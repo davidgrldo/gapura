@@ -1,6 +1,8 @@
 //! Request matching over a translated Config: pick the listener, pick the TLS cert, find the rule.
 
-use crate::config::{Config, ListenerConfig, PathMatch, RouteMatch, RouteRule, TlsBundle};
+use crate::config::{
+    Config, ListenerConfig, MatchEntry, PathMatch, RouteMatch, RouteRule, TlsBundle,
+};
 use crate::hostname;
 
 /// What the proxy extracts from a request before matching.
@@ -63,8 +65,8 @@ impl Config {
 }
 
 impl ListenerConfig {
-    /// First entry of the precedence-sorted table that matches the request.
-    pub fn match_request(&self, req: &RequestAttrs<'_>) -> Option<&RouteRule> {
+    /// First entry of the precedence-sorted table that matches the request, with its rule.
+    pub fn match_entry(&self, req: &RequestAttrs<'_>) -> Option<(&MatchEntry, &RouteRule)> {
         self.table
             .iter()
             .find(|e| {
@@ -73,7 +75,12 @@ impl ListenerConfig {
                     .is_none_or(|h| hostname::matches(h, req.host))
                     && matches(&e.matcher, req)
             })
-            .map(|e| &self.rules[e.rule])
+            .map(|e| (e, &self.rules[e.rule]))
+    }
+
+    /// The winning rule for the request, if any.
+    pub fn match_request(&self, req: &RequestAttrs<'_>) -> Option<&RouteRule> {
+        self.match_entry(req).map(|(_, rule)| rule)
     }
 }
 
@@ -265,6 +272,16 @@ mod tests {
         assert_eq!(l.match_request(&req("/api", &[])).unwrap().route, "apps/c");
         assert!(l.match_request(&req("/apiv2", &[])).is_none());
         assert!(l.match_request(&req("/", &[])).is_none());
+    }
+
+    #[test]
+    fn match_entry_exposes_the_winning_match() {
+        let c = config();
+        let l = c.select_listener(80, "echo.example.com").unwrap();
+        let (entry, rule) = l.match_entry(&req("/api/v2", &[])).expect("a match");
+        assert_eq!(rule.route, "apps/c");
+        assert_eq!(entry.matcher.path, PathMatch::Prefix("/api".into()));
+        assert!(l.match_entry(&req("/nope", &[])).is_none());
     }
 
     #[test]
