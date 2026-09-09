@@ -1,0 +1,125 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners:
+    - id: infra/main/http
+      port: 80
+      protocol: Http
+      hostname: ~
+      tls: ~
+      rules:
+        - route: apps/echo
+          rule_index: 0
+          creation_timestamp: "2026-09-01T10:00:00Z"
+          matches:
+            - path:
+                Prefix: /api
+              headers: []
+              query: []
+              method: ~
+          filters:
+            request_headers:
+              set:
+                - - X-Gateway
+                  - gapura
+              add: []
+              remove: []
+            response_headers:
+              set: []
+              add: []
+              remove: []
+            redirect: ~
+            rewrite: ~
+          backends:
+            - cluster: ~
+              weight: 1
+          timeouts:
+            request_ms: ~
+            backend_request_ms: ~
+      table:
+        - hostname: echo.example.com
+          matcher:
+            path:
+              Prefix: /api
+            headers: []
+            query: []
+            method: ~
+          rule: 0
+  clusters: {}
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: main
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Gateway is accepted
+        observedGeneration: 1
+      - type: Programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
+        observedGeneration: 1
+    listeners:
+      - name: http
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 1
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+  - kind: HTTPRoute
+    namespace: apps
+    name: echo
+    parents:
+      - parentRef:
+          group: ~
+          kind: ~
+          namespace: infra
+          name: main
+          sectionName: ~
+          port: ~
+        controllerName: gapura.dev/controller
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Route is accepted
+            observedGeneration: 2
+          - type: ResolvedRefs
+            status: "False"
+            reason: BackendNotFound
+            message: Service apps/ghost not found
+            observedGeneration: 2

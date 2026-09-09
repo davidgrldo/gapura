@@ -29,8 +29,6 @@ pub(crate) struct ListenerBuild {
     pub hostname: Option<String>,
     /// `None` when the protocol is unsupported.
     pub protocol: Option<Protocol>,
-    /// Kept for Task 8 (route attachment); not read until routes exist.
-    #[allow(dead_code)]
     pub allowed: Option<AllowedRoutes>,
     pub tls: Option<TlsBundle>,
     pub accepted: Result<(), Rejection>,
@@ -118,8 +116,6 @@ impl ListenerBuild {
     }
 
     /// Add compiled rules under the given effective hostnames (empty = any host).
-    /// Kept for Task 8 (route attachment); not called until routes exist.
-    #[allow(dead_code)]
     pub fn add_route(&mut self, rules: &[RouteRule], hostnames: &[String]) {
         let hosts: Vec<Option<String>> = if hostnames.is_empty() {
             vec![None]

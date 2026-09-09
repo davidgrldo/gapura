@@ -1,10 +1,12 @@
 //! `translate(&Snapshot, &Settings) -> Translation`: the pure heart of Gapura.
 //! Steps: accept GatewayClasses -> build listeners -> attach routes -> assemble Config + Gateway status.
 
+mod allowed;
 mod backends;
 mod gateway_class;
 mod grants;
 mod listeners;
+mod routes;
 mod rules;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,9 +28,18 @@ pub struct Translation {
 pub fn translate(snap: &Snapshot, settings: &Settings) -> Translation {
     let mut status = Vec::new();
     let classes = gateway_class::accept(snap, settings, &mut status);
-    let gateways = listeners::build(snap, settings, &classes);
-    let clusters: BTreeMap<String, Cluster> = BTreeMap::new(); // filled once routes are attached (Task 8)
+    let mut gateways = listeners::build(snap, settings, &classes);
+    let mut clusters: BTreeMap<String, Cluster> = BTreeMap::new();
+    let mut route_status = Vec::new();
+    routes::attach(
+        snap,
+        settings,
+        &mut gateways,
+        &mut clusters,
+        &mut route_status,
+    );
     let config = assemble(gateways, clusters, settings, &mut status);
+    status.extend(route_status);
     Translation { config, status }
 }
 
@@ -46,13 +57,13 @@ fn assemble(
         let generation = gw.generation;
         let mut listener_status = Vec::new();
         let mut any_programmed = false;
-        let mut all_valid = true;
+        let mut all_programmed = true;
         for mut l in gw.listeners {
             let programmed = l.programmed();
             if programmed {
                 any_programmed = true;
             } else {
-                all_valid = false;
+                all_programmed = false;
             }
             listener_status.push(ListenerStatus {
                 name: l.name.clone(),
@@ -82,7 +93,7 @@ fn assemble(
                 table: std::mem::take(&mut l.table),
             });
         }
-        let accepted = if all_valid {
+        let accepted = if all_programmed {
             Condition::new(
                 types::ACCEPTED,
                 ConditionStatus::True,

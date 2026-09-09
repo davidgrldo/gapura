@@ -11,8 +11,6 @@ use crate::translate::listeners::{Rejection, GATEWAY_GROUP};
 
 /// Resolve one backendRef of an HTTPRoute in namespace `route.namespace`.
 /// On success the cluster exists in `clusters` and its key is returned.
-// used from Task 9 (routes::attach)
-#[allow(dead_code)]
 pub(crate) fn resolve(
     b: &HttpBackendRef,
     route: &ObjectRef,

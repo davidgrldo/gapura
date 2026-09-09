@@ -18,20 +18,14 @@ use crate::translate::backends;
 
 /// Why a whole route is rejected. Always reported with reason `UnsupportedValue`.
 #[derive(Debug, Clone, PartialEq)]
-// used from Task 9 (routes::attach)
-#[allow(dead_code)]
 pub(crate) struct Unsupported(pub String);
 
-// used from Task 9 (routes::attach)
-#[allow(dead_code)]
 pub(crate) struct Compiled {
     pub rules: Vec<RouteRule>,
     /// ResolvedRefs condition of the route; identical for every parent.
     pub resolved_refs: Condition,
 }
 
-// used from Task 9 (routes::attach)
-#[allow(dead_code)]
 pub(crate) fn compile(
     route: &HttpRoute,
     rref: &ObjectRef,
@@ -442,5 +436,80 @@ spec:
   - timeouts: { request: "10" }
 "#;
         assert!(compile_first(yaml).0.is_err());
+    }
+
+    #[test]
+    fn mixed_valid_and_invalid_backends_keep_weights_and_report_first_error() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps, generation: 1 }
+spec:
+  rules:
+  - backendRefs:
+    - { name: echo, port: 80, weight: 9 }
+    - { name: ghost, port: 80, weight: 1 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+"#;
+        let (result, clusters) = compile_first(yaml);
+        let c = result.unwrap();
+        assert_eq!(
+            c.rules[0].backends,
+            vec![
+                WeightedBackend {
+                    cluster: Some("apps/echo:80".into()),
+                    weight: 9
+                },
+                WeightedBackend {
+                    cluster: None,
+                    weight: 1
+                },
+            ]
+        );
+        assert_eq!(c.resolved_refs.status, ConditionStatus::False);
+        assert_eq!(c.resolved_refs.reason, reasons::BACKEND_NOT_FOUND);
+        assert!(
+            clusters["apps/echo:80"].endpoints.is_empty(),
+            "no EndpointSlice -> empty cluster, 503 at runtime"
+        );
+    }
+
+    #[test]
+    fn url_rewrite_compiles_prefix_and_full_path_variants() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - matches: [{ path: { type: PathPrefix, value: /old } }]
+    filters:
+    - type: URLRewrite
+      urlRewrite: { hostname: internal.svc, path: { type: ReplacePrefixMatch, replacePrefixMatch: /new } }
+  - filters:
+    - type: URLRewrite
+      urlRewrite: { path: { type: ReplaceFullPath, replaceFullPath: /index.html } }
+"#;
+        let (result, _) = compile_first(yaml);
+        let c = result.unwrap();
+        assert_eq!(
+            c.rules[0].filters.rewrite,
+            Some(Rewrite {
+                hostname: Some("internal.svc".into()),
+                path: Some(PathRewrite::ReplacePrefixMatch("/new".into()))
+            })
+        );
+        assert_eq!(
+            c.rules[1].filters.rewrite,
+            Some(Rewrite {
+                hostname: None,
+                path: Some(PathRewrite::ReplaceFullPath("/index.html".into()))
+            })
+        );
+        assert!(c.rules[0].filters.redirect.is_none());
     }
 }

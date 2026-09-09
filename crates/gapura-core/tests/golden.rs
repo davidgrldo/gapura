@@ -6,6 +6,8 @@
 use std::fs;
 use std::path::Path;
 
+use gapura_core::config::PathMatch;
+use gapura_core::status::RouteParentStatus;
 use gapura_core::status::{Condition, ConditionStatus, ListenerStatus, StatusPatch};
 use gapura_core::{translate, Settings, Snapshot, Translation};
 
@@ -304,4 +306,263 @@ fn allowed_kinds_invalid() {
     );
     assert!(l.supported_kinds.is_empty());
     insta::assert_yaml_snapshot!("allowed-kinds-invalid", t);
+}
+
+/// Parents of the HTTPRoute status patch `namespace/name`.
+fn route_parents<'a>(t: &'a Translation, namespace: &str, name: &str) -> &'a [RouteParentStatus] {
+    t.status
+        .iter()
+        .find_map(|p| match p {
+            StatusPatch::HttpRoute {
+                namespace: ns,
+                name: n,
+                parents,
+            } if ns == namespace && n == name => Some(parents.as_slice()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no HTTPRoute status for {namespace}/{name}"))
+}
+
+#[test]
+fn basic_http() {
+    let t = run("basic-http");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(listener(listeners, "http").attached_routes, 1);
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(parents.len(), 1);
+    assert_eq!(parents[0].controller_name, "gapura.dev/controller");
+    assert_eq!(
+        cond(&parents[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    assert_eq!(parents[0].conditions[0].observed_generation, Some(2));
+    let l = &t.config.listeners[0];
+    assert_eq!(l.rules.len(), 1);
+    assert_eq!(l.rules[0].route, "apps/echo");
+    assert_eq!(l.rules[0].matches[0].path, PathMatch::Prefix("/api".into()));
+    assert_eq!(
+        l.rules[0].filters.request_headers.set,
+        vec![("X-Gateway".to_string(), "gapura".to_string())]
+    );
+    assert_eq!(l.table.len(), 1);
+    assert_eq!(l.table[0].hostname.as_deref(), Some("echo.example.com"));
+    assert_eq!(l.table[0].rule, 0);
+    let cluster = &t.config.clusters["apps/echo:80"];
+    assert_eq!(cluster.endpoints.len(), 1);
+    assert_eq!(cluster.endpoints[0].address, "10.1.0.5");
+    assert_eq!(cluster.endpoints[0].port, 8080);
+    insta::assert_yaml_snapshot!("basic-http", t);
+}
+
+#[test]
+fn backend_not_found() {
+    let t = run("backend-not-found");
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(
+        cond(&parents[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "BackendNotFound")
+    );
+    assert_eq!(t.config.listeners[0].rules[0].backends[0].cluster, None);
+    assert!(t.config.clusters.is_empty());
+    insta::assert_yaml_snapshot!("backend-not-found", t);
+}
+
+#[test]
+fn cross_ns_backend_grant() {
+    let t = run("cross-ns-backend-grant");
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    assert_eq!(
+        t.config.clusters["platform/shared:80"].endpoints[0].address,
+        "10.2.0.9"
+    );
+    insta::assert_yaml_snapshot!("cross-ns-backend-grant", t);
+}
+
+#[test]
+fn cross_ns_backend_no_grant() {
+    let t = run("cross-ns-backend-no-grant");
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(
+        cond(&parents[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "RefNotPermitted")
+    );
+    assert!(t.config.clusters.is_empty());
+    insta::assert_yaml_snapshot!("cross-ns-backend-no-grant", t);
+}
+
+#[test]
+fn hostname_intersection() {
+    let t = run("hostname-intersection");
+    assert_eq!(
+        cond(&route_parents(&t, "apps", "api")[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(
+            &route_parents(&t, "apps", "nomatch")[0].conditions,
+            "Accepted"
+        ),
+        (ConditionStatus::False, "NoMatchingListenerHostname")
+    );
+    let l = &t.config.listeners[0];
+    assert_eq!(
+        l.rules.len(),
+        1,
+        "only the intersecting route is programmed"
+    );
+    assert_eq!(l.table.len(), 1);
+    assert_eq!(l.table[0].hostname.as_deref(), Some("api.example.com"));
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(listener(listeners, "http").attached_routes, 1);
+    insta::assert_yaml_snapshot!("hostname-intersection", t);
+}
+
+#[test]
+fn allowed_routes_selector() {
+    let t = run("allowed-routes-selector");
+    assert_eq!(
+        cond(&route_parents(&t, "apps", "ok")[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(
+            &route_parents(&t, "other", "denied")[0].conditions,
+            "Accepted"
+        ),
+        (ConditionStatus::False, "NotAllowedByListeners")
+    );
+    assert_eq!(t.config.listeners[0].rules.len(), 1);
+    assert_eq!(t.config.listeners[0].rules[0].route, "apps/ok");
+    insta::assert_yaml_snapshot!("allowed-routes-selector", t);
+}
+
+#[test]
+fn section_name_parent() {
+    let t = run("section-name-parent");
+    assert_eq!(
+        cond(
+            &route_parents(&t, "apps", "secure")[0].conditions,
+            "Accepted"
+        ),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(
+            &route_parents(&t, "apps", "nowhere")[0].conditions,
+            "Accepted"
+        ),
+        (ConditionStatus::False, "NoMatchingParent")
+    );
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(listener(listeners, "http").attached_routes, 0);
+    assert_eq!(listener(listeners, "https").attached_routes, 1);
+    let https = t
+        .config
+        .listeners
+        .iter()
+        .find(|l| l.id == "infra/main/https")
+        .unwrap();
+    assert_eq!(https.rules.len(), 1);
+    let http = t
+        .config
+        .listeners
+        .iter()
+        .find(|l| l.id == "infra/main/http")
+        .unwrap();
+    assert!(http.rules.is_empty());
+    insta::assert_yaml_snapshot!("section-name-parent", t);
+}
+
+#[test]
+fn unsupported_filter() {
+    let t = run("unsupported-filter");
+    let parents = route_parents(&t, "apps", "mirror");
+    assert_eq!(
+        cond(&parents[0].conditions, "Accepted"),
+        (ConditionStatus::False, "UnsupportedValue")
+    );
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(listener(listeners, "http").attached_routes, 0);
+    assert!(t.config.listeners[0].rules.is_empty());
+    assert!(
+        t.config.clusters.is_empty(),
+        "clusters of rejected routes are pruned"
+    );
+    insta::assert_yaml_snapshot!("unsupported-filter", t);
+}
+
+#[test]
+fn foreign_parent_ignored() {
+    let t = run("foreign-parent-ignored");
+    assert!(
+        !t.status
+            .iter()
+            .any(|p| matches!(p, StatusPatch::HttpRoute { .. })),
+        "routes whose parents are not ours get no status from us"
+    );
+    insta::assert_yaml_snapshot!("foreign-parent-ignored", t);
+}
+
+#[test]
+fn listener_protocol_conflict() {
+    let t = run("listener-protocol-conflict");
+    let (gw_conds, listeners, _) = gateway_patch(&t);
+    for name in ["http", "https-on-80"] {
+        let l = listener(listeners, name);
+        assert_eq!(
+            cond(&l.conditions, "Accepted"),
+            (ConditionStatus::True, "Accepted")
+        );
+        assert_eq!(
+            cond(&l.conditions, "Conflicted"),
+            (ConditionStatus::True, "ProtocolConflict")
+        );
+        assert_eq!(
+            cond(&l.conditions, "Programmed"),
+            (ConditionStatus::False, "Invalid")
+        );
+    }
+    assert_eq!(
+        cond(gw_conds, "Accepted"),
+        (ConditionStatus::False, "ListenersNotValid")
+    );
+    assert!(t.config.listeners.is_empty());
+    insta::assert_yaml_snapshot!("listener-protocol-conflict", t);
+}
+
+#[test]
+fn https_without_tls() {
+    let t = run("https-without-tls");
+    let (_, listeners, _) = gateway_patch(&t);
+    let l = listener(listeners, "https");
+    assert_eq!(
+        cond(&l.conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&l.conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "InvalidCertificateRef")
+    );
+    assert_eq!(
+        cond(&l.conditions, "Programmed"),
+        (ConditionStatus::False, "Invalid")
+    );
+    assert!(t.config.listeners.is_empty());
+    insta::assert_yaml_snapshot!("https-without-tls", t);
 }
