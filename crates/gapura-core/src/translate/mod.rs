@@ -1,9 +1,11 @@
 //! `translate(&Snapshot, &Settings) -> Translation`: the pure heart of Gapura.
 //! Steps: accept GatewayClasses -> build listeners -> attach routes -> assemble Config + Gateway status.
 
+mod backends;
 mod gateway_class;
 mod grants;
 mod listeners;
+mod rules;
 
 use std::collections::{BTreeMap, BTreeSet};
 
