@@ -1,0 +1,16 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners: []
+  clusters: {}
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1

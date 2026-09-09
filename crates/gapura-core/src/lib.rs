@@ -10,6 +10,8 @@ pub mod hostname;
 pub mod input;
 pub mod snapshot;
 pub mod status;
+pub mod translate;
 
 pub use config::Config;
 pub use snapshot::{ObjectRef, Settings, Snapshot, SnapshotError};
+pub use translate::{translate, Translation};

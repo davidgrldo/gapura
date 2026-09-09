@@ -1,0 +1,8 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners: []
+  clusters: {}
+status: []
