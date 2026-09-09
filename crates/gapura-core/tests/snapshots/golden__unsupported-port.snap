@@ -1,0 +1,59 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners: []
+  clusters: {}
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: main
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "False"
+        reason: ListenersNotValid
+        message: No listener is valid
+        observedGeneration: 1
+      - type: Programmed
+        status: "False"
+        reason: Invalid
+        message: No listener is programmed
+        observedGeneration: 1
+    listeners:
+      - name: alt
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "False"
+            reason: PortUnavailable
+            message: "port 8080 is not bound by this deployment, supported ports: [80, 443]"
+            observedGeneration: 1
+          - type: Programmed
+            status: "False"
+            reason: Invalid
+            message: Listener is not valid
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1

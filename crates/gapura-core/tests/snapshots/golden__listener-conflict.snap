@@ -1,0 +1,121 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners:
+    - id: infra/main/https
+      port: 443
+      protocol: Https
+      hostname: ~
+      tls:
+        secret: infra/wildcard
+        cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCCQDfixture\n-----END CERTIFICATE-----\n"
+        key_pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgfixture\n-----END PRIVATE KEY-----\n"
+      rules: []
+      table: []
+  clusters: {}
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: main
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: ListenersNotValid
+        message: Some listeners are not valid
+        observedGeneration: 2
+      - type: Programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
+        observedGeneration: 2
+    listeners:
+      - name: http-a
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 2
+          - type: Programmed
+            status: "False"
+            reason: Invalid
+            message: Listener is not valid
+            observedGeneration: 2
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 2
+          - type: Conflicted
+            status: "True"
+            reason: HostnameConflict
+            message: listeners http-a and http-b share port 80 and hostname (none)
+            observedGeneration: 2
+      - name: http-b
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 2
+          - type: Programmed
+            status: "False"
+            reason: Invalid
+            message: Listener is not valid
+            observedGeneration: 2
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 2
+          - type: Conflicted
+            status: "True"
+            reason: HostnameConflict
+            message: listeners http-a and http-b share port 80 and hostname (none)
+            observedGeneration: 2
+      - name: https
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 2
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 2
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 2
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 2

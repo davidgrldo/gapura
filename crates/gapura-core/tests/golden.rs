@@ -126,3 +126,182 @@ fn gatewayclass_mixed() {
     }
     insta::assert_yaml_snapshot!("gatewayclass-mixed", t);
 }
+
+#[test]
+fn gateway_http_listener() {
+    let t = run("gateway-http-listener");
+    let (gw_conds, listeners, addresses) = gateway_patch(&t);
+    assert_eq!(addresses, ["10.0.0.1".to_string()]);
+    assert_eq!(
+        cond(gw_conds, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(gw_conds, "Programmed"),
+        (ConditionStatus::True, "Programmed")
+    );
+    let http = listener(listeners, "http");
+    assert_eq!(http.attached_routes, 0);
+    assert_eq!(http.supported_kinds.len(), 1);
+    assert_eq!(http.supported_kinds[0].kind, "HTTPRoute");
+    assert_eq!(
+        cond(&http.conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&http.conditions, "Programmed"),
+        (ConditionStatus::True, "Programmed")
+    );
+    assert_eq!(
+        cond(&http.conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    assert_eq!(
+        cond(&http.conditions, "Conflicted"),
+        (ConditionStatus::False, "NoConflicts")
+    );
+    assert_eq!(t.config.listeners.len(), 1);
+    assert_eq!(t.config.listeners[0].id, "infra/main/http");
+    assert_eq!(t.config.listeners[0].port, 80);
+    assert!(t.config.listeners[0].tls.is_none());
+    insta::assert_yaml_snapshot!("gateway-http-listener", t);
+}
+
+#[test]
+fn unsupported_port() {
+    let t = run("unsupported-port");
+    let (gw_conds, listeners, _) = gateway_patch(&t);
+    assert_eq!(
+        cond(gw_conds, "Accepted"),
+        (ConditionStatus::False, "ListenersNotValid")
+    );
+    assert_eq!(
+        cond(gw_conds, "Programmed"),
+        (ConditionStatus::False, "Invalid")
+    );
+    let alt = listener(listeners, "alt");
+    assert_eq!(
+        cond(&alt.conditions, "Accepted"),
+        (ConditionStatus::False, "PortUnavailable")
+    );
+    assert_eq!(
+        cond(&alt.conditions, "Programmed"),
+        (ConditionStatus::False, "Invalid")
+    );
+    assert!(t.config.listeners.is_empty());
+    insta::assert_yaml_snapshot!("unsupported-port", t);
+}
+
+#[test]
+fn https_tls_secret() {
+    let t = run("https-tls-secret");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(
+        cond(&listener(listeners, "https").conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    let l = &t.config.listeners[0];
+    assert_eq!(l.hostname.as_deref(), Some("*.example.com"));
+    let tls = l.tls.as_ref().expect("tls bundle");
+    assert_eq!(tls.secret, "infra/wildcard");
+    assert!(tls.cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    assert!(tls.key_pem.contains("PRIVATE KEY"));
+    insta::assert_yaml_snapshot!("https-tls-secret", t);
+}
+
+#[test]
+fn https_missing_secret() {
+    let t = run("https-missing-secret");
+    let (gw_conds, listeners, _) = gateway_patch(&t);
+    let https = listener(listeners, "https");
+    assert_eq!(
+        cond(&https.conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&https.conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "InvalidCertificateRef")
+    );
+    assert_eq!(
+        cond(&https.conditions, "Programmed"),
+        (ConditionStatus::False, "Invalid")
+    );
+    assert_eq!(
+        cond(gw_conds, "Programmed"),
+        (ConditionStatus::False, "Invalid")
+    );
+    assert!(t.config.listeners.is_empty());
+    insta::assert_yaml_snapshot!("https-missing-secret", t);
+}
+
+#[test]
+fn https_cross_ns_secret_grant() {
+    let t = run("https-cross-ns-secret-grant");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(
+        cond(&listener(listeners, "https").conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    assert_eq!(
+        t.config.listeners[0].tls.as_ref().unwrap().secret,
+        "certs/wildcard"
+    );
+    insta::assert_yaml_snapshot!("https-cross-ns-secret-grant", t);
+}
+
+#[test]
+fn https_cross_ns_secret_no_grant() {
+    let t = run("https-cross-ns-secret-no-grant");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(
+        cond(&listener(listeners, "https").conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "RefNotPermitted")
+    );
+    assert!(t.config.listeners.is_empty());
+    insta::assert_yaml_snapshot!("https-cross-ns-secret-no-grant", t);
+}
+
+#[test]
+fn listener_conflict() {
+    let t = run("listener-conflict");
+    let (gw_conds, listeners, _) = gateway_patch(&t);
+    for name in ["http-a", "http-b"] {
+        let l = listener(listeners, name);
+        assert_eq!(
+            cond(&l.conditions, "Conflicted"),
+            (ConditionStatus::True, "HostnameConflict")
+        );
+        assert_eq!(
+            cond(&l.conditions, "Programmed"),
+            (ConditionStatus::False, "Invalid")
+        );
+    }
+    assert_eq!(
+        cond(&listener(listeners, "https").conditions, "Programmed"),
+        (ConditionStatus::True, "Programmed")
+    );
+    assert_eq!(
+        cond(gw_conds, "Accepted"),
+        (ConditionStatus::True, "ListenersNotValid")
+    );
+    assert_eq!(
+        cond(gw_conds, "Programmed"),
+        (ConditionStatus::True, "Programmed")
+    );
+    assert_eq!(t.config.listeners.len(), 1);
+    assert_eq!(t.config.listeners[0].id, "infra/main/https");
+    insta::assert_yaml_snapshot!("listener-conflict", t);
+}
+
+#[test]
+fn allowed_kinds_invalid() {
+    let t = run("allowed-kinds-invalid");
+    let (_, listeners, _) = gateway_patch(&t);
+    let l = listener(listeners, "tcp-only");
+    assert_eq!(
+        cond(&l.conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "InvalidRouteKinds")
+    );
+    assert!(l.supported_kinds.is_empty());
+    insta::assert_yaml_snapshot!("allowed-kinds-invalid", t);
+}

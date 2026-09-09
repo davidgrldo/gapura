@@ -1,0 +1,12 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: main, namespace: infra, generation: 2 }
+spec:
+  gatewayClassName: gapura
+  listeners:
+  - { name: http-a, port: 80, protocol: HTTP }
+  - { name: http-b, port: 80, protocol: HTTP }
+  - name: https
+    port: 443
+    protocol: HTTPS
+    tls: { certificateRefs: [{ name: wildcard }] }
