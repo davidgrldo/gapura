@@ -6,3 +6,7 @@
 
 pub mod duration;
 pub mod hostname;
+pub mod input;
+pub mod snapshot;
+
+pub use snapshot::{ObjectRef, Settings, Snapshot, SnapshotError};
