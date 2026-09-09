@@ -25,7 +25,9 @@ pub struct Metrics {
     /// labels: secret (`ns/name`)
     pub tls_cert_parse_errors_total: IntCounterVec,
     /// labels: port
+    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub tls_sni_misses_total: IntCounterVec,
+    #[allow(dead_code)] // used from Task 10 (install_panic_hook is called from main)
     pub handler_panics_total: IntCounter,
 }
 
@@ -170,6 +172,7 @@ pub fn write_access_log(entry: &AccessLog<'_>) {
 }
 
 /// App logs: JSON lines on stderr, filtered by `RUST_LOG`-style directives.
+#[allow(dead_code)] // used from Task 10 (main)
 pub fn init_logging(filter: &str) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
@@ -181,6 +184,7 @@ pub fn init_logging(filter: &str) {
 }
 
 /// Count panics in request handling; Pingora keeps the process alive, we keep the number.
+#[allow(dead_code)] // used from Task 10 (main)
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

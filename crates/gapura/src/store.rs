@@ -23,12 +23,10 @@ pub struct ParsedCert {
 
 /// Immutable per-generation state read by every request without locks.
 pub struct Runtime {
-    #[allow(dead_code)] // used from Task 8 (proxy request handling)
     pub config: Config,
     #[allow(dead_code)]
     // not read by production code anywhere in the plan text; kept for parity with the Store-level generation counter
     pub generation: u64,
-    #[allow(dead_code)] // read via Runtime::next_index, used from Task 8
     rr: HashMap<String, AtomicUsize>,
     #[allow(dead_code)] // read via Runtime::cert, used from Task 9
     certs: HashMap<String, Arc<ParsedCert>>,
@@ -70,7 +68,6 @@ impl Runtime {
     }
 
     /// Monotonic round-robin cursor for a cluster; `None` for unknown clusters.
-    #[allow(dead_code)] // used from Task 8 (proxy upstream selection)
     pub fn next_index(&self, cluster: &str) -> Option<usize> {
         self.rr
             .get(cluster)
@@ -122,7 +119,6 @@ impl Store {
         self.current.load()
     }
 
-    #[allow(dead_code)] // used from Task 8 (proxy), Task 9 (TLS SNI resolver), Task 10 (admin /debug/config)
     pub fn load_full(&self) -> Arc<Runtime> {
         self.current.load_full()
     }

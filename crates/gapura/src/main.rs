@@ -1,12 +1,11 @@
 //! Gapura data plane binary.
 
 mod cli;
-#[allow(dead_code)] // used from Task 8
+#[allow(dead_code)] // used from Task 10
 mod proxy;
 #[allow(dead_code)] // used from Task 10
 mod source;
 mod store;
-#[allow(dead_code)] // used from Task 8
 mod telemetry;
 
 use clap::Parser;
