@@ -24,6 +24,6 @@ cargo run -p gapura-core --example dump -- crates/gapura-core/tests/fixtures/bas
 local backend with the file-based config source. End-to-end tests (`cargo test -p gapura`) start the
 real binary against generated configs and a mock upstream.
 
-`gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The proxy, the Kubernetes controller, and the Helm chart follow in later plans.
+`gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The Kubernetes controller and the Helm chart follow in later plans.
 
 License: Apache-2.0.

@@ -179,8 +179,10 @@ async fn start(yaml: String, http: u16, https: u16) -> Gateway {
     for _ in 0..200 {
         if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
             // Pingora binds each service independently: /readyz only proves the admin listener
-            // and the loaded config, so also wait for the data-plane port to accept connections.
-            if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", https)).is_ok() {
+            // and the loaded config, so also wait for the data-plane service to accept connections.
+            // Probe the plain HTTP port of the same service: a bare connect to the TLS port would
+            // log a handshake error on every run.
+            if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
                 return gw;
             }
         }
