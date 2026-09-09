@@ -71,23 +71,30 @@ pub fn host_of(req: &RequestHeader) -> Option<String> {
     normalize_host(&raw)
 }
 
-/// Lowercase, strip `:port` and any trailing dot. Reject empty hosts, hosts containing `*`,
-/// and hosts with empty labels; an IPv6 literal `[::1]` is kept bracketed.
+/// Lowercase, strip `:port` and one trailing dot. Reject empty hosts, hosts containing `*`,
+/// and hosts with empty labels; an IPv6 literal is validated with `std::net::Ipv6Addr` and
+/// re-emitted bracketed in canonical form.
 pub fn normalize_host(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
-        let end = rest.find(']')?;
-        return Some(format!("[{}]", rest[..end].to_ascii_lowercase()));
-    } else {
-        match trimmed.rsplit_once(':') {
-            Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
-            _ => trimmed,
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        // IPv6 literal: "[addr]" or "[addr]:port", nothing else after ']'.
+        let (inner, after) = rest.split_once(']')?;
+        let port = after.strip_prefix(':').unwrap_or(after);
+        if !after.is_empty() && !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
         }
+        let addr: std::net::Ipv6Addr = inner.parse().ok()?;
+        return Some(format!("[{addr}]"));
+    }
+    let without_port = match trimmed.rsplit_once(':') {
+        // `port = *DIGIT` per RFC 9110, so a bare trailing colon is a valid empty port.
+        Some((h, port)) if port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => trimmed,
     };
-    let host = without_port.trim_end_matches('.').to_ascii_lowercase();
+    let host = without_port
+        .strip_suffix('.')
+        .unwrap_or(without_port)
+        .to_ascii_lowercase();
     if host.is_empty() || host.contains('*') || host.split('.').any(str::is_empty) {
         return None;
     }
@@ -134,6 +141,17 @@ mod tests {
         assert_eq!(normalize_host("*.example.com"), None);
         assert_eq!(normalize_host("a..b"), None);
         assert_eq!(normalize_host("a.b:notaport"), Some("a.b:notaport".into()));
+        assert_eq!(normalize_host("host:"), Some("host".into()));
+        assert_eq!(normalize_host("[0:0:0:0:0:0:0:1]"), Some("[::1]".into()));
+        assert_eq!(normalize_host("[::1]:"), Some("[::1]".into()));
+        assert_eq!(normalize_host("[*]"), None);
+        assert_eq!(normalize_host("[]"), None);
+        assert_eq!(normalize_host("[::1"), None);
+        assert_eq!(normalize_host("[::1]junk"), None);
+        assert_eq!(normalize_host("[::1]:abc"), None);
+        assert_eq!(normalize_host("example.com.."), None);
+        assert_eq!(normalize_host("."), None);
+        assert_eq!(normalize_host(":80"), None);
     }
 
     #[test]
@@ -173,5 +191,7 @@ mod tests {
             ""
         );
         assert_eq!(Extracted::from_request(&req("", None)).path, "/");
+        let r = RequestHeader::build("OPTIONS", b"*", None).unwrap();
+        assert_eq!(Extracted::from_request(&r).path, "*");
     }
 }
