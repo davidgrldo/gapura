@@ -55,6 +55,17 @@ mod tests {
         headers: usize,
         method: bool,
     ) -> RouteRule {
+        rule_with_query(route, created, path, headers, method, 0)
+    }
+
+    fn rule_with_query(
+        route: &str,
+        created: &str,
+        path: PathMatch,
+        headers: usize,
+        method: bool,
+        query: usize,
+    ) -> RouteRule {
         RouteRule {
             route: route.into(),
             rule_index: 0,
@@ -67,7 +78,12 @@ mod tests {
                         value: "v".into(),
                     })
                     .collect(),
-                query: vec![],
+                query: (0..query)
+                    .map(|i| KvMatch {
+                        name: format!("q{i}"),
+                        value: "v".into(),
+                    })
+                    .collect(),
                 method: method.then(|| "GET".to_string()),
             }],
             filters: Filters::default(),
@@ -165,5 +181,39 @@ mod tests {
                 "-:z/prefix-short",
             ]
         );
+    }
+
+    #[test]
+    fn query_count_breaks_ties() {
+        let rules = vec![
+            rule_with_query(
+                "z/no-query",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Prefix("/a".into()),
+                0,
+                false,
+                0,
+            ),
+            rule_with_query(
+                "z/one-query",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Prefix("/a".into()),
+                0,
+                false,
+                1,
+            ),
+        ];
+        let mut table: Vec<MatchEntry> = rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| MatchEntry {
+                hostname: None,
+                matcher: r.matches[0].clone(),
+                rule: i,
+            })
+            .collect();
+        sort_table(&mut table, &rules);
+        let order: Vec<&str> = table.iter().map(|e| rules[e.rule].route.as_str()).collect();
+        assert_eq!(order, vec!["z/one-query", "z/no-query"]);
     }
 }

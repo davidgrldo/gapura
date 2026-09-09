@@ -8,10 +8,12 @@ pub mod config;
 pub mod duration;
 pub mod hostname;
 pub mod input;
+pub mod matcher;
 pub mod snapshot;
 pub mod status;
 pub mod translate;
 
 pub use config::Config;
+pub use matcher::RequestAttrs;
 pub use snapshot::{ObjectRef, Settings, Snapshot, SnapshotError};
 pub use translate::{translate, Translation};
