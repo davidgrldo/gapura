@@ -21,8 +21,6 @@ pub struct ParsedCert {
 /// Immutable per-generation state read by every request without locks.
 pub struct Runtime {
     pub config: Config,
-    #[allow(dead_code)]
-    // not read by production code anywhere in the plan text; kept for parity with the Store-level generation counter
     pub generation: u64,
     rr: HashMap<String, AtomicUsize>,
     certs: HashMap<String, Arc<ParsedCert>>,
@@ -100,7 +98,6 @@ pub struct Store {
 }
 
 impl Store {
-    #[allow(dead_code)] // used from Task 10 (main.rs constructs the Store)
     pub fn empty() -> Self {
         Self {
             current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0)),
@@ -109,7 +106,7 @@ impl Store {
         }
     }
 
-    #[allow(dead_code)] // not called by production code anywhere in the plan text; load_full is used instead from Task 8/9/10
+    /// Borrow the current runtime for a short, non-async read (e.g. `/readyz`).
     pub fn load(&self) -> Guard<Arc<Runtime>> {
         self.current.load()
     }
@@ -128,15 +125,8 @@ impl Store {
         METRICS.config_last_reload_timestamp_seconds.set(now_secs());
     }
 
-    #[allow(dead_code)] // used from Task 10 (admin /readyz)
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
-    }
-
-    /// Generation of the last swap (0 before the first).
-    #[allow(dead_code)] // not called by production code anywhere in the plan text; kept as a public accessor for the generation counter
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
     }
 }
 
@@ -189,14 +179,11 @@ mod tests {
         let store = Store::empty();
         assert!(!store.is_ready());
         assert_eq!(store.load().generation, 0);
-        assert_eq!(store.generation(), 0);
         store.swap(Config::default());
         assert!(store.is_ready());
         assert_eq!(store.load().generation, 1);
-        assert_eq!(store.generation(), 1);
         store.swap(Config::default());
         assert_eq!(store.load_full().generation, 2);
-        assert_eq!(store.generation(), 2);
     }
 
     #[test]

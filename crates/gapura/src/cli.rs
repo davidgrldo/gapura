@@ -55,8 +55,6 @@ impl Args {
         ports
     }
 
-    // Only exercised by the unit test until Task 10 wires it into `main`.
-    #[allow(dead_code)]
     pub fn settings(&self) -> Settings {
         Settings {
             controller_name: self.controller_name.clone(),
