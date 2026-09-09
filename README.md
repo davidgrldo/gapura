@@ -8,4 +8,14 @@ Status: design phase. Nothing to run yet.
 - Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
 - Market research and gap analysis: [docs/superpowers/specs/research/](docs/superpowers/specs/research/)
 
+## Development
+
+```bash
+cargo test -p gapura-core                 # unit + golden tests (< 60 s)
+cargo insta review                        # review changed golden snapshots
+cargo run -p gapura-core --example dump -- crates/gapura-core/tests/fixtures/basic-http/input
+```
+
+`gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The proxy, the Kubernetes controller, and the Helm chart follow in later plans.
+
 License: Apache-2.0.

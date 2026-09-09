@@ -4,6 +4,10 @@ use crate::config::{Config, ListenerConfig, PathMatch, RouteMatch, RouteRule, Tl
 use crate::hostname;
 
 /// What the proxy extracts from a request before matching.
+///
+/// Borrowed `(name, value)` slices keep this type simple; the proxy currently collects headers and
+/// query pairs into `Vec`s per request. If that shows up in profiles, a later revision can borrow
+/// straight from the server's header map instead of changing the matching logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestAttrs<'a> {
     /// Host without port, any case.
@@ -318,6 +322,21 @@ mod tests {
                     let _ = l.match_request(&RequestAttrs { host: &host, path: &path, method: &method, headers: &[], query: &[] });
                 }
                 let _ = c.tls_for(port, Some(&host));
+            }
+        }
+
+        #[test]
+        fn matching_with_headers_and_query_never_panics(
+            host in "[a-z0-9.*-]{0,24}",
+            path in "[a-zA-Z0-9/._%-]{0,40}",
+            headers in proptest::collection::vec(("[a-z-]{1,8}", "[a-zA-Z0-9]{0,8}"), 0..=3),
+            query in proptest::collection::vec(("[a-z-]{1,8}", "[a-zA-Z0-9]{0,8}"), 0..=3),
+        ) {
+            let c = config();
+            for port in [80u16, 443] {
+                if let Some(l) = c.select_listener(port, &host) {
+                    let _ = l.match_request(&RequestAttrs { host: &host, path: &path, method: "GET", headers: &headers, query: &query });
+                }
             }
         }
     }

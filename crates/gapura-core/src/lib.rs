@@ -1,8 +1,10 @@
-//! Pure translation core of Gapura.
+//! Pure translation core of Gapura, the Rust API gateway.
 //!
-//! Input: a [`Snapshot`] of Kubernetes Gateway API resources.
-//! Output: a routing [`Config`] for the data plane and status patches for the API server.
-//! No I/O, no clock, no async. Everything here is deterministic and unit-testable.
+//! Input: a [`Snapshot`] of Kubernetes Gateway API resources (GatewayClass, Gateway, HTTPRoute,
+//! ReferenceGrant, Namespace, Service, EndpointSlice, Secret), loaded from JSON or YAML.
+//! Output: a routing [`Config`] for the data plane plus status patches for the API server,
+//! via [`translate()`]. Request matching lives in [`matcher`].
+//! No I/O, no clock, no async: everything is deterministic and covered by golden tests.
 
 pub mod config;
 pub mod duration;
