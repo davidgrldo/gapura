@@ -1,6 +1,8 @@
 //! Gapura data plane binary.
 
 mod cli;
+#[allow(dead_code)] // used from Task 5
+mod store;
 #[allow(dead_code)] // used from Task 8
 mod telemetry;
 

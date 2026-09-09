@@ -1,0 +1,214 @@
+//! Hot-swappable runtime state derived from a `Config`.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use arc_swap::{ArcSwap, Guard};
+use gapura_core::Config;
+use pingora::tls::pkey::{PKey, Private};
+use pingora::tls::x509::X509;
+
+use crate::telemetry::{now_secs, METRICS};
+
+/// A parsed TLS bundle: leaf certificate, optional chain, private key.
+pub struct ParsedCert {
+    pub leaf: X509,
+    pub chain: Vec<X509>,
+    pub key: PKey<Private>,
+}
+
+/// Immutable per-generation state read by every request without locks.
+pub struct Runtime {
+    pub config: Config,
+    pub generation: u64,
+    rr: HashMap<String, AtomicUsize>,
+    certs: HashMap<String, Arc<ParsedCert>>,
+}
+
+impl Runtime {
+    pub fn new(config: Config, generation: u64) -> Self {
+        let rr = config
+            .clusters
+            .keys()
+            .map(|k| (k.clone(), AtomicUsize::new(0)))
+            .collect();
+        let mut certs: HashMap<String, Arc<ParsedCert>> = HashMap::new();
+        for listener in &config.listeners {
+            let Some(tls) = &listener.tls else { continue };
+            if certs.contains_key(&tls.secret) {
+                continue;
+            }
+            match parse_bundle(&tls.cert_pem, &tls.key_pem) {
+                Ok(parsed) => {
+                    certs.insert(tls.secret.clone(), Arc::new(parsed));
+                }
+                Err(e) => {
+                    tracing::error!(secret = %tls.secret, listener = %listener.id, error = %e, "TLS secret unusable, handshakes for this listener will fail");
+                    METRICS
+                        .tls_cert_parse_errors_total
+                        .with_label_values(&[&tls.secret])
+                        .inc();
+                }
+            }
+        }
+        Self {
+            config,
+            generation,
+            rr,
+            certs,
+        }
+    }
+
+    /// Monotonic round-robin cursor for a cluster; `None` for unknown clusters.
+    pub fn next_index(&self, cluster: &str) -> Option<usize> {
+        self.rr
+            .get(cluster)
+            .map(|c| c.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn cert(&self, secret: &str) -> Option<&Arc<ParsedCert>> {
+        self.certs.get(secret)
+    }
+}
+
+fn parse_bundle(cert_pem: &str, key_pem: &str) -> Result<ParsedCert, String> {
+    let mut stack =
+        X509::stack_from_pem(cert_pem.as_bytes()).map_err(|e| format!("tls.crt: {e}"))?;
+    if stack.is_empty() {
+        return Err("tls.crt: no CERTIFICATE block".to_string());
+    }
+    let leaf = stack.remove(0);
+    let key =
+        PKey::private_key_from_pem(key_pem.as_bytes()).map_err(|e| format!("tls.key: {e}"))?;
+    Ok(ParsedCert {
+        leaf,
+        chain: stack,
+        key,
+    })
+}
+
+/// The single shared handle: swap is atomic, readers never block, in-flight requests keep their Arc.
+pub struct Store {
+    current: ArcSwap<Runtime>,
+    ready: AtomicBool,
+    generation: AtomicU64,
+}
+
+impl Store {
+    pub fn empty() -> Self {
+        Self {
+            current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0)),
+            ready: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    pub fn load(&self) -> Guard<Arc<Runtime>> {
+        self.current.load()
+    }
+
+    pub fn load_full(&self) -> Arc<Runtime> {
+        self.current.load_full()
+    }
+
+    /// Install a new Config. Marks the store ready.
+    pub fn swap(&self, config: Config) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.current
+            .store(Arc::new(Runtime::new(config, generation)));
+        self.ready.store(true, Ordering::Release);
+        METRICS.config_last_reload_timestamp_seconds.set(now_secs());
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use gapura_core::config::{Cluster, Endpoint, ListenerConfig, Protocol, TlsBundle};
+
+    use super::*;
+
+    fn listener(tls: Option<TlsBundle>) -> ListenerConfig {
+        ListenerConfig {
+            id: "infra/main/https".into(),
+            port: 443,
+            protocol: Protocol::Https,
+            hostname: None,
+            tls,
+            rules: vec![],
+            table: vec![],
+        }
+    }
+
+    #[test]
+    fn round_robin_cursor_advances_per_cluster() {
+        let mut clusters = BTreeMap::new();
+        clusters.insert(
+            "apps/echo:80".to_string(),
+            Cluster {
+                endpoints: vec![Endpoint {
+                    address: "10.0.0.1".into(),
+                    port: 8080,
+                }],
+            },
+        );
+        let rt = Runtime::new(
+            Config {
+                listeners: vec![],
+                clusters,
+            },
+            1,
+        );
+        assert_eq!(rt.next_index("apps/echo:80"), Some(0));
+        assert_eq!(rt.next_index("apps/echo:80"), Some(1));
+        assert_eq!(rt.next_index("nope"), None);
+    }
+
+    #[test]
+    fn swap_marks_ready_and_bumps_generation() {
+        let store = Store::empty();
+        assert!(!store.is_ready());
+        assert_eq!(store.load().generation, 0);
+        store.swap(Config::default());
+        assert!(store.is_ready());
+        assert_eq!(store.load().generation, 1);
+        store.swap(Config::default());
+        assert_eq!(store.load_full().generation, 2);
+    }
+
+    #[test]
+    fn bad_pem_is_tolerated_and_good_pem_is_parsed() {
+        let bad = TlsBundle {
+            secret: "infra/bad".into(),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n".into(),
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["a.example.com".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let good = TlsBundle {
+            secret: "infra/good".into(),
+            cert_pem: cert.pem(),
+            key_pem: key.serialize_pem(),
+        };
+        let rt = Runtime::new(
+            Config {
+                listeners: vec![listener(Some(bad)), listener(Some(good))],
+                clusters: BTreeMap::new(),
+            },
+            1,
+        );
+        assert!(rt.cert("infra/bad").is_none());
+        let parsed = rt.cert("infra/good").expect("parsed");
+        assert!(parsed.chain.is_empty());
+        assert_eq!(parsed.leaf.subject_alt_names().map(|s| s.len()), Some(1));
+    }
+}
