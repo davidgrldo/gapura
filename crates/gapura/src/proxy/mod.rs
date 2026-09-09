@@ -434,7 +434,7 @@ impl ProxyHttp for GapuraProxy {
             .upstream_errors_total
             .with_label_values(&[&cluster, "connect"])
             .inc();
-        if let Some(addr) = ctx.upstream.take() {
+        if let Some(addr) = ctx.upstream {
             ctx.tried.push(addr);
         }
         let more_endpoints = ctx
@@ -465,12 +465,11 @@ impl ProxyHttp for GapuraProxy {
         };
         if upstream {
             let kind = match e.etype() {
-                ErrorType::ConnectTimedout | ErrorType::ReadTimedout | ErrorType::WriteTimedout => {
-                    "timeout"
-                }
-                ErrorType::ConnectRefused | ErrorType::ConnectNoRoute | ErrorType::ConnectError => {
-                    "connect"
-                }
+                ErrorType::ReadTimedout | ErrorType::WriteTimedout => "timeout",
+                ErrorType::ConnectTimedout
+                | ErrorType::ConnectRefused
+                | ErrorType::ConnectNoRoute
+                | ErrorType::ConnectError => "connect",
                 ErrorType::ReadError | ErrorType::WriteError | ErrorType::ConnectionClosed => {
                     "read"
                 }
@@ -484,12 +483,16 @@ impl ProxyHttp for GapuraProxy {
                     .inc();
             }
         }
-        if code > 0 {
+        // Only answer when nothing has been sent yet: a failure mid-body must not append an error
+        // text to the streamed response. Pingora drops the downstream connection after this, so
+        // say so in the header instead of advertising keep-alive.
+        if code > 0 && session.response_written().is_none() {
+            session.set_keepalive(None);
             if let Err(write_err) = write_local(session, code, &ctx.request_id).await {
                 tracing::debug!(error = %write_err, "could not write error response, client likely gone");
             }
+            ctx.local_status = Some(code);
         }
-        ctx.local_status = Some(code);
         FailToProxy {
             error_code: code,
             can_reuse_downstream: false,
