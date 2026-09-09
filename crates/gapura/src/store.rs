@@ -1,6 +1,6 @@
 //! Hot-swappable runtime state derived from a `Config`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -34,9 +34,10 @@ impl Runtime {
             .map(|k| (k.clone(), AtomicUsize::new(0)))
             .collect();
         let mut certs: HashMap<String, Arc<ParsedCert>> = HashMap::new();
+        let mut attempted: HashSet<String> = HashSet::new();
         for listener in &config.listeners {
             let Some(tls) = &listener.tls else { continue };
-            if certs.contains_key(&tls.secret) {
+            if !attempted.insert(tls.secret.clone()) {
                 continue;
             }
             match parse_bundle(&tls.cert_pem, &tls.key_pem) {
@@ -78,6 +79,7 @@ fn parse_bundle(cert_pem: &str, key_pem: &str) -> Result<ParsedCert, String> {
     if stack.is_empty() {
         return Err("tls.crt: no CERTIFICATE block".to_string());
     }
+    // kubernetes.io/tls convention (cert-manager, kubectl create secret tls): leaf first, then intermediates.
     let leaf = stack.remove(0);
     let key =
         PKey::private_key_from_pem(key_pem.as_bytes()).map_err(|e| format!("tls.key: {e}"))?;
@@ -113,6 +115,7 @@ impl Store {
     }
 
     /// Install a new Config. Marks the store ready.
+    /// Call from a single writer (the config source); concurrent swaps could publish generations out of order.
     pub fn swap(&self, config: Config) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.current
@@ -123,6 +126,11 @@ impl Store {
 
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+    }
+
+    /// Generation of the last swap (0 before the first).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 }
 
@@ -175,11 +183,14 @@ mod tests {
         let store = Store::empty();
         assert!(!store.is_ready());
         assert_eq!(store.load().generation, 0);
+        assert_eq!(store.generation(), 0);
         store.swap(Config::default());
         assert!(store.is_ready());
         assert_eq!(store.load().generation, 1);
+        assert_eq!(store.generation(), 1);
         store.swap(Config::default());
         assert_eq!(store.load_full().generation, 2);
+        assert_eq!(store.generation(), 2);
     }
 
     #[test]
@@ -209,6 +220,69 @@ mod tests {
         assert!(rt.cert("infra/bad").is_none());
         let parsed = rt.cert("infra/good").expect("parsed");
         assert!(parsed.chain.is_empty());
-        assert_eq!(parsed.leaf.subject_alt_names().map(|s| s.len()), Some(1));
+        let sans = parsed.leaf.subject_alt_names().expect("SANs");
+        assert!(sans
+            .iter()
+            .any(|san| san.dnsname() == Some("a.example.com")));
+    }
+
+    #[test]
+    fn shared_bad_secret_is_counted_once() {
+        let bad = TlsBundle {
+            secret: "infra/bad2".into(),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n".into(),
+        };
+        let before = METRICS
+            .tls_cert_parse_errors_total
+            .with_label_values(&["infra/bad2"])
+            .get();
+        let rt = Runtime::new(
+            Config {
+                listeners: vec![listener(Some(bad.clone())), listener(Some(bad))],
+                clusters: BTreeMap::new(),
+            },
+            1,
+        );
+        let after = METRICS
+            .tls_cert_parse_errors_total
+            .with_label_values(&["infra/bad2"])
+            .get();
+        assert_eq!(after - before, 1);
+        assert!(rt.cert("infra/bad2").is_none());
+    }
+
+    #[test]
+    fn leaf_and_intermediate_split() {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec!["x.example.com".to_string()]).unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+
+        let cert_pem = format!("{}{}", leaf_cert.pem(), ca_cert.pem());
+        let key_pem = leaf_key.serialize_pem();
+
+        let bundle = TlsBundle {
+            secret: "infra/chain".into(),
+            cert_pem,
+            key_pem,
+        };
+        let rt = Runtime::new(
+            Config {
+                listeners: vec![listener(Some(bundle))],
+                clusters: BTreeMap::new(),
+            },
+            1,
+        );
+        let parsed = rt.cert("infra/chain").expect("parsed");
+        assert_eq!(parsed.chain.len(), 1);
+        let sans = parsed.leaf.subject_alt_names().expect("SANs");
+        assert!(sans
+            .iter()
+            .any(|san| san.dnsname() == Some("x.example.com")));
     }
 }
