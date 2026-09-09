@@ -48,6 +48,7 @@ pub(crate) fn compile(
         let filters = compile_filters(&r.filters)?;
         let mut backends = Vec::new();
         for b in &r.backend_refs {
+            // Negative weights are rejected by the CRD schema; clamping is defense in depth, not a real path.
             let weight = b.weight.unwrap_or(1).max(0) as u32;
             match backends::resolve(b, rref, snap, clusters) {
                 Ok(key) => backends.push(WeightedBackend {

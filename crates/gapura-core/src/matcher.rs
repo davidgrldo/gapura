@@ -5,8 +5,8 @@ use crate::hostname;
 
 /// What the proxy extracts from a request before matching.
 ///
-/// Borrowed `(name, value)` slices keep this type simple; the proxy currently collects headers and
-/// query pairs into `Vec`s per request. If that shows up in profiles, a later revision can borrow
+/// Borrowed `(name, value)` slices keep this type simple; the planned proxy (Plan 2) is expected to
+/// collect headers and query pairs into `Vec`s per request. If that shows up in profiles, a later revision can borrow
 /// straight from the server's header map instead of changing the matching logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestAttrs<'a> {
