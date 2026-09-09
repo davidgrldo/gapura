@@ -58,7 +58,7 @@ pub fn pick_endpoint(
         return Err(Local::NoEndpoints);
     }
     for i in 0..n {
-        let e = &cluster.endpoints[(cursor + i) % n];
+        let e = &cluster.endpoints[(cursor % n + i) % n];
         let Ok(ip) = e.address.parse::<IpAddr>() else {
             continue;
         };
@@ -90,7 +90,10 @@ pub fn rewrite_path(modifier: &PathRewrite, path_in: &str, matched: &PathMatch) 
                     rest.to_string()
                 };
             }
-            format!("{}{}", replacement.trim_end_matches('/'), rest)
+            match format!("{}{}", replacement.trim_end_matches('/'), rest) {
+                p if p.is_empty() => "/".to_string(),
+                p => p,
+            }
         }
     }
 }
@@ -186,6 +189,11 @@ mod tests {
         let b: SocketAddr = "[fd00::2]:8080".parse().unwrap();
         assert_eq!(pick_endpoint(&c, 0, &[]), Ok(a));
         assert_eq!(pick_endpoint(&c, 1, &[]), Ok(b));
+        assert_eq!(
+            pick_endpoint(&c, usize::MAX, &[]),
+            Ok(b),
+            "cursor wrap must not overflow"
+        );
         assert_eq!(pick_endpoint(&c, 0, &[a]), Ok(b));
         assert_eq!(pick_endpoint(&c, 0, &[a, b]), Err(Local::NoEndpoints));
         assert_eq!(
@@ -219,6 +227,11 @@ mod tests {
         assert_eq!(
             rewrite_path(&rep("/new"), "/exact", &PathMatch::Exact("/exact".into())),
             "/new"
+        );
+        assert_eq!(
+            rewrite_path(&rep("//"), "/foo", &prefix),
+            "/",
+            "all-slash replacement never yields an empty path"
         );
     }
 
