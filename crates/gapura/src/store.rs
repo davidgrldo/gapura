@@ -13,11 +13,8 @@ use crate::telemetry::{now_secs, METRICS};
 
 /// A parsed TLS bundle: leaf certificate, optional chain, private key.
 pub struct ParsedCert {
-    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub leaf: X509,
-    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub chain: Vec<X509>,
-    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub key: PKey<Private>,
 }
 
@@ -28,7 +25,6 @@ pub struct Runtime {
     // not read by production code anywhere in the plan text; kept for parity with the Store-level generation counter
     pub generation: u64,
     rr: HashMap<String, AtomicUsize>,
-    #[allow(dead_code)] // read via Runtime::cert, used from Task 9
     certs: HashMap<String, Arc<ParsedCert>>,
 }
 
@@ -74,7 +70,6 @@ impl Runtime {
             .map(|c| c.fetch_add(1, Ordering::Relaxed))
     }
 
-    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub fn cert(&self, secret: &str) -> Option<&Arc<ParsedCert>> {
         self.certs.get(secret)
     }

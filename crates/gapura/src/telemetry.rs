@@ -25,7 +25,6 @@ pub struct Metrics {
     /// labels: secret (`ns/name`)
     pub tls_cert_parse_errors_total: IntCounterVec,
     /// labels: port
-    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub tls_sni_misses_total: IntCounterVec,
     #[allow(dead_code)] // used from Task 10 (install_panic_hook is called from main)
     pub handler_panics_total: IntCounter,
