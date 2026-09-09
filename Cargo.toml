@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/gapura-core"]
 
 [workspace.package]
@@ -16,3 +16,6 @@ thiserror = "2"
 base64 = "0.22"
 insta = { version = "1", features = ["yaml"] }
 proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
