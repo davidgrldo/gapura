@@ -13,16 +13,24 @@ use crate::telemetry::{now_secs, METRICS};
 
 /// A parsed TLS bundle: leaf certificate, optional chain, private key.
 pub struct ParsedCert {
+    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub leaf: X509,
+    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub chain: Vec<X509>,
+    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub key: PKey<Private>,
 }
 
 /// Immutable per-generation state read by every request without locks.
 pub struct Runtime {
+    #[allow(dead_code)] // used from Task 8 (proxy request handling)
     pub config: Config,
+    #[allow(dead_code)]
+    // not read by production code anywhere in the plan text; kept for parity with the Store-level generation counter
     pub generation: u64,
+    #[allow(dead_code)] // read via Runtime::next_index, used from Task 8
     rr: HashMap<String, AtomicUsize>,
+    #[allow(dead_code)] // read via Runtime::cert, used from Task 9
     certs: HashMap<String, Arc<ParsedCert>>,
 }
 
@@ -62,12 +70,14 @@ impl Runtime {
     }
 
     /// Monotonic round-robin cursor for a cluster; `None` for unknown clusters.
+    #[allow(dead_code)] // used from Task 8 (proxy upstream selection)
     pub fn next_index(&self, cluster: &str) -> Option<usize> {
         self.rr
             .get(cluster)
             .map(|c| c.fetch_add(1, Ordering::Relaxed))
     }
 
+    #[allow(dead_code)] // used from Task 9 (TLS SNI resolver)
     pub fn cert(&self, secret: &str) -> Option<&Arc<ParsedCert>> {
         self.certs.get(secret)
     }
@@ -98,6 +108,7 @@ pub struct Store {
 }
 
 impl Store {
+    #[allow(dead_code)] // used from Task 10 (main.rs constructs the Store)
     pub fn empty() -> Self {
         Self {
             current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0)),
@@ -106,10 +117,12 @@ impl Store {
         }
     }
 
+    #[allow(dead_code)] // not called by production code anywhere in the plan text; load_full is used instead from Task 8/9/10
     pub fn load(&self) -> Guard<Arc<Runtime>> {
         self.current.load()
     }
 
+    #[allow(dead_code)] // used from Task 8 (proxy), Task 9 (TLS SNI resolver), Task 10 (admin /debug/config)
     pub fn load_full(&self) -> Arc<Runtime> {
         self.current.load_full()
     }
@@ -124,11 +137,13 @@ impl Store {
         METRICS.config_last_reload_timestamp_seconds.set(now_secs());
     }
 
+    #[allow(dead_code)] // used from Task 10 (admin /readyz)
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
 
     /// Generation of the last swap (0 before the first).
+    #[allow(dead_code)] // not called by production code anywhere in the plan text; kept as a public accessor for the generation counter
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
