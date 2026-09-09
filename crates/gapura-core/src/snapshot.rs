@@ -75,6 +75,7 @@ pub enum SnapshotError {
     MissingKind,
     #[error("unsupported kind `{0}`")]
     UnsupportedKind(String),
+    /// The wrapped serde_json error comes from `from_value`, so its line and column are always 0; the useful part is the message.
     #[error("invalid {kind}: {source}")]
     Invalid {
         kind: String,
@@ -83,6 +84,13 @@ pub enum SnapshotError {
     },
     #[error("yaml: {0}")]
     Yaml(#[from] serde_yaml_ng::Error),
+    #[error("document {index}: {source}")]
+    Document {
+        /// 0-based position of the failing document in the multi-document input.
+        index: usize,
+        #[source]
+        source: Box<SnapshotError>,
+    },
 }
 
 impl Snapshot {
@@ -156,12 +164,20 @@ impl Snapshot {
     /// Build a snapshot from a multi-document YAML string (`---` separated). Used by fixtures and the dump example.
     pub fn from_yaml_docs(yaml: &str) -> Result<Self, SnapshotError> {
         let mut snap = Snapshot::default();
-        for doc in serde_yaml_ng::Deserializer::from_str(yaml) {
-            let value = serde_json::Value::deserialize(doc)?;
+        for (index, doc) in serde_yaml_ng::Deserializer::from_str(yaml).enumerate() {
+            let value =
+                serde_json::Value::deserialize(doc).map_err(|e| SnapshotError::Document {
+                    index,
+                    source: Box::new(SnapshotError::Yaml(e)),
+                })?;
             if value.is_null() {
                 continue;
             }
-            snap.insert_json(value)?;
+            snap.insert_json(value)
+                .map_err(|e| SnapshotError::Document {
+                    index,
+                    source: Box::new(e),
+                })?;
         }
         Ok(snap)
     }
@@ -222,13 +238,54 @@ data: { tls.crt: Zm9v, tls.key: YmFy }
     #[test]
     fn rejects_unknown_kind() {
         let err = Snapshot::from_yaml_docs("kind: Pod\nmetadata: { name: x }\n").unwrap_err();
-        assert!(matches!(err, SnapshotError::UnsupportedKind(k) if k == "Pod"));
+        let SnapshotError::Document { index, source } = err else {
+            panic!("expected Document, got {err:?}")
+        };
+        assert_eq!(index, 0);
+        assert!(matches!(*source, SnapshotError::UnsupportedKind(ref k) if k == "Pod"));
     }
 
     #[test]
     fn rejects_missing_kind() {
         let err = Snapshot::from_yaml_docs("metadata: { name: x }\n").unwrap_err();
-        assert!(matches!(err, SnapshotError::MissingKind));
+        let SnapshotError::Document { index, source } = err else {
+            panic!("expected Document, got {err:?}")
+        };
+        assert_eq!(index, 0);
+        assert!(matches!(*source, SnapshotError::MissingKind));
+    }
+
+    #[test]
+    fn wrong_json_type_is_an_error_not_a_default() {
+        let err = Snapshot::from_yaml_docs(
+            "apiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata: { name: g, namespace: ns }\nspec: { gatewayClassName: c, listeners: [{ name: l, port: not-a-number, protocol: HTTP }] }\n",
+        )
+        .unwrap_err();
+        let SnapshotError::Document { index: 0, source } = err else {
+            panic!("expected Document, got {err:?}")
+        };
+        assert!(matches!(*source, SnapshotError::Invalid { ref kind, .. } if kind == "Gateway"));
+    }
+
+    #[test]
+    fn document_index_points_at_the_failing_document() {
+        let yaml = "apiVersion: v1\nkind: Namespace\nmetadata: { name: ok }\n---\nkind: Pod\nmetadata: { name: x }\n";
+        let err = Snapshot::from_yaml_docs(yaml).unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::Document { index: 1, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn insert_replaces_object_with_same_key() {
+        let mut s = Snapshot::default();
+        let mut doc = serde_json::json!({ "kind": "Namespace", "metadata": { "name": "apps", "labels": { "team": "a" } } });
+        s.insert_json(doc.clone()).unwrap();
+        doc["metadata"]["labels"]["team"] = serde_json::json!("b");
+        s.insert_json(doc).unwrap();
+        assert_eq!(s.namespaces.len(), 1);
+        assert_eq!(s.namespaces["apps"].metadata.labels["team"], "b");
     }
 
     #[test]

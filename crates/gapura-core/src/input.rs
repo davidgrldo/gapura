@@ -28,6 +28,7 @@ pub struct GatewayClass {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GatewayClassSpec {
+    /// Empty means the field was absent (struct-level `serde(default)`), never a valid controller name.
     pub controller_name: String,
 }
 
@@ -41,6 +42,7 @@ pub struct Gateway {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GatewaySpec {
+    /// Empty means the field was absent (struct-level `serde(default)`), never a valid GatewayClass name.
     pub gateway_class_name: String,
     pub listeners: Vec<Listener>,
 }
