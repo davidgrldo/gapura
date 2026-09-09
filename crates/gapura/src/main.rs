@@ -78,6 +78,7 @@ fn main() {
         }),
     );
     admin.add_tcp(&args.admin.to_string());
+    admin.threads = Some(1); // probes and scrapes do not need a worker per core
     server.add_service(admin);
 
     tracing::info!(http = ?args.listen_http, https = ?args.listen_https, admin = %args.admin, "gapura listening");

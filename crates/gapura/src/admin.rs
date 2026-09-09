@@ -1,4 +1,4 @@
-//! Admin endpoints on their own port (never exposed through the Kubernetes Service):
+//! Admin endpoints on their own port (keep it off the public Service; see Plan 4):
 //! /healthz, /readyz, /metrics, /debug/config.
 
 use std::sync::Arc;
@@ -60,7 +60,17 @@ impl AdminApp {
             }
             "/debug/config" => {
                 let runtime = self.store.load_full();
-                match serde_json::to_vec_pretty(&runtime.config) {
+                // Never expose key material, even on the admin port: the port is a deployment
+                // promise, not a property of this code.
+                let redacted = serde_json::to_value(&runtime.config).map(|mut v| {
+                    for listener in v["listeners"].as_array_mut().into_iter().flatten() {
+                        if let Some(key) = listener.pointer_mut("/tls/key_pem") {
+                            *key = serde_json::Value::String("<redacted>".into());
+                        }
+                    }
+                    v
+                });
+                match redacted.and_then(|v| serde_json::to_vec_pretty(&v)) {
                     Ok(json) => respond(StatusCode::OK, "application/json", json),
                     Err(e) => respond(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -88,7 +98,7 @@ impl ServeHttp for AdminApp {
 
 #[cfg(test)]
 mod tests {
-    use gapura_core::config::{ListenerConfig, Protocol};
+    use gapura_core::config::{ListenerConfig, Protocol, TlsBundle};
     use gapura_core::Config;
 
     use super::*;
@@ -107,9 +117,13 @@ mod tests {
             listeners: vec![ListenerConfig {
                 id: "infra/main/http".into(),
                 port: 80,
-                protocol: Protocol::Http,
+                protocol: Protocol::Https,
                 hostname: None,
-                tls: None,
+                tls: Some(TlsBundle {
+                    secret: "infra/tls".into(),
+                    cert_pem: "CERT".into(),
+                    key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n".into(),
+                }),
                 rules: vec![],
                 table: vec![],
             }],
@@ -122,7 +136,15 @@ mod tests {
         assert_eq!(body, "ready (generation 1)\n");
         let cfg = app.handle("/debug/config");
         assert_eq!(cfg.headers()[header::CONTENT_TYPE], "application/json");
-        assert!(String::from_utf8_lossy(cfg.body()).contains("infra/main/http"));
+        let dump = String::from_utf8_lossy(cfg.body());
+        assert!(
+            dump.contains("infra/main/http") && dump.contains("CERT"),
+            "{dump}"
+        );
+        assert!(
+            dump.contains("<redacted>") && !dump.contains("PRIVATE KEY"),
+            "key material must never leave the process: {dump}"
+        );
         let metrics = app.handle("/metrics");
         assert_eq!(metrics.status(), StatusCode::OK);
         assert_eq!(app.handle("/nope").status(), StatusCode::NOT_FOUND);
