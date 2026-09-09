@@ -17,8 +17,14 @@ fn load(case: &str) -> Snapshot {
     let mut files: Vec<_> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "yaml" || x == "yml"))
         .collect();
     files.sort();
+    assert!(
+        !files.is_empty(),
+        "fixture {case} has no *.yaml files in {}",
+        dir.display()
+    );
     let mut yaml = String::new();
     for f in files {
         yaml.push_str(&fs::read_to_string(&f).unwrap());
@@ -101,4 +107,22 @@ fn gatewayclass_accepted() {
         other => panic!("unexpected patch {other:?}"),
     }
     insta::assert_yaml_snapshot!("gatewayclass-accepted", t);
+}
+
+#[test]
+fn gatewayclass_mixed() {
+    let t = run("gatewayclass-mixed");
+    assert_eq!(t.status.len(), 1, "only our class gets status");
+    match &t.status[0] {
+        StatusPatch::GatewayClass { name, conditions } => {
+            assert_eq!(name, "gapura");
+            assert_eq!(
+                cond(conditions, "Accepted"),
+                (ConditionStatus::True, "Accepted")
+            );
+            assert_eq!(conditions[0].observed_generation, Some(2));
+        }
+        other => panic!("unexpected patch {other:?}"),
+    }
+    insta::assert_yaml_snapshot!("gatewayclass-mixed", t);
 }

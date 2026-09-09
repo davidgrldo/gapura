@@ -16,6 +16,9 @@ pub struct Translation {
     pub status: Vec<StatusPatch>,
 }
 
+/// Translate a snapshot of Gateway API resources into a routing `Config` and the status patches
+/// that describe what was accepted or rejected. Pure and deterministic: invalid input never
+/// errors, it becomes a condition on the offending resource.
 pub fn translate(snap: &Snapshot, settings: &Settings) -> Translation {
     let mut status = Vec::new();
     let _classes = gateway_class::accept(snap, settings, &mut status);

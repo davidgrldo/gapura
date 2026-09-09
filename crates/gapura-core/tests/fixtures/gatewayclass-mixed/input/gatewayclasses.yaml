@@ -1,0 +1,9 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: { name: nginx, generation: 4 }
+spec: { controllerName: k8s.io/ingress-nginx }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: { name: gapura, generation: 2 }
+spec: { controllerName: gapura.dev/controller }
