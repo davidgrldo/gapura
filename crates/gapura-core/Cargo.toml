@@ -1,0 +1,18 @@
+[package]
+name = "gapura-core"
+description = "Pure translation core of the Gapura API gateway: Gateway API resources in, routing Config and status out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
