@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gapura-core"]
+members = ["crates/gapura-core", "crates/gapura"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,22 @@ thiserror = "2"
 base64 = "0.22"
 insta = { version = "1", features = ["yaml"] }
 proptest = "1"
+pingora = { version = "0.8", features = ["proxy", "openssl"] }
+async-trait = "0.1"
+arc-swap = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+http = "1"
+prometheus = "0.13"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rcgen = "0.13"
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
