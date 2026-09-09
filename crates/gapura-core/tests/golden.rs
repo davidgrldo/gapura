@@ -566,3 +566,71 @@ fn https_without_tls() {
     assert!(t.config.listeners.is_empty());
     insta::assert_yaml_snapshot!("https-without-tls", t);
 }
+
+#[test]
+fn precedence() {
+    let t = run("precedence");
+    let l = &t.config.listeners[0];
+    let order: Vec<(Option<&str>, &str, usize)> = l
+        .table
+        .iter()
+        .map(|e| {
+            (
+                e.hostname.as_deref(),
+                l.rules[e.rule].route.as_str(),
+                l.rules[e.rule].rule_index,
+            )
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (Some("api.example.com"), "apps/c-host", 0), // hostname beats everything
+            (None, "apps/b-new", 1),                     // Exact beats Prefix
+            (None, "apps/b-new", 0),                     // more header matches
+            (None, "apps/a-old", 0),                     // the rest
+        ]
+    );
+    insta::assert_yaml_snapshot!("precedence", t);
+}
+
+#[test]
+fn duplicate_parent_refs_attach_once() {
+    let t = run("duplicate-parent-refs");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(listener(listeners, "http").attached_routes, 1);
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(parents.len(), 2, "status is still reported per parentRef");
+    for p in parents {
+        assert_eq!(
+            cond(&p.conditions, "Accepted"),
+            (ConditionStatus::True, "Accepted")
+        );
+    }
+    assert_eq!(t.config.listeners[0].rules.len(), 1);
+    assert_eq!(t.config.listeners[0].table.len(), 1);
+    insta::assert_yaml_snapshot!("duplicate-parent-refs", t);
+}
+
+#[test]
+fn port_based_parent_ref() {
+    let t = run("port-based-parent");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(listener(listeners, "http").attached_routes, 0);
+    assert_eq!(listener(listeners, "https").attached_routes, 1);
+    assert_eq!(
+        cond(
+            &route_parents(&t, "apps", "secure")[0].conditions,
+            "Accepted"
+        ),
+        (ConditionStatus::True, "Accepted")
+    );
+    let https = t
+        .config
+        .listeners
+        .iter()
+        .find(|l| l.id == "infra/main/https")
+        .unwrap();
+    assert_eq!(https.rules.len(), 1);
+    insta::assert_yaml_snapshot!("port-based-parent", t);
+}

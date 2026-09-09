@@ -1,6 +1,6 @@
 //! Step 3 of translation: attach HTTPRoutes to listeners through parentRefs and produce route status.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Cluster;
 use crate::hostname;
@@ -21,6 +21,7 @@ pub(crate) fn attach(
         let compiled = rules::compile(route, rref, snap, clusters);
         let generation = route.metadata.generation;
         let mut parents = Vec::new();
+        let mut attached: BTreeSet<String> = BTreeSet::new();
         for pref in &route.spec.parent_refs {
             let is_gateway = pref.group.as_deref().unwrap_or(GATEWAY_GROUP) == GATEWAY_GROUP
                 && pref.kind.as_deref().unwrap_or("Gateway") == "Gateway";
@@ -37,7 +38,15 @@ pub(crate) fn attach(
             else {
                 continue; // not ours (or absent): the spec says stay silent
             };
-            let outcome = attach_to_gateway(gw, pref, route, rref, snap, compiled.as_ref().ok());
+            let outcome = attach_to_gateway(
+                gw,
+                pref,
+                route,
+                rref,
+                snap,
+                compiled.as_ref().ok(),
+                &mut attached,
+            );
             parents.push(RouteParentStatus {
                 parent_ref: pref.clone(),
                 controller_name: settings.controller_name.clone(),
@@ -71,6 +80,7 @@ fn attach_to_gateway(
     rref: &ObjectRef,
     snap: &Snapshot,
     compiled: Option<&rules::Compiled>,
+    attached: &mut BTreeSet<String>,
 ) -> Outcome {
     let mut outcome = Outcome {
         matching_listeners: 0,
@@ -78,6 +88,7 @@ fn attach_to_gateway(
         hostname_ok: 0,
     };
     let gw_ns = gw.r#ref.namespace.clone();
+    let gw_id = gw.r#ref.to_string();
     for l in gw.listeners.iter_mut() {
         if pref.section_name.as_deref().is_some_and(|s| s != l.name)
             || pref.port.is_some_and(|p| p != l.port)
@@ -96,9 +107,12 @@ fn attach_to_gateway(
         };
         outcome.hostname_ok += 1;
         if let Some(c) = compiled {
-            l.attached_routes += 1;
-            if l.programmed() {
-                l.add_route(&c.rules, &hosts);
+            let key = format!("{gw_id}/{}", l.name);
+            if attached.insert(key) {
+                l.attached_routes += 1;
+                if l.programmed() {
+                    l.add_route(&c.rules, &hosts);
+                }
             }
         }
     }

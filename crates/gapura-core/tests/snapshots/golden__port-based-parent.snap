@@ -1,0 +1,163 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners:
+    - id: infra/main/http
+      port: 80
+      protocol: Http
+      hostname: ~
+      tls: ~
+      rules: []
+      table: []
+    - id: infra/main/https
+      port: 443
+      protocol: Https
+      hostname: ~
+      tls:
+        secret: infra/wildcard
+        cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCCQDfixture\n-----END CERTIFICATE-----\n"
+        key_pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgfixture\n-----END PRIVATE KEY-----\n"
+      rules:
+        - route: apps/secure
+          rule_index: 0
+          creation_timestamp: "2026-09-01T10:00:00Z"
+          matches:
+            - path:
+                Prefix: /
+              headers: []
+              query: []
+              method: ~
+          filters:
+            request_headers:
+              set: []
+              add: []
+              remove: []
+            response_headers:
+              set: []
+              add: []
+              remove: []
+            redirect: ~
+            rewrite: ~
+          backends:
+            - cluster: "apps/echo:80"
+              weight: 1
+          timeouts:
+            request_ms: ~
+            backend_request_ms: ~
+      table:
+        - hostname: ~
+          matcher:
+            path:
+              Prefix: /
+            headers: []
+            query: []
+            method: ~
+          rule: 0
+  clusters:
+    "apps/echo:80":
+      endpoints:
+        - address: 10.1.0.5
+          port: 8080
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: main
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Gateway is accepted
+        observedGeneration: 1
+      - type: Programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
+        observedGeneration: 1
+    listeners:
+      - name: http
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+      - name: https
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 1
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+  - kind: HTTPRoute
+    namespace: apps
+    name: secure
+    parents:
+      - parentRef:
+          group: ~
+          kind: ~
+          namespace: infra
+          name: main
+          sectionName: ~
+          port: 443
+        controllerName: gapura.dev/controller
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Route is accepted
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1

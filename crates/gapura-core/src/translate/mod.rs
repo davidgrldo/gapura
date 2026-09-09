@@ -6,6 +6,7 @@ mod backends;
 mod gateway_class;
 mod grants;
 mod listeners;
+mod precedence;
 mod routes;
 mod rules;
 
@@ -74,6 +75,7 @@ fn assemble(
             if !programmed {
                 continue;
             }
+            precedence::sort_table(&mut l.table, &l.rules);
             for rule in &l.rules {
                 for backend in &rule.backends {
                     if let Some(cluster) = &backend.cluster {
