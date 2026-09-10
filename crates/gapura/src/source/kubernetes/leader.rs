@@ -77,10 +77,21 @@ pub async fn run(
             _ = tick.tick() => {}
             _ = shutdown.changed() => return,
         }
-        let leader = match step(&api, &opts).await {
-            Ok(leader) => leader,
-            Err(e) => {
+        // A hung API call must not pin leadership: bound each step by the lease duration
+        // (client-go's RenewDeadline) and give up leadership when it elapses.
+        let deadline = Duration::from_secs(u64::try_from(opts.lease_secs).unwrap_or(15));
+        let outcome = tokio::select! {
+            r = tokio::time::timeout(deadline, step(&api, &opts)) => r,
+            _ = shutdown.changed() => return,
+        };
+        let leader = match outcome {
+            Ok(Ok(leader)) => leader,
+            Ok(Err(e)) => {
                 tracing::warn!(lease = %opts.name, error = %e, "lease step failed, not leader");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(lease = %opts.name, secs = deadline.as_secs(), "lease step timed out, not leader");
                 false
             }
         };
