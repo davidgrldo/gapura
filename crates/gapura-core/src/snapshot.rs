@@ -346,6 +346,24 @@ data: { tls.crt: Zm9v, tls.key: YmFy }
             policy.spec.validation.ca_certificate_refs[0].kind,
             "ConfigMap"
         );
+        snap.insert_json(serde_json::json!({
+            "kind": "BackendTLSPolicy",
+            "metadata": { "name": "sys-tls", "namespace": "apps" },
+            "spec": {
+                "targetRefs": [{ "kind": "Service", "name": "echo" }],
+                "validation": { "wellKnownCACertificates": "System", "hostname": "echo.example.com" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            snap.backend_tls_policies[&ObjectRef::new("apps", "sys-tls")]
+                .spec
+                .validation
+                .well_known_ca_certificates
+                .as_deref(),
+            Some("System"),
+            "the CRD key is wellKnownCACertificates, not serde's wellKnownCaCertificates"
+        );
         let cref = ObjectRef::new("apps", "echo-ca");
         assert!(snap.config_maps[&cref].data["ca.crt"].starts_with("-----BEGIN CERTIFICATE-----"));
         assert_eq!(snap.config_maps[&cref].metadata.annotations["a"], "b");

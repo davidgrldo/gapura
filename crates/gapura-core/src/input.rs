@@ -400,6 +400,8 @@ pub struct PolicyTargetRef {
 pub struct BackendTlsValidation {
     pub ca_certificate_refs: Vec<LocalObjectReference>,
     /// `System` is the only supported value.
+    /// serde camelCase would emit `wellKnownCaCertificates`; the CRD key keeps the acronym.
+    #[serde(rename = "wellKnownCACertificates")]
     pub well_known_ca_certificates: Option<String>,
     pub hostname: String,
 }
