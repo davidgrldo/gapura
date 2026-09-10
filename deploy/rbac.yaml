@@ -1,0 +1,45 @@
+# RBAC for the Gapura controller. Reused by the Helm chart in Plan 4.
+apiVersion: v1
+kind: Namespace
+metadata: { name: gapura-system }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: gapura, namespace: gapura-system }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: gapura }
+rules:
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [gatewayclasses, gateways, httproutes, referencegrants, backendtlspolicies]
+  verbs: [get, list, watch]
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [gatewayclasses/status, gateways/status, httproutes/status]
+  verbs: [patch]
+- apiGroups: [""]
+  resources: [namespaces, services, secrets, configmaps]
+  verbs: [get, list, watch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: gapura }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: gapura }
+subjects: [{ kind: ServiceAccount, name: gapura, namespace: gapura-system }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: gapura-leader, namespace: gapura-system }
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: gapura-leader, namespace: gapura-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: gapura-leader }
+subjects: [{ kind: ServiceAccount, name: gapura, namespace: gapura-system }]
