@@ -24,6 +24,8 @@ pub struct Runtime {
     pub generation: u64,
     rr: HashMap<String, AtomicUsize>,
     certs: HashMap<String, Arc<ParsedCert>>,
+    /// Upstream CA bundles by cluster key, for `PeerOptions::ca`.
+    upstream_cas: HashMap<String, Arc<Box<[X509]>>>,
 }
 
 impl Runtime {
@@ -53,11 +55,30 @@ impl Runtime {
                 }
             }
         }
+        let mut upstream_cas: HashMap<String, Arc<Box<[X509]>>> = HashMap::new();
+        for (key, cluster) in &config.clusters {
+            let Some(pem) = cluster.tls.as_ref().and_then(|t| t.ca_pem.as_deref()) else {
+                continue;
+            };
+            match X509::stack_from_pem(pem.as_bytes()) {
+                Ok(stack) if !stack.is_empty() => {
+                    upstream_cas.insert(key.clone(), Arc::new(stack.into_boxed_slice()));
+                }
+                Ok(_) | Err(_) => {
+                    tracing::error!(cluster = %key, "upstream CA bundle unusable, TLS to this backend will fail verification");
+                    METRICS
+                        .tls_cert_parse_errors_total
+                        .with_label_values(&[&format!("upstream-ca/{key}")])
+                        .inc();
+                }
+            }
+        }
         Self {
             config,
             generation,
             rr,
             certs,
+            upstream_cas,
         }
     }
 
@@ -70,6 +91,11 @@ impl Runtime {
 
     pub fn cert(&self, secret: &str) -> Option<&Arc<ParsedCert>> {
         self.certs.get(secret)
+    }
+
+    /// CA bundle of a cluster with `ca_pem`; `None` for system roots or an unparsable bundle.
+    pub fn upstream_ca(&self, cluster: &str) -> Option<Arc<Box<[X509]>>> {
+        self.upstream_cas.get(cluster).cloned()
     }
 }
 
@@ -278,5 +304,58 @@ mod tests {
         assert!(sans
             .iter()
             .any(|san| san.dnsname() == Some("x.example.com")));
+    }
+
+    #[test]
+    fn upstream_ca_is_parsed_per_cluster_and_garbage_is_skipped() {
+        use gapura_core::config::ClusterTls;
+        let key = rcgen::KeyPair::generate().unwrap();
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let tls = |pem: &str| {
+            Some(ClusterTls {
+                sni: "echo.apps.svc".into(),
+                ca_pem: Some(pem.to_string()),
+                insecure: false,
+            })
+        };
+        let mut config = Config::default();
+        config.clusters.insert(
+            "apps/good:443".into(),
+            Cluster {
+                endpoints: vec![],
+                tls: tls(&ca.pem()),
+            },
+        );
+        config.clusters.insert(
+            "apps/bad:443".into(),
+            Cluster {
+                endpoints: vec![],
+                tls: tls("not a certificate"),
+            },
+        );
+        config.clusters.insert(
+            "apps/system:443".into(),
+            Cluster {
+                endpoints: vec![],
+                tls: Some(ClusterTls {
+                    sni: "x".into(),
+                    ca_pem: None,
+                    insecure: false,
+                }),
+            },
+        );
+        let rt = Runtime::new(config, 1);
+        assert_eq!(rt.upstream_ca("apps/good:443").map(|c| c.len()), Some(1));
+        assert!(
+            rt.upstream_ca("apps/bad:443").is_none(),
+            "unparsable bundle is logged and skipped"
+        );
+        assert!(
+            rt.upstream_ca("apps/system:443").is_none(),
+            "System roots need no bundle"
+        );
     }
 }

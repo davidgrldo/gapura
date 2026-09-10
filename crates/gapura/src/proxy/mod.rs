@@ -337,7 +337,22 @@ impl ProxyHttp for GapuraProxy {
         let addr = pick_endpoint(cluster, cursor, &ctx.tried)
             .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "no endpoint left to try"))?;
         ctx.upstream = Some(addr);
-        let mut peer = HttpPeer::new(addr, false, String::new());
+        let mut peer = match &cluster.tls {
+            None => HttpPeer::new(addr, false, String::new()),
+            Some(tls) => {
+                let mut peer = HttpPeer::new(addr, true, tls.sni.clone());
+                if tls.insecure {
+                    // Opt-in per Service (gapura.dev/backend-tls: insecure): encrypt, do not verify.
+                    peer.options.verify_cert = false;
+                    peer.options.verify_hostname = false;
+                } else if tls.ca_pem.is_some() {
+                    // None here means the bundle failed to parse at load time; verification then
+                    // runs against the system store and fails loudly instead of silently trusting.
+                    peer.options.ca = rt.upstream_ca(&key);
+                }
+                peer
+            }
+        };
         let timeout = ctx
             .rule()
             .map(|r| effective_timeout(&r.timeouts))
@@ -469,7 +484,10 @@ impl ProxyHttp for GapuraProxy {
                 ErrorType::ConnectTimedout
                 | ErrorType::ConnectRefused
                 | ErrorType::ConnectNoRoute
-                | ErrorType::ConnectError => "connect",
+                | ErrorType::ConnectError
+                | ErrorType::TLSHandshakeFailure
+                | ErrorType::TLSHandshakeTimedout
+                | ErrorType::InvalidCert => "connect",
                 ErrorType::ReadError | ErrorType::WriteError | ErrorType::ConnectionClosed => {
                     "read"
                 }

@@ -32,6 +32,8 @@ axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rcgen = "0.13"
 tempfile = "3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
