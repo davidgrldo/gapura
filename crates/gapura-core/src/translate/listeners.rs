@@ -181,6 +181,11 @@ fn build_listener(
         .and_then(|t| t.mode.as_deref())
         .is_some_and(|m| m != "Terminate");
 
+    let bound = match protocol {
+        Some(Protocol::Https) => &settings.https_ports,
+        _ => &settings.http_ports,
+    };
+
     let accepted: Result<(), Rejection> = if protocol.is_none() {
         Err((
             reasons::UNSUPPORTED_PROTOCOL,
@@ -189,12 +194,12 @@ fn build_listener(
                 l.protocol
             ),
         ))
-    } else if !settings.supported_ports.contains(&l.port) {
+    } else if !bound.contains(&l.port) {
         Err((
             reasons::PORT_UNAVAILABLE,
             format!(
-                "port {} is not bound by this deployment, supported ports: {:?}",
-                l.port, settings.supported_ports
+                "port {} is not bound for {} by this deployment, bound ports: {:?}",
+                l.port, l.protocol, bound
             ),
         ))
     } else if protocol == Some(Protocol::Https) && passthrough {

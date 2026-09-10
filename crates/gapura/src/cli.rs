@@ -42,26 +42,22 @@ pub struct Args {
 }
 
 impl Args {
-    /// Ports we actually bind. Gateway listeners on other ports get `PortUnavailable`.
-    pub fn supported_ports(&self) -> Vec<u16> {
-        let mut ports: Vec<u16> = self
-            .listen_http
-            .iter()
-            .chain(&self.listen_https)
-            .map(|a| a.port())
-            .collect();
-        ports.sort_unstable();
-        ports.dedup();
-        ports
-    }
-
     pub fn settings(&self) -> Settings {
         Settings {
             controller_name: self.controller_name.clone(),
-            supported_ports: self.supported_ports(),
+            http_ports: ports_of(&self.listen_http),
+            https_ports: ports_of(&self.listen_https),
             gateway_addresses: self.publish_addresses.clone(),
         }
     }
+}
+
+/// Sorted, unique ports of the given listen addresses.
+fn ports_of(addrs: &[SocketAddr]) -> Vec<u16> {
+    let mut ports: Vec<u16> = addrs.iter().map(|a| a.port()).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 #[cfg(test)]
@@ -69,19 +65,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_ports_are_sorted_and_unique() {
+    fn default_ports_are_split_per_protocol() {
+        let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x"]);
+        let settings = args.settings();
+        assert_eq!(settings.http_ports, vec![80]);
+        assert_eq!(settings.https_ports, vec![443]);
+        assert_eq!(settings.controller_name, "gapura.dev/controller");
+    }
+
+    #[test]
+    fn http_ports_are_sorted_and_unique() {
         let args = Args::parse_from([
             "gapura",
             "--config-dir",
             "/tmp/x",
             "--listen-http",
             "0.0.0.0:8080",
+            "--listen-http",
+            "0.0.0.0:80",
+            "--listen-http",
+            "[::]:8080",
             "--listen-https",
             "0.0.0.0:8443",
-            "--listen-https",
-            "[::]:8080",
         ]);
-        assert_eq!(args.supported_ports(), vec![8080, 8443]);
-        assert_eq!(args.settings().controller_name, "gapura.dev/controller");
+        let settings = args.settings();
+        assert_eq!(settings.http_ports, vec![80, 8080]);
+        assert_eq!(settings.https_ports, vec![8443]);
     }
 }

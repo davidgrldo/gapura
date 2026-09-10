@@ -40,7 +40,7 @@ status:
           - type: Accepted
             status: "False"
             reason: PortUnavailable
-            message: "port 8080 is not bound by this deployment, supported ports: [80, 443]"
+            message: "port 8080 is not bound for HTTP by this deployment, bound ports: [80]"
             observedGeneration: 1
           - type: Programmed
             status: "False"

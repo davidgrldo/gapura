@@ -53,8 +53,10 @@ pub struct Snapshot {
 pub struct Settings {
     /// Only GatewayClasses with this `spec.controllerName` are handled.
     pub controller_name: String,
-    /// Ports the process actually binds. Listeners on other ports are rejected with `PortUnavailable`.
-    pub supported_ports: Vec<u16>,
+    /// Ports bound for plain HTTP. HTTP listeners on other ports get `PortUnavailable`.
+    pub http_ports: Vec<u16>,
+    /// Ports bound for HTTPS. HTTPS listeners on other ports get `PortUnavailable`.
+    pub https_ports: Vec<u16>,
     /// Addresses published into `Gateway.status.addresses` (the LoadBalancer IPs of our Service).
     pub gateway_addresses: Vec<String>,
 }
@@ -63,7 +65,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             controller_name: "gapura.dev/controller".to_string(),
-            supported_ports: vec![80, 443],
+            http_ports: vec![80],
+            https_ports: vec![443],
             gateway_addresses: Vec::new(),
         }
     }

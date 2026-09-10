@@ -3,7 +3,14 @@ source: crates/gapura-core/tests/golden.rs
 expression: t
 ---
 config:
-  listeners: []
+  listeners:
+    - id: infra/main/http
+      port: 80
+      protocol: Http
+      hostname: ~
+      tls: ~
+      rules: []
+      table: []
   clusters: {}
 status:
   - kind: GatewayClass
@@ -21,16 +28,42 @@ status:
       - 10.0.0.1
     conditions:
       - type: Accepted
-        status: "False"
+        status: "True"
         reason: ListenersNotValid
-        message: No listener is valid
+        message: Some listeners are not valid
         observedGeneration: 1
       - type: Programmed
-        status: "False"
-        reason: Invalid
-        message: No listener is programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
         observedGeneration: 1
     listeners:
+      - name: http-on-tls-port
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "False"
+            reason: PortUnavailable
+            message: "port 443 is not bound for HTTP by this deployment, bound ports: [80]"
+            observedGeneration: 1
+          - type: Programmed
+            status: "False"
+            reason: Invalid
+            message: Listener is not valid
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
       - name: http
         supportedKinds:
           - group: gateway.networking.k8s.io
@@ -43,9 +76,9 @@ status:
             message: Listener is accepted
             observedGeneration: 1
           - type: Programmed
-            status: "False"
-            reason: Invalid
-            message: Listener is not valid
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
             observedGeneration: 1
           - type: ResolvedRefs
             status: "True"
@@ -53,33 +86,7 @@ status:
             message: All references resolved
             observedGeneration: 1
           - type: Conflicted
-            status: "True"
-            reason: ProtocolConflict
-            message: listeners http and https-on-80 share port 80 with different protocols
-            observedGeneration: 1
-      - name: https-on-80
-        supportedKinds:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-        attachedRoutes: 0
-        conditions:
-          - type: Accepted
             status: "False"
-            reason: PortUnavailable
-            message: "port 80 is not bound for HTTPS by this deployment, bound ports: [443]"
-            observedGeneration: 1
-          - type: Programmed
-            status: "False"
-            reason: Invalid
-            message: Listener is not valid
-            observedGeneration: 1
-          - type: ResolvedRefs
-            status: "True"
-            reason: ResolvedRefs
-            message: All references resolved
-            observedGeneration: 1
-          - type: Conflicted
-            status: "True"
-            reason: ProtocolConflict
-            message: listeners http and https-on-80 share port 80 with different protocols
+            reason: NoConflicts
+            message: No conflicts
             observedGeneration: 1

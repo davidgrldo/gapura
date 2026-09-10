@@ -195,6 +195,30 @@ fn unsupported_port() {
 }
 
 #[test]
+fn listener_port_protocol_mismatch() {
+    let t = run("listener-port-protocol-mismatch");
+    let (_, listeners, _) = gateway_patch(&t);
+    assert_eq!(
+        cond(
+            &listener(listeners, "http-on-tls-port").conditions,
+            "Accepted"
+        ),
+        (ConditionStatus::False, "PortUnavailable"),
+        "HTTP on the HTTPS port is not bound for HTTP"
+    );
+    assert_eq!(
+        cond(&listener(listeners, "http").conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        t.config.listeners.len(),
+        1,
+        "only the valid listener is programmed"
+    );
+    insta::assert_yaml_snapshot!("listener-port-protocol-mismatch", t);
+}
+
+#[test]
 fn https_tls_secret() {
     let t = run("https-tls-secret");
     let (_, listeners, _) = gateway_patch(&t);
@@ -523,12 +547,18 @@ fn foreign_parent_ignored() {
 fn listener_protocol_conflict() {
     let t = run("listener-protocol-conflict");
     let (gw_conds, listeners, _) = gateway_patch(&t);
+    // Port 80 is bound for HTTP only, so the HTTPS listener is also PortUnavailable;
+    // the protocol conflict is still reported on both listeners.
+    assert_eq!(
+        cond(&listener(listeners, "http").conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&listener(listeners, "https-on-80").conditions, "Accepted"),
+        (ConditionStatus::False, "PortUnavailable")
+    );
     for name in ["http", "https-on-80"] {
         let l = listener(listeners, name);
-        assert_eq!(
-            cond(&l.conditions, "Accepted"),
-            (ConditionStatus::True, "Accepted")
-        );
         assert_eq!(
             cond(&l.conditions, "Conflicted"),
             (ConditionStatus::True, "ProtocolConflict")
