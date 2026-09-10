@@ -33,7 +33,6 @@ pub struct Metrics {
     /// labels: result (`success`, `failure`)
     pub status_writes_total: IntCounterVec,
     /// 1 while this replica holds the leader Lease.
-    #[expect(dead_code, reason = "set by the leader loop (Task 9)")]
     pub leader: IntGauge,
 }
 

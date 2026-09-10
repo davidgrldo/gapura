@@ -2,5 +2,6 @@
 //! hand status to the leader's writer. Runs as a Pingora background service (Task 10).
 
 pub mod kinds;
+pub mod leader;
 pub mod reconcile;
 pub mod status;
