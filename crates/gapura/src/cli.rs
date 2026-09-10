@@ -105,8 +105,8 @@ impl Args {
     pub fn identity(&self) -> String {
         self.identity
             .clone()
-            .or_else(|| std::env::var("HOSTNAME").ok())
             .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
             .unwrap_or_else(|| format!("gapura-{}", std::process::id()))
     }
 
