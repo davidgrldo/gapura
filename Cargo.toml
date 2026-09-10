@@ -6,7 +6,7 @@ members = ["crates/gapura-core", "crates/gapura"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -20,13 +20,16 @@ pingora = { version = "0.8", features = ["proxy", "openssl"] }
 async-trait = "0.1"
 arc-swap = "1"
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 http = "1"
 prometheus = "0.13"
 rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 anyhow = "1"
+kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls", "ring"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
+futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

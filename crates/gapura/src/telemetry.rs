@@ -27,6 +27,15 @@ pub struct Metrics {
     /// labels: port
     pub tls_sni_misses_total: IntCounterVec,
     pub handler_panics_total: IntCounter,
+    /// labels: kind
+    #[expect(dead_code, reason = "incremented by the Kubernetes source (Task 10)")]
+    pub watch_disconnects_total: IntCounterVec,
+    /// labels: result (`success`, `failure`)
+    #[expect(dead_code, reason = "incremented by the status writer (Task 8)")]
+    pub status_writes_total: IntCounterVec,
+    /// 1 while this replica holds the leader Lease.
+    #[expect(dead_code, reason = "set by the leader loop (Task 9)")]
+    pub leader: IntGauge,
 }
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
@@ -75,6 +84,23 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
     handler_panics_total: register_int_counter!(
         "gapura_handler_panics_total",
         "Panics caught in request handling"
+    )
+    .expect("metric registered once"),
+    watch_disconnects_total: register_int_counter_vec!(
+        "gapura_watch_disconnects_total",
+        "Watch streams that failed and were restarted",
+        &["kind"]
+    )
+    .expect("metric registered once"),
+    status_writes_total: register_int_counter_vec!(
+        "gapura_status_writes_total",
+        "Status patches by result",
+        &["result"]
+    )
+    .expect("metric registered once"),
+    leader: register_int_gauge!(
+        "gapura_leader",
+        "1 while this replica holds the leader Lease"
     )
     .expect("metric registered once"),
 });

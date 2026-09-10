@@ -9,7 +9,7 @@ mod telemetry;
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use pingora::apps::http_app::HttpServer;
 use pingora::listeners::tls::TlsSettings;
 use pingora::proxy::http_proxy_service;
@@ -19,18 +19,24 @@ use pingora::services::listening::Service;
 
 fn main() {
     let args = cli::Args::parse();
+    if let Err(msg) = args.validate() {
+        // Same exit code and formatting as clap's own usage errors.
+        cli::Args::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, msg)
+            .exit();
+    }
     telemetry::init_logging(&args.log_level);
     telemetry::install_panic_hook();
 
     let store = Arc::new(store::Store::empty());
     let settings = args.settings();
-    match source::file::apply(&args.config_dir, &settings, &store) {
-        Ok(summary) => {
-            tracing::info!(?summary, dir = %args.config_dir.display(), "config loaded")
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "cannot load config directory");
-            std::process::exit(1);
+    if let Some(dir) = &args.config_dir {
+        match source::file::apply(dir, &settings, &store) {
+            Ok(summary) => tracing::info!(?summary, dir = %dir.display(), "config loaded"),
+            Err(e) => {
+                tracing::error!(error = %e, "cannot load config directory");
+                std::process::exit(1);
+            }
         }
     }
 
