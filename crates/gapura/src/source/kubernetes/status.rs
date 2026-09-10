@@ -235,7 +235,7 @@ impl Writer {
                     // Every 10 minutes forget what was written: an object deleted and recreated
                     // with an identical translation would otherwise never get its status back.
                     ticks += 1;
-                    if ticks % 20 == 0 {
+                    if ticks.is_multiple_of(20) {
                         self.written.clear();
                     }
                 }
