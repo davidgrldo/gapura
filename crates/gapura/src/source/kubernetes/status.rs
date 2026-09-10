@@ -225,12 +225,20 @@ impl Writer {
         mut shutdown: ShutdownWatch,
     ) {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
+        let mut ticks: u32 = 0;
         loop {
             tokio::select! {
                 changed = latest.changed() => {
                     if changed.is_err() { return; }
                 }
-                _ = tick.tick() => {}
+                _ = tick.tick() => {
+                    // Every 10 minutes forget what was written: an object deleted and recreated
+                    // with an identical translation would otherwise never get its status back.
+                    ticks += 1;
+                    if ticks % 20 == 0 {
+                        self.written.clear();
+                    }
+                }
                 _ = shutdown.changed() => return,
             }
             let patches = latest.borrow_and_update().clone();
@@ -244,7 +252,14 @@ impl Writer {
             self.written.clear();
             return;
         }
+        // Objects that left the translation are forgotten, so a recreated one is written again.
+        self.written
+            .retain(|t, _| patches.iter().any(|p| target_of(p) == *t));
         for p in patches {
+            if !self.is_leader.load(Ordering::Acquire) {
+                self.written.clear();
+                return;
+            }
             self.write(p).await;
         }
     }
@@ -256,6 +271,11 @@ impl Writer {
             return;
         }
         let Some(ar) = self.resources.get(target.kind) else {
+            tracing::debug!(?target, "kind not served by the API server, status skipped");
+            METRICS
+                .status_writes_total
+                .with_label_values(&["skipped"])
+                .inc();
             return;
         };
         let api: Api<DynamicObject> = match &target.namespace {
