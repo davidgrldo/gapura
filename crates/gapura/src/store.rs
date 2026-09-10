@@ -160,6 +160,7 @@ mod tests {
                     address: "10.0.0.1".into(),
                     port: 8080,
                 }],
+                tls: None,
             },
         );
         let rt = Runtime::new(

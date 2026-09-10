@@ -31,13 +31,13 @@ config:
             redirect: ~
             rewrite: ~
           backends:
-            - cluster: "platform/shared:80"
+            - cluster: "apps/echo:443"
               weight: 1
           timeouts:
             request_ms: ~
             backend_request_ms: ~
       table:
-        - hostname: ~
+        - hostname: echo.example.com
           matcher:
             path:
               Prefix: /
@@ -46,11 +46,14 @@ config:
             method: ~
           rule: 0
   clusters:
-    "platform/shared:80":
+    "apps/echo:443":
       endpoints:
-        - address: 10.2.0.9
-          port: 8080
-      tls: ~
+        - address: 10.1.0.5
+          port: 8443
+      tls:
+        sni: echo.apps.svc
+        ca_pem: "-----BEGIN CERTIFICATE-----\nMIIBfakefixturecertificatenotparsedbythecore\n-----END CERTIFICATE-----\n"
+        insecure: false
 status:
   - kind: GatewayClass
     name: gapura
@@ -120,9 +123,9 @@ status:
             status: "True"
             reason: Accepted
             message: Route is accepted
-            observedGeneration: 2
+            observedGeneration: 1
           - type: ResolvedRefs
             status: "True"
             reason: ResolvedRefs
             message: All references resolved
-            observedGeneration: 2
+            observedGeneration: 1

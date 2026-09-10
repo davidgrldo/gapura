@@ -2,6 +2,7 @@
 //! Steps: accept GatewayClasses -> build listeners -> attach routes -> assemble Config + Gateway status.
 
 mod allowed;
+mod backend_tls;
 mod backends;
 mod gateway_class;
 mod grants;

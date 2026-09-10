@@ -132,10 +132,23 @@ pub struct Timeouts {
     pub backend_request_ms: Option<u64>,
 }
 
+/// TLS towards the backend. `None` on the cluster means plain HTTP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterTls {
+    /// SNI and, unless `insecure`, the name the server certificate must match.
+    pub sni: String,
+    /// PEM bundle of CA certificates to verify against; `None` = the process trust store.
+    pub ca_pem: Option<String>,
+    /// Skip certificate and hostname verification: per-Service opt-in via the
+    /// `gapura.dev/backend-tls: insecure` annotation.
+    pub insecure: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cluster {
     /// Sorted, unique. Empty is valid config and yields 503 at runtime.
     pub endpoints: Vec<Endpoint>,
+    pub tls: Option<ClusterTls>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -192,6 +205,7 @@ mod tests {
                         address: "10.1.0.5".into(),
                         port: 8080,
                     }],
+                    tls: None,
                 },
             )]),
         };

@@ -6,6 +6,7 @@ use crate::config::{Cluster, Endpoint};
 use crate::input::HttpBackendRef;
 use crate::snapshot::{ObjectRef, Snapshot};
 use crate::status::reasons;
+use crate::translate::backend_tls;
 use crate::translate::grants;
 use crate::translate::listeners::{Rejection, GATEWAY_GROUP};
 
@@ -64,10 +65,10 @@ pub(crate) fn resolve(
     ))?;
     let key = format!("{ns}/{}:{port}", b.name);
     if !clusters.contains_key(&key) {
-        clusters.insert(
-            key.clone(),
-            build_cluster(svc_port.name.as_deref(), &sref, snap),
-        );
+        let tls = backend_tls::resolve(&sref, svc, svc_port.name.as_deref(), snap)?;
+        let mut cluster = build_cluster(svc_port.name.as_deref(), &sref, snap);
+        cluster.tls = tls;
+        clusters.insert(key.clone(), cluster);
     }
     Ok(key)
 }
@@ -106,7 +107,10 @@ fn build_cluster(port_name: Option<&str>, svc: &ObjectRef, snap: &Snapshot) -> C
     }
     endpoints.sort();
     endpoints.dedup();
-    Cluster { endpoints }
+    Cluster {
+        endpoints,
+        tls: None,
+    }
 }
 
 #[cfg(test)]

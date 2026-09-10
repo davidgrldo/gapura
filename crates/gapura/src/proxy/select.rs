@@ -184,6 +184,7 @@ mod tests {
                     port: 8080,
                 },
             ],
+            tls: None,
         };
         let a: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let b: SocketAddr = "[fd00::2]:8080".parse().unwrap();

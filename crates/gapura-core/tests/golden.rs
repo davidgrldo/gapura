@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use gapura_core::config::PathMatch;
+use gapura_core::config::{ClusterTls, PathMatch};
 use gapura_core::status::RouteParentStatus;
 use gapura_core::status::{Condition, ConditionStatus, ListenerStatus, StatusPatch};
 use gapura_core::{translate, Settings, Snapshot, Translation};
@@ -663,4 +663,78 @@ fn port_based_parent_ref() {
         .unwrap();
     assert_eq!(https.rules.len(), 1);
     insta::assert_yaml_snapshot!("port-based-parent", t);
+}
+
+fn cluster_tls<'a>(t: &'a Translation, key: &str) -> &'a ClusterTls {
+    t.config.clusters[key]
+        .tls
+        .as_ref()
+        .unwrap_or_else(|| panic!("cluster {key} has no tls"))
+}
+
+#[test]
+fn backend_tls_configmap() {
+    let t = run("backend-tls-configmap");
+    let tls = cluster_tls(&t, "apps/echo:443");
+    assert_eq!(tls.sni, "echo.apps.svc");
+    assert!(tls.ca_pem.as_deref().unwrap().contains("BEGIN CERTIFICATE"));
+    assert!(!tls.insecure);
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    insta::assert_yaml_snapshot!("backend-tls-configmap", t);
+}
+
+#[test]
+fn backend_tls_system() {
+    let t = run("backend-tls-system");
+    let tls = cluster_tls(&t, "apps/echo:443");
+    assert_eq!(tls.sni, "echo.example.com");
+    assert_eq!(tls.ca_pem, None, "System means the process trust store");
+    assert!(!tls.insecure);
+    insta::assert_yaml_snapshot!("backend-tls-system", t);
+}
+
+#[test]
+fn backend_tls_insecure_annotation() {
+    let t = run("backend-tls-insecure");
+    let tls = cluster_tls(&t, "apps/echo:443");
+    assert_eq!(
+        tls,
+        &ClusterTls {
+            sni: "echo.apps.svc".into(),
+            ca_pem: None,
+            insecure: true
+        }
+    );
+    insta::assert_yaml_snapshot!("backend-tls-insecure", t);
+}
+
+#[test]
+fn backend_tls_missing_ca_invalidates_backend() {
+    let t = run("backend-tls-missing-ca");
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "BackendNotFound")
+    );
+    assert!(parents[0].conditions[1]
+        .message
+        .contains("ConfigMap apps/echo-ca not found"));
+    let rule = &t.config.listeners[0].rules[0];
+    assert_eq!(
+        rule.backends[0].cluster, None,
+        "invalid backend serves 500, never plaintext"
+    );
+    assert!(t.config.clusters.is_empty());
+    insta::assert_yaml_snapshot!("backend-tls-missing-ca", t);
+}
+
+#[test]
+fn backend_tls_section_name_wins_over_service_wide_policy() {
+    let t = run("backend-tls-section");
+    assert_eq!(cluster_tls(&t, "apps/echo:443").sni, "https.example.com");
+    insta::assert_yaml_snapshot!("backend-tls-section", t);
 }

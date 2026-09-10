@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: echo-ca, namespace: apps }
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIBfakefixturecertificatenotparsedbythecore
+    -----END CERTIFICATE-----
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: { name: echo-tls, namespace: apps, creationTimestamp: "2026-09-01T10:00:00Z" }
+spec:
+  targetRefs: [{ group: "", kind: Service, name: echo }]
+  validation:
+    caCertificateRefs: [{ group: "", kind: ConfigMap, name: echo-ca }]
+    hostname: echo.apps.svc

@@ -31,13 +31,13 @@ config:
             redirect: ~
             rewrite: ~
           backends:
-            - cluster: "platform/shared:80"
+            - cluster: ~
               weight: 1
           timeouts:
             request_ms: ~
             backend_request_ms: ~
       table:
-        - hostname: ~
+        - hostname: echo.example.com
           matcher:
             path:
               Prefix: /
@@ -45,12 +45,7 @@ config:
             query: []
             method: ~
           rule: 0
-  clusters:
-    "platform/shared:80":
-      endpoints:
-        - address: 10.2.0.9
-          port: 8080
-      tls: ~
+  clusters: {}
 status:
   - kind: GatewayClass
     name: gapura
@@ -120,9 +115,9 @@ status:
             status: "True"
             reason: Accepted
             message: Route is accepted
-            observedGeneration: 2
+            observedGeneration: 1
           - type: ResolvedRefs
-            status: "True"
-            reason: ResolvedRefs
-            message: All references resolved
-            observedGeneration: 2
+            status: "False"
+            reason: BackendNotFound
+            message: "BackendTLSPolicy apps/echo-tls: ConfigMap apps/echo-ca not found"
+            observedGeneration: 1

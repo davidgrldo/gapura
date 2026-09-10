@@ -156,6 +156,7 @@ config:
       endpoints:
         - address: 10.1.0.5
           port: 8080
+      tls: ~
 status:
   - kind: GatewayClass
     name: gapura
