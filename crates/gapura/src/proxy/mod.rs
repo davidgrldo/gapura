@@ -350,6 +350,14 @@ impl ProxyHttp for GapuraProxy {
                     // runs against the system store and fails loudly instead of silently trusting.
                     peer.options.ca = rt.upstream_ca(&key);
                 }
+                // Pooled connections are keyed by address, SNI and verify flags, not by CA bundle:
+                // one pool per cluster so a connection verified under one trust anchor is never
+                // reused by another cluster.
+                peer.group_key = {
+                    let mut h = std::hash::DefaultHasher::new();
+                    std::hash::Hash::hash(&key, &mut h);
+                    std::hash::Hasher::finish(&h)
+                };
                 peer
             }
         };
