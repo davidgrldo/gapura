@@ -369,6 +369,7 @@ data: { tls.crt: Zm9v, tls.key: YmFy }
         assert_eq!(snap.config_maps[&cref].metadata.annotations["a"], "b");
         assert!(snap.remove("BackendTLSPolicy", &pref));
         assert!(snap.remove("ConfigMap", &cref));
+        assert!(snap.remove("BackendTLSPolicy", &ObjectRef::new("apps", "sys-tls")));
         assert!(snap.backend_tls_policies.is_empty() && snap.config_maps.is_empty());
     }
 }
