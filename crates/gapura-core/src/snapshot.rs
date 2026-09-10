@@ -46,6 +46,8 @@ pub struct Snapshot {
     pub services: BTreeMap<ObjectRef, Service>,
     pub endpoint_slices: BTreeMap<ObjectRef, EndpointSlice>,
     pub secrets: BTreeMap<ObjectRef, Secret>,
+    pub backend_tls_policies: BTreeMap<ObjectRef, BackendTlsPolicy>,
+    pub config_maps: BTreeMap<ObjectRef, ConfigMap>,
 }
 
 /// Runtime settings that influence translation but are not Kubernetes resources.
@@ -144,6 +146,14 @@ impl Snapshot {
             "Secret" => put!(self.secrets, Secret, |o: &Secret| ObjectRef::of(
                 &o.metadata
             )),
+            "BackendTLSPolicy" => put!(
+                self.backend_tls_policies,
+                BackendTlsPolicy,
+                |o: &BackendTlsPolicy| { ObjectRef::of(&o.metadata) }
+            ),
+            "ConfigMap" => put!(self.config_maps, ConfigMap, |o: &ConfigMap| ObjectRef::of(
+                &o.metadata
+            )),
             other => return Err(SnapshotError::UnsupportedKind(other.to_string())),
         }
         Ok(())
@@ -160,6 +170,8 @@ impl Snapshot {
             "Service" => self.services.remove(r).is_some(),
             "EndpointSlice" => self.endpoint_slices.remove(r).is_some(),
             "Secret" => self.secrets.remove(r).is_some(),
+            "BackendTLSPolicy" => self.backend_tls_policies.remove(r).is_some(),
+            "ConfigMap" => self.config_maps.remove(r).is_some(),
             _ => false,
         }
     }
@@ -298,5 +310,47 @@ data: { tls.crt: Zm9v, tls.key: YmFy }
         assert!(!s.remove("Gateway", &ObjectRef::new("infra", "main")));
         assert!(s.remove("GatewayClass", &ObjectRef::new("", "gapura")));
         assert!(s.gateways.is_empty() && s.gateway_classes.is_empty());
+    }
+
+    #[test]
+    fn backend_tls_policy_and_configmap_round_trip() {
+        let mut snap = Snapshot::default();
+        snap.insert_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "BackendTLSPolicy",
+            "metadata": { "name": "echo-tls", "namespace": "apps", "creationTimestamp": "2026-09-01T00:00:00Z" },
+            "spec": {
+                "targetRefs": [{ "group": "", "kind": "Service", "name": "echo", "sectionName": "https" }],
+                "validation": {
+                    "caCertificateRefs": [{ "group": "", "kind": "ConfigMap", "name": "echo-ca" }],
+                    "hostname": "echo.apps.svc"
+                }
+            }
+        }))
+        .unwrap();
+        snap.insert_json(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": "echo-ca", "namespace": "apps", "annotations": { "a": "b" } },
+            "data": { "ca.crt": "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n" }
+        }))
+        .unwrap();
+        let pref = ObjectRef::new("apps", "echo-tls");
+        let policy = &snap.backend_tls_policies[&pref];
+        assert_eq!(
+            policy.spec.target_refs[0].section_name.as_deref(),
+            Some("https")
+        );
+        assert_eq!(policy.spec.validation.hostname, "echo.apps.svc");
+        assert_eq!(
+            policy.spec.validation.ca_certificate_refs[0].kind,
+            "ConfigMap"
+        );
+        let cref = ObjectRef::new("apps", "echo-ca");
+        assert!(snap.config_maps[&cref].data["ca.crt"].starts_with("-----BEGIN CERTIFICATE-----"));
+        assert_eq!(snap.config_maps[&cref].metadata.annotations["a"], "b");
+        assert!(snap.remove("BackendTLSPolicy", &pref));
+        assert!(snap.remove("ConfigMap", &cref));
+        assert!(snap.backend_tls_policies.is_empty() && snap.config_maps.is_empty());
     }
 }

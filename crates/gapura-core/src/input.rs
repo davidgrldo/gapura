@@ -14,6 +14,7 @@ pub struct ObjectMeta {
     /// RFC 3339 string as emitted by the API server, e.g. `2026-09-01T10:00:00Z`.
     pub creation_timestamp: Option<String>,
     pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
 }
 
 // ---------- gateway.networking.k8s.io/v1 ----------
@@ -365,5 +366,56 @@ pub struct Secret {
     #[serde(rename = "type")]
     pub type_: Option<String>,
     /// Values are base64 as stored by the API server.
+    pub data: BTreeMap<String, String>,
+}
+
+/// gateway.networking.k8s.io/v1 BackendTLSPolicy (v1alpha3 has the same fields).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackendTlsPolicy {
+    pub metadata: ObjectMeta,
+    pub spec: BackendTlsPolicySpec,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackendTlsPolicySpec {
+    pub target_refs: Vec<PolicyTargetRef>,
+    pub validation: BackendTlsValidation,
+}
+
+/// LocalPolicyTargetReferenceWithSectionName: same namespace as the policy; `sectionName` is a Service port name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PolicyTargetRef {
+    pub group: Option<String>,
+    pub kind: String,
+    pub name: String,
+    pub section_name: Option<String>,
+}
+
+/// `subjectAltNames` is deliberately not modeled in v0.1; the SNI hostname is what gets verified.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackendTlsValidation {
+    pub ca_certificate_refs: Vec<LocalObjectReference>,
+    /// `System` is the only supported value.
+    pub well_known_ca_certificates: Option<String>,
+    pub hostname: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LocalObjectReference {
+    pub group: Option<String>,
+    pub kind: String,
+    pub name: String,
+}
+
+/// core/v1 ConfigMap; the reconciler only forwards the `ca.crt` key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConfigMap {
+    pub metadata: ObjectMeta,
     pub data: BTreeMap<String, String>,
 }
