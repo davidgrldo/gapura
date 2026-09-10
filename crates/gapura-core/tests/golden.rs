@@ -738,3 +738,29 @@ fn backend_tls_section_name_wins_over_service_wide_policy() {
     assert_eq!(cluster_tls(&t, "apps/echo:443").sni, "https.example.com");
     insta::assert_yaml_snapshot!("backend-tls-section", t);
 }
+
+#[test]
+fn backend_tls_unknown_annotation_fails_closed() {
+    let t = run("backend-tls-bad-annotation");
+    let parents = route_parents(&t, "apps", "echo");
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "UnsupportedValue")
+    );
+    assert!(
+        t.config.clusters.is_empty(),
+        "a typo in the annotation must never mean plaintext"
+    );
+    insta::assert_yaml_snapshot!("backend-tls-bad-annotation", t);
+}
+
+#[test]
+fn backend_tls_oldest_service_wide_policy_wins() {
+    let t = run("backend-tls-oldest-wins");
+    assert_eq!(
+        cluster_tls(&t, "apps/echo:443").sni,
+        "all.example.com",
+        "older policy beats the lexically smaller newer name"
+    );
+    insta::assert_yaml_snapshot!("backend-tls-oldest-wins", t);
+}

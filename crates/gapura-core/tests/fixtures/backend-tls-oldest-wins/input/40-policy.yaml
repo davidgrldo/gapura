@@ -1,0 +1,13 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: { name: all-ports, namespace: apps, creationTimestamp: "2026-01-01T00:00:00Z" }
+spec:
+  targetRefs: [{ group: "", kind: Service, name: echo }]
+  validation: { wellKnownCACertificates: System, hostname: all.example.com }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: { name: a-newer-one, namespace: apps, creationTimestamp: "2026-06-01T00:00:00Z" }
+spec:
+  targetRefs: [{ group: "", kind: Service, name: echo }]
+  validation: { wellKnownCACertificates: System, hostname: newer.example.com }
