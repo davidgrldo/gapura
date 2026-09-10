@@ -129,10 +129,13 @@ impl KubeSource {
         drop(tx);
 
         // 3. Leader election and the status writer.
+        // Leader and writer end only at shutdown; watchers never end on their own, so a finished
+        // watcher task is a failure that restarts the source.
+        let mut aux = tokio::task::JoinSet::new();
         let is_leader = Arc::new(AtomicBool::new(false));
         let (status_tx, status_rx) = watch::channel::<Vec<StatusPatch>>(Vec::new());
         if !self.read_only {
-            tasks.spawn(leader::run(
+            aux.spawn(leader::run(
                 client.clone(),
                 self.leader.clone(),
                 is_leader.clone(),
@@ -149,7 +152,7 @@ impl KubeSource {
                 self.settings.controller_name.clone(),
                 is_leader,
             );
-            tasks.spawn(writer.run(status_rx, shutdown.clone()));
+            aux.spawn(writer.run(status_rx, shutdown.clone()));
         }
 
         // 4. Reconcile: debounce, translate, swap, publish status.
@@ -157,6 +160,7 @@ impl KubeSource {
         loop {
             let first = tokio::select! {
                 c = rx.recv() => c,
+                Some(ended) = tasks.join_next() => anyhow::bail!("a watcher task ended: {ended:?}"),
                 _ = shutdown.changed() => return Ok(()),
             };
             let Some(first) = first else {

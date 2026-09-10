@@ -79,7 +79,12 @@ pub async fn run(
         }
         // A hung API call must not pin leadership: bound each step by the lease duration
         // (client-go's RenewDeadline) and give up leadership when it elapses.
-        let deadline = Duration::from_secs(u64::try_from(opts.lease_secs).unwrap_or(15));
+        // client-go's RenewDeadline: strictly below the lease duration, so leadership is dropped
+        // before another replica can acquire the expired Lease.
+        let lease = Duration::from_secs(u64::try_from(opts.lease_secs).unwrap_or(15));
+        let deadline = lease
+            .saturating_sub(opts.renew_every)
+            .max(Duration::from_secs(1));
         let outcome = tokio::select! {
             r = tokio::time::timeout(deadline, step(&api, &opts)) => r,
             _ = shutdown.changed() => return,

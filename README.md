@@ -34,7 +34,7 @@ cargo run -p gapura -- --kubernetes --listen-http 127.0.0.1:8080 --listen-https 
 
 The controller watches GatewayClass, Gateway, HTTPRoute, ReferenceGrant, BackendTLSPolicy,
 Namespace, Service, EndpointSlice, TLS Secrets, and ConfigMaps (`ca.crt` only), writes status as
-the holder of the `gapura-leader` Lease, and publishes `--publish-address` values or the
+the holder of the `gapura-leader` Lease, and publishes `--publish-address` values and the
 LoadBalancer addresses of `--publish-service namespace/name` into Gateway status.
 `hack/kind-e2e.sh` runs the control-plane e2e against a local kind cluster.
 

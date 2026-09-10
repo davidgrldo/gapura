@@ -218,13 +218,13 @@ impl Writer {
     }
 
     /// `latest` carries the newest status list (a `watch` channel: intermediate versions are skipped).
-    /// A tick retries failures and catches leadership gained between translations.
+    /// A 5 s tick retries failures and catches leadership gained between translations.
     pub async fn run(
         mut self,
         mut latest: watch::Receiver<Vec<StatusPatch>>,
         mut shutdown: ShutdownWatch,
     ) {
-        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
         let mut ticks: u32 = 0;
         loop {
             tokio::select! {
@@ -235,7 +235,7 @@ impl Writer {
                     // Every 10 minutes forget what was written: an object deleted and recreated
                     // with an identical translation would otherwise never get its status back.
                     ticks += 1;
-                    if ticks.is_multiple_of(20) {
+                    if ticks.is_multiple_of(120) {
                         self.written.clear();
                     }
                 }
@@ -253,8 +253,8 @@ impl Writer {
             return;
         }
         // Objects that left the translation are forgotten, so a recreated one is written again.
-        self.written
-            .retain(|t, _| patches.iter().any(|p| target_of(p) == *t));
+        let current: std::collections::HashSet<Target> = patches.iter().map(target_of).collect();
+        self.written.retain(|t, _| current.contains(t));
         for p in patches {
             if !self.is_leader.load(Ordering::Acquire) {
                 self.written.clear();
