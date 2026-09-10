@@ -40,3 +40,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Dependencies without debuginfo: their rlibs shrink to a fraction and builds get faster.
+# Workspace crates keep full debuginfo for backtraces.
+[profile.dev.package."*"]
+debug = false
