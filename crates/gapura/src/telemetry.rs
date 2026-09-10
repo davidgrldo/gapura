@@ -31,7 +31,6 @@ pub struct Metrics {
     #[expect(dead_code, reason = "incremented by the Kubernetes source (Task 10)")]
     pub watch_disconnects_total: IntCounterVec,
     /// labels: result (`success`, `failure`)
-    #[expect(dead_code, reason = "incremented by the status writer (Task 8)")]
     pub status_writes_total: IntCounterVec,
     /// 1 while this replica holds the leader Lease.
     #[expect(dead_code, reason = "set by the leader loop (Task 9)")]

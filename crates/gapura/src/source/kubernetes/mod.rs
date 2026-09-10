@@ -3,3 +3,4 @@
 
 pub mod kinds;
 pub mod reconcile;
+pub mod status;
