@@ -28,7 +28,6 @@ pub struct Metrics {
     pub tls_sni_misses_total: IntCounterVec,
     pub handler_panics_total: IntCounter,
     /// labels: kind
-    #[expect(dead_code, reason = "incremented by the Kubernetes source (Task 10)")]
     pub watch_disconnects_total: IntCounterVec,
     /// labels: result (`success`, `failure`)
     pub status_writes_total: IntCounterVec,

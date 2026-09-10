@@ -15,6 +15,7 @@ use pingora::listeners::tls::TlsSettings;
 use pingora::proxy::http_proxy_service;
 use pingora::server::configuration::ServerConf;
 use pingora::server::Server;
+use pingora::services::background::background_service;
 use pingora::services::listening::Service;
 
 fn main() {
@@ -50,6 +51,35 @@ fn main() {
     };
     let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
+
+    if args.kubernetes {
+        let publish_service = match args.publish_service_ref() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "invalid --publish-service");
+                std::process::exit(2);
+            }
+        };
+        let source = source::kubernetes::KubeSource {
+            settings: settings.clone(),
+            store: store.clone(),
+            publish_service,
+            leader: source::kubernetes::leader::LeaderOpts {
+                namespace: args.lease_namespace.clone(),
+                name: args.lease_name.clone(),
+                identity: args.identity(),
+                ..Default::default()
+            },
+            read_only: args.no_status,
+        };
+        server.add_service(background_service("kubernetes", source));
+        tracing::info!(
+            lease = %format!("{}/{}", args.lease_namespace, args.lease_name),
+            identity = %args.identity(),
+            read_only = args.no_status,
+            "kubernetes source enabled"
+        );
+    }
 
     let mut proxy = http_proxy_service(
         &server.configuration,

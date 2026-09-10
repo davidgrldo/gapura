@@ -95,13 +95,6 @@ impl Args {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the Kubernetes source once main wires it (Task 10)"
-        )
-    )]
     pub fn identity(&self) -> String {
         self.identity
             .clone()
@@ -111,13 +104,6 @@ impl Args {
     }
 
     /// `--publish-service namespace/name` parsed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the Kubernetes source once main wires it (Task 10)"
-        )
-    )]
     pub fn publish_service_ref(&self) -> anyhow::Result<Option<ObjectRef>> {
         match &self.publish_service {
             None => Ok(None),
