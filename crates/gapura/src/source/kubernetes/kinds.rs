@@ -87,10 +87,15 @@ impl Kind {
     /// Ask the API server which of our candidate versions serves this kind. `Ok(None)` when none does.
     pub async fn resolve(&self, client: &Client) -> kube::Result<Option<ApiResource>> {
         for version in self.versions {
-            match client
-                .list_api_group_resources(&self.api_version(version))
-                .await
-            {
+            // The core group lives at /api/<version>; named groups at /apis/<group>/<version>.
+            let listed = if self.group.is_empty() {
+                client.list_core_api_resources(version).await
+            } else {
+                client
+                    .list_api_group_resources(&self.api_version(version))
+                    .await
+            };
+            match listed {
                 Ok(list) if list.resources.iter().any(|r| r.name == self.plural) => {
                     let gvk = GroupVersionKind::gvk(self.group, version, self.name);
                     return Ok(Some(ApiResource::from_gvk_with_plural(&gvk, self.plural)));
@@ -118,6 +123,12 @@ pub fn project(kind: &Kind, obj: &DynamicObject) -> Option<Value> {
         meta.remove("managedFields");
         if let Some(annotations) = meta.get_mut("annotations").and_then(Value::as_object_mut) {
             annotations.remove(LAST_APPLIED_ANNOTATION);
+        }
+    }
+    // Only the publish Service's status is read (LoadBalancer addresses); the rest is dead weight.
+    if kind.name != "Service" {
+        if let Some(root) = doc.as_object_mut() {
+            root.remove("status");
         }
     }
     match kind.name {
@@ -175,6 +186,34 @@ mod tests {
         );
         assert_eq!(doc["spec"]["gatewayClassName"], "gapura");
         assert_eq!(object_ref(&o), ObjectRef::new("infra", "main"));
+    }
+
+    #[test]
+    fn status_is_kept_only_for_services() {
+        let gw = obj(
+            json!({ "metadata": { "name": "main", "namespace": "infra" }, "spec": {}, "status": { "conditions": [] } }),
+        );
+        assert!(project(kind_named("Gateway"), &gw)
+            .unwrap()
+            .get("status")
+            .is_none());
+        let svc = obj(
+            json!({ "metadata": { "name": "lb", "namespace": "infra" }, "spec": {}, "status": { "loadBalancer": { "ingress": [{ "ip": "203.0.113.7" }] } } }),
+        );
+        assert_eq!(
+            project(kind_named("Service"), &svc).unwrap()["status"]["loadBalancer"]["ingress"][0]
+                ["ip"],
+            "203.0.113.7"
+        );
+    }
+
+    #[test]
+    fn secret_without_data_projects_to_empty_data() {
+        let s = obj(
+            json!({ "metadata": { "name": "tls", "namespace": "apps" }, "type": "kubernetes.io/tls" }),
+        );
+        let doc = project(kind_named("Secret"), &s).unwrap();
+        assert_eq!(doc["data"], json!({}), "unlike ConfigMap, an empty Secret stays so the translator reports InvalidCertificateRef");
     }
 
     #[test]
