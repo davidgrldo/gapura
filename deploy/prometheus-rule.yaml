@@ -20,13 +20,16 @@ spec:
       annotations:
         summary: No Gapura replica holds the Lease
         description: Gateway API status stops being written, while traffic keeps flowing.
-    - alert: GapuraConfigStale
-      expr: time() - max(gapura_config_last_reload_timestamp_seconds) > 900
-      for: 10m
-      labels: { severity: warning }
-      annotations:
-        summary: Gapura has not loaded a config for 15 minutes
-        description: Either nothing changed, or reloads are failing; check gapura_config_reloads_total.
+    # There is deliberately no staleness alert on gapura_config_last_reload_timestamp_seconds.
+    # That gauge is set only when the config actually changes: the reconcile loop skips when
+    # nothing is dirty, and a relist returning identical objects is not dirty. So it records the
+    # last *change*, not the last successful check, and "no reload in N minutes" cannot be told
+    # apart from "nothing changed" -- which is the steady state of a healthy gateway, so such an
+    # alert latches on every quiet cluster. gapura_config_reloads_total has the same property (it
+    # only counts reconciles that ran), so no expression over the metrics Gapura exports today
+    # fixes this; a correct staleness alert would need a new heartbeat series, bumped on every
+    # completed check even when the result is unchanged. GapuraConfigReloadFailing below covers
+    # the real failure mode: reloads being attempted and failing.
     - alert: GapuraConfigReloadFailing
       expr: increase(gapura_config_reloads_total{result="failure"}[15m]) > 0
       for: 5m
@@ -41,7 +44,15 @@ spec:
       for: 10m
       labels: { severity: critical }
       annotations:
-        summary: More than 5 percent of Gapura requests fail upstream
+        summary: Upstream error attempts exceed 5 per 100 Gapura requests
+        description: >-
+          Ratio of upstream error attempts (gapura_upstream_errors_total, counted once per failed
+          connect or read attempt) to every request that reached logging (gapura_requests_total,
+          which also counts route-miss 404s, locally generated 5xx and client aborts logged as
+          status 0). It is not a request failure rate and is not bounded by 1: a request that
+          fails over to another endpoint and then returns 200 still contributes an error, and one
+          request can contribute several. Read it as a signal of upstream trouble, then check the
+          user-visible impact with gapura_requests_total by code.
     - alert: GapuraTlsSniMisses
       expr: sum(rate(gapura_tls_sni_misses_total[15m])) > 0
       for: 15m

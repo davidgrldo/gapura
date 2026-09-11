@@ -4,6 +4,9 @@
 {{- fail "metrics.prometheusRule.enabled is true but charts/gapura/prometheus-rule.yaml is missing" }}
 {{- end }}
 {{- $parsed := $rule | fromYaml }}
+{{- if not (kindIs "map" $parsed.spec) }}
+{{- fail (printf "charts/gapura/prometheus-rule.yaml has no spec map (parsed .spec is %s): the file is either not valid YAML or is missing its top-level spec key" (kindOf $parsed.spec)) }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

@@ -502,14 +502,6 @@ spec:
       for: 5m
       labels:
         severity: warning
-    - alert: GapuraConfigStale
-      annotations:
-        description: Either nothing changed, or reloads are failing; check gapura_config_reloads_total.
-        summary: Gapura has not loaded a config for 15 minutes
-      expr: time() - max(gapura_config_last_reload_timestamp_seconds) > 900
-      for: 10m
-      labels:
-        severity: warning
     - alert: GapuraConfigReloadFailing
       annotations:
         description: The previous config is still being served; the logs carry the translator
@@ -521,7 +513,15 @@ spec:
         severity: warning
     - alert: GapuraUpstreamErrors
       annotations:
-        summary: More than 5 percent of Gapura requests fail upstream
+        description: 'Ratio of upstream error attempts (gapura_upstream_errors_total,
+          counted once per failed connect or read attempt) to every request that reached
+          logging (gapura_requests_total, which also counts route-miss 404s, locally
+          generated 5xx and client aborts logged as status 0). It is not a request failure
+          rate and is not bounded by 1: a request that fails over to another endpoint
+          and then returns 200 still contributes an error, and one request can contribute
+          several. Read it as a signal of upstream trouble, then check the user-visible
+          impact with gapura_requests_total by code.'
+        summary: Upstream error attempts exceed 5 per 100 Gapura requests
       expr: |
         sum(rate(gapura_upstream_errors_total[5m]))
           / clamp_min(sum(rate(gapura_requests_total[5m])), 0.001) > 0.05
