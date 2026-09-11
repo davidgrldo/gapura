@@ -2,7 +2,7 @@
 
 | API channel | Implementation version | Mode | Report |
 |---|---|---|---|
-| standard | v0.1.0 | default | [standard-v0.1.0-default-report.yaml](reports/v1.6/gapura-gapura/standard-v0.1.0-default-report.yaml) |
+| standard | v0.1.0 | default | [standard-v0.1.0-default-report.yaml](reports/v1.6/davidgrldo-gapura/standard-v0.1.0-default-report.yaml) |
 
 Profile GATEWAY-HTTP against Gateway API v1.6.2. Core features claimed, and advertised in
 `GatewayClass.status.supportedFeatures`: `Gateway`, `HTTPRoute`, `ReferenceGrant`.

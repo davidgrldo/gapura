@@ -1,13 +1,13 @@
 apiVersion: gateway.networking.k8s.io/v1
-date: "2026-09-11T16:22:48+07:00"
+date: "2026-09-11T18:57:36+07:00"
 gatewayAPIChannel: standard
 gatewayAPIVersion: v1.6.2
 implementation:
   contact:
-  - https://github.com/gapura-dev/gapura/issues
-  organization: gapura
+  - https://github.com/davidgrldo/gapura/issues
+  organization: davidgrldo
   project: gapura
-  url: https://github.com/gapura-dev/gapura
+  url: https://github.com/davidgrldo/gapura
   version: v0.1.0
 kind: ConformanceReport
 mode: default
