@@ -73,12 +73,18 @@ pub mod reasons {
     pub const INVALID_KIND: &str = "InvalidKind";
 }
 
+/// Feature names Gapura claims in `GatewayClass.status.supportedFeatures`. These are the core
+/// features of the Gateway API GATEWAY-HTTP conformance profile. The CRD requires ascending order.
+pub const SUPPORTED_FEATURES: [&str; 3] = ["Gateway", "HTTPRoute", "ReferenceGrant"];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum StatusPatch {
     GatewayClass {
         name: String,
         conditions: Vec<Condition>,
+        /// Feature names, ascending; the writer turns them into `[{name: ...}]`.
+        supported_features: Vec<String>,
     },
     Gateway {
         namespace: String,
@@ -145,6 +151,7 @@ mod tests {
         let g = StatusPatch::GatewayClass {
             name: "gapura".into(),
             conditions: vec![],
+            supported_features: vec![],
         };
         assert_eq!(serde_json::to_value(&g).unwrap()["kind"], "GatewayClass");
     }

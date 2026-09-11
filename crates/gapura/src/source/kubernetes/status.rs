@@ -62,8 +62,18 @@ pub fn now_rfc3339() -> String {
 /// `now` is RFC 3339.
 pub fn body(p: &StatusPatch, live: &Value, controller_name: &str, now: &str) -> Value {
     match p {
-        StatusPatch::GatewayClass { conditions, .. } => {
-            json!({ "status": { "conditions": stamp(conditions, live.get("conditions"), now) } })
+        StatusPatch::GatewayClass {
+            conditions,
+            supported_features,
+            ..
+        } => {
+            json!({ "status": {
+                "conditions": stamp(conditions, live.get("conditions"), now),
+                "supportedFeatures": supported_features
+                    .iter()
+                    .map(|f| json!({ "name": f }))
+                    .collect::<Vec<_>>(),
+            } })
         }
         StatusPatch::Gateway {
             addresses,
@@ -335,6 +345,7 @@ mod tests {
                 cond("Accepted", ConditionStatus::True),
                 cond("Programmed", ConditionStatus::True),
             ],
+            supported_features: vec![],
         };
         let b = body(&p, &live, "gapura.dev/controller", "2026-09-10T00:00:00Z");
         let conds = b["status"]["conditions"].as_array().unwrap();
@@ -355,6 +366,22 @@ mod tests {
                 name: "g".into()
             }
         );
+    }
+
+    #[test]
+    fn gateway_class_body_carries_supported_features_as_objects() {
+        let p = StatusPatch::GatewayClass {
+            name: "gapura".into(),
+            conditions: vec![cond("Accepted", ConditionStatus::True)],
+            supported_features: vec!["Gateway".into(), "HTTPRoute".into()],
+        };
+        let b = body(&p, &Value::Null, "gapura.dev/controller", "now");
+        assert_eq!(
+            b["status"]["supportedFeatures"],
+            json!([{ "name": "Gateway" }, { "name": "HTTPRoute" }]),
+            "the CRD models supportedFeatures as a list of objects keyed by name"
+        );
+        assert_eq!(b["status"]["conditions"][0]["type"], "Accepted");
     }
 
     #[test]
@@ -427,10 +454,12 @@ mod tests {
         let a = StatusPatch::GatewayClass {
             name: "g".into(),
             conditions: vec![cond("Accepted", ConditionStatus::True)],
+            supported_features: vec![],
         };
         let b = StatusPatch::GatewayClass {
             name: "g".into(),
             conditions: vec![cond("Accepted", ConditionStatus::False)],
+            supported_features: vec![],
         };
         assert_ne!(hash_of(&a), hash_of(&b));
         assert_eq!(hash_of(&a), hash_of(&a.clone()));

@@ -14,3 +14,7 @@ status:
         reason: Accepted
         message: Handled by Gapura
         observedGeneration: 1
+    supportedFeatures:
+      - Gateway
+      - HTTPRoute
+      - ReferenceGrant

@@ -98,7 +98,9 @@ fn gatewayclass_accepted() {
     let t = run("gatewayclass-accepted");
     assert_eq!(t.status.len(), 1);
     match &t.status[0] {
-        StatusPatch::GatewayClass { name, conditions } => {
+        StatusPatch::GatewayClass {
+            name, conditions, ..
+        } => {
             assert_eq!(name, "gapura");
             assert_eq!(
                 cond(conditions, "Accepted"),
@@ -116,7 +118,9 @@ fn gatewayclass_mixed() {
     let t = run("gatewayclass-mixed");
     assert_eq!(t.status.len(), 1, "only our class gets status");
     match &t.status[0] {
-        StatusPatch::GatewayClass { name, conditions } => {
+        StatusPatch::GatewayClass {
+            name, conditions, ..
+        } => {
             assert_eq!(name, "gapura");
             assert_eq!(
                 cond(conditions, "Accepted"),
@@ -127,6 +131,26 @@ fn gatewayclass_mixed() {
         other => panic!("unexpected patch {other:?}"),
     }
     insta::assert_yaml_snapshot!("gatewayclass-mixed", t);
+}
+
+#[test]
+fn gateway_class_advertises_supported_features() {
+    let t = run("basic-http");
+    let StatusPatch::GatewayClass {
+        supported_features, ..
+    } = &t.status[0]
+    else {
+        panic!("first patch is the GatewayClass: {:?}", t.status[0])
+    };
+    assert_eq!(
+        supported_features,
+        &vec![
+            "Gateway".to_string(),
+            "HTTPRoute".to_string(),
+            "ReferenceGrant".to_string()
+        ],
+        "the GATEWAY-HTTP core feature set, sorted as the CRD requires"
+    );
 }
 
 #[test]

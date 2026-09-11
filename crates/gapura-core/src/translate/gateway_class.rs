@@ -26,6 +26,10 @@ pub(crate) fn accept(
                 "Handled by Gapura",
                 gc.metadata.generation,
             )],
+            supported_features: crate::status::SUPPORTED_FEATURES
+                .iter()
+                .map(|f| f.to_string())
+                .collect(),
         });
     }
     ours
