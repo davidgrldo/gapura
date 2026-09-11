@@ -14,6 +14,24 @@ Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kub
 - Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
 - The mark, its variants, and how to use them: [assets/logo/](assets/logo/)
 
+## What it does
+
+Gateway API core, served out of one binary with no database and no separate control plane:
+
+- **Routing** on hostname, path (`Exact` and `PathPrefix`), header, query parameter and method.
+- **Filters**: request and response header modification, `RequestRedirect`, and `URLRewrite`.
+- **TLS**: termination with the certificate chosen per SNI, and TLS to backends via
+  `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.
+- **Traffic**: per-rule request and backend timeouts, and one retry against a second endpoint when a
+  connection fails.
+- **Operations**: Prometheus metrics, a JSON access log carrying trace context, a Grafana dashboard
+  and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
+  config swap so in-flight requests finish on the config they started with.
+
+Deliberately not here yet: regular-expression path matching, `RequestMirror`, 307 and 308 redirects,
+and an address per Gateway. That last one is why a single conformance test fails, and
+[conformance/](conformance/) explains it.
+
 ## The name
 
 A *gapura* is the gate of a Javanese or Balinese temple. The one the mark is
@@ -34,23 +52,32 @@ in a rust that is both the language and the colour of temple brick.
 You need a cluster (Kubernetes 1.29 or newer), `kubectl`, and Helm 3.8 or newer. Steps 1 to 4 are
 meant to be pasted in order and end with a request that goes through the gateway to a backend.
 
-<!-- REMOVE WHEN PUBLIC: delete this blockquote once v0.1.0 is tagged and both ghcr.io/davidgrldo packages, gapura and charts/gapura, are public. -->
-> **Step 2 does not work yet.** Nothing has been published to `ghcr.io/davidgrldo`, so
-> `helm install ... oci://ghcr.io/...` fails, and two separate things have to happen before it
-> works. The `v0.1.0` tag has to be pushed, which is what builds and publishes the image and the
-> chart. Then both GHCR packages -- `gapura` and `charts/gapura` -- have to be made public by hand:
-> a new package defaults to private, GitHub documents no API for changing that, and a private
-> package pulls fine for the maintainer while 401ing for everyone else. The tag alone is not enough;
-> [docs/RELEASING.md](docs/RELEASING.md) section 5.3 is the procedure. The `home` and `sources` URLs
-> in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same repository and are
-> equally unpublished. Until both are done, install from a checkout instead:
-> `./hack/kind-deploy.sh` does all of this on a local kind cluster, and against any other cluster
-> build the image, push it somewhere your nodes can read, and replace step 2 with
-> `helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set
-> image.repository=<your-registry>/gapura --set image.tag=0.1.0`, adding the no-LoadBalancer flags
-> step 2 lists if your cluster needs them. Without those two `image.*` values the chart points at
-> the same unpublished registry and the pods sit in `ImagePullBackOff`. Steps 1, 3 and 4 are
-> unchanged.
+<!-- REMOVE WHEN PUBLIC: delete this blockquote and the collapsed block under it once v0.1.0 is tagged and both ghcr.io/davidgrldo packages, gapura and charts/gapura, are public. -->
+> **Step 2 does not work yet.** Nothing is published to `ghcr.io/davidgrldo`, so the `helm install`
+> in step 2 fails. Install from a checkout instead: `./hack/kind-deploy.sh` does all of it on a
+> local kind cluster. Steps 1, 3 and 4 work as written.
+
+<details>
+<summary>What has to happen before it works, and how to install against another cluster</summary>
+
+Nothing has been published to `ghcr.io/davidgrldo`, so
+`helm install ... oci://ghcr.io/...` fails, and two separate things have to happen before it
+works. The `v0.1.0` tag has to be pushed, which is what builds and publishes the image and the
+chart. Then both GHCR packages -- `gapura` and `charts/gapura` -- have to be made public by hand:
+a new package defaults to private, GitHub documents no API for changing that, and a private
+package pulls fine for the maintainer while 401ing for everyone else. The tag alone is not enough;
+[docs/RELEASING.md](docs/RELEASING.md) section 5.3 is the procedure. The `home` and `sources` URLs
+in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same repository and are
+equally unpublished. Until both are done, install from a checkout instead:
+`./hack/kind-deploy.sh` does all of this on a local kind cluster, and against any other cluster
+build the image, push it somewhere your nodes can read, and replace step 2 with
+`helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set
+image.repository=<your-registry>/gapura --set image.tag=0.1.0`, adding the no-LoadBalancer flags
+step 2 lists if your cluster needs them. Without those two `image.*` values the chart points at
+the same unpublished registry and the pods sit in `ImagePullBackOff`. Steps 1, 3 and 4 are
+unchanged.
+
+</details>
 
 No cluster? kind will do. It has no LoadBalancer, so give the node a host port that reaches the
 NodePort step 2 will ask for:
@@ -97,7 +124,13 @@ helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
   --set publishService=false --set 'publishAddresses={127.0.0.1}'
 ```
 
-**That `127.0.0.1` assumes your node maps host port 80 to the NodePort.** It is the address step 4
+**That `127.0.0.1` assumes your node maps host port 80 to the NodePort.** Skip this and nothing
+upstream looks wrong: the Gateway reports `Programmed=True`, and step 4 answers
+`curl: (7) Failed to connect to 127.0.0.1 port 80`.
+
+<details>
+<summary>Why, what to do if your cluster has no such mapping, and why minikube is not on that list</summary>
+
 reads out of Gateway status and dials, a Gateway address carries no port, so step 4 goes to
 `127.0.0.1:80` while the Service above is on NodePort 30080. The `kind create cluster` block above
 bridges the two with `extraPortMappings`; a cluster you already had almost certainly does not. If
@@ -112,6 +145,8 @@ nothing listens on `127.0.0.1:80` by default, so `publishAddresses={127.0.0.1}` 
 that was never going to answer. Run `minikube tunnel` in another terminal and use the LoadBalancer
 command above: the tunnel is what gives the `LoadBalancer` Service a reachable address, on port 80,
 which is exactly what step 4 expects.
+
+</details>
 
 **3. A Gateway, a route, and something to route to.** The echo backend is the one
 [deploy/kind/fixture.yaml](deploy/kind/fixture.yaml) uses:
