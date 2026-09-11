@@ -8,8 +8,10 @@
 #
 # Nothing here ever contacts ghcr.io. The only registry is the local container.
 #
-# Needs: docker (with buildx), kind, kubectl, helm, jq. Runs under bash, not sh: the manifest-list
-# join relies on word splitting and on process substitution, exactly as release.yml's `run:` does.
+# Needs: docker (with buildx), kind, kubectl, helm 3.13 or newer, jq. The helm floor is `--plain-http`,
+# which is what lets `push` and `install` talk to a registry with no TLS; it landed in 3.13 and there
+# is no substitute on an older helm. Runs under bash, not sh: the manifest-list join relies on word
+# splitting and on process substitution, exactly as release.yml's `run:` does.
 #
 # Two addresses, one registry. The registry container publishes 5000 on the host as
 # localhost:5001, and is also joined to the `kind` docker network, where the node reaches it by
@@ -68,10 +70,14 @@ BUILDER=gapura-dry-run-builder
 RELEASE=gapura-dryrun
 NS=gapura-dryrun
 FIXTURE_NS=gapura-dryrun-e2e
-TGZ="gapura-${VERSION}.tgz"
 BACKUP=/etc/containerd/config.toml.gapura-dryrun-bak
 
 WORK=$(mktemp -d)
+# The chart tarball is written into this run's own directory, never the repo root. cleanup removes
+# $WORK whole, and with VERSION overridden to a real release version a tarball in the repo root
+# would be named gapura-0.1.0.tgz -- the same name a `helm package` the user ran themselves leaves
+# there. A rehearsal must not be able to delete a file it did not create.
+TGZ="${WORK}/gapura-${VERSION}.tgz"
 PF_PID=
 WD_PID=
 CONTAINERD_PATCHED=0
@@ -110,6 +116,15 @@ watchdog() {
       echo "==> DISK FLOOR HIT mid-build (host ${h}G, vm ${v}G): cancelling" >&2
       touch "$WORK/floor-hit"
       kill -TERM "$pid" 2>/dev/null || true
+      # One signal is not a guarantee. A build that is slow to unwind, or that never handles the
+      # TERM at all, keeps writing while the script sits in `wait` -- the disk filling is exactly
+      # what this function exists to prevent, so do not leave it to the build's good manners.
+      for _ in $(seq 6); do
+        sleep 5
+        kill -0 "$pid" 2>/dev/null || return 0
+      done
+      echo "==> build still alive 30s after SIGTERM: SIGKILL" >&2
+      kill -KILL "$pid" 2>/dev/null || true
       return 0
     fi
   done
@@ -139,8 +154,7 @@ cleanup() {
   docker buildx rm "$BUILDER" >/dev/null 2>&1 || true
   docker rm --force --volumes "$REG_NAME" >/dev/null 2>&1 || true
   docker volume rm "${REG_NAME}-data" >/dev/null 2>&1 || true
-  rm -f "$TGZ"
-  rm -rf "$WORK"
+  rm -rf "$WORK"   # the chart tarball lives in here, so it goes with it
   disk_report "after cleanup"
   return $rc
 }
@@ -204,6 +218,17 @@ echo "==> cluster"
 # neither the host port mappings nor the NodePorts the other hack/ scripts claim.
 REQUIRE_PORTS=0 ./hack/kind-up.sh
 
+echo "==> clearing anything a previous run left in the cluster"
+# Same pre-run reset the registry, its volume and the builder get below, for the two things that
+# outlive a run this script did not get to finish: a SIGKILL skips cleanup entirely, and cleanup's
+# own `helm uninstall --timeout 2m` can expire on a namespace that is slow to drain. What survives
+# is a release name, and `helm install` refuses a name that is still in use. Left to the install
+# step that refusal arrives after both builds -- the forty expensive minutes -- for a leftover that
+# costs seconds to clear here. Same order as cleanup: the release first, so its objects go while
+# their namespace still exists, then the namespaces. On a clean machine both are no-ops.
+helm uninstall "$RELEASE" --namespace "$NS" --wait --timeout 2m >/dev/null 2>&1 || true
+kubectl delete ns "$FIXTURE_NS" "$NS" --ignore-not-found --timeout=90s >/dev/null 2>&1 || true
+
 echo "==> registry ${REG_NAME} on ${HOST_REG} (host) and ${NODE_REG} (cluster)"
 docker rm --force --volumes "$REG_NAME" >/dev/null 2>&1 || true
 docker volume rm "${REG_NAME}-data" >/dev/null 2>&1 || true
@@ -248,10 +273,29 @@ done
 docker exec "$NODE" crictl info >/dev/null || { echo "containerd did not come back" >&2; exit 1; }
 # Assert the migration landed. Without this an unmigrated key reads as a plain ImagePullBackOff
 # half a build later, with nothing pointing back at this block.
+#
+# The dump holds two keys spelled `config_path`, and on an unpatched node both read '': the one
+# this block means, under [plugins.'io.containerd.cri.v1.images'.registry], and an unrelated one
+# under [plugins.'io.containerd.transfer.v1.local']. A bare grep for the value is satisfied by
+# either, so it names its table and looks for the value only inside it -- four lines of context,
+# which is the whole table today plus slack, and still nowhere near the transfer plugin two hundred
+# lines further down.
+#
+# The same dump says `use_local_image_pull = false`, so a CRI pull is handed to the transfer service
+# rather than resolved in process -- which raises the question of whether the transfer plugin's
+# config_path is the one that decides whether certs.d is read. It is not, and the key written above
+# is enough. The CRI image service passes its own registry.config_path into the transfer request as
+# the request's host directory: in the node's containerd (v2.3.4) the only call site of
+# core/transfer/registry.WithHostDir is CRIImageService.pullImageWithTransferService, and the
+# transfer API's OCIRegistry message carries a host_dir field to put it in. The transfer plugin's
+# own config_path is the fallback for transfer clients that send no host directory, ctr among them;
+# kubelet is not one of them. So: one key, asserted exactly.
 docker exec "$NODE" containerd config dump 2>/dev/null \
-  | grep -q "config_path = '/etc/containerd/certs.d'" \
-  || { echo "containerd did not pick up config_path; certs.d is still ignored" >&2; exit 1; }
-echo "    containerd config_path is /etc/containerd/certs.d"
+  | grep -F -A4 "[plugins.'io.containerd.cri.v1.images'.registry]" \
+  | grep -qF "config_path = '/etc/containerd/certs.d'" \
+  || { echo "the grpc.v1.cri registry key did not migrate onto io.containerd.cri.v1.images;" >&2
+       echo "certs.d is still ignored and the pull below would ImagePullBackOff" >&2; exit 1; }
+echo "    io.containerd.cri.v1.images registry config_path is /etc/containerd/certs.d"
 kubectl wait --for=condition=Ready "node/$NODE" --timeout=120s
 
 echo "==> buildx builder ${BUILDER}"
@@ -316,7 +360,7 @@ diff <(printf 'linux/amd64\nlinux/arm64\n') "$WORK/arches" \
 
 echo "==> package and push the chart (the workflow's \`chart\` job)"
 ./hack/chart-render.sh
-helm package charts/gapura --version "$VERSION" --app-version "$VERSION"
+helm package charts/gapura --version "$VERSION" --app-version "$VERSION" --destination "$WORK"
 # helm push appends the chart name, so the remote is the parent path: this lands the chart at
 # ${HOST_REG}/${OWNER}/charts/gapura, exactly as release.yml's oci://ghcr.io/<owner>/charts does.
 # --plain-http because the registry has no TLS; no `helm registry login`, it wants no auth.
