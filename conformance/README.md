@@ -23,10 +23,11 @@ section 5.1 defers to SP4.
 | `HTTPRouteMultipleGateways` | `same-namespace-dedicated-route` and `all-namespaces-dedicated-route` are the same match, `PathPrefix /` with no hostname, on the same port, attached to two different Gateways, and they want different backends. Nothing in the request tells them apart, so the port table has to pick one: the two routes share a creation timestamp, the tie falls through to `namespace/name`, `all-namespaces-dedicated-route` sorts first, and `/` answers from `infra-backend-v3`. The `Gateway_same-namespace` subtest asks for `infra-backend-v2` at that same URL and gets `infra-backend-v3`. |
 
 The three earlier failures were two different problems wearing one face. `HTTPRouteCrossNamespace`
-and `HTTPRouteHostnameIntersection` failed because `Config::select_listener` kept exactly one
-listener per port, so the routes attached to every other Gateway on that port were never served at
-all; one match table per port fixes that and both now pass. `HTTPRouteMultipleGateways` is the other
-problem, and merging cannot fix it. Two identical listeners whose routes both match `/` are
+and `HTTPRouteHostnameIntersection` failed because `Config::select_listener` picked exactly one
+listener per port-and-host pair -- a different hostname could select a different listener, but for
+any one request only that listener's routes existed, so the routes attached to every other Gateway
+matching the same host on that port were never served at all; one match table per port fixes that
+and both now pass. `HTTPRouteMultipleGateways` is the other problem, and merging cannot fix it. Two identical listeners whose routes both match `/` are
 distinguishable only by which address the client dialled, and Gapura publishes one address for every
 Gateway of its class. Ordering makes the outcome deterministic and documented rather than a
 name-order lottery, but one of the two backends is still unreachable by construction. Closing it

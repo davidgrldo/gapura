@@ -4,6 +4,9 @@
 {{- if and (eq .Values.privilegedPorts "none") (or (lt (int .Values.ports.http) 1024) (lt (int .Values.ports.https) 1024)) }}
 {{- fail "privilegedPorts: none cannot bind a port below 1024: raise ports.http/ports.https or pick capability or sysctl" }}
 {{- end }}
+{{- if ne 3 (len (uniq (list (int .Values.ports.http) (int .Values.ports.https) (int .Values.ports.admin)))) }}
+{{- fail (printf "ports.http, ports.https and ports.admin must all differ, got http=%d https=%d admin=%d: two services sharing a port both bind it (SO_REUSEPORT) and the kernel splits traffic between them" (int .Values.ports.http) (int .Values.ports.https) (int .Values.ports.admin)) }}
+{{- end }}
 {{- if not (has .Values.livenessPort (list "http" "admin")) }}
 {{- fail (printf "livenessPort must be http or admin, got %q" .Values.livenessPort) }}
 {{- end }}

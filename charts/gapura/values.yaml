@@ -30,9 +30,10 @@ ports:
   https: 443
   admin: 9090
 
-# Which port the liveness probe watches. `http` catches a data-plane listener that died or never
-# bound, which no probe on the admin port can see, though a TCP probe on `http` cannot see an
-# https-only bind failure; `admin` watches only the admin thread.
+# Which port the liveness probe watches. `http` catches a data-plane listener that died, which no
+# probe on the admin port can see, though a TCP probe on `http` cannot see an https-only failure.
+# A listener that never bound at all needs no probe: the process exits 1 before any probe runs.
+# `admin` watches only the admin thread.
 livenessPort: http
 
 service:

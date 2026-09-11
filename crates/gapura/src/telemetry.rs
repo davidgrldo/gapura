@@ -29,7 +29,7 @@ pub struct Metrics {
     pub handler_panics_total: IntCounter,
     /// labels: kind
     pub watch_disconnects_total: IntCounterVec,
-    /// labels: result (`success`, `failure`)
+    /// labels: result (`success`, `failure`, `skipped`)
     pub status_writes_total: IntCounterVec,
     /// 1 while this replica holds the leader Lease.
     pub leader: IntGauge,

@@ -265,7 +265,10 @@ async fn setup() -> (Gateway, reqwest::Client) {
 /// ports is the fix. A child that starts but never becomes ready is a real failure, not a race,
 /// and fails the test with whatever it managed to log.
 async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
-    for attempt in 1..=5u32 {
+    const ATTEMPTS: u32 = 5;
+    // What the last child to exit managed to say, so the final panic can show it.
+    let mut last_logs = String::new();
+    for attempt in 1..=ATTEMPTS {
         let (http, admin, https) = (free_port(), free_port(), free_port());
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.yaml"), render(http)).unwrap();
@@ -331,11 +334,16 @@ async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
                  its stdout was:\n{captured}"
             );
         }
+        last_logs = gw.logs.lock().unwrap().join("\n");
         eprintln!(
             "gateway exited before becoming ready on attempt {attempt}, retrying on new ports"
         );
     }
-    panic!("gateway lost the port race five times running");
+    panic!(
+        "the gateway exited before becoming ready on all {ATTEMPTS} attempts. Either it lost the \
+         port race every time, or it cannot start at all -- the second is a real regression and \
+         looks identical from here. Its stdout on the last attempt was:\n{last_logs}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

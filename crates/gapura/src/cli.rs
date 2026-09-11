@@ -81,9 +81,30 @@ pub struct Args {
 }
 
 impl Args {
-    /// Cross-argument checks clap cannot express. A port listed under both `--listen-http` and
-    /// `--listen-https` would make Pingora fail the second bind at startup.
+    /// Cross-argument checks clap cannot express.
+    ///
+    /// A port listed under both `--listen-http` and `--listen-https` would make Pingora fail the
+    /// second bind at startup. An address listed twice is worse than a failed bind: Pingora sets
+    /// `SO_REUSEPORT`, so both services bind it and the kernel splits new connections between
+    /// them, which reads as a gateway answering at random. `first_unbindable` cannot catch it
+    /// either, since it releases each socket before trying the next one.
     pub fn validate(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        let repeated: std::collections::BTreeSet<String> = self
+            .listen_http
+            .iter()
+            .chain(self.listen_https.iter())
+            .chain(std::iter::once(&self.admin))
+            .filter(|addr| !seen.insert(**addr))
+            .map(|addr| addr.to_string())
+            .collect();
+        if !repeated.is_empty() {
+            return Err(format!(
+                "address {} listed more than once across --listen-http, --listen-https and --admin",
+                repeated.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+
         let https = ports_of(&self.listen_https);
         let shared: Vec<String> = ports_of(&self.listen_http)
             .into_iter()
@@ -242,6 +263,52 @@ mod tests {
 
         let ok = Args::try_parse_from(["gapura", "--config-dir", "x"]).unwrap();
         assert_eq!(ok.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_repeated_listen_address_is_rejected() {
+        // Not merely a failed bind: Pingora sets SO_REUSEPORT, so the proxy and the admin server
+        // both bind the shared address and the kernel splits connections between them. Ten
+        // requests to /healthz come back as a mix of 200 and 404, and nothing is logged.
+        let clash = Args::try_parse_from([
+            "gapura",
+            "--config-dir",
+            "x",
+            "--listen-http",
+            "127.0.0.1:18099",
+            "--admin",
+            "127.0.0.1:18099",
+        ])
+        .unwrap();
+        let err = clash.validate().unwrap_err();
+        assert!(err.contains("127.0.0.1:18099"), "{err}");
+
+        let twice = Args::try_parse_from([
+            "gapura",
+            "--config-dir",
+            "x",
+            "--listen-https",
+            "0.0.0.0:8443",
+            "--listen-https",
+            "0.0.0.0:8443",
+        ])
+        .unwrap();
+        let err = twice.validate().unwrap_err();
+        assert!(err.contains("0.0.0.0:8443"), "{err}");
+
+        let distinct = Args::try_parse_from([
+            "gapura",
+            "--config-dir",
+            "x",
+            "--listen-http",
+            "0.0.0.0:8080",
+            "--listen-https",
+            "0.0.0.0:8443",
+            "--admin",
+            "0.0.0.0:9090",
+        ])
+        .unwrap();
+        assert_eq!(distinct.validate(), Ok(()));
     }
 
     #[test]
