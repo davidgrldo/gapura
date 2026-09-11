@@ -21,8 +21,11 @@
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
       "targets": [
         { "refId": "A", "editorMode": "code", "range": true,
-          "expr": "sum by (code) (rate(gapura_requests_total[$__rate_interval]))",
-          "legendFormat": "{{code}}" }
+          "expr": "sum by (code) (rate(gapura_requests_total{code!=\"0\"}[$__rate_interval]))",
+          "legendFormat": "{{code}}" },
+        { "refId": "B", "editorMode": "code", "range": true,
+          "expr": "sum(rate(gapura_requests_total{code=\"0\"}[$__rate_interval]))",
+          "legendFormat": "client abort" }
       ]
     },
     {
@@ -131,6 +134,18 @@
         { "refId": "C", "editorMode": "code", "range": true,
           "expr": "sum by (kind) (rate(gapura_watch_disconnects_total[$__rate_interval]))",
           "legendFormat": "watch {{kind}}" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Client aborts",
+      "description": "Requests that ended with no response status because the client went away before anything was sent; they are logged with status 0 and client_abort true. An abort part-way through a body keeps the status already sent, so it counts under that code here and shows up only as client_abort in the access log.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "editorMode": "code", "range": true,
+          "expr": "sum(rate(gapura_requests_total{code=\"0\"}[$__rate_interval]))",
+          "legendFormat": "aborted" }
       ]
     }
   ]

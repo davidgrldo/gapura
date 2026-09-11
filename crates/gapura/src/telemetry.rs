@@ -183,6 +183,14 @@ pub struct AccessLog<'a> {
     pub status: u16,
     pub bytes: usize,
     pub duration_ms: u64,
+    /// Milliseconds from the moment an upstream peer was picked to the end of the request, for
+    /// requests that reached an upstream at all. It therefore covers connecting, sending the
+    /// request, waiting, and streaming the response back -- it is not the upstream server's own
+    /// processing time. A retry restarts the clock, so on a retried request this covers the
+    /// attempt that finished rather than every attempt.
+    pub upstream_duration_ms: Option<u64>,
+    /// The client went away before the response was complete. Not an error on our side.
+    pub client_abort: bool,
     pub listener: &'a str,
     pub route: &'a str,
     pub upstream: Option<&'a str>,
@@ -262,6 +270,8 @@ mod tests {
             status: 200,
             bytes: 3,
             duration_ms: 4,
+            upstream_duration_ms: Some(2),
+            client_abort: false,
             listener: "infra/main/http",
             route: "apps/echo",
             upstream: Some("10.0.0.1:8080"),
@@ -273,6 +283,32 @@ mod tests {
         assert_eq!(v["status"], 200);
         assert_eq!(v["route"], "apps/echo");
         assert!(v["client_ip"].is_null());
+    }
+
+    #[test]
+    fn access_log_carries_client_abort_and_upstream_duration() {
+        let entry = AccessLog {
+            ts_ms: 1,
+            request_id: "r",
+            trace_id: "t",
+            method: "GET",
+            host: "h",
+            path: "/",
+            status: 0,
+            bytes: 0,
+            duration_ms: 5,
+            upstream_duration_ms: Some(3),
+            client_abort: true,
+            listener: "l",
+            route: "r",
+            upstream: None,
+            client_ip: None,
+            user_agent: None,
+            error: None,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["client_abort"], true);
+        assert_eq!(v["upstream_duration_ms"], 3);
     }
 
     #[test]
