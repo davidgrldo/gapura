@@ -1,0 +1,106 @@
+# Number of replicas. Every replica watches the API server and serves traffic; only the holder
+# of the Lease writes Gateway API status.
+replicaCount: 2
+
+image:
+  repository: ghcr.io/gapura-dev/gapura
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# GatewayClass.spec.controllerName this instance handles. Must match the GatewayClass below.
+controllerName: gapura.dev/controller
+
+gatewayClass:
+  create: true
+  name: gapura
+  annotations: {}
+
+# Container ports. These are also the Gateway listener ports a Gateway may declare: a listener on
+# any other port gets Accepted=False, reason PortUnavailable.
+ports:
+  http: 80
+  https: 443
+  admin: 9090
+
+service:
+  type: LoadBalancer
+  annotations: {}
+  labels: {}
+  # Empty means the cluster default.
+  loadBalancerClass: ""
+  loadBalancerIP: ""
+  externalTrafficPolicy: Local
+  ipFamilyPolicy: SingleStack
+  # Only used when type is NodePort.
+  nodePorts:
+    http: null
+    https: null
+
+# Extra addresses published into Gateway status, on top of the LoadBalancer addresses of the
+# Service. Needed on clusters without a LoadBalancer implementation (kind).
+publishAddresses: []
+# Publish the LoadBalancer addresses of this chart's Service (--publish-service).
+publishService: true
+
+# EnvFilter directives, e.g. "info" or "gapura=debug,pingora_core=warn".
+logLevel: info
+# Worker threads per Pingora service. 0 asks the machine, which does not see cgroup limits.
+threads: 0
+# Do not write status and never take the Lease.
+readOnly: false
+extraArgs: []
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+# How the container is allowed to bind ports below 1024 as uid 65532.
+# capability: add NET_BIND_SERVICE (Pod Security Standard Restricted allows exactly this one).
+# sysctl: set net.ipv4.ip_unprivileged_port_start=0 (a "safe" sysctl, incompatible with hostNetwork).
+# none: neither, only for ports above 1023.
+privilegedPorts: capability
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Pingora sleeps grace_period_seconds (30 s) then drains for up to graceful_shutdown_timeout_seconds
+# (30 s), so anything below ~65 s means Kubernetes SIGKILLs the pod mid-drain.
+terminationGracePeriodSeconds: 75
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: ""
+    labels: {}
+  dashboard:
+    # Ship the Grafana dashboard as a ConfigMap for the Grafana sidecar to pick up.
+    enabled: false
+    label: grafana_dashboard
+    labelValue: "1"

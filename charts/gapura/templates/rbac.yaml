@@ -1,0 +1,60 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "gapura.fullname" . }}
+  labels: {{- include "gapura.labels" . | nindent 4 }}
+rules:
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [gatewayclasses, gateways, httproutes, referencegrants, backendtlspolicies]
+  verbs: [get, list, watch]
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [gatewayclasses/status, gateways/status, httproutes/status]
+  verbs: [patch]
+- apiGroups: [""]
+  resources: [namespaces, services, secrets, configmaps]
+  verbs: [get, list, watch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "gapura.fullname" . }}
+  labels: {{- include "gapura.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "gapura.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "gapura.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gapura.fullname" . }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.labels" . | nindent 4 }}
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gapura.fullname" . }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gapura.fullname" . }}-leader
+subjects:
+- kind: ServiceAccount
+  name: {{ include "gapura.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

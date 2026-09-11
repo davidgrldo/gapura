@@ -1,0 +1,25 @@
+Gapura {{ .Chart.AppVersion }} installed as {{ include "gapura.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+1. Wait for the controller to become ready:
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "gapura.fullname" . }}
+
+2. Point a Gateway at this class:
+     apiVersion: gateway.networking.k8s.io/v1
+     kind: Gateway
+     metadata: { name: main }
+     spec:
+       gatewayClassName: {{ .Values.gatewayClass.name }}
+       listeners:
+       - { name: http, port: {{ .Values.ports.http }}, protocol: HTTP }
+
+3. Read its status:
+     kubectl get gateway main -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}{"\n"}'
+
+Metrics, health and the routing table live on the admin port ({{ .Values.ports.admin }}) of the
+ClusterIP Service {{ include "gapura.fullname" . }}-admin. They are deliberately kept off the
+public Service:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gapura.fullname" . }}-admin {{ .Values.ports.admin }}:{{ .Values.ports.admin }}
+     curl -s localhost:{{ .Values.ports.admin }}/debug/config | head -20
+
+The Gateway API CRDs are not part of this chart. Install the standard channel yourself:
+     kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml

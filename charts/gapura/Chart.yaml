@@ -1,0 +1,22 @@
+apiVersion: v2
+name: gapura
+description: The Rust API gateway. Kubernetes Gateway API-native, one binary, no database.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/gapura-dev/gapura
+sources:
+  - https://github.com/gapura-dev/gapura
+keywords:
+  - gateway-api
+  - ingress
+  - proxy
+  - rust
+  - pingora
+maintainers:
+  - name: David Geraldo
+    email: davidgrldo123@gmail.com
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "true"
