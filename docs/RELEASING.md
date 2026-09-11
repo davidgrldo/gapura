@@ -32,7 +32,12 @@ Four things here are permanent. Nothing else in this document is.
    `ghcr.io/davidgrldo/gapura:0.1.0` exists, deleting it breaks anyone who pinned it. If the
    contents turn out to be wrong, the fix is `0.1.1`. Never re-push a version that has shipped.
 4. **Making the repository public is not reliably reversible.** Flipping it back to private hides it
-   from GitHub, not from whoever cloned, forked or indexed it while it was up.
+   from GitHub, not from whoever cloned, forked or indexed it while it was up. What is permanent is
+   the content, not the repository: `gh repo create --public` in section 2 makes an *empty* public
+   repository, and until the push there is nothing in it to clone, fork or index — so if the name
+   comes out wrong (findings 1 and 2 in 1.4 are two ways it can), deleting it and creating it again
+   costs nothing. That is why section 2 marks the create `# PUBLIC` and the push
+   `# PUBLIC, IRREVERSIBLE`, and why it keeps them two separate commands.
 
 Checks are free. Run all of them.
 
@@ -47,10 +52,18 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+RUSTUP_TOOLCHAIN=1.89 cargo check --workspace --all-targets --locked
 ./hack/check-identity.sh
 ./hack/chart-render.sh
 cargo deny check all
 ```
+
+The fifth line is the MSRV gate — `ci.yml`'s `msrv` job, invoked the way that job invokes it. It is
+the only check here that fails on a change which compiles on stable but not on the minimum supported
+Rust version, and nothing in `release.yml` runs it, so a release can ship that regression unless you
+run it now. It needs the toolchain installed once (`rustup toolchain install 1.89`), and it needs
+the environment variable rather than a bare `cargo check`, because `rust-toolchain.toml` pins
+`stable` and would otherwise decide which compiler you got.
 
 The release is cut from `main`, so the branch the work was done on has to be merged first. Confirm
 you are standing on the commit you actually verified:
@@ -141,46 +154,9 @@ blobs by digest, with no tag attached. `image` needs `build` and so never runs, 
 manifest list is never created; `chart` needs `image` and never runs either. What you are left with
 is a tag that exists, blobs nobody can address, nothing at `:0.1.0`, and no chart at all.
 
-The probe is free, and it belongs after the repository is public and before the tag:
-
-```bash
-git switch -c probe/arm64-runner
-cat > .github/workflows/arm-probe.yml <<'YAML'
-name: arm-probe
-on: push
-jobs:
-  probe:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - run: uname -m
-YAML
-git add .github/workflows/arm-probe.yml
-git commit -m "chore: probe the arm64 runner label"
-git push -u origin probe/arm64-runner                 # PUBLIC
-gh run watch
-```
-
-A runner that picks the job up inside a minute and prints `aarch64` settles it. Clean up:
-
-```bash
-git push origin --delete probe/arm64-runner           # PUBLIC
-git switch main && git branch -D probe/arm64-runner
-```
-
-Deleting the branch does not remove the commit from GitHub — it stays reachable by its SHA. For a
-probe that is fine; do not use this trick for anything you would not want read.
-
-If instead it queues, change `release.yml` before tagging, and merge that change to `main`:
-
-- collapse the `build` matrix into a single `runs-on: ubuntu-latest` job;
-- add `- uses: docker/setup-qemu-action@v3` ahead of `docker/setup-buildx-action`;
-- give `docker/build-push-action` `platforms: linux/amd64,linux/arm64` and the tags from
-  `docker/metadata-action` directly, instead of `outputs: ...push-by-digest=true`;
-- delete the digest artifacts and the `image` job's join step, and point `chart`'s `needs:` at
-  whatever job now publishes the tags.
-
-The cost is a Rust release build with vendored OpenSSL running under emulation for arm64, which is
-far slower than a native runner. Budget for a long job, not a failing one.
+The probe that settles it is free, but it is two `# PUBLIC` pushes and it cannot run from here: it
+needs the remote section 2 adds, and it belongs after the repository is public and before the tag.
+It is section 3. Nothing in section 1 leaves this machine.
 
 #### 4. The `workflow_dispatch` path is broken — release by pushing a tag
 
@@ -243,8 +219,49 @@ git push -u origin main                                        # PUBLIC, IRREVER
 
 ## 3. Prove the arm64 runner label
 
-Run the probe from 1.4 finding 3 now, while a mistake still only costs a branch. Do not tag until
-it has come back green, or until you have switched the workflow to the QEMU fallback.
+Now, while a mistake still only costs a branch; 1.4 finding 3 is the argument for it. Push a
+throwaway branch carrying a workflow that asks for the label and does nothing else:
+
+```bash
+git switch -c probe/arm64-runner
+cat > .github/workflows/arm-probe.yml <<'YAML'
+name: arm-probe
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - run: uname -m
+YAML
+git add .github/workflows/arm-probe.yml
+git commit -m "chore: probe the arm64 runner label"
+git push -u origin probe/arm64-runner                 # PUBLIC
+gh run watch
+```
+
+A runner that picks the job up inside a minute and prints `aarch64` settles it. Clean up:
+
+```bash
+git push origin --delete probe/arm64-runner           # PUBLIC
+git switch main && git branch -D probe/arm64-runner
+```
+
+Deleting the branch does not remove the commit from GitHub — it stays reachable by its SHA. For a
+probe that is fine; do not use this trick for anything you would not want read.
+
+Do not tag until it has come back green, or until you have switched the workflow to the QEMU
+fallback. If instead it queues, change `release.yml` before tagging, and merge that change to
+`main`:
+
+- collapse the `build` matrix into a single `runs-on: ubuntu-latest` job;
+- add `- uses: docker/setup-qemu-action@v3` ahead of `docker/setup-buildx-action`;
+- give `docker/build-push-action` `platforms: linux/amd64,linux/arm64` and the tags from
+  `docker/metadata-action` directly, instead of `outputs: ...push-by-digest=true`;
+- delete the digest artifacts and the `image` job's join step, and point `chart`'s `needs:` at
+  whatever job now publishes the tags.
+
+The cost is a Rust release build with vendored OpenSSL running under emulation for arm64, which is
+far slower than a native runner. Budget for a long job, not a failing one.
 
 ## 4. Tag, and let the workflow publish
 
@@ -300,15 +317,24 @@ gh api /user/packages/container/gapura --jq '.visibility, .html_url'
 gh api /user/packages/container/charts%2Fgapura --jq '.visibility, .html_url'
 ```
 
-Both must print `public`. (If the second 404s on the encoded slash, list the packages instead with
-`gh api '/user/packages?package_type=container' --jq '.[].name'` and open the one you need from the
-web UI.)
+Both must print `public`. Two ways those calls fail while telling you nothing about the packages:
+
+- **403, or `Resource not accessible by ...`.** `gh auth login` does not request `read:packages`, so
+  this endpoint is forbidden on most maintainers' tokens. Run `gh auth refresh -s read:packages`,
+  approve the scope in the browser, and ask again. A 403 is a fact about your token; it is not
+  evidence that anything is private.
+- **404 on the second one.** The encoded slash. List the packages instead with
+  `gh api '/user/packages?package_type=container' --jq '.[].name'` and open the one you need from
+  the web UI.
 
 To fix: open the `html_url` those commands printed, then **Package settings → Danger Zone →
 Change visibility → Public**. GitHub's packages REST API documents no endpoint for changing
 visibility, so this is a web-UI change. Do it for both packages.
 
-Then prove it the way a stranger would, without credentials:
+Then prove it the way a stranger would, without credentials. This check, not the one above, is the
+authority: nothing in it is authenticated — the `ghcr.io/token` request is anonymous and `curl`
+reads neither your `gh` token nor your docker keychain — so what it returns is a fact about the
+package and can never be a fact about your scopes:
 
 ```bash
 tok=$(curl -s "https://ghcr.io/token?scope=repository:davidgrldo/gapura:pull&service=ghcr.io" | jq -r .token)
@@ -322,8 +348,10 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $tok" \
   https://ghcr.io/v2/davidgrldo/charts/gapura/manifests/0.1.0
 ```
 
-`200` twice means public. `401` means the package is still private: the anonymous token is issued
-either way, but it carries no pull access. If you would rather test with the real clients,
+`200` twice means public. `401` means the package is still private: ghcr.io issues the anonymous
+token either way, but it carries no pull access to a private package. Since no credential of yours
+is in play, a `401` here cannot mean "I am missing a scope" — that reading belongs to the `gh api`
+calls above and nowhere else. If you would rather test with the real clients,
 `helm registry logout ghcr.io` and `docker logout ghcr.io` first — that costs you the stored
 credential, nothing else.
 
@@ -372,9 +400,20 @@ requires, so when that day comes the submission is a folder copy rather than a r
 ## 7. If something goes wrong after the tag
 
 **The run failed for a reason outside the repository** — a flaky runner, a registry hiccup, a
-queue that timed out. `gh run rerun --failed` is the whole fix. It is safe: the source is identical,
-so the artifacts it produces are the ones the tag always meant. Blobs a half-finished run pushed by
-digest carry no tag and are harmless; they are addressed only by a digest nobody published.
+queue that timed out. Re-running it is the whole fix:
+
+```bash
+gh run rerun --failed                                          # PUBLIC, IRREVERSIBLE
+gh run watch
+```
+
+It is safe in the one sense that the source is identical, so the artifacts it produces are the ones
+the tag always meant. It is not safe in the sense of undoable: a re-run is what finishes the
+release. It pushes blobs, creates the `0.1.0` and `0.1` manifest list and pushes the chart, and a
+published package version is permanent — item 3 under "What cannot be undone". Run it when you
+believe the failure was infrastructure and the commit under the tag is the one you want published.
+Blobs a half-finished run pushed by digest carry no tag and are harmless; they are addressed only by
+a digest nobody published.
 
 **The fix is a change to the repository, `release.yml` included.** A re-run will *not* pick it up: a
 run is pinned to the commit the tag points at, and so is the workflow file it executes. Land the fix
@@ -385,6 +424,13 @@ already spent, whether or not anything was published under it.
 it, and a version that changes underneath its consumers is worse than a version with a known bug.
 See item 3 under "What cannot be undone".
 
-**The tag itself was a mistake and nothing has been published under it.** `git push origin
-:refs/tags/v0.1.0` deletes it from GitHub, and you should still treat the version number as spent:
-you cannot know who fetched it in between. Move to the next one.
+**The tag itself was a mistake and nothing has been published under it.** Delete it from GitHub,
+and delete it here as well — otherwise the next `git push --tags` puts it straight back:
+
+```bash
+git push origin :refs/tags/v0.1.0                              # PUBLIC
+git tag -d v0.1.0
+```
+
+Treat the version number as spent regardless: you cannot know who fetched it in between. Move to the
+next one.
