@@ -1,0 +1,82 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners: []
+  clusters: {}
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: main
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "False"
+        reason: InvalidParameters
+        message: spec.infrastructure.parametersRef invalid.io/InvalidParameters does-not-exist is not supported
+        observedGeneration: 1
+      - type: Programmed
+        status: "False"
+        reason: Invalid
+        message: No listener is programmed
+        observedGeneration: 1
+    listeners:
+      - name: http
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 1
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+  - kind: HTTPRoute
+    namespace: apps
+    name: echo
+    parents:
+      - parentRef:
+          group: ~
+          kind: ~
+          namespace: infra
+          name: main
+          sectionName: ~
+          port: ~
+        controllerName: gapura.dev/controller
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Route is accepted
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1

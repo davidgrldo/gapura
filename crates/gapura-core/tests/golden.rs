@@ -764,3 +764,59 @@ fn backend_tls_oldest_service_wide_policy_wins() {
     );
     insta::assert_yaml_snapshot!("backend-tls-oldest-wins", t);
 }
+
+#[test]
+fn listener_mixed_route_kinds_is_not_resolved() {
+    let t = run("listener-mixed-route-kinds");
+    let (_, listeners, _) = gateway_patch(&t);
+    let mixed = listener(listeners, "mixed");
+    assert_eq!(
+        cond(&mixed.conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "InvalidRouteKinds"),
+        "one unsupported kind in the list is enough, even next to HTTPRoute"
+    );
+    assert_eq!(
+        mixed.supported_kinds,
+        vec![gapura_core::input::RouteGroupKind {
+            group: Some("gateway.networking.k8s.io".into()),
+            kind: "HTTPRoute".into()
+        }],
+        "supportedKinds still advertises what we do support"
+    );
+    let only_bad = listener(listeners, "only-bad");
+    assert_eq!(
+        cond(&only_bad.conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "InvalidRouteKinds")
+    );
+    assert!(only_bad.supported_kinds.is_empty());
+    assert!(
+        t.config.listeners.is_empty(),
+        "neither listener is programmed"
+    );
+    insta::assert_yaml_snapshot!("listener-mixed-route-kinds", t);
+}
+
+#[test]
+fn gateway_with_parameters_ref_is_rejected() {
+    let t = run("gateway-invalid-parameters-ref");
+    let (conditions, listeners, _) = gateway_patch(&t);
+    assert_eq!(
+        cond(conditions, "Accepted"),
+        (ConditionStatus::False, "InvalidParameters")
+    );
+    assert_eq!(
+        cond(conditions, "Programmed"),
+        (ConditionStatus::False, "Invalid")
+    );
+    assert_eq!(
+        cond(&listener(listeners, "http").conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted"),
+        "the listener itself is fine; the Gateway is what we refuse"
+    );
+    assert!(
+        t.config.listeners.is_empty(),
+        "a rejected Gateway serves nothing"
+    );
+    assert!(t.config.clusters.is_empty());
+    insta::assert_yaml_snapshot!("gateway-invalid-parameters-ref", t);
+}

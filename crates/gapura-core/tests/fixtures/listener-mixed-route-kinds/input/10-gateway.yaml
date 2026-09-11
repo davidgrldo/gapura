@@ -1,0 +1,19 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: main, namespace: infra, generation: 1 }
+spec:
+  gatewayClassName: gapura
+  listeners:
+  - name: mixed
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      kinds:
+      - { group: gateway.networking.k8s.io, kind: TCPRoute }
+      - { group: gateway.networking.k8s.io, kind: HTTPRoute }
+  - name: only-bad
+    port: 80
+    protocol: HTTP
+    hostname: bad.example.com
+    allowedRoutes:
+      kinds: [{ kind: TCPRoute }]

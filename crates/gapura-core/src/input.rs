@@ -46,6 +46,16 @@ pub struct GatewaySpec {
     /// Empty means the field was absent (struct-level `serde(default)`), never a valid GatewayClass name.
     pub gateway_class_name: String,
     pub listeners: Vec<Listener>,
+    pub infrastructure: Option<GatewayInfrastructure>,
+}
+
+/// `spec.infrastructure`. Only `parametersRef` is modeled: setting it means the Gateway asks for
+/// an implementation-specific parameter object we do not have, which the spec answers with
+/// `Accepted=False`, reason `InvalidParameters`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GatewayInfrastructure {
+    pub parameters_ref: Option<LocalObjectReference>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -56,6 +56,7 @@ pub mod reasons {
     pub const RESOLVED_REFS: &str = "ResolvedRefs";
     pub const NO_CONFLICTS: &str = "NoConflicts";
     pub const INVALID: &str = "Invalid";
+    pub const INVALID_PARAMETERS: &str = "InvalidParameters";
     pub const LISTENERS_NOT_VALID: &str = "ListenersNotValid";
     pub const PORT_UNAVAILABLE: &str = "PortUnavailable";
     pub const UNSUPPORTED_PROTOCOL: &str = "UnsupportedProtocol";

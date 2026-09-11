@@ -57,11 +57,12 @@ fn assemble(
     let mut used = BTreeSet::new();
     for gw in gateways {
         let generation = gw.generation;
+        let gateway_ok = gw.rejected.is_none();
         let mut listener_status = Vec::new();
         let mut any_programmed = false;
         let mut all_programmed = true;
         for mut l in gw.listeners {
-            let programmed = l.programmed();
+            let programmed = gateway_ok && l.programmed();
             if programmed {
                 any_programmed = true;
             } else {
@@ -96,30 +97,35 @@ fn assemble(
                 table: std::mem::take(&mut l.table),
             });
         }
-        let accepted = if all_programmed {
-            Condition::new(
+        let accepted = match &gw.rejected {
+            Some((reason, message)) => Condition::new(
+                types::ACCEPTED,
+                ConditionStatus::False,
+                reason,
+                message.clone(),
+                generation,
+            ),
+            None if all_programmed => Condition::new(
                 types::ACCEPTED,
                 ConditionStatus::True,
                 reasons::ACCEPTED,
                 "Gateway is accepted",
                 generation,
-            )
-        } else if any_programmed {
-            Condition::new(
+            ),
+            None if any_programmed => Condition::new(
                 types::ACCEPTED,
                 ConditionStatus::True,
                 reasons::LISTENERS_NOT_VALID,
                 "Some listeners are not valid",
                 generation,
-            )
-        } else {
-            Condition::new(
+            ),
+            None => Condition::new(
                 types::ACCEPTED,
                 ConditionStatus::False,
                 reasons::LISTENERS_NOT_VALID,
                 "No listener is valid",
                 generation,
-            )
+            ),
         };
         let programmed = if any_programmed {
             Condition::new(

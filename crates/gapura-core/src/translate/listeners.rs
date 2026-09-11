@@ -20,6 +20,8 @@ pub(crate) struct GatewayBuild {
     pub r#ref: ObjectRef,
     pub generation: Option<i64>,
     pub listeners: Vec<ListenerBuild>,
+    /// Set when the Gateway itself is refused, whatever its listeners say.
+    pub rejected: Option<Rejection>,
 }
 
 pub(crate) struct ListenerBuild {
@@ -155,10 +157,27 @@ pub(crate) fn build(
             .map(|l| build_listener(l, r, snap, settings))
             .collect();
         detect_conflicts(&mut listeners);
+        let rejected = gw
+            .spec
+            .infrastructure
+            .as_ref()
+            .and_then(|i| i.parameters_ref.as_ref())
+            .map(|r| {
+                (
+                    reasons::INVALID_PARAMETERS,
+                    format!(
+                        "spec.infrastructure.parametersRef {}/{} {} is not supported",
+                        r.group.as_deref().unwrap_or(""),
+                        r.kind,
+                        r.name
+                    ),
+                )
+            });
         out.push(GatewayBuild {
             r#ref: r.clone(),
             generation: gw.metadata.generation,
             listeners,
+            rejected,
         });
     }
     out
@@ -252,14 +271,23 @@ fn supported_kinds(allowed: Option<&AllowedRoutes>) -> (Vec<RouteGroupKind>, boo
         group: Some(GATEWAY_GROUP.to_string()),
         kind: "HTTPRoute".to_string(),
     };
+    let is_http_route = |k: &RouteGroupKind| {
+        k.kind == "HTTPRoute" && k.group.as_deref().is_none_or(|g| g == GATEWAY_GROUP)
+    };
     match allowed.map(|a| &a.kinds) {
         None => (vec![http_route], true),
         Some(kinds) if kinds.is_empty() => (vec![http_route], true),
         Some(kinds) => {
-            let ok = kinds.iter().any(|k| {
-                k.kind == "HTTPRoute" && k.group.as_deref().is_none_or(|g| g == GATEWAY_GROUP)
-            });
-            (if ok { vec![http_route] } else { Vec::new() }, ok)
+            // supportedKinds advertises the intersection; ResolvedRefs needs every requested kind
+            // to be one we serve (Gateway API: an unsupported kind is InvalidRouteKinds even when
+            // a supported one is listed next to it).
+            let advertised = if kinds.iter().any(is_http_route) {
+                vec![http_route]
+            } else {
+                Vec::new()
+            };
+            let all_known = kinds.iter().all(is_http_route);
+            (advertised, all_known)
         }
     }
 }
