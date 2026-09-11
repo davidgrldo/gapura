@@ -83,8 +83,10 @@ jobs:
         run: |
           set -euo pipefail
           tags=$(jq -r '.tags | map("--tag " + .) | join(" ")' <<<'${{ steps.meta.outputs.json }}')
+          # An unmatched glob would pass through literally and printf would still emit "$IMAGE@",
+          # so check the directory itself before trusting the refs.
+          test -n "$(ls -A /tmp/digests 2>/dev/null)"
           refs=$(for f in /tmp/digests/*; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
-          test -n "$refs"
           # shellcheck disable=SC2086
           docker buildx imagetools create $tags $refs
           docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
