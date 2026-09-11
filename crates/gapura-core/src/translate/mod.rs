@@ -11,11 +11,21 @@ mod precedence;
 mod routes;
 mod rules;
 
+/// The per-port sort, exposed so the matcher's unit tests build their index exactly as
+/// `assemble` does. Not part of the public API.
+#[cfg(test)]
+pub(crate) fn sort_port_table_for_tests(
+    entries: &mut [crate::config::PortEntry],
+    listeners: &[crate::config::ListenerConfig],
+) {
+    precedence::sort_port_table(entries, listeners);
+}
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Cluster, Config, ListenerConfig};
+use crate::config::{Cluster, Config, ListenerConfig, MatchEntry, PortEntry};
 use crate::snapshot::{Settings, Snapshot};
 use crate::status::{reasons, types, Condition, ConditionStatus, ListenerStatus, StatusPatch};
 use listeners::GatewayBuild;
@@ -54,6 +64,7 @@ fn assemble(
     status: &mut Vec<StatusPatch>,
 ) -> Config {
     let mut listeners_cfg = Vec::new();
+    let mut tables: Vec<Vec<MatchEntry>> = Vec::new();
     let mut used = BTreeSet::new();
     for gw in gateways {
         let generation = gw.generation;
@@ -77,7 +88,6 @@ fn assemble(
             if !programmed {
                 continue;
             }
-            precedence::sort_table(&mut l.table, &l.rules);
             for rule in &l.rules {
                 for backend in &rule.backends {
                     if let Some(cluster) = &backend.cluster {
@@ -85,6 +95,7 @@ fn assemble(
                     }
                 }
             }
+            tables.push(std::mem::take(&mut l.table));
             listeners_cfg.push(ListenerConfig {
                 id: format!("{}/{}/{}", gw.r#ref.namespace, gw.r#ref.name, l.name),
                 port: l.port,
@@ -94,7 +105,6 @@ fn assemble(
                 hostname: l.hostname.clone(),
                 tls: l.tls.take(),
                 rules: std::mem::take(&mut l.rules),
-                table: std::mem::take(&mut l.table),
             });
         }
         let accepted = match &gw.rejected {
@@ -152,12 +162,31 @@ fn assemble(
             listeners: listener_status,
         });
     }
+    // One table per port over every programmed listener: the data plane matches on the port the
+    // request arrived on, not on a single listener chosen up front.
+    let mut ports: BTreeMap<u16, Vec<PortEntry>> = BTreeMap::new();
+    for (index, entries) in tables.into_iter().enumerate() {
+        let port = listeners_cfg[index].port;
+        let bucket = ports.entry(port).or_default();
+        for e in entries {
+            bucket.push(PortEntry {
+                listener: index,
+                hostname: e.hostname,
+                matcher: e.matcher,
+                rule: e.rule,
+            });
+        }
+    }
+    for entries in ports.values_mut() {
+        precedence::sort_port_table(entries, &listeners_cfg);
+    }
     let clusters = clusters
         .into_iter()
         .filter(|(key, _)| used.contains(key))
         .collect();
     Config {
         listeners: listeners_cfg,
+        ports,
         clusters,
     }
 }

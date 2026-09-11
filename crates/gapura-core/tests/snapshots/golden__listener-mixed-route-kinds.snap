@@ -36,15 +36,6 @@ config:
           timeouts:
             request_ms: ~
             backend_request_ms: ~
-      table:
-        - hostname: echo.example.com
-          matcher:
-            path:
-              Prefix: /
-            headers: []
-            query: []
-            method: ~
-          rule: 0
     - id: infra/main/https-mixed
       port: 443
       protocol: Https
@@ -54,7 +45,18 @@ config:
         cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCCQDfixture\n-----END CERTIFICATE-----\n"
         key_pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgfixture\n-----END PRIVATE KEY-----\n"
       rules: []
-      table: []
+  ports:
+    80:
+      - listener: 0
+        hostname: echo.example.com
+        matcher:
+          path:
+            Prefix: /
+          headers: []
+          query: []
+          method: ~
+        rule: 0
+    443: []
   clusters:
     "apps/echo:80":
       endpoints:

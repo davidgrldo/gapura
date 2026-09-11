@@ -396,9 +396,11 @@ fn basic_http() {
         l.rules[0].filters.request_headers.set,
         vec![("X-Gateway".to_string(), "gapura".to_string())]
     );
-    assert_eq!(l.table.len(), 1);
-    assert_eq!(l.table[0].hostname.as_deref(), Some("echo.example.com"));
-    assert_eq!(l.table[0].rule, 0);
+    let entries = &t.config.ports[&l.port];
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].listener, 0);
+    assert_eq!(entries[0].hostname.as_deref(), Some("echo.example.com"));
+    assert_eq!(entries[0].rule, 0);
     let cluster = &t.config.clusters["apps/echo:80"];
     assert_eq!(cluster.endpoints.len(), 1);
     assert_eq!(cluster.endpoints[0].address, "10.1.0.5");
@@ -474,8 +476,10 @@ fn hostname_intersection() {
         1,
         "only the intersecting route is programmed"
     );
-    assert_eq!(l.table.len(), 1);
-    assert_eq!(l.table[0].hostname.as_deref(), Some("api.example.com"));
+    let entries = &t.config.ports[&l.port];
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].listener, 0);
+    assert_eq!(entries[0].hostname.as_deref(), Some("api.example.com"));
     let (_, listeners, _) = gateway_patch(&t);
     assert_eq!(listener(listeners, "http").attached_routes, 1);
     insta::assert_yaml_snapshot!("hostname-intersection", t);
@@ -625,8 +629,12 @@ fn https_without_tls() {
 fn precedence() {
     let t = run("precedence");
     let l = &t.config.listeners[0];
-    let order: Vec<(Option<&str>, &str, usize)> = l
-        .table
+    let entries = &t.config.ports[&l.port];
+    assert!(
+        entries.iter().all(|e| e.listener == 0),
+        "this fixture has one listener, so the whole port table is its own"
+    );
+    let order: Vec<(Option<&str>, &str, usize)> = entries
         .iter()
         .map(|e| {
             (
@@ -662,7 +670,7 @@ fn duplicate_parent_refs_attach_once() {
         );
     }
     assert_eq!(t.config.listeners[0].rules.len(), 1);
-    assert_eq!(t.config.listeners[0].table.len(), 1);
+    assert_eq!(t.config.ports[&t.config.listeners[0].port].len(), 1);
     insta::assert_yaml_snapshot!("duplicate-parent-refs", t);
 }
 

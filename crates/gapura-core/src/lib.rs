@@ -16,6 +16,6 @@ pub mod status;
 pub mod translate;
 
 pub use config::Config;
-pub use matcher::RequestAttrs;
+pub use matcher::{PortMatch, RequestAttrs};
 pub use snapshot::{ObjectRef, Settings, Snapshot, SnapshotError};
 pub use translate::{translate, Translation};

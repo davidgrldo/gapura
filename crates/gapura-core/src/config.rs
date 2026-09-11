@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub listeners: Vec<ListenerConfig>,
+    /// Match table per listen port, over every programmed listener on that port, sorted once by
+    /// Gateway API precedence. The data plane does first-match over the table of the port the
+    /// request arrived on; this is what lets two Gateways share a port.
+    pub ports: BTreeMap<u16, Vec<PortEntry>>,
     /// Key: `namespace/service:port`.
     pub clusters: BTreeMap<String, Cluster>,
 }
@@ -20,8 +24,19 @@ pub struct ListenerConfig {
     pub hostname: Option<String>,
     pub tls: Option<TlsBundle>,
     pub rules: Vec<RouteRule>,
-    /// Sorted by Gateway API precedence. The matcher does first-match over this table.
-    pub table: Vec<MatchEntry>,
+}
+
+/// One match of one listener inside a port-wide table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PortEntry {
+    /// Index into `Config::listeners`.
+    pub listener: usize,
+    /// `None` = any host. Already the intersection of the listener hostname and the route
+    /// hostnames, so matching this is enough: the listener hostname needs no separate check.
+    pub hostname: Option<String>,
+    pub matcher: RouteMatch,
+    /// Index into `Config::listeners[listener].rules`.
+    pub rule: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +53,8 @@ pub struct TlsBundle {
     pub key_pem: String,
 }
 
+/// Build-time entry: what `translate` collects per listener before the per-port index is built.
+/// The data plane matches on `PortEntry`, not on this.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatchEntry {
     /// `None` = any host.
@@ -187,7 +204,11 @@ mod tests {
                     }],
                     timeouts: Timeouts::default(),
                 }],
-                table: vec![MatchEntry {
+            }],
+            ports: BTreeMap::from([(
+                80u16,
+                vec![PortEntry {
+                    listener: 0,
                     hostname: Some("echo.example.com".into()),
                     matcher: RouteMatch {
                         path: PathMatch::Prefix("/api".into()),
@@ -197,7 +218,7 @@ mod tests {
                     },
                     rule: 0,
                 }],
-            }],
+            )]),
             clusters: BTreeMap::from([(
                 "apps/echo:80".to_string(),
                 Cluster {

@@ -1,11 +1,14 @@
-//! Gateway API match precedence, used to sort each listener's match table once after translation.
+//! Gateway API match precedence, used to sort each port's match table once after translation.
 //! Order: hostname specificity (exact > wildcard, more labels first) > path Exact > longer PathPrefix >
-//! has method > more header matches > more query matches > older route > namespace/name > rule index.
+//! has method > more header matches > more query matches > older route > namespace/name > rule index >
+//! listener id. The last key only decides between two Gateways that attached the same route to the
+//! same port, where nothing in the request can tell them apart; it keeps the order stable instead of
+//! leaving it to hash or iteration order.
 //! Routes without creationTimestamp sort as the oldest (empty string); real clusters always stamp it.
 
 use std::cmp::Reverse;
 
-use crate::config::{MatchEntry, PathMatch, RouteRule};
+use crate::config::{ListenerConfig, PathMatch, PortEntry, RouteMatch, RouteRule};
 use crate::hostname;
 
 type Key = (
@@ -18,35 +21,40 @@ type Key = (
     String,
     String,
     usize,
+    String,
 );
 
-fn key(entry: &MatchEntry, rule: &RouteRule) -> Key {
-    let (path_kind, path_len) = match &entry.matcher.path {
+fn key(hostname_: Option<&str>, matcher: &RouteMatch, rule: &RouteRule, listener_id: &str) -> Key {
+    let (path_kind, path_len) = match &matcher.path {
         PathMatch::Exact(p) => (1u8, p.len()),
         PathMatch::Prefix(p) => (0u8, p.len()),
     };
     (
-        Reverse(hostname::specificity(entry.hostname.as_deref())),
+        Reverse(hostname::specificity(hostname_)),
         Reverse(path_kind),
         Reverse(path_len),
-        Reverse(u8::from(entry.matcher.method.is_some())),
-        Reverse(entry.matcher.headers.len()),
-        Reverse(entry.matcher.query.len()),
+        Reverse(u8::from(matcher.method.is_some())),
+        Reverse(matcher.headers.len()),
+        Reverse(matcher.query.len()),
         rule.creation_timestamp.clone(),
         rule.route.clone(),
         rule.rule_index,
+        listener_id.to_string(),
     )
 }
 
-/// Sort a listener's table in place so the first matching entry is the winner.
-pub(crate) fn sort_table(table: &mut [MatchEntry], rules: &[RouteRule]) {
-    table.sort_by_cached_key(|e| key(e, &rules[e.rule]));
+/// Sort one port's table in place so the first matching entry is the winner.
+pub(crate) fn sort_port_table(entries: &mut [PortEntry], listeners: &[ListenerConfig]) {
+    entries.sort_by_cached_key(|e| {
+        let l = &listeners[e.listener];
+        key(e.hostname.as_deref(), &e.matcher, &l.rules[e.rule], &l.id)
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Filters, KvMatch, RouteMatch, Timeouts};
+    use crate::config::{Filters, KvMatch, Protocol, Timeouts};
 
     fn rule(
         route: &str,
@@ -90,6 +98,41 @@ mod tests {
             backends: vec![],
             timeouts: Timeouts::default(),
         }
+    }
+
+    fn m(path: &str) -> RouteMatch {
+        RouteMatch {
+            path: PathMatch::Prefix(path.into()),
+            headers: vec![],
+            query: vec![],
+            method: None,
+        }
+    }
+
+    /// The tables these tests sort belong to one listener on one port, so its id never decides
+    /// anything; `the_listener_id_breaks_a_tie_between_two_gateways` covers the case where it does.
+    fn one_listener(rules: Vec<RouteRule>) -> Vec<ListenerConfig> {
+        vec![ListenerConfig {
+            id: "infra/gw/http".into(),
+            port: 80,
+            protocol: Protocol::Http,
+            hostname: None,
+            tls: None,
+            rules,
+        }]
+    }
+
+    fn entries_for(rules: &[RouteRule]) -> Vec<PortEntry> {
+        rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| PortEntry {
+                listener: 0,
+                hostname: None,
+                matcher: r.matches[0].clone(),
+                rule: i,
+            })
+            .collect()
     }
 
     #[test]
@@ -138,27 +181,22 @@ mod tests {
                 false,
             ),
         ];
-        let mut table: Vec<MatchEntry> = rules
-            .iter()
-            .enumerate()
-            .map(|(i, r)| MatchEntry {
-                hostname: None,
-                matcher: r.matches[0].clone(),
-                rule: i,
-            })
-            .collect();
-        table.push(MatchEntry {
+        let mut entries = entries_for(&rules);
+        entries.push(PortEntry {
+            listener: 0,
             hostname: Some("*.x.com".into()),
             matcher: rules[0].matches[0].clone(),
             rule: 0,
         });
-        table.push(MatchEntry {
+        entries.push(PortEntry {
+            listener: 0,
             hostname: Some("a.x.com".into()),
             matcher: rules[0].matches[0].clone(),
             rule: 0,
         });
-        sort_table(&mut table, &rules);
-        let order: Vec<String> = table
+        let listeners = one_listener(rules.clone());
+        sort_port_table(&mut entries, &listeners);
+        let order: Vec<String> = entries
             .iter()
             .map(|e| {
                 format!(
@@ -203,17 +241,60 @@ mod tests {
                 1,
             ),
         ];
-        let mut table: Vec<MatchEntry> = rules
+        let mut entries = entries_for(&rules);
+        let listeners = one_listener(rules.clone());
+        sort_port_table(&mut entries, &listeners);
+        let order: Vec<&str> = entries
             .iter()
-            .enumerate()
-            .map(|(i, r)| MatchEntry {
-                hostname: None,
-                matcher: r.matches[0].clone(),
-                rule: i,
-            })
+            .map(|e| rules[e.rule].route.as_str())
             .collect();
-        sort_table(&mut table, &rules);
-        let order: Vec<&str> = table.iter().map(|e| rules[e.rule].route.as_str()).collect();
         assert_eq!(order, vec!["z/one-query", "z/no-query"]);
+    }
+
+    #[test]
+    fn the_listener_id_breaks_a_tie_between_two_gateways() {
+        // The same route attached to two Gateways on one port: identical in every key but the
+        // listener, so the order must still be deterministic.
+        let shared = rule(
+            "apps/shared",
+            "2026-01-01T00:00:00Z",
+            PathMatch::Prefix("/".into()),
+            0,
+            false,
+        );
+        let listeners = vec![
+            ListenerConfig {
+                id: "b/gw/http".into(),
+                port: 80,
+                protocol: Protocol::Http,
+                hostname: None,
+                tls: None,
+                rules: vec![shared.clone()],
+            },
+            ListenerConfig {
+                id: "a/gw/http".into(),
+                port: 80,
+                protocol: Protocol::Http,
+                hostname: None,
+                tls: None,
+                rules: vec![shared],
+            },
+        ];
+        let mut entries = vec![
+            PortEntry {
+                listener: 0,
+                hostname: None,
+                matcher: m("/"),
+                rule: 0,
+            },
+            PortEntry {
+                listener: 1,
+                hostname: None,
+                matcher: m("/"),
+                rule: 0,
+            },
+        ];
+        sort_port_table(&mut entries, &listeners);
+        assert_eq!(entries[0].listener, 1, "a/gw/http sorts before b/gw/http");
     }
 }

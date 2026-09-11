@@ -13,7 +13,8 @@ config:
         cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCCQDfixture\n-----END CERTIFICATE-----\n"
         key_pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgfixture\n-----END PRIVATE KEY-----\n"
       rules: []
-      table: []
+  ports:
+    443: []
   clusters: {}
 status:
   - kind: GatewayClass

@@ -4,5 +4,6 @@ expression: t
 ---
 config:
   listeners: []
+  ports: {}
   clusters: {}
 status: []

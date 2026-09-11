@@ -10,7 +10,6 @@ config:
       hostname: ~
       tls: ~
       rules: []
-      table: []
     - id: infra/main/https
       port: 443
       protocol: Https
@@ -46,15 +45,18 @@ config:
           timeouts:
             request_ms: ~
             backend_request_ms: ~
-      table:
-        - hostname: ~
-          matcher:
-            path:
-              Prefix: /
-            headers: []
-            query: []
-            method: ~
-          rule: 0
+  ports:
+    80: []
+    443:
+      - listener: 1
+        hostname: ~
+        matcher:
+          path:
+            Prefix: /
+          headers: []
+          query: []
+          method: ~
+        rule: 0
   clusters:
     "apps/echo:80":
       endpoints:

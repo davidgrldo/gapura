@@ -10,7 +10,8 @@ config:
       hostname: ~
       tls: ~
       rules: []
-      table: []
+  ports:
+    80: []
   clusters: {}
 status:
   - kind: GatewayClass

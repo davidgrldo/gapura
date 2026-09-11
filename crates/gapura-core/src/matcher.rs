@@ -1,7 +1,7 @@
-//! Request matching over a translated Config: pick the listener, pick the TLS cert, find the rule.
+//! Request matching over a translated Config: match the port's table, pick the TLS cert, find the rule.
 
 use crate::config::{
-    Config, ListenerConfig, MatchEntry, PathMatch, RouteMatch, RouteRule, TlsBundle,
+    Config, ListenerConfig, PathMatch, PortEntry, RouteMatch, RouteRule, TlsBundle,
 };
 use crate::hostname;
 
@@ -23,18 +23,38 @@ pub struct RequestAttrs<'a> {
     pub query: &'a [(String, String)],
 }
 
+/// The winning entry on a port, with the listener it belongs to and the rule it points at.
+#[derive(Debug)]
+pub struct PortMatch<'a> {
+    /// Index into `Config::listeners`, for the proxy's per-request state.
+    pub listener_index: usize,
+    pub listener: &'a ListenerConfig,
+    pub entry: &'a PortEntry,
+    pub rule: &'a RouteRule,
+}
+
 impl Config {
-    /// The listener serving `port` for `host`: hostname must match (or be absent); the most specific wins.
-    pub fn select_listener(&self, port: u16, host: &str) -> Option<&ListenerConfig> {
-        self.listeners
-            .iter()
-            .filter(|l| {
-                l.port == port
-                    && l.hostname
-                        .as_deref()
-                        .is_none_or(|h| hostname::matches(h, host))
-            })
-            .max_by_key(|l| hostname::specificity(l.hostname.as_deref()))
+    /// First entry of the port's precedence-sorted table that matches this request.
+    ///
+    /// The table spans every programmed listener on the port, so a request is served by the most
+    /// specific listener hostname first and then by normal route precedence, whichever Gateway the
+    /// route came from. Two identical entries from two Gateways are ordered by listener id, which
+    /// is arbitrary but stable: no single-address data plane can tell those two requests apart.
+    pub fn match_port(&self, port: u16, req: &RequestAttrs<'_>) -> Option<PortMatch<'_>> {
+        let entry = self.ports.get(&port)?.iter().find(|e| {
+            e.hostname
+                .as_deref()
+                .is_none_or(|h| hostname::matches(h, req.host))
+                && matches(&e.matcher, req)
+        })?;
+        let listener = self.listeners.get(entry.listener)?;
+        let rule = listener.rules.get(entry.rule)?;
+        Some(PortMatch {
+            listener_index: entry.listener,
+            listener,
+            entry,
+            rule,
+        })
     }
 
     /// Certificate for a TLS handshake on `port` with the given SNI: the most specific matching listener
@@ -61,26 +81,6 @@ impl Config {
             .find(|l| l.hostname.is_none())
             .or_else(|| on_port().next())
             .and_then(|l| l.tls.as_ref())
-    }
-}
-
-impl ListenerConfig {
-    /// First entry of the precedence-sorted table that matches the request, with its rule.
-    pub fn match_entry(&self, req: &RequestAttrs<'_>) -> Option<(&MatchEntry, &RouteRule)> {
-        self.table
-            .iter()
-            .find(|e| {
-                e.hostname
-                    .as_deref()
-                    .is_none_or(|h| hostname::matches(h, req.host))
-                    && matches(&e.matcher, req)
-            })
-            .map(|e| (e, &self.rules[e.rule]))
-    }
-
-    /// The winning rule for the request, if any.
-    pub fn match_request(&self, req: &RequestAttrs<'_>) -> Option<&RouteRule> {
-        self.match_entry(req).map(|(_, rule)| rule)
     }
 }
 
@@ -115,26 +115,31 @@ fn matches(m: &RouteMatch, req: &RequestAttrs<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
-    use crate::config::{Filters, KvMatch, MatchEntry, Protocol, Timeouts};
+    use crate::config::{
+        Cluster, Filters, KvMatch, ListenerConfig, PortEntry, Protocol, RouteRule, Timeouts,
+        WeightedBackend,
+    };
+    use std::collections::BTreeMap;
 
     fn rule(route: &str, m: RouteMatch) -> RouteRule {
         RouteRule {
-            route: route.into(),
+            route: route.to_string(),
             rule_index: 0,
-            creation_timestamp: String::new(),
+            creation_timestamp: "2026-01-01T00:00:00Z".to_string(),
             matches: vec![m],
             filters: Filters::default(),
-            backends: vec![],
+            backends: vec![WeightedBackend {
+                cluster: Some("apps/echo:80".to_string()),
+                weight: 1,
+            }],
             timeouts: Timeouts::default(),
         }
     }
 
-    fn m(path: PathMatch) -> RouteMatch {
+    fn m(path: &str) -> RouteMatch {
         RouteMatch {
-            path,
+            path: PathMatch::Prefix(path.to_string()),
             headers: vec![],
             query: vec![],
             method: None,
@@ -145,69 +150,76 @@ mod tests {
         id: &str,
         port: u16,
         hostname: Option<&str>,
-        tls: bool,
         rules: Vec<RouteRule>,
     ) -> ListenerConfig {
-        let table = rules
-            .iter()
-            .enumerate()
-            .map(|(i, r)| MatchEntry {
-                hostname: None,
-                matcher: r.matches[0].clone(),
-                rule: i,
-            })
-            .collect();
         ListenerConfig {
-            id: id.into(),
+            id: id.to_string(),
             port,
-            protocol: if tls { Protocol::Https } else { Protocol::Http },
-            hostname: hostname.map(String::from),
-            tls: tls.then(|| TlsBundle {
-                secret: format!("s/{id}"),
-                cert_pem: "c".into(),
-                key_pem: "k".into(),
-            }),
+            protocol: if port == 443 {
+                Protocol::Https
+            } else {
+                Protocol::Http
+            },
+            hostname: hostname.map(str::to_string),
+            tls: None,
             rules,
-            table,
         }
     }
 
-    /// Table already in precedence order (Task 10 guarantees this in real configs).
+    /// Build the per-port index the way `translate::assemble` does: one entry per (listener, rule,
+    /// match), hostname taken from the listener because these fixtures have no route hostnames.
+    fn index(listeners: &[ListenerConfig]) -> BTreeMap<u16, Vec<PortEntry>> {
+        let mut ports: BTreeMap<u16, Vec<PortEntry>> = BTreeMap::new();
+        for (i, l) in listeners.iter().enumerate() {
+            for (r, rule) in l.rules.iter().enumerate() {
+                for matcher in &rule.matches {
+                    ports.entry(l.port).or_default().push(PortEntry {
+                        listener: i,
+                        hostname: l.hostname.clone(),
+                        matcher: matcher.clone(),
+                        rule: r,
+                    });
+                }
+            }
+        }
+        for entries in ports.values_mut() {
+            crate::translate::sort_port_table_for_tests(entries, listeners);
+        }
+        ports
+    }
+
     fn config() -> Config {
-        let exact = rule("apps/a", m(PathMatch::Exact("/api/v1".into())));
-        let prefix_hdr = rule(
-            "apps/b",
-            RouteMatch {
-                path: PathMatch::Prefix("/api".into()),
-                headers: vec![KvMatch {
-                    name: "x-version".into(),
-                    value: "2".into(),
-                }],
-                query: vec![],
-                method: None,
-            },
-        );
-        let prefix = rule("apps/c", m(PathMatch::Prefix("/api".into())));
+        let listeners = vec![
+            listener("infra/gw/http", 80, None, vec![rule("apps/any", m("/"))]),
+            listener(
+                "infra/gw/wild",
+                443,
+                Some("*.example.com"),
+                vec![rule("apps/wild", m("/"))],
+            ),
+            listener(
+                "infra/gw/exact",
+                443,
+                Some("api.example.com"),
+                vec![rule("apps/exact", m("/"))],
+            ),
+            listener(
+                "infra/gw/any",
+                443,
+                None,
+                vec![rule("apps/fallback", m("/"))],
+            ),
+        ];
         Config {
-            listeners: vec![
-                listener(
-                    "infra/gw/http",
-                    80,
-                    None,
-                    false,
-                    vec![exact, prefix_hdr, prefix],
-                ),
-                listener("infra/gw/wild", 443, Some("*.example.com"), true, vec![]),
-                listener("infra/gw/exact", 443, Some("api.example.com"), true, vec![]),
-                listener("infra/gw/any", 443, None, true, vec![]),
-            ],
-            clusters: BTreeMap::new(),
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::from([("apps/echo:80".to_string(), Cluster::default())]),
         }
     }
 
     fn req<'a>(path: &'a str, headers: &'a [(String, String)]) -> RequestAttrs<'a> {
         RequestAttrs {
-            host: "echo.example.com",
+            host: "api.example.com",
             path,
             method: "GET",
             headers,
@@ -216,118 +228,197 @@ mod tests {
     }
 
     #[test]
-    fn select_listener_prefers_most_specific_hostname() {
+    fn most_specific_listener_hostname_wins_on_a_shared_port() {
         let c = config();
+        let hit = c
+            .match_port(443, &req("/", &[]))
+            .expect("a listener matches");
+        assert_eq!(hit.listener.id, "infra/gw/exact");
+        assert_eq!(hit.rule.route, "apps/exact");
+
+        let other = RequestAttrs {
+            host: "shop.example.com",
+            ..req("/", &[])
+        };
         assert_eq!(
-            c.select_listener(443, "api.example.com").unwrap().id,
-            "infra/gw/exact"
-        );
-        assert_eq!(
-            c.select_listener(443, "foo.example.com").unwrap().id,
+            c.match_port(443, &other)
+                .expect("wildcard matches")
+                .listener
+                .id,
             "infra/gw/wild"
         );
+
+        let unrelated = RequestAttrs {
+            host: "nope.test",
+            ..req("/", &[])
+        };
         assert_eq!(
-            c.select_listener(443, "other.org").unwrap().id,
+            c.match_port(443, &unrelated)
+                .expect("hostname-less listener catches the rest")
+                .listener
+                .id,
             "infra/gw/any"
         );
-        assert!(c.select_listener(8443, "api.example.com").is_none());
     }
 
     #[test]
-    fn tls_for_sni_then_fallbacks() {
-        let c = config();
-        assert_eq!(
-            c.tls_for(443, Some("api.example.com")).unwrap().secret,
-            "s/infra/gw/exact"
-        );
-        assert_eq!(
-            c.tls_for(443, Some("x.example.com")).unwrap().secret,
-            "s/infra/gw/wild"
-        );
-        assert_eq!(
-            c.tls_for(443, Some("nomatch.org")).unwrap().secret,
-            "s/infra/gw/any"
-        );
-        assert_eq!(c.tls_for(443, None).unwrap().secret, "s/infra/gw/any");
-        assert!(c.tls_for(80, None).is_none());
+    fn a_port_with_no_listener_matches_nothing() {
+        assert!(config().match_port(8080, &req("/", &[])).is_none());
     }
 
     #[test]
-    fn match_request_first_match_and_prefix_boundaries() {
-        let c = config();
-        let l = c.select_listener(80, "echo.example.com").unwrap();
-        assert_eq!(
-            l.match_request(&req("/api/v1", &[])).unwrap().route,
-            "apps/a"
+    fn routes_of_every_listener_on_the_port_are_reachable() {
+        // Two Gateways, neither with a hostname, distinct paths: both must be served. This is the
+        // case `select_listener` used to lose, and the reason this index exists.
+        let listeners = vec![
+            listener("a/gw/http", 80, None, vec![rule("apps/first", m("/first"))]),
+            listener(
+                "b/gw/http",
+                80,
+                None,
+                vec![rule("apps/second", m("/second"))],
+            ),
+        ];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let first = c.match_port(
+            80,
+            &RequestAttrs {
+                host: "any.test",
+                path: "/first",
+                method: "GET",
+                headers: &[],
+                query: &[],
+            },
         );
-        let hdr = [("X-Version".to_string(), "2".to_string())];
-        assert_eq!(
-            l.match_request(&req("/api/v2", &hdr)).unwrap().route,
-            "apps/b"
+        assert_eq!(first.expect("first is reachable").rule.route, "apps/first");
+        let second = c.match_port(
+            80,
+            &RequestAttrs {
+                host: "any.test",
+                path: "/second",
+                method: "GET",
+                headers: &[],
+                query: &[],
+            },
         );
         assert_eq!(
-            l.match_request(&req("/api/v2", &[])).unwrap().route,
-            "apps/c"
+            second.expect("second is reachable").rule.route,
+            "apps/second"
         );
-        assert_eq!(l.match_request(&req("/api", &[])).unwrap().route, "apps/c");
-        assert!(l.match_request(&req("/apiv2", &[])).is_none());
-        assert!(l.match_request(&req("/", &[])).is_none());
     }
 
     #[test]
-    fn match_entry_exposes_the_winning_match() {
-        let c = config();
-        let l = c.select_listener(80, "echo.example.com").unwrap();
-        let (entry, rule) = l.match_entry(&req("/api/v2", &[])).expect("a match");
-        assert_eq!(rule.route, "apps/c");
-        assert_eq!(entry.matcher.path, PathMatch::Prefix("/api".into()));
-        assert!(l.match_entry(&req("/nope", &[])).is_none());
+    fn first_match_and_prefix_boundaries() {
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            None,
+            vec![rule("apps/api", m("/api")), rule("apps/root", m("/"))],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let at = |p: &str| {
+            c.match_port(
+                80,
+                &RequestAttrs {
+                    host: "any.test",
+                    path: p,
+                    method: "GET",
+                    headers: &[],
+                    query: &[],
+                },
+            )
+            .map(|h| h.rule.route.clone())
+        };
+        assert_eq!(at("/api").as_deref(), Some("apps/api"));
+        assert_eq!(at("/api/x").as_deref(), Some("apps/api"));
+        assert_eq!(
+            at("/apix").as_deref(),
+            Some("apps/root"),
+            "a prefix only matches on / boundaries"
+        );
+        assert_eq!(at("/other").as_deref(), Some("apps/root"));
     }
 
     #[test]
     fn method_and_query_matching() {
-        let r = RouteMatch {
-            path: PathMatch::Prefix("/".into()),
-            headers: vec![],
-            query: vec![KvMatch {
-                name: "v".into(),
-                value: "1".into(),
-            }],
-            method: Some("POST".into()),
+        let mut with_method = m("/");
+        with_method.method = Some("POST".to_string());
+        with_method.query = vec![KvMatch {
+            name: "v".into(),
+            value: "2".into(),
+        }];
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            None,
+            vec![rule("apps/post", with_method), rule("apps/any", m("/"))],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
         };
-        let q = [
-            ("v".to_string(), "1".to_string()),
-            ("v".to_string(), "2".to_string()),
-        ];
-        let ok = RequestAttrs {
-            host: "h",
-            path: "/x",
+        let post = RequestAttrs {
+            host: "any.test",
+            path: "/",
             method: "post",
             headers: &[],
-            query: &q,
+            query: &[("v".to_string(), "2".to_string())],
         };
-        assert!(matches(&r, &ok));
-        assert!(!matches(
-            &r,
-            &RequestAttrs {
-                method: "GET",
-                ..ok.clone()
-            }
-        ));
-        let q2 = [
-            ("v".to_string(), "2".to_string()),
-            ("v".to_string(), "1".to_string()),
-        ];
-        assert!(
-            !matches(
-                &r,
-                &RequestAttrs {
-                    query: &q2,
-                    ..ok.clone()
-                }
-            ),
-            "only the first occurrence of a query name counts"
+        assert_eq!(
+            c.match_port(80, &post).unwrap().rule.route,
+            "apps/post",
+            "method compares case-insensitively"
         );
+        let get = RequestAttrs {
+            method: "GET",
+            ..post.clone()
+        };
+        assert_eq!(c.match_port(80, &get).unwrap().rule.route, "apps/any");
+    }
+
+    #[test]
+    fn tls_for_sni_then_fallbacks() {
+        // Unchanged behaviour, kept because the SNI resolver depends on it.
+        let mut listeners = vec![
+            listener("infra/gw/wild", 443, Some("*.example.com"), vec![]),
+            listener("infra/gw/exact", 443, Some("api.example.com"), vec![]),
+            listener("infra/gw/any", 443, None, vec![]),
+        ];
+        for (i, l) in listeners.iter_mut().enumerate() {
+            l.tls = Some(crate::config::TlsBundle {
+                secret: format!("infra/secret-{i}"),
+                cert_pem: "CERT".into(),
+                key_pem: "KEY".into(),
+            });
+        }
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        assert_eq!(
+            c.tls_for(443, Some("api.example.com")).unwrap().secret,
+            "infra/secret-1"
+        );
+        assert_eq!(
+            c.tls_for(443, Some("shop.example.com")).unwrap().secret,
+            "infra/secret-0"
+        );
+        assert_eq!(
+            c.tls_for(443, Some("nope.test")).unwrap().secret,
+            "infra/secret-2"
+        );
+        assert_eq!(c.tls_for(443, None).unwrap().secret, "infra/secret-2");
+        assert!(c.tls_for(80, None).is_none());
     }
 
     proptest::proptest! {
@@ -335,9 +426,7 @@ mod tests {
         fn matching_never_panics(host in "[a-z0-9.*-]{0,24}", path in "[a-zA-Z0-9/._%-]{0,40}", method in "[A-Z]{0,7}") {
             let c = config();
             for port in [80u16, 443] {
-                if let Some(l) = c.select_listener(port, &host) {
-                    let _ = l.match_request(&RequestAttrs { host: &host, path: &path, method: &method, headers: &[], query: &[] });
-                }
+                let _ = c.match_port(port, &RequestAttrs { host: &host, path: &path, method: &method, headers: &[], query: &[] });
                 let _ = c.tls_for(port, Some(&host));
             }
         }
@@ -351,9 +440,7 @@ mod tests {
         ) {
             let c = config();
             for port in [80u16, 443] {
-                if let Some(l) = c.select_listener(port, &host) {
-                    let _ = l.match_request(&RequestAttrs { host: &host, path: &path, method: "GET", headers: &headers, query: &query });
-                }
+                let _ = c.match_port(port, &RequestAttrs { host: &host, path: &path, method: "GET", headers: &headers, query: &query });
             }
         }
     }
