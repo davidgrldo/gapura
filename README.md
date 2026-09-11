@@ -12,39 +12,129 @@ Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`-
 
 ## Quickstart
 
+You need a cluster (Kubernetes 1.29 or newer), `kubectl`, and Helm 3.8 or newer. Steps 1 to 4 are
+meant to be pasted in order and end with a request that goes through the gateway to a backend.
+
+> **Step 2 does not work yet.** Nothing has been published to `ghcr.io/davidgrldo`, so
+> `helm install ... oci://ghcr.io/...` fails until the `v0.1.0` tag is pushed; the `home` and
+> `sources` URLs in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same
+> repository and are equally unpublished. Until the tag exists, install from a checkout instead:
+> `./hack/kind-deploy.sh` does all of this on a local kind cluster, and against any other cluster
+> build the image, push it somewhere your nodes can read, and replace step 2 with
+> `helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set
+> image.repository=<your-registry>/gapura --set image.tag=0.1.0`, adding the no-LoadBalancer flags
+> step 2 lists if your cluster needs them. Steps 1, 3 and 4 are unchanged.
+
+No cluster? kind will do. It has no LoadBalancer, so give the node a host port that reaches the
+NodePort step 2 will ask for:
+
+```bash
+kind create cluster --config - <<'EOF'
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings: [{ containerPort: 30080, hostPort: 80, protocol: TCP }]
+EOF
+```
+
+**1. Gateway API CRDs** (standard channel, v1.6.2):
+
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml
-helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --namespace gapura-system --create-namespace
+kubectl wait --for=condition=Established --timeout=60s \
+  crd/gatewayclasses.gateway.networking.k8s.io \
+  crd/gateways.gateway.networking.k8s.io \
+  crd/httproutes.gateway.networking.k8s.io
 ```
 
-The `oci://ghcr.io/davidgrldo/charts/gapura` reference above, and the `home` and `sources` URLs in
-[charts/gapura/Chart.yaml](charts/gapura/Chart.yaml), are placeholders for a public repository that
-does not exist yet: nothing has been pushed to GHCR, so that install command and those links do not
-work. Until the first release, build the image yourself and install from the checkout. `./hack/kind-deploy.sh`
-does all of it for a local kind cluster; against any other cluster, build and push the image to a
-registry your nodes can read, then:
+**2. Gapura:**
 
 ```bash
-helm install gapura ./charts/gapura --namespace gapura-system --create-namespace \
-  --set image.repository=<your-registry>/gapura --set image.tag=0.1.0
+helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
+  --namespace gapura-system --create-namespace --wait
 ```
 
-Without those two values the chart points at the placeholder registry and the pods sit in
-`ImagePullBackOff`.
+The chart's Service is a `LoadBalancer`, and its address is what lands in Gateway status. On a
+cluster without a LoadBalancer -- kind, or minikube without `minikube tunnel` -- publish a fixed
+address and a NodePort instead:
 
-Then point a Gateway at the `gapura` class:
+```bash
+helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
+  --namespace gapura-system --create-namespace --wait \
+  --set service.type=NodePort --set service.nodePorts.http=30080 \
+  --set publishService=false --set 'publishAddresses={127.0.0.1}'
+```
+
+**3. A Gateway, a route, and something to route to.** The echo backend is the one
+[deploy/kind/fixture.yaml](deploy/kind/fixture.yaml) uses:
 
 ```bash
 kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata: { name: gapura-demo }
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
-metadata: { name: main }
+metadata: { name: main, namespace: gapura-demo }
 spec:
   gatewayClassName: gapura
-  listeners: [{ name: http, port: 80, protocol: HTTP }]
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+    allowedRoutes: { namespaces: { from: Same } }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: echo, namespace: gapura-demo }
+spec:
+  parentRefs: [{ name: main }]
+  hostnames: [echo.example]
+  rules:
+  - backendRefs: [{ name: echo, port: 80 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo, namespace: gapura-demo }
+spec:
+  selector: { app: echo }
+  ports: [{ name: http, port: 80, targetPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: echo, namespace: gapura-demo }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: echo } }
+  template:
+    metadata: { labels: { app: echo } }
+    spec:
+      containers:
+      - name: echo
+        image: registry.k8s.io/e2e-test-images/agnhost:2.53
+        args: [netexec, --http-port=8080]
+        ports: [{ containerPort: 8080, name: http }]
 EOF
-kubectl get gateway main -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}{"\n"}'
+kubectl -n gapura-demo rollout status deploy/echo --timeout=120s
+kubectl -n gapura-demo wait --for=condition=Programmed --timeout=120s gateway/main
 ```
+
+The listener is on port 80 because that is the port the container binds (`ports.http` in the
+chart's values). A listener on any other port is rejected with `Accepted=False`, reason
+`PortUnavailable`.
+
+**4. One request through it:**
+
+```bash
+GW=$(kubectl -n gapura-demo get gateway main -o jsonpath='{.status.addresses[0].value}')
+curl -sS -H 'Host: echo.example' "http://${GW}/echo?msg=it-works"
+```
+
+That prints `it-works`: the request reached Gapura on the address in Gateway status, matched the
+HTTPRoute by its `Host` header, and came back from the echo pod. Tear the demo down with
+`kubectl delete ns gapura-demo`.
 
 Chart values, RBAC, and the admin endpoints are documented in [charts/gapura/values.yaml](charts/gapura/values.yaml).
 The Grafana dashboard is [deploy/grafana/gapura-overview.json](deploy/grafana/gapura-overview.json); `--set metrics.dashboard.enabled=true` ships it as a ConfigMap for the Grafana sidecar.
