@@ -1,0 +1,142 @@
+---
+# Source: gapura/templates/service-admin.yaml
+# Admin port on its own ClusterIP Service: /metrics and /debug/config must never be reachable
+# from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gapura-admin
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.1.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+    # Own label instead of overriding app.kubernetes.io/component, which gapura.labels already sets.
+    gapura.dev/admin: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+  ports:
+  - name: admin
+    port: 9090
+    targetPort: admin
+    protocol: TCP
+---
+# Source: gapura/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gapura
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.1.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+spec:
+  type: ClusterIP
+  ipFamilyPolicy: SingleStack
+  selector:
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    protocol: TCP
+  - name: https
+    port: 8443
+    targetPort: https
+    protocol: TCP
+---
+# Source: gapura/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gapura
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.1.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gapura
+      app.kubernetes.io/instance: gapura
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gapura
+        app.kubernetes.io/instance: gapura
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: preexisting
+      terminationGracePeriodSeconds: 75
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: gapura
+        image: ghcr.io/gapura-dev/gapura:0.1.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - --kubernetes
+        - --listen-http=0.0.0.0:8080
+        - --listen-https=0.0.0.0:8443
+        - --admin=0.0.0.0:9090
+        - --controller-name=gapura.dev/controller
+        - --log-level=info
+        - --lease-name=gapura-leader
+        env:
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: POD_NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        ports:
+        - { name: http, containerPort: 8080, protocol: TCP }
+        - { name: https, containerPort: 8443, protocol: TCP }
+        - { name: admin, containerPort: 9090, protocol: TCP }
+        readinessProbe:
+          httpGet: { path: /readyz, port: admin }
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: { path: /healthz, port: admin }
+          periodSeconds: 10
+          failureThreshold: 3
+        startupProbe:
+          httpGet: { path: /readyz, port: admin }
+          periodSeconds: 2
+          failureThreshold: 60
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi

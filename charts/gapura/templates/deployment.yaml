@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gapura.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "gapura.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gapura.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "gapura.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+        {{- if eq .Values.privilegedPorts "sysctl" }}
+        sysctls:
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+        {{- end }}
+      containers:
+      - name: gapura
+        image: {{ include "gapura.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        - --kubernetes
+        - --listen-http=0.0.0.0:{{ .Values.ports.http }}
+        - --listen-https=0.0.0.0:{{ .Values.ports.https }}
+        - --admin=0.0.0.0:{{ .Values.ports.admin }}
+        - --controller-name={{ .Values.controllerName }}
+        - --log-level={{ .Values.logLevel }}
+        - --lease-name={{ include "gapura.fullname" . }}-leader
+        {{- if gt (int .Values.threads) 0 }}
+        - --threads={{ .Values.threads }}
+        {{- end }}
+        {{- if .Values.publishService }}
+        - --publish-service=$(POD_NAMESPACE)/{{ include "gapura.fullname" . }}
+        {{- end }}
+        {{- range .Values.publishAddresses }}
+        - --publish-address={{ . }}
+        {{- end }}
+        {{- if .Values.readOnly }}
+        - --no-status
+        {{- end }}
+        {{- with .Values.extraArgs }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        env:
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: POD_NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        {{- with .Values.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        ports:
+        - { name: http, containerPort: {{ .Values.ports.http }}, protocol: TCP }
+        - { name: https, containerPort: {{ .Values.ports.https }}, protocol: TCP }
+        - { name: admin, containerPort: {{ .Values.ports.admin }}, protocol: TCP }
+        readinessProbe:
+          httpGet: { path: /readyz, port: admin }
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: { path: /healthz, port: admin }
+          periodSeconds: 10
+          failureThreshold: 3
+        startupProbe:
+          httpGet: { path: /readyz, port: admin }
+          periodSeconds: 2
+          failureThreshold: 60
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            {{- if eq .Values.privilegedPorts "capability" }}
+            add: ["NET_BIND_SERVICE"]
+            {{- end }}
+        {{- with .Values.resources }}
+        resources: {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: {{- toYaml . | nindent 8 }}
+      {{- end }}

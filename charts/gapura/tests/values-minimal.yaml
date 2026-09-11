@@ -1,0 +1,20 @@
+# Every optional piece off, ports above 1023, no privileges at all.
+replicaCount: 1
+rbac:
+  create: false
+serviceAccount:
+  create: false
+  name: preexisting
+gatewayClass:
+  create: false
+service:
+  type: ClusterIP
+ports:
+  http: 8080
+  https: 8443
+  admin: 9090
+privilegedPorts: none
+publishService: false
+podDisruptionBudget:
+  enabled: false
+resources: {}

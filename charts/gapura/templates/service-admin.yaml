@@ -1,0 +1,19 @@
+# Admin port on its own ClusterIP Service: /metrics and /debug/config must never be reachable
+# from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gapura.fullname" . }}-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    # Own label instead of overriding app.kubernetes.io/component, which gapura.labels already sets.
+    gapura.dev/admin: "true"
+spec:
+  type: ClusterIP
+  selector: {{- include "gapura.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: admin
+    port: {{ .Values.ports.admin }}
+    targetPort: admin
+    protocol: TCP
