@@ -256,64 +256,90 @@ ports: [{{ name: http, port: {up_port} }}]
 
 async fn setup() -> (Gateway, reqwest::Client) {
     let (dead, upstream) = spawn_dead_and_upstream().await;
-    let http = free_port();
-    let gw = start_gateway(config(http, upstream, dead), http).await;
+    let gw = start_gateway(|http| config(http, upstream, dead)).await;
     let c = client(&gw);
     (gw, c)
 }
 
-/// Start the binary with HTTP bound on `http`, the port the config was rendered with.
-async fn start_gateway(yaml: String, http: u16) -> Gateway {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
-    let admin = free_port();
-    let https = free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gapura"))
-        .args([
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-            "--listen-http",
-            &format!("127.0.0.1:{http}"),
-            "--listen-https",
-            &format!("127.0.0.1:{https}"),
-            "--admin",
-            &format!("127.0.0.1:{admin}"),
-            "--log-level",
-            "warn",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    // Access logs go to stdout. Keep a thread draining the pipe: left unread it fills, and the
-    // gateway then blocks in `logging` for as long as the test runs. The thread ends on EOF,
-    // which Drop causes by killing the child.
-    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let sink = Arc::clone(&logs);
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            sink.lock().unwrap().push(line);
-        }
-    });
-    let gw = Gateway {
-        child,
-        http,
-        admin,
-        logs,
-        _dir: dir,
-    };
-    for _ in 0..200 {
-        if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-            // Pingora binds each service independently: /readyz only proves the admin listener
-            // and the loaded config, so also wait for the data-plane port to accept connections.
-            if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
-                return gw;
+/// Start the binary on ports chosen here, rendering the config once the http port is known.
+///
+/// `free_port` drops its listener before the child binds, so another test binary running in
+/// parallel can take the same ephemeral port in between. The gateway refuses to start on an
+/// address it cannot bind, so that race shows up as an immediate clean exit; retrying with fresh
+/// ports is the fix. A child that starts but never becomes ready is a real failure, not a race,
+/// and fails the test with whatever it managed to log.
+async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
+    for attempt in 1..=5u32 {
+        let (http, admin, https) = (free_port(), free_port(), free_port());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.yaml"), render(http)).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+            .args([
+                "--config-dir",
+                dir.path().to_str().unwrap(),
+                "--listen-http",
+                &format!("127.0.0.1:{http}"),
+                "--listen-https",
+                &format!("127.0.0.1:{https}"),
+                "--admin",
+                &format!("127.0.0.1:{admin}"),
+                "--log-level",
+                "warn",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        // Access logs go to stdout. Keep a thread draining the pipe: left unread it fills, and the
+        // gateway then blocks in `logging` for as long as the test runs. The thread ends on EOF,
+        // which Drop causes by killing the child.
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let sink = Arc::clone(&logs);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                sink.lock().unwrap().push(line);
             }
+        });
+        let mut gw = Gateway {
+            child,
+            http,
+            admin,
+            logs,
+            _dir: dir,
+        };
+        let mut exited = false;
+        let mut ready = false;
+        for _ in 0..200 {
+            if matches!(gw.child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
+                // Pingora binds each service independently: /readyz only proves the admin listener
+                // and the loaded config, so also wait for the data-plane port to accept connections.
+                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                    ready = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if ready {
+            return gw;
+        }
+        if !exited {
+            let captured = gw.logs.lock().unwrap().join("\n");
+            panic!(
+                "gateway started on http={http} admin={admin} but never became ready; \
+                 its stdout was:\n{captured}"
+            );
+        }
+        eprintln!(
+            "gateway exited before becoming ready on attempt {attempt}, retrying on new ports"
+        );
     }
-    panic!("gateway did not become ready");
+    panic!("gateway lost the port race five times running");
 }
 
 #[tokio::test(flavor = "multi_thread")]
