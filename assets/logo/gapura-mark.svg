@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="gapura">
+  <title>gapura</title>
+  <mask id="gate"><rect width="64" height="64" fill="#fff"/><path d="M17 46V32h5V22h6v24Z" fill="#000"/><path d="M47 46V32h-5V22h-6v24Z" fill="#000"/></mask>
+  <path mask="url(#gate)" fill="#C2410C" d="M32 3 58 18v28L32 61 6 46V18Z"/>
+</svg>
