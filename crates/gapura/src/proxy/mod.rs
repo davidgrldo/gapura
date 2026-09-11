@@ -468,9 +468,11 @@ impl ProxyHttp for GapuraProxy {
 
     async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
         let upstream = matches!(e.esource(), ErrorSource::Upstream);
-        // Mark it here, not next to the error response below: a downstream failure yields code 0
-        // and an abort mid-body has already written a response, so both skip that branch. This is
-        // the only spot every failing path passes through.
+        // Mark it above the status mapping so that every path through this function reaches it: a
+        // downstream failure yields code 0 and an abort mid-body has already written a response,
+        // so neither reaches the error-response branch below. What the flag means then rests on
+        // the `ErrorSource::Downstream => 0` arm a few lines down -- code 0 is what keeps an abort
+        // from being answered and logged as an error of ours.
         if matches!(e.esource(), ErrorSource::Downstream) {
             ctx.client_abort = true;
         }

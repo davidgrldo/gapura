@@ -1,13 +1,16 @@
 //! End-to-end: the real `gapura` binary against a generated config dir and a mock upstream.
 
+use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::Request;
 use axum::routing::any;
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use tokio::io::AsyncWriteExt;
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -67,7 +70,32 @@ struct Gateway {
     child: Child,
     http: u16,
     admin: u16,
+    /// Access-log lines read off the gateway's stdout, in order.
+    logs: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
+}
+
+impl Gateway {
+    /// The access log line for `request_id`, parsed. `logging` runs after the client already has
+    /// its response, so the line can still be in flight when the request returns: wait for it.
+    async fn access_log(&self, request_id: &str) -> Value {
+        for _ in 0..200 {
+            if let Some(line) = self.logged(request_id) {
+                return line;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("no access log line for request id {request_id}");
+    }
+
+    fn logged(&self, request_id: &str) -> Option<Value> {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["request_id"] == request_id)
+    }
 }
 
 impl Drop for Gateway {
@@ -240,7 +268,7 @@ async fn start_gateway(yaml: String, http: u16) -> Gateway {
     std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
     let admin = free_port();
     let https = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gapura"))
         .args([
             "--config-dir",
             dir.path().to_str().unwrap(),
@@ -253,14 +281,26 @@ async fn start_gateway(yaml: String, http: u16) -> Gateway {
             "--log-level",
             "warn",
         ])
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
+    // Access logs go to stdout. Keep a thread draining the pipe: left unread it fills, and the
+    // gateway then blocks in `logging` for as long as the test runs. The thread ends on EOF,
+    // which Drop causes by killing the child.
+    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let sink = Arc::clone(&logs);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            sink.lock().unwrap().push(line);
+        }
+    });
     let gw = Gateway {
         child,
         http,
         admin,
+        logs,
         _dir: dir,
     };
     for _ in 0..200 {
@@ -489,4 +529,59 @@ async fn a_second_gateway_on_the_same_port_is_reachable() {
     let first = c.get(url(&gw, "echo.test", "/api")).send().await.unwrap();
     assert_eq!(first.status(), 200);
     assert_eq!(first.headers()["x-resp"], "yes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn access_log_of_a_proxied_request_times_the_upstream_leg() {
+    let (gw, c) = setup().await;
+    let r = c
+        .get(url(&gw, "echo.test", "/api/logged"))
+        .header("X-Request-Id", "log-proxied")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let line = gw.access_log("log-proxied").await;
+    assert_eq!(line["status"], 200, "{line}");
+    assert_eq!(line["route"], "apps/echo", "{line}");
+    let upstream_ms = line["upstream_duration_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a proxied request records the upstream leg: {line}"));
+    assert!(
+        upstream_ms <= line["duration_ms"].as_u64().unwrap(),
+        "the upstream leg is part of the request, not longer than it: {line}"
+    );
+    assert_eq!(line["client_abort"], false, "{line}");
+}
+
+/// A client that goes away mid-request: the header promises a body that never arrives and the
+/// connection is closed instead. That is a downstream failure, and the log must call it an abort
+/// rather than a gateway error.
+#[tokio::test(flavor = "multi_thread")]
+async fn access_log_records_a_client_that_went_away() {
+    let (gw, _c) = setup().await;
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+        .await
+        .unwrap();
+    sock.write_all(
+        concat!(
+            "POST /api/abort HTTP/1.1\r\n",
+            "Host: echo.test\r\n",
+            "X-Request-Id: log-abort\r\n",
+            "Content-Length: 32\r\n",
+            "\r\n",
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    // Half-close: the request body can never arrive now, so the gateway's read of it fails.
+    sock.shutdown().await.unwrap();
+    let line = gw.access_log("log-abort").await;
+    assert_eq!(line["client_abort"], true, "{line}");
+    assert_eq!(
+        line["status"], 0,
+        "an abort is not answered, so there is no status to log: {line}"
+    );
+    drop(sock);
 }

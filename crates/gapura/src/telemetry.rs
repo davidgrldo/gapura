@@ -183,13 +183,16 @@ pub struct AccessLog<'a> {
     pub status: u16,
     pub bytes: usize,
     pub duration_ms: u64,
-    /// Milliseconds from the moment an upstream peer was picked to the end of the request, for
-    /// requests that reached an upstream at all. It therefore covers connecting, sending the
-    /// request, waiting, and streaming the response back -- it is not the upstream server's own
-    /// processing time. A retry restarts the clock, so on a retried request this covers the
-    /// attempt that finished rather than every attempt.
+    /// Milliseconds from the moment an upstream peer was picked to the end of the request. The
+    /// clock starts at peer selection, before the connector runs, so a request that never got a
+    /// connection still carries a duration; only requests that never picked a peer log `null`.
+    /// It therefore covers connecting, sending the request, waiting, and streaming the response
+    /// back -- it is not the upstream server's own processing time. A retry restarts the clock,
+    /// so on a retried request this covers the attempt that finished rather than every attempt.
     pub upstream_duration_ms: Option<u64>,
-    /// The client went away before the response was complete. Not an error on our side.
+    /// The request failed on the downstream side -- nearly always a client that went away
+    /// mid-request, but any failure against the client connection counts, down to an unreadable
+    /// request body. Not an error on our side.
     pub client_abort: bool,
     pub listener: &'a str,
     pub route: &'a str,
