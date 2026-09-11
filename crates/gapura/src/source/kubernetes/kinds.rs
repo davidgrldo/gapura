@@ -75,6 +75,16 @@ pub static KINDS: [Kind; 10] = [
     kind("ConfigMap", "", &["v1"], "configmaps"),
 ];
 
+/// The optional kinds the API server did not serve, given the names discovery resolved.
+/// A mandatory kind absent here is a startup failure the caller reports, never a gap the
+/// rediscovery loop should try to close later.
+pub fn missing_optional(resolved: &[&str]) -> Vec<&'static Kind> {
+    KINDS
+        .iter()
+        .filter(|k| k.optional && !resolved.contains(&k.name))
+        .collect()
+}
+
 impl Kind {
     fn api_version(&self, version: &str) -> String {
         if self.group.is_empty() {
@@ -269,7 +279,43 @@ mod tests {
         assert_eq!(
             optional,
             vec!["BackendTLSPolicy"],
-            "the rediscovery loop only has a job while some kind is optional"
+            "marking a mandatory Gateway API kind optional would turn a hard startup failure \
+             into a feature that is silently disabled"
+        );
+    }
+
+    fn resolved_without(absent: &str) -> Vec<&'static str> {
+        KINDS
+            .iter()
+            .map(|k| k.name)
+            .filter(|n| *n != absent)
+            .collect()
+    }
+
+    fn missing_names(resolved: &[&str]) -> Vec<&'static str> {
+        missing_optional(resolved).iter().map(|k| k.name).collect()
+    }
+
+    #[test]
+    fn nothing_is_missing_when_every_kind_resolved() {
+        let all: Vec<&str> = KINDS.iter().map(|k| k.name).collect();
+        assert!(missing_optional(&all).is_empty());
+    }
+
+    #[test]
+    fn an_absent_optional_kind_is_missing() {
+        let resolved = resolved_without("BackendTLSPolicy");
+        assert_eq!(missing_names(&resolved), vec!["BackendTLSPolicy"]);
+    }
+
+    #[test]
+    fn an_absent_mandatory_kind_is_not_missing() {
+        // A missing Gateway aborts startup; handing it to the rediscovery loop would instead
+        // leave the source running without it.
+        let resolved = resolved_without("Gateway");
+        assert!(
+            missing_names(&resolved).is_empty(),
+            "only optional kinds are rechecked"
         );
     }
 }

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use gapura_core::status::StatusPatch;
 use gapura_core::{ObjectRef, Settings};
-use kube::api::{Api, ApiResource, DynamicObject};
+use kube::api::{Api, ApiResource, DynamicObject, ListParams};
 use kube::runtime::{watcher, WatchStreamExt};
 use kube::Client;
 use pingora::server::ShutdownWatch;
@@ -34,6 +34,8 @@ use crate::telemetry::METRICS;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 const RETRY: Duration = Duration::from_secs(10);
+/// How often an absent optional kind is looked for again.
+const RECHECK: Duration = Duration::from_secs(60);
 
 pub struct KubeSource {
     pub settings: Settings,
@@ -42,6 +44,14 @@ pub struct KubeSource {
     pub leader: LeaderOpts,
     /// Skip status writes and the Lease entirely (`--no-status`).
     pub read_only: bool,
+}
+
+/// Why `run` returned without failing. Both are expected; neither is an error.
+enum Stopped {
+    /// The process is shutting down, so nothing restarts.
+    Shutdown,
+    /// An optional kind is served and listable now: rebuild the source to watch it.
+    KindAppeared(&'static str),
 }
 
 #[async_trait]
@@ -53,7 +63,20 @@ impl BackgroundService for KubeSource {
                 _ = shutdown.changed() => return,
             };
             match outcome {
-                Ok(()) => return,
+                Ok(Stopped::Shutdown) => return,
+                // A planned restart: error level is reserved for bugs and the unexpected
+                // (spec 5.4), and installing a CRD must not page anyone.
+                Ok(Stopped::KindAppeared(kind)) => {
+                    tracing::info!(
+                        kind,
+                        restart_secs = RETRY.as_secs(),
+                        "optional kind is served now, restarting the source to watch it"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RETRY) => {}
+                        _ = shutdown.changed() => return,
+                    }
+                }
                 Err(e) => {
                     tracing::error!(error = %e, retry_secs = RETRY.as_secs(), "kubernetes source failed, retrying");
                     tokio::select! {
@@ -67,7 +90,7 @@ impl BackgroundService for KubeSource {
 }
 
 impl KubeSource {
-    async fn run(&self, mut shutdown: ShutdownWatch) -> anyhow::Result<()> {
+    async fn run(&self, mut shutdown: ShutdownWatch) -> anyhow::Result<Stopped> {
         let client = Client::try_default()
             .await
             .context("connecting to the API server")?;
@@ -92,11 +115,9 @@ impl KubeSource {
             }
         }
         let watched: Vec<&str> = resolved.iter().map(|(k, _)| k.name).collect();
-        let mut aux = tokio::task::JoinSet::new();
-        let missing: Vec<&'static Kind> = KINDS
-            .iter()
-            .filter(|k| k.optional && !resolved.iter().any(|(r, _)| r.name == k.name))
-            .collect();
+        // Each task reports what it was, so an unexpected end can name itself.
+        let mut aux: tokio::task::JoinSet<&'static str> = tokio::task::JoinSet::new();
+        let missing = kinds::missing_optional(&watched);
         for kind in KINDS.iter() {
             let absent = missing.iter().any(|m| m.name == kind.name);
             METRICS
@@ -104,29 +125,57 @@ impl KubeSource {
                 .with_label_values(&[kind.name])
                 .set(i64::from(absent));
         }
+        // An optional CRD installed after we started would otherwise stay invisible until a
+        // restart. Recheck on a timer and ask `run` to rebuild everything once one appears.
+        // This is a planned restart, not a failure, so it travels on its own channel and lives
+        // in its own JoinSet: nothing joins it, and dropping the set when `run` returns aborts it.
+        let (found_tx, mut found_rx) = mpsc::channel::<&'static str>(1);
+        let mut rediscovery = tokio::task::JoinSet::new();
         if !missing.is_empty() {
-            // An optional CRD installed after we started would otherwise stay invisible until a
-            // restart. Watch for it and let the outer loop rebuild everything when it appears.
             let client = client.clone();
             let names: Vec<&'static str> = missing.iter().map(|k| k.name).collect();
-            let missing: Vec<&'static Kind> = missing.clone();
-            aux.spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(60));
+            let found_tx = found_tx.clone();
+            rediscovery.spawn(async move {
+                // No immediate first tick: discovery decided these kinds were absent a moment
+                // ago. Asking again straight away is not just redundant -- an API server whose
+                // replicas disagree about a freshly created CRD (discovery hits one that says
+                // absent, the tick one that says present) would restart us every `RETRY`
+                // instead of every `RECHECK`.
+                let mut tick =
+                    tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
                 loop {
                     tick.tick().await;
                     for kind in &missing {
-                        if matches!(kind.resolve(&client).await, Ok(Some(_))) {
-                            tracing::info!(
+                        let Ok(Some(ar)) = kind.resolve(&client).await else {
+                            continue;
+                        };
+                        // Served is not the same as usable. If listing the kind is forbidden,
+                        // its watcher retries its initial list forever, that kind never syncs,
+                        // and `synced_all` then blocks *every* Gateway and HTTPRoute change.
+                        // A bounded list proves the RBAC is in place before we restart on it.
+                        let api = Api::<DynamicObject>::all_with(client.clone(), &ar);
+                        match api.list(&ListParams::default().limit(1)).await {
+                            Ok(_) => {
+                                let _ = found_tx.send(kind.name).await;
+                                return;
+                            }
+                            Err(e) => tracing::warn!(
                                 kind = kind.name,
-                                "kind is served now, restarting the source"
-                            );
-                            return;
+                                error = %e,
+                                "kind is served but cannot be listed, not restarting; check RBAC"
+                            ),
                         }
                     }
                 }
             });
-            tracing::warn!(?names, "optional kinds absent, rechecking every 60s");
+            tracing::warn!(
+                ?names,
+                recheck_secs = RECHECK.as_secs(),
+                "optional kinds absent, rechecking"
+            );
         }
+        // Without a rediscovery task the channel closes here, which disables its select arm.
+        drop(found_tx);
 
         // 2. One watcher per kind, all feeding one channel.
         let (tx, mut rx) = mpsc::channel::<Change>(1024);
@@ -168,12 +217,14 @@ impl KubeSource {
         let (status_tx, status_rx) = watch::channel::<Vec<StatusPatch>>(Vec::new());
         if !self.read_only {
             let (leadership_tx, leadership_rx) = watch::channel(false);
-            aux.spawn(leader::run(
-                client.clone(),
-                self.leader.clone(),
-                leadership_tx,
-                shutdown.clone(),
-            ));
+            aux.spawn({
+                let (client, opts, shutdown) =
+                    (client.clone(), self.leader.clone(), shutdown.clone());
+                async move {
+                    leader::run(client, opts, leadership_tx, shutdown).await;
+                    "leader election"
+                }
+            });
             let resources: HashMap<&'static str, ApiResource> = resolved
                 .iter()
                 .filter(|(k, _)| matches!(k.name, "GatewayClass" | "Gateway" | "HTTPRoute"))
@@ -185,7 +236,13 @@ impl KubeSource {
                 self.settings.controller_name.clone(),
                 leadership_rx,
             );
-            aux.spawn(writer.run(status_rx, shutdown.clone()));
+            aux.spawn({
+                let shutdown = shutdown.clone();
+                async move {
+                    writer.run(status_rx, shutdown).await;
+                    "status writer"
+                }
+            });
         }
 
         // 4. Reconcile: debounce, translate, swap, publish status.
@@ -194,16 +251,19 @@ impl KubeSource {
             let first = tokio::select! {
                 c = rx.recv() => c,
                 Some(ended) = tasks.join_next() => anyhow::bail!("a watcher task ended: {ended:?}"),
+                Some(kind) = found_rx.recv() => return Ok(Stopped::KindAppeared(kind)),
                 Some(ended) = aux.join_next() => {
-                    // Outside shutdown this is the rediscovery task telling us a CRD appeared.
-                    // The leader and the writer also end at shutdown, and that can win the race
+                    // The leader and the writer end at shutdown too, and that can win the race
                     // against the arm below, so a clean stop must not be reported as a failure.
                     if *shutdown.borrow() {
-                        return Ok(());
+                        return Ok(Stopped::Shutdown);
                     }
-                    anyhow::bail!("a support task ended: {ended:?}")
+                    match ended {
+                        Ok(name) => anyhow::bail!("the {name} task ended unexpectedly"),
+                        Err(e) => anyhow::bail!("a support task panicked: {e}"),
+                    }
                 }
-                _ = shutdown.changed() => return Ok(()),
+                _ = shutdown.changed() => return Ok(Stopped::Shutdown),
             };
             let Some(first) = first else {
                 anyhow::bail!("all watchers stopped")

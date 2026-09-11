@@ -332,8 +332,18 @@ impl Writer {
         };
         let result: kube::Result<bool> = async {
             let Some(live) = api.get_opt(&target.name).await? else {
+                tracing::debug!(?target, "object gone before its status was written");
                 return Ok(false);
             };
+            // Leadership can also drop between that read and the patch below, and the patch
+            // would then land on top of what the new leader already wrote. Re-checking here
+            // narrows the window from get-RTT + patch-RTT to patch-RTT. It cannot be closed:
+            // a merge patch carries no resourceVersion precondition, so there is no optimistic
+            // concurrency to reject a write from a demoted instance.
+            if !*self.leadership.borrow() {
+                tracing::debug!(?target, "leadership lost before the patch, status skipped");
+                return Ok(false);
+            }
             let live_status = live.data.get("status").cloned().unwrap_or(Value::Null);
             let body = body(p, &live_status, &self.controller_name, &now_rfc3339());
             api.patch_status(&target.name, &PatchParams::default(), &Patch::Merge(body))
@@ -349,10 +359,7 @@ impl Writer {
                     .inc();
                 true
             }
-            Ok(false) => {
-                tracing::debug!(?target, "object gone before its status was written");
-                false
-            }
+            Ok(false) => false,
             Err(e) => {
                 tracing::warn!(?target, error = %e, "status patch failed, will retry");
                 METRICS
