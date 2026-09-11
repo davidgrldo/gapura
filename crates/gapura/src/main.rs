@@ -18,6 +18,22 @@ use pingora::server::Server;
 use pingora::services::background::background_service;
 use pingora::services::listening::Service;
 
+/// The first address that cannot be bound, with the OS message.
+///
+/// Pingora binds its listeners on a service thread and `expect`s on failure, and our panic hook
+/// only counts the panic, so a process that cannot bind :80 would otherwise keep running with no
+/// listener while every probe on the admin port stays green. Checking here turns that into a clear
+/// exit. The socket is released immediately, so a competing process could still take the port in
+/// the window between this check and Pingora's own bind; that race costs a restart, not silence.
+fn first_unbindable(addrs: &[std::net::SocketAddr]) -> Option<(std::net::SocketAddr, String)> {
+    addrs
+        .iter()
+        .find_map(|addr| match std::net::TcpListener::bind(addr) {
+            Ok(_) => None,
+            Err(e) => Some((*addr, e.to_string())),
+        })
+}
+
 fn main() {
     let args = cli::Args::parse();
     if let Err(msg) = args.validate() {
@@ -28,6 +44,14 @@ fn main() {
     }
     telemetry::init_logging(&args.log_level);
     telemetry::install_panic_hook();
+
+    let mut wanted: Vec<std::net::SocketAddr> = args.listen_http.clone();
+    wanted.extend(args.listen_https.iter().copied());
+    wanted.push(args.admin);
+    if let Some((addr, error)) = first_unbindable(&wanted) {
+        tracing::error!(%addr, %error, "cannot bind a listen address, refusing to start");
+        std::process::exit(1);
+    }
 
     let store = Arc::new(store::Store::empty());
     let settings = args.settings();

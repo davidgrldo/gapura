@@ -4,6 +4,9 @@
 {{- if and (eq .Values.privilegedPorts "none") (or (lt (int .Values.ports.http) 1024) (lt (int .Values.ports.https) 1024)) }}
 {{- fail "privilegedPorts: none cannot bind a port below 1024: raise ports.http/ports.https or pick capability or sysctl" }}
 {{- end }}
+{{- if not (has .Values.livenessPort (list "http" "admin")) }}
+{{- fail (printf "livenessPort must be http or admin, got %q" .Values.livenessPort) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -92,10 +95,17 @@ spec:
           httpGet: { path: /readyz, port: admin }
           periodSeconds: 5
           failureThreshold: 3
+        {{- if eq .Values.livenessPort "http" }}
+        livenessProbe:
+          tcpSocket: { port: http }
+          periodSeconds: 10
+          failureThreshold: 3
+        {{- else }}
         livenessProbe:
           httpGet: { path: /healthz, port: admin }
           periodSeconds: 10
           failureThreshold: 3
+        {{- end }}
         # On /healthz, not /readyz: readiness waits for the first config, which never arrives when
         # the Gateway API CRDs or the RBAC are missing, and a startupProbe on it would turn that
         # into CrashLoopBackOff instead of a pod that stays NotReady with readable logs.

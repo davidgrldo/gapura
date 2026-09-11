@@ -30,6 +30,10 @@ ports:
   https: 443
   admin: 9090
 
+# Which port the liveness probe watches. `http` catches a data-plane listener that died or never
+# bound, which no probe on the admin port can see; `admin` watches only the admin thread.
+livenessPort: http
+
 service:
   type: LoadBalancer
   annotations: {}

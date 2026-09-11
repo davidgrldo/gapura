@@ -257,4 +257,18 @@ mod tests {
         let pinned = Args::try_parse_from(["gapura", "--kubernetes", "--threads", "3"]).unwrap();
         assert_eq!(pinned.worker_threads(), 3);
     }
+
+    #[test]
+    fn bindable_reports_the_address_already_in_use() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = held.local_addr().unwrap();
+        let free: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert!(
+            crate::first_unbindable(&[free]).is_none(),
+            "port 0 is always bindable"
+        );
+        let (addr, err) = crate::first_unbindable(&[taken]).expect("the held port is not bindable");
+        assert_eq!(addr, taken);
+        assert!(!err.is_empty());
+    }
 }

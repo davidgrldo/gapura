@@ -241,7 +241,7 @@ spec:
           periodSeconds: 5
           failureThreshold: 3
         livenessProbe:
-          httpGet: { path: /healthz, port: admin }
+          tcpSocket: { port: http }
           periodSeconds: 10
           failureThreshold: 3
         # On /healthz, not /readyz: readiness waits for the first config, which never arrives when
