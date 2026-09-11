@@ -6,6 +6,13 @@ metadata:
   labels: {{- include "gapura.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never take a replica down before its replacement is ready: a pod needs up to
+      # terminationGracePeriodSeconds to drain, which is a long time to run short.
+      maxUnavailable: {{ .Values.updateStrategy.maxUnavailable }}
+      maxSurge: {{ .Values.updateStrategy.maxSurge }}
   selector:
     matchLabels: {{- include "gapura.selectorLabels" . | nindent 6 }}
   template:
@@ -83,10 +90,13 @@ spec:
           httpGet: { path: /healthz, port: admin }
           periodSeconds: 10
           failureThreshold: 3
+        # On /healthz, not /readyz: readiness waits for the first config, which never arrives when
+        # the Gateway API CRDs or the RBAC are missing, and a startupProbe on it would turn that
+        # into CrashLoopBackOff instead of a pod that stays NotReady with readable logs.
         startupProbe:
-          httpGet: { path: /readyz, port: admin }
+          httpGet: { path: /healthz, port: admin }
           periodSeconds: 2
-          failureThreshold: 60
+          failureThreshold: 30
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

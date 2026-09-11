@@ -205,7 +205,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 spec:
-  replicas: 2
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -233,6 +233,9 @@ spec:
         runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+        sysctls:
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
       containers:
       - name: gapura
         image: ghcr.io/gapura-dev/gapura:0.1.0
@@ -275,7 +278,6 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
-            add: ["NET_BIND_SERVICE"]
         resources:
           limits:
             memory: 256Mi
@@ -298,3 +300,32 @@ metadata:
     app.kubernetes.io/part-of: gapura
 spec:
   controllerName: gapura.dev/controller
+---
+# Source: gapura/templates/servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gapura
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.1.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gapura
+      app.kubernetes.io/instance: gapura
+      gapura.dev/admin: "true"
+  namespaceSelector:
+    matchNames: [gapura-system]
+  endpoints:
+  - port: admin
+    path: /metrics
+    interval: 15s
+    scrapeTimeout: 10s

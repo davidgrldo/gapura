@@ -52,7 +52,8 @@ publishService: true
 
 # EnvFilter directives, e.g. "info" or "gapura=debug,pingora_core=warn".
 logLevel: info
-# Worker threads per Pingora service. 0 asks the machine, which does not see cgroup limits.
+# Worker threads per Pingora service. 0 asks the machine, which does not see cgroup limits, so on
+# a large node it means many threads inside a small memory limit. Set it to your CPU limit.
 threads: 0
 # Do not write status and never take the Lease.
 readOnly: false
@@ -72,7 +73,8 @@ serviceAccount:
   annotations: {}
 
 # With `create: false` the chart installs no ClusterRole, ClusterRoleBinding, Role or RoleBinding:
-# bind your own to the ServiceAccount above, or the controller watches nothing and writes no status.
+# bind your own to the ServiceAccount above. Without permissions the controller never loads a
+# config, so its pods stay NotReady (they do not crash: the logs keep telling you why).
 rbac:
   create: true
 
@@ -81,6 +83,10 @@ rbac:
 # sysctl: set net.ipv4.ip_unprivileged_port_start=0 (a "safe" sysctl, incompatible with hostNetwork).
 # none: neither, only for ports above 1023.
 privilegedPorts: capability
+
+updateStrategy:
+  maxUnavailable: 0
+  maxSurge: 1
 
 podDisruptionBudget:
   enabled: true

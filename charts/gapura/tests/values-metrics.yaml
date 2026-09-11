@@ -1,0 +1,10 @@
+# Exercises the template branches no other permutation reaches: the ServiceMonitor and the
+# unprivileged-port sysctl. The dashboard stays off until charts/gapura/dashboards exists.
+replicaCount: 1
+privilegedPorts: sysctl
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    labels: { release: kube-prometheus-stack }
