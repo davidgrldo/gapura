@@ -51,34 +51,35 @@ kubectl -n "$NS" rollout status deploy/gapura --timeout=3m
 if [ "${FIXTURE:-1}" = 1 ]; then
   kubectl apply -f deploy/kind/fixture.yaml
   kubectl -n gapura-e2e rollout status deploy/echo --timeout=120s
+
+  # The fixture Gateway listens on 8080, which this chart does not bind; give it one on 80.
+  kubectl -n gapura-e2e patch gateway main --type=merge -p \
+    '{"spec":{"listeners":[{"name":"http","port":80,"protocol":"HTTP","allowedRoutes":{"namespaces":{"from":"Same"}}}]}}'
+
+  echo "==> waiting for Programmed=True"
+  for _ in $(seq 60); do
+    [ "$(kubectl -n gapura-e2e get gateway main -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}')" = "True" ] && break
+    sleep 2
+  done
+  kubectl -n gapura-e2e get gateway main -o wide
+  kubectl -n gapura-e2e get httproute echo -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}{"\n"}'
+
+  echo "==> request through the gateway"
+  # Right after a rollout the NodePort can still hand a connection to the terminating pod, so give
+  # the first request a few tries before calling it a failure.
+  for attempt in $(seq 10); do
+    if body=$(curl -sS --fail-with-body -H 'Host: echo.e2e' http://127.0.0.1/ 2>&1); then
+      printf '%s\n' "$body" | head -5
+      break
+    fi
+    if [ "$attempt" = 10 ]; then
+      echo "no answer through the gateway after 10 tries: $body" >&2
+      exit 1
+    fi
+    sleep 2
+  done
 fi
 
-# The fixture Gateway listens on 8080, which this chart does not bind; give it one on 80.
-kubectl -n gapura-e2e patch gateway main --type=merge -p \
-  '{"spec":{"listeners":[{"name":"http","port":80,"protocol":"HTTP","allowedRoutes":{"namespaces":{"from":"Same"}}}]}}'
-
-echo "==> waiting for Programmed=True"
-for _ in $(seq 60); do
-  [ "$(kubectl -n gapura-e2e get gateway main -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}')" = "True" ] && break
-  sleep 2
-done
-kubectl -n gapura-e2e get gateway main -o wide
-kubectl -n gapura-e2e get httproute echo -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}{"\n"}'
-
-echo "==> request through the gateway"
-# Right after a rollout the NodePort can still hand a connection to the terminating pod, so give
-# the first request a few tries before calling it a failure.
-for attempt in $(seq 10); do
-  if body=$(curl -sS --fail-with-body -H 'Host: echo.e2e' http://127.0.0.1/ 2>&1); then
-    printf '%s\n' "$body" | head -5
-    break
-  fi
-  if [ "$attempt" = 10 ]; then
-    echo "no answer through the gateway after 10 tries: $body" >&2
-    exit 1
-  fi
-  sleep 2
-done
 echo "==> admin endpoints"
 kubectl -n "$NS" port-forward "svc/gapura-admin" 19090:9090 >/tmp/gapura-pf.log 2>&1 &
 pf=$!
