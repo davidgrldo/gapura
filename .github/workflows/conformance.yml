@@ -1,0 +1,29 @@
+name: conformance
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+permissions:
+  contents: read
+jobs:
+  gateway-http:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'conformance'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - uses: azure/setup-helm@v5
+      - uses: docker/setup-buildx-action@v4
+      - name: Run the suite
+        run: ./hack/conformance.sh
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-report
+          path: conformance/reports/**/*.yaml
+          if-no-files-found: warn
