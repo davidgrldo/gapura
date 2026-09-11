@@ -20,6 +20,11 @@ PROFILE=${PROFILE:-GATEWAY-HTTP}
 REPORT_DIR="$REPO_ROOT/conformance/reports/v1.6/${ORG}-${PROJECT}"
 REPORT="$REPORT_DIR/standard-${VERSION}-default-report.yaml"
 
+# The suite brings its own Gateways on port 80; the e2e fixture would put a second one there
+# and change what is being measured. Default it off here so a plain run reproduces the
+# recorded report, while FIXTURE=1 still works for anyone who wants both.
+export FIXTURE=${FIXTURE:-0}
+
 echo "==> cluster and chart"
 ./hack/kind-deploy.sh
 

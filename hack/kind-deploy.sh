@@ -47,7 +47,7 @@ kubectl -n "$NS" rollout restart deploy/gapura
 kubectl -n "$NS" rollout status deploy/gapura --timeout=3m
 
 # The conformance suite brings its own Gateways on port 80; a second one from this fixture would
-# compete for the same address, so conformance.sh asks for the chart only.
+# compete for the same address, so conformance.sh sets FIXTURE=0 and gets the chart only.
 if [ "${FIXTURE:-1}" = 1 ]; then
   kubectl apply -f deploy/kind/fixture.yaml
   kubectl -n gapura-e2e rollout status deploy/echo --timeout=120s
