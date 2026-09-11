@@ -1,12 +1,9 @@
-# Control-plane e2e fixture: one Gateway on 8080, one route, one echo Deployment.
+# Control-plane e2e fixture: one Gateway, one route, one echo Deployment.
+# No GatewayClass here on purpose: the chart owns one with the same name, and applying a second
+# copy makes kubectl co-own it, so deleting this fixture would take the chart's class with it.
 apiVersion: v1
 kind: Namespace
 metadata: { name: gapura-e2e }
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata: { name: gapura }
-spec: { controllerName: gapura.dev/controller }
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway

@@ -46,8 +46,12 @@ helm upgrade --install gapura charts/gapura \
 kubectl -n "$NS" rollout restart deploy/gapura
 kubectl -n "$NS" rollout status deploy/gapura --timeout=3m
 
-kubectl apply -f deploy/kind/fixture.yaml
-kubectl -n gapura-e2e rollout status deploy/echo --timeout=120s
+# The conformance suite brings its own Gateways on port 80; a second one from this fixture would
+# compete for the same address, so conformance.sh asks for the chart only.
+if [ "${FIXTURE:-1}" = 1 ]; then
+  kubectl apply -f deploy/kind/fixture.yaml
+  kubectl -n gapura-e2e rollout status deploy/echo --timeout=120s
+fi
 
 # The fixture Gateway listens on 8080, which this chart does not bind; give it one on 80.
 kubectl -n gapura-e2e patch gateway main --type=merge -p \
@@ -79,7 +83,16 @@ echo "==> admin endpoints"
 kubectl -n "$NS" port-forward "svc/gapura-admin" 19090:9090 >/tmp/gapura-pf.log 2>&1 &
 pf=$!
 trap 'kill $pf 2>/dev/null || true' EXIT
-sleep 2
+# The forward needs a moment, and just after a rollout it can attach to the pod that is going away.
+for attempt in $(seq 15); do
+  if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:19090/healthz; then break; fi
+  if [ "$attempt" = 15 ]; then
+    echo "admin port never answered; port-forward log:" >&2
+    cat /tmp/gapura-pf.log >&2
+    exit 1
+  fi
+  sleep 2
+done
 curl -sS http://127.0.0.1:19090/readyz
 curl -s http://127.0.0.1:19090/metrics | grep -E '^gapura_(requests_total|leader|config_reloads_total)' | head -5
 echo "==> done"
