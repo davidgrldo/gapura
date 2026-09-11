@@ -54,7 +54,10 @@ impl ListenerBuild {
         match &self.resolved {
             Ok(()) => true,
             Err((reason, _)) => {
-                *reason == reasons::INVALID_ROUTE_KINDS && !self.supported_kinds.is_empty()
+                *reason == reasons::INVALID_ROUTE_KINDS
+                    && !self.supported_kinds.is_empty()
+                    // An HTTPS listener without a certificate has nothing to serve.
+                    && (self.protocol != Some(Protocol::Https) || self.tls.is_some())
             }
         }
     }
@@ -244,22 +247,30 @@ fn build_listener(
     };
 
     let (supported_kinds, kinds_ok) = supported_kinds(l.allowed_routes.as_ref());
-    let mut resolved: Result<(), Rejection> = if kinds_ok {
-        Ok(())
-    } else {
+
+    // TLS is resolved whatever `allowedRoutes.kinds` says: a listener that also names a kind we do
+    // not serve still terminates TLS for the kinds we do, and a programmed HTTPS listener must
+    // always carry a certificate.
+    let mut tls = None;
+    let mut tls_error: Option<Rejection> = None;
+    if protocol == Some(Protocol::Https) && !passthrough {
+        match resolve_tls(l, gw_ref, snap) {
+            Ok(bundle) => tls = Some(bundle),
+            Err(rejection) => tls_error = Some(rejection),
+        }
+    }
+
+    // ResolvedRefs carries one reason: an unknown route kind is reported before a broken reference.
+    let resolved: Result<(), Rejection> = if !kinds_ok {
         Err((
             reasons::INVALID_ROUTE_KINDS,
             "only HTTPRoute is supported in allowedRoutes.kinds".to_string(),
         ))
+    } else if let Some(rejection) = tls_error {
+        Err(rejection)
+    } else {
+        Ok(())
     };
-
-    let mut tls = None;
-    if resolved.is_ok() && protocol == Some(Protocol::Https) && !passthrough {
-        match resolve_tls(l, gw_ref, snap) {
-            Ok(bundle) => tls = Some(bundle),
-            Err(rejection) => resolved = Err(rejection),
-        }
-    }
 
     ListenerBuild {
         name: l.name.clone(),

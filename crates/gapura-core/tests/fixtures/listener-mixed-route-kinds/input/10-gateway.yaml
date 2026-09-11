@@ -19,3 +19,13 @@ spec:
     allowedRoutes:
       namespaces: { from: All }
       kinds: [{ kind: TCPRoute }]
+  - name: https-mixed
+    port: 443
+    protocol: HTTPS
+    hostname: tls.example.com
+    tls: { certificateRefs: [{ name: wildcard }] }
+    allowedRoutes:
+      namespaces: { from: All }
+      kinds:
+      - { kind: TCPRoute }
+      - { kind: HTTPRoute }

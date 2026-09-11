@@ -45,6 +45,16 @@ config:
             query: []
             method: ~
           rule: 0
+    - id: infra/main/https-mixed
+      port: 443
+      protocol: Https
+      hostname: tls.example.com
+      tls:
+        secret: infra/wildcard
+        cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCCQDfixture\n-----END CERTIFICATE-----\n"
+        key_pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgfixture\n-----END PRIVATE KEY-----\n"
+      rules: []
+      table: []
   clusters:
     "apps/echo:80":
       endpoints:
@@ -120,6 +130,32 @@ status:
             status: "False"
             reason: Invalid
             message: Listener is not valid
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "False"
+            reason: InvalidRouteKinds
+            message: only HTTPRoute is supported in allowedRoutes.kinds
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+      - name: https-mixed
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
             observedGeneration: 1
           - type: ResolvedRefs
             status: "False"

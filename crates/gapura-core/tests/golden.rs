@@ -819,10 +819,30 @@ fn listener_mixed_route_kinds_is_not_resolved() {
         "the kinds we do serve keep working, so the listener is still programmed"
     );
     assert_eq!(mixed.attached_routes, 1);
+    let https = listener(listeners, "https-mixed");
+    assert_eq!(
+        cond(&https.conditions, "ResolvedRefs"),
+        (ConditionStatus::False, "InvalidRouteKinds")
+    );
+    assert_eq!(
+        cond(&https.conditions, "Programmed"),
+        (ConditionStatus::True, "Programmed"),
+        "an unknown route kind must not cost the listener its certificate"
+    );
+    let tls_listener = t
+        .config
+        .listeners
+        .iter()
+        .find(|l| l.id == "infra/main/https-mixed")
+        .expect("the HTTPS listener is programmed");
+    assert!(
+        tls_listener.tls.is_some(),
+        "a programmed HTTPS listener always carries a resolved certificate"
+    );
     let ids: Vec<&str> = t.config.listeners.iter().map(|l| l.id.as_str()).collect();
     assert_eq!(
         ids,
-        vec!["infra/main/mixed"],
+        vec!["infra/main/mixed", "infra/main/https-mixed"],
         "only the listener with no usable kind is dropped"
     );
     assert_eq!(
