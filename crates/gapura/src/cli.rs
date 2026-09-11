@@ -45,6 +45,11 @@ pub struct Args {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
+    /// Worker threads per Pingora service. 0 asks the machine, which does not see cgroup limits;
+    /// set it to the CPU limit in Kubernetes.
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
+
     /// Read Gateway API resources from the Kubernetes API server (in-cluster, or $KUBECONFIG).
     #[arg(long)]
     pub kubernetes: bool,
@@ -101,6 +106,16 @@ impl Args {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
             .unwrap_or_else(|| format!("gapura-{}", std::process::id()))
+    }
+
+    pub fn worker_threads(&self) -> usize {
+        if self.threads > 0 {
+            self.threads
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        }
     }
 
     /// `--publish-service namespace/name` parsed.
@@ -227,5 +242,19 @@ mod tests {
 
         let ok = Args::try_parse_from(["gapura", "--config-dir", "x"]).unwrap();
         assert_eq!(ok.validate(), Ok(()));
+    }
+
+    #[test]
+    fn threads_defaults_to_available_parallelism_and_can_be_pinned() {
+        let auto = Args::try_parse_from(["gapura", "--kubernetes"]).unwrap();
+        assert_eq!(auto.threads, 0, "0 means: ask the machine");
+        assert_eq!(
+            auto.worker_threads(),
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        );
+        let pinned = Args::try_parse_from(["gapura", "--kubernetes", "--threads", "3"]).unwrap();
+        assert_eq!(pinned.worker_threads(), 3);
     }
 }

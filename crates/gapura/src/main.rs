@@ -42,9 +42,7 @@ fn main() {
     }
 
     let conf = ServerConf {
-        threads: std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
+        threads: args.worker_threads(),
         grace_period_seconds: Some(30),
         graceful_shutdown_timeout_seconds: Some(30),
         ..ServerConf::default()
