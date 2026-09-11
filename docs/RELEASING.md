@@ -400,8 +400,8 @@ one Deployment with one published address, so nothing in the request distinguish
 steps the suite did not expect — never a test that failed. Skipping a test we know fails would be
 claiming conformance we do not have.
 
-Submission waits for an address per Gateway, which section 5.1 of the design spec defers to SP4, and
-which would take the profile to 37 of 37. The report folder already carries the `README.md` upstream
+Submission waits for an address per Gateway, which is out of scope for v0.1 by design, and which
+would take the profile to 37 of 37. The report folder already carries the `README.md` upstream
 requires, so when that day comes the submission is a folder copy rather than a rewrite.
 
 ## 7. If something goes wrong after the tag

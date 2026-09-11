@@ -37,8 +37,8 @@ REPORT="$REPORT_DIR/standard-${VERSION}-default-report.yaml"
 #   HTTPRouteMultipleGateways -- two Gateways, two routes that both match `PathPrefix /` with no
 #   hostname, and a different backend expected from each. Gapura publishes one address for every
 #   Gateway of its class, so nothing in the request tells the two apart and one of the backends is
-#   unreachable by construction. Closing it needs a listening address per Gateway, which spec
-#   section 5.1 defers to SP4. conformance/README.md has the long version.
+#   unreachable by construction. Closing it needs a listening address per Gateway, which is out of
+#   scope for v0.1. conformance/README.md has the long version.
 #
 # The comparison at the end of this script is an equality, not a subset: a test that fails and is
 # not on this list is a regression and fails the run, and a test on this list that starts passing

@@ -14,9 +14,8 @@ it is not submittable upstream yet. The remaining failure is architectural, not 
 `HTTPRouteMultipleGateways` attaches two routes that both match `PathPrefix /` with no hostname to
 two different Gateways and expects different backends from the same address. One Deployment with one
 published address cannot distinguish those two requests, whatever the precedence rules say; the
-per-port table introduced in Plan 5 orders them deterministically by the Gateway API precedence
-chain instead of leaving it to name order. Passing it needs an address per Gateway, which spec
-section 5.1 defers to SP4.
+per-port match table orders them deterministically by the Gateway API precedence chain instead of
+leaving it to name order. Passing it needs an address per Gateway, which is out of scope for v0.1.
 
 | Test | Why it fails |
 |---|---|
@@ -31,8 +30,9 @@ and both now pass. `HTTPRouteMultipleGateways` is the other problem, and merging
 distinguishable only by which address the client dialled, and Gapura publishes one address for every
 Gateway of its class. Ordering makes the outcome deterministic and documented rather than a
 name-order lottery, but one of the two backends is still unreachable by construction. Closing it
-needs a listening address per Gateway, or a Deployment per Gateway; spec section 5.1 defers
-per-Gateway isolation to SP4 and beyond, so this is a known trade-off rather than a surprise. It is
+needs a listening address per Gateway, or a Deployment per Gateway. That is deliberately out of
+scope for v0.1, whose architecture is one Deployment serving every Gateway of its class, so this is
+a known trade-off rather than a surprise. It is
 the same reason a shared ingress controller cannot pass this test.
 
 The folder `reports/v1.6/davidgrldo-gapura/` already carries the `README.md` upstream requires, so a

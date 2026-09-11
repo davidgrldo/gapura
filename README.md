@@ -2,13 +2,11 @@
 
 The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
-Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes 36 of 37 core tests; the report and the reason for the one remaining failure are in [conformance/](conformance/).
+Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes 36 of 37 core tests; the report and the reason for the one remaining failure are in [conformance/](conformance/).
 
 - Release notes, and what changes for operators on upgrade: [CHANGELOG.md](CHANGELOG.md)
 - Contributing, security policy, and code of conduct: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- Design spec (Indonesian): [docs/superpowers/specs/2026-09-09-gapura-sp1-design.md](docs/superpowers/specs/2026-09-09-gapura-sp1-design.md)
 - Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
-- Market research and gap analysis: [docs/superpowers/specs/research/](docs/superpowers/specs/research/)
 
 ## Quickstart
 
