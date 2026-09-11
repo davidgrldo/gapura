@@ -51,6 +51,7 @@ jobs:
           # Pinned: the golden renders were produced by this version, and a helm release that
           # changes rendering would fail this job for reasons unrelated to the chart.
           version: v4.1.4
+      - run: ./hack/check-identity.sh
       - run: ./hack/chart-render.sh
 
   image:

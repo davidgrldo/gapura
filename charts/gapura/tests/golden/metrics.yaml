@@ -408,7 +408,7 @@ spec:
           value: "0"
       containers:
       - name: gapura
-        image: ghcr.io/gapura-dev/gapura:0.1.0
+        image: ghcr.io/davidgrldo/gapura:0.1.0
         imagePullPolicy: IfNotPresent
         args:
         - --kubernetes

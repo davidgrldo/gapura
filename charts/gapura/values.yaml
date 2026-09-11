@@ -3,7 +3,7 @@
 replicaCount: 2
 
 image:
-  repository: ghcr.io/gapura-dev/gapura
+  repository: ghcr.io/davidgrldo/gapura
   # Defaults to the chart appVersion.
   tag: ""
   pullPolicy: IfNotPresent
@@ -13,6 +13,9 @@ nameOverride: ""
 fullnameOverride: ""
 
 # GatewayClass.spec.controllerName this instance handles. Must match the GatewayClass below.
+# The gapura.dev prefix is the project's identity, not the publisher's: Kubernetes only requires a
+# DNS-subdomain shape here, and changing this string after a release orphans every GatewayClass
+# that still names the old controller.
 controllerName: gapura.dev/controller
 
 # The GatewayClass is cluster-scoped, so its name must be unique in the cluster: a second release

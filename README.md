@@ -13,10 +13,10 @@ Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`-
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml
-helm install gapura oci://ghcr.io/gapura-dev/charts/gapura --namespace gapura-system --create-namespace
+helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --namespace gapura-system --create-namespace
 ```
 
-The `oci://ghcr.io/gapura-dev/charts/gapura` reference above, and the `home` and `sources` URLs in
+The `oci://ghcr.io/davidgrldo/charts/gapura` reference above, and the `home` and `sources` URLs in
 [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml), are placeholders for a public repository that
 does not exist yet: nothing has been pushed to GHCR, so that install command and those links do not
 work. Until the first release, build the image yourself and install from the checkout. `./hack/kind-deploy.sh`

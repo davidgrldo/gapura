@@ -11,11 +11,11 @@ REPO_ROOT=$(pwd)
 
 GWAPI=${GWAPI:-v1.6.2}
 CHECKOUT=${CHECKOUT:-/tmp/gateway-api-$GWAPI}
-ORG=${ORG:-gapura}
+ORG=${ORG:-davidgrldo}
 PROJECT=${PROJECT:-gapura}
-URL=${URL:-https://github.com/gapura-dev/gapura}
+URL=${URL:-https://github.com/davidgrldo/gapura}
 VERSION=${VERSION:-v0.1.0}
-CONTACT=${CONTACT:-https://github.com/gapura-dev/gapura/issues}
+CONTACT=${CONTACT:-https://github.com/davidgrldo/gapura/issues}
 PROFILE=${PROFILE:-GATEWAY-HTTP}
 REPORT_DIR="$REPO_ROOT/conformance/reports/v1.6/${ORG}-${PROJECT}"
 REPORT="$REPORT_DIR/standard-${VERSION}-default-report.yaml"

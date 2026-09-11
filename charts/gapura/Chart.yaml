@@ -5,9 +5,9 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.29.0-0"
-home: https://github.com/gapura-dev/gapura
+home: https://github.com/davidgrldo/gapura
 sources:
-  - https://github.com/gapura-dev/gapura
+  - https://github.com/davidgrldo/gapura
 keywords:
   - gateway-api
   - ingress
@@ -16,7 +16,7 @@ keywords:
   - pingora
 maintainers:
   - name: David Geraldo
-    url: https://github.com/gapura-dev
+    url: https://github.com/davidgrldo
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/prerelease: "true"

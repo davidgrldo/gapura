@@ -38,7 +38,7 @@ the same reason a shared ingress controller cannot pass this test.
 ## Reproduce
 
 ```bash
-git clone https://github.com/gapura-dev/gapura.git && cd gapura
+git clone https://github.com/davidgrldo/gapura.git && cd gapura
 ./hack/conformance.sh
 ```
 
