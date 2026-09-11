@@ -97,6 +97,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
+        with:
+          version: v4.1.4
       - run: ./hack/chart-render.sh
       - name: Package and push the chart
         run: |
