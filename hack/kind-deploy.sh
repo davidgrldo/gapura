@@ -41,6 +41,11 @@ helm upgrade --install gapura charts/gapura \
   --set "image.repository=${IMAGE%%:*}" --set "image.tag=${IMAGE##*:}" \
   --wait --timeout 3m
 
+# The tag never changes, so helm sees no diff and the pods keep the image they started with.
+# Force them onto the one just loaded, or every run tests the previous build.
+kubectl -n "$NS" rollout restart deploy/gapura
+kubectl -n "$NS" rollout status deploy/gapura --timeout=3m
+
 kubectl apply -f deploy/kind/fixture.yaml
 kubectl -n gapura-e2e rollout status deploy/echo --timeout=120s
 
