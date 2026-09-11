@@ -36,6 +36,161 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 ---
+# Source: gapura/templates/dashboard.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gapura-dashboard
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.1.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+    grafana_dashboard: "1"
+data:
+  gapura-overview.json: |
+    {
+      "uid": "gapura-overview",
+      "title": "Gapura Overview",
+      "tags": ["gapura", "gateway-api"],
+      "timezone": "browser",
+      "schemaVersion": 41,
+      "version": 1,
+      "editable": true,
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "templating": {
+        "list": [
+          { "name": "datasource", "type": "datasource", "query": "prometheus", "current": {}, "hide": 0 }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1, "type": "timeseries", "title": "Request rate by status code",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "sum by (code) (rate(gapura_requests_total[$__rate_interval]))",
+              "legendFormat": "{{code}}" }
+          ]
+        },
+        {
+          "id": 2, "type": "timeseries", "title": "Request latency p50 / p95 / p99",
+          "description": "The largest histogram bucket is 10 s, so p99 saturates under heavy overload.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(gapura_request_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p50" },
+            { "refId": "B", "editorMode": "code", "range": true,
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(gapura_request_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p95" },
+            { "refId": "C", "editorMode": "code", "range": true,
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(gapura_request_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p99" }
+          ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Upstream errors by kind",
+          "description": "kind is connect, timeout, read or other. TLS handshake failures count as connect.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "sum by (kind) (rate(gapura_upstream_errors_total[$__rate_interval]))",
+              "legendFormat": "{{kind}}" }
+          ]
+        },
+        {
+          "id": 4, "type": "stat", "title": "Config age",
+          "description": "Seconds since the last successful reload. A failing translator keeps the old config and does not move this.",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 300 },
+                { "color": "red", "value": 900 }
+              ] }
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "time() - max(gapura_config_last_reload_timestamp_seconds)",
+              "legendFormat": "config age" }
+          ]
+        },
+        {
+          "id": 5, "type": "stat", "title": "Leader replicas",
+          "description": "Exactly one replica should report 1. Zero means nobody writes status; more than one means split brain.",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "mappings": [
+                { "type": "value", "options": {
+                  "0": { "text": "no leader", "color": "red", "index": 0 },
+                  "1": { "text": "leader OK", "color": "green", "index": 1 }
+                } }
+              ]
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "sum(gapura_leader)", "legendFormat": "leaders" }
+          ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Config reloads and status writes",
+          "description": "status_writes_total result is success, failure or skipped.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "sum by (result) (rate(gapura_config_reloads_total[$__rate_interval]))",
+              "legendFormat": "reload {{result}}" },
+            { "refId": "B", "editorMode": "code", "range": true,
+              "expr": "sum by (result) (rate(gapura_status_writes_total[$__rate_interval]))",
+              "legendFormat": "status {{result}}" }
+          ]
+        },
+        {
+          "id": 7, "type": "timeseries", "title": "TLS misses, cert errors, watch disconnects",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "editorMode": "code", "range": true,
+              "expr": "sum by (port) (rate(gapura_tls_sni_misses_total[$__rate_interval]))",
+              "legendFormat": "sni miss :{{port}}" },
+            { "refId": "B", "editorMode": "code", "range": true,
+              "expr": "sum by (secret) (rate(gapura_tls_cert_parse_errors_total[$__rate_interval]))",
+              "legendFormat": "cert error {{secret}}" },
+            { "refId": "C", "editorMode": "code", "range": true,
+              "expr": "sum by (kind) (rate(gapura_watch_disconnects_total[$__rate_interval]))",
+              "legendFormat": "watch {{kind}}" }
+          ]
+        }
+      ]
+    }
+---
 # Source: gapura/templates/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -249,11 +404,15 @@ spec:
         - --log-level=info
         - --lease-name=gapura-leader
         - --publish-service=$(POD_NAMESPACE)/gapura
+        - --no-status
+        - --log-level=gapura=debug
         env:
         - name: POD_NAME
           valueFrom: { fieldRef: { fieldPath: metadata.name } }
         - name: POD_NAMESPACE
           valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: RUST_BACKTRACE
+          value: "1"
         ports:
         - { name: http, containerPort: 80, protocol: TCP }
         - { name: https, containerPort: 443, protocol: TCP }
