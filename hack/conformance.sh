@@ -9,7 +9,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT=$(pwd)
 
-GWAPI=${GWAPI:-v1.6.2}
+# Exported so hack/kind-up.sh installs the CRDs for the same release this script checks out.
+# Left unexported the two would agree only by both spelling the same literal, and bumping one
+# would leave the cluster on the old CRDs with nothing to say why the suite started failing.
+export GWAPI=${GWAPI:-v1.6.2}
 CHECKOUT=${CHECKOUT:-/tmp/gateway-api-$GWAPI}
 ORG=${ORG:-davidgrldo}
 PROJECT=${PROJECT:-gapura}
