@@ -348,6 +348,81 @@ mod tests {
     }
 
     #[test]
+    fn header_matching_is_case_insensitive_on_the_name_and_exact_on_the_value() {
+        let mut with_header = m("/");
+        with_header.headers = vec![KvMatch {
+            name: "x-version".into(),
+            value: "2".into(),
+        }];
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            None,
+            vec![rule("apps/v2", with_header), rule("apps/any", m("/"))],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let at = |headers: &[(String, String)]| {
+            c.match_port(
+                80,
+                &RequestAttrs {
+                    host: "any.test",
+                    path: "/",
+                    method: "GET",
+                    headers,
+                    query: &[],
+                },
+            )
+            .map(|h| h.rule.route.clone())
+        };
+        assert_eq!(
+            at(&[("X-Version".to_string(), "2".to_string())]).as_deref(),
+            Some("apps/v2"),
+            "the header name compares case-insensitively"
+        );
+        assert_eq!(
+            at(&[("x-version".to_string(), "3".to_string())]).as_deref(),
+            Some("apps/any"),
+            "the value compares exactly"
+        );
+        assert_eq!(at(&[]).as_deref(), Some("apps/any"));
+    }
+
+    #[test]
+    fn a_populated_port_can_still_match_nothing() {
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            Some("only.example.com"),
+            vec![rule("apps/only", m("/api"))],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let miss = |host: &str, path: &str| {
+            c.match_port(
+                80,
+                &RequestAttrs {
+                    host,
+                    path,
+                    method: "GET",
+                    headers: &[],
+                    query: &[],
+                },
+            )
+            .is_none()
+        };
+        assert!(miss("other.example.com", "/api"), "the hostname must match");
+        assert!(miss("only.example.com", "/other"), "the path must match");
+        assert!(!miss("only.example.com", "/api"));
+    }
+
+    #[test]
     fn method_and_query_matching() {
         let mut with_method = m("/");
         with_method.method = Some("POST".to_string());
