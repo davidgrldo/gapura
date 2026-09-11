@@ -21,5 +21,8 @@ public Service:
      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gapura.fullname" . }}-admin {{ .Values.ports.admin }}:{{ .Values.ports.admin }}
      curl -s localhost:{{ .Values.ports.admin }}/debug/config | head -20
 
+The GatewayClass {{ .Values.gatewayClass.name }} is cluster-scoped. A second release of this chart
+in the same cluster needs its own gatewayClass.name and controllerName.
+
 The Gateway API CRDs are not part of this chart. Install the standard channel yourself:
      kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml

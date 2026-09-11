@@ -15,6 +15,9 @@ fullnameOverride: ""
 # GatewayClass.spec.controllerName this instance handles. Must match the GatewayClass below.
 controllerName: gapura.dev/controller
 
+# The GatewayClass is cluster-scoped, so its name must be unique in the cluster: a second release
+# of this chart needs its own `gatewayClass.name` and its own `controllerName`, or the two
+# installations fight over the same class.
 gatewayClass:
   create: true
   name: gapura
@@ -68,6 +71,8 @@ serviceAccount:
   name: ""
   annotations: {}
 
+# With `create: false` the chart installs no ClusterRole, ClusterRoleBinding, Role or RoleBinding:
+# bind your own to the ServiceAccount above, or the controller watches nothing and writes no status.
 rbac:
   create: true
 
