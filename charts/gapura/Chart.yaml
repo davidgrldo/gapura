@@ -16,7 +16,7 @@ keywords:
   - pingora
 maintainers:
   - name: David Geraldo
-    email: davidgrldo123@gmail.com
+    url: https://github.com/gapura-dev
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/prerelease: "true"

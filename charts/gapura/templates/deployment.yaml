@@ -1,3 +1,9 @@
+{{- if not (has .Values.privilegedPorts (list "capability" "sysctl" "none")) }}
+{{- fail (printf "privilegedPorts must be capability, sysctl or none, got %q" .Values.privilegedPorts) }}
+{{- end }}
+{{- if and (eq .Values.privilegedPorts "none") (or (lt (int .Values.ports.http) 1024) (lt (int .Values.ports.https) 1024)) }}
+{{- fail "privilegedPorts: none cannot bind a port below 1024: raise ports.http/ports.https or pick capability or sysctl" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

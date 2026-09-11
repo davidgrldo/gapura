@@ -16,6 +16,13 @@ snapshot() {
     | grep -E '^gapura_(requests_total|upstream_errors_total)' | head -10 || true
 }
 
+# 50 connections for 30 seconds is enough to matter: make sure the target answers first, and that
+# it is the gateway and not whatever else owns port 80 on this machine.
+if ! curl -sf -o /dev/null -H "Host: ${HOST_HEADER}" --max-time 5 "$URL"; then
+  echo "no answer from $URL with Host: ${HOST_HEADER}; start a gateway first (hack/kind-deploy.sh)" >&2
+  exit 1
+fi
+
 echo "== metrics before"; snapshot
 if command -v oha >/dev/null 2>&1; then
   echo "== oha: $CONNS connections for $DURATION against $URL (Host: $HOST_HEADER)"

@@ -50,8 +50,9 @@ publishAddresses: []
 # Publish the LoadBalancer addresses of this chart's Service (--publish-service).
 publishService: true
 
-# EnvFilter directives, e.g. "info" or "gapura=debug,pingora_core=warn".
-logLevel: info
+# EnvFilter directives, e.g. "info" or "gapura=debug". Pingora logs every failed downstream
+# handshake at error level, including the ones a port scanner causes, so it is quieted by default.
+logLevel: info,pingora_core::services::listening=warn
 # Worker threads per Pingora service. 0 asks the machine, which does not see cgroup limits, so on
 # a large node it means many threads inside a small memory limit. Set it to your CPU limit.
 threads: 0

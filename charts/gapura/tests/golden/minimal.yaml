@@ -114,7 +114,7 @@ spec:
         - --listen-https=0.0.0.0:8443
         - --admin=0.0.0.0:9090
         - --controller-name=gapura.dev/controller
-        - --log-level=info
+        - --log-level=info,pingora_core::services::listening=warn
         - --lease-name=gapura-leader
         env:
         - name: POD_NAME
