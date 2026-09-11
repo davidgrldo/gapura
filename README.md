@@ -18,7 +18,17 @@ helm install gapura oci://ghcr.io/gapura-dev/charts/gapura --namespace gapura-sy
 The `oci://ghcr.io/gapura-dev/charts/gapura` reference above, and the `home` and `sources` URLs in
 [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml), are placeholders for a public repository that
 does not exist yet: nothing has been pushed to GHCR, so that install command and those links do not
-work. Until the first release, install from a checkout with `helm install gapura ./charts/gapura`.
+work. Until the first release, build the image yourself and install from the checkout. `./hack/kind-deploy.sh`
+does all of it for a local kind cluster; against any other cluster, build and push the image to a
+registry your nodes can read, then:
+
+```bash
+helm install gapura ./charts/gapura --namespace gapura-system --create-namespace \
+  --set image.repository=<your-registry>/gapura --set image.tag=0.1.0
+```
+
+Without those two values the chart points at the placeholder registry and the pods sit in
+`ImagePullBackOff`.
 
 Then point a Gateway at the `gapura` class:
 
