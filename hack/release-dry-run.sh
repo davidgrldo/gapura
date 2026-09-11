@@ -148,6 +148,55 @@ trap cleanup EXIT
 
 disk_guard "before"
 
+echo "==> the packaged chart is the chart in charts/gapura"
+# The Grafana dashboard and prometheus-rule.yaml reach the rendered output only through
+# `.Files.Get`, which returns an empty string with no error for a file the chart did not load, and
+# what the chart loads is decided by charts/gapura/.helmignore -- a file nothing else reads.
+#
+# This is deliberately an assertion about the tarball, not an inference from a render. helm applies
+# .helmignore to a directory load as well as to `helm package`, so today a mistake there does show
+# up locally: it trips the `fail` guards in those two templates, on the values-metrics permutation
+# hack/chart-render.sh renders. But that is helm's behaviour rather than this repo's, and the guards
+# and the permutation that expose it are each one edit away from being gone, while none of it ever
+# says the two files are inside the chart a user installs. So say that, about the artifact, in the
+# rehearsal of the release that ships it.
+#
+# It runs first, ahead of the cluster and the builds: it costs a second and no network, and the
+# watchdog above cancels the run when the disk floor is hit mid-build -- on the machines this script
+# was written for, a check placed after the builds is one that often never runs at all.
+CHART_VERSION=$(helm show chart charts/gapura | awk '$1 == "version:" { print $2 }')
+CHECK_TGZ="$WORK/gapura-${CHART_VERSION}.tgz"
+# Deliberately without the --version/--app-version the `chart` job below passes. Stamping a version
+# rewrites Chart.yaml inside the tarball, and that alone makes the two renders differ in the
+# helm.sh/chart label, in app.kubernetes.io/version and in the default image tag -- three carve-outs
+# to maintain in the comparison below, each one a place a real difference could hide. Packaging at
+# the chart's own version asks the only question this check exists to ask, whether the packaged
+# content is the directory's content, and lets the answer be an empty diff with nothing explained
+# away. The version flags are exercised for real further down, where the chart that gets pushed is
+# packaged with them and then installed.
+helm package charts/gapura --destination "$WORK" >/dev/null
+tar tzf "$CHECK_TGZ" | sort | tee "$WORK/packaged"
+for f in gapura/prometheus-rule.yaml gapura/dashboards/gapura-overview.json; do
+  grep -qxF "$f" "$WORK/packaged" \
+    || { echo "FAIL ${f} is not in the packaged chart: charts/gapura/.helmignore excludes it" >&2; exit 1; }
+done
+echo "    both files .Files.Get reads are packaged"
+
+# Same chart version on both sides, so nothing is expected to differ and the comparison is the whole
+# rendered output, unfiltered: any difference at all is a finding, and diff prints it. This is the
+# arm that would notice helm's package path and its directory-load path drifting apart -- they agree
+# today, which is exactly what is worth pinning down. values-metrics.yaml is the permutation that
+# turns the PrometheusRule and the dashboard on, so it is the one that reads both files; it comes
+# from the working tree, since .helmignore keeps tests/ out of the tarball on purpose.
+helm template gapura "$CHECK_TGZ" --namespace gapura-system \
+  --values charts/gapura/tests/values-metrics.yaml > "$WORK/from-tgz.yaml"
+helm template gapura charts/gapura --namespace gapura-system \
+  --values charts/gapura/tests/values-metrics.yaml > "$WORK/from-dir.yaml"
+diff "$WORK/from-tgz.yaml" "$WORK/from-dir.yaml" \
+  || { echo "FAIL the packaged chart renders differently from charts/gapura (above)" >&2; exit 1; }
+echo "    the packaged chart renders byte for byte as charts/gapura does"
+rm -f "$CHECK_TGZ" "$WORK/packaged" "$WORK/from-tgz.yaml" "$WORK/from-dir.yaml"
+
 echo "==> cluster"
 # REQUIRE_PORTS=0: this script never dials a Gateway through host port 80. It installs its own
 # release next to whatever is already in the cluster, with its own namespace, its own GatewayClass
