@@ -92,6 +92,41 @@ impl KubeSource {
             }
         }
         let watched: Vec<&str> = resolved.iter().map(|(k, _)| k.name).collect();
+        let mut aux = tokio::task::JoinSet::new();
+        let missing: Vec<&'static Kind> = KINDS
+            .iter()
+            .filter(|k| k.optional && !resolved.iter().any(|(r, _)| r.name == k.name))
+            .collect();
+        for kind in KINDS.iter() {
+            let absent = missing.iter().any(|m| m.name == kind.name);
+            METRICS
+                .discovery_missing
+                .with_label_values(&[kind.name])
+                .set(i64::from(absent));
+        }
+        if !missing.is_empty() {
+            // An optional CRD installed after we started would otherwise stay invisible until a
+            // restart. Watch for it and let the outer loop rebuild everything when it appears.
+            let client = client.clone();
+            let names: Vec<&'static str> = missing.iter().map(|k| k.name).collect();
+            let missing: Vec<&'static Kind> = missing.clone();
+            aux.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    for kind in &missing {
+                        if matches!(kind.resolve(&client).await, Ok(Some(_))) {
+                            tracing::info!(
+                                kind = kind.name,
+                                "kind is served now, restarting the source"
+                            );
+                            return;
+                        }
+                    }
+                }
+            });
+            tracing::warn!(?names, "optional kinds absent, rechecking every 60s");
+        }
 
         // 2. One watcher per kind, all feeding one channel.
         let (tx, mut rx) = mpsc::channel::<Change>(1024);
@@ -127,10 +162,9 @@ impl KubeSource {
         }
         drop(tx);
 
-        // 3. Leader election and the status writer.
+        // 3. Leader election and the status writer, joining `aux`.
         // Leader and writer end only at shutdown; watchers never end on their own, so a finished
         // watcher task is a failure that restarts the source.
-        let mut aux = tokio::task::JoinSet::new();
         let (status_tx, status_rx) = watch::channel::<Vec<StatusPatch>>(Vec::new());
         if !self.read_only {
             let (leadership_tx, leadership_rx) = watch::channel(false);
@@ -160,6 +194,15 @@ impl KubeSource {
             let first = tokio::select! {
                 c = rx.recv() => c,
                 Some(ended) = tasks.join_next() => anyhow::bail!("a watcher task ended: {ended:?}"),
+                Some(ended) = aux.join_next() => {
+                    // Outside shutdown this is the rediscovery task telling us a CRD appeared.
+                    // The leader and the writer also end at shutdown, and that can win the race
+                    // against the arm below, so a clean stop must not be reported as a failure.
+                    if *shutdown.borrow() {
+                        return Ok(());
+                    }
+                    anyhow::bail!("a support task ended: {ended:?}")
+                }
                 _ = shutdown.changed() => return Ok(()),
             };
             let Some(first) = first else {

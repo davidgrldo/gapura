@@ -258,4 +258,18 @@ mod tests {
             Some("type=kubernetes.io/tls")
         );
     }
+
+    #[test]
+    fn only_backend_tls_policy_is_optional() {
+        let optional: Vec<&str> = KINDS
+            .iter()
+            .filter(|k| k.optional)
+            .map(|k| k.name)
+            .collect();
+        assert_eq!(
+            optional,
+            vec!["BackendTLSPolicy"],
+            "the rediscovery loop only has a job while some kind is optional"
+        );
+    }
 }

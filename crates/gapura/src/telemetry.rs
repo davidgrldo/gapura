@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_int_gauge_vec, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
 };
 use rand::RngCore;
 use serde::Serialize;
@@ -33,6 +33,8 @@ pub struct Metrics {
     pub status_writes_total: IntCounterVec,
     /// 1 while this replica holds the leader Lease.
     pub leader: IntGauge,
+    /// labels: kind
+    pub discovery_missing: IntGaugeVec,
 }
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
@@ -98,6 +100,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
     leader: register_int_gauge!(
         "gapura_leader",
         "1 while this replica holds the leader Lease"
+    )
+    .expect("metric registered once"),
+    discovery_missing: register_int_gauge_vec!(
+        "gapura_discovery_missing",
+        "1 while an optional kind is not served by the API server",
+        &["kind"]
     )
     .expect("metric registered once"),
 });
