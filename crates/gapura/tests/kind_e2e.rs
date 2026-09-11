@@ -74,6 +74,71 @@ impl Drop for Gateway {
     }
 }
 
+/// The gateway against the kind cluster, ready, with the admin port it ended up on.
+///
+/// `free_port` drops its listener before the child binds, so anything else on the machine can take
+/// the port in between; the gateway refuses to start on an address it cannot bind, so that race
+/// shows up as an immediate clean exit and retrying on fresh ports is the fix. The HTTP port is
+/// fixed, though, so a child that keeps exiting is more likely to be that port already in use than
+/// the race five times over -- the last panic says both.
+async fn start(http: &Client) -> (Gateway, u16) {
+    for attempt in 1..=5u32 {
+        let admin = free_port();
+        let mut gw = Gateway(
+            Command::new(env!("CARGO_BIN_EXE_gapura"))
+                .args([
+                    "--kubernetes",
+                    "--listen-http",
+                    "127.0.0.1:8080",
+                    "--listen-https",
+                    &format!("127.0.0.1:{}", free_port()),
+                    "--admin",
+                    &format!("127.0.0.1:{admin}"),
+                    "--lease-namespace",
+                    "gapura-system",
+                    "--identity",
+                    "kind-e2e",
+                    "--publish-address",
+                    "203.0.113.10",
+                    "--log-level",
+                    "info",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut exited = false;
+        while Instant::now() < deadline {
+            if matches!(gw.0.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            let ready = http
+                .get(format!("http://127.0.0.1:{admin}/readyz"))
+                .send()
+                .await
+                .map(|r| r.status() == 200)
+                .unwrap_or(false);
+            if ready {
+                return (gw, admin);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        if !exited {
+            panic!("gateway started on admin={admin} but never became ready");
+        }
+        eprintln!(
+            "gateway exited before becoming ready on attempt {attempt}, retrying on new ports"
+        );
+    }
+    panic!(
+        "the gateway exited before becoming ready five times running: either 127.0.0.1:8080 is \
+         already in use, or it lost the race for its ephemeral ports every time"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a kind cluster; run hack/kind-e2e.sh"]
 async fn status_config_lease_and_hot_reload() {
@@ -81,48 +146,10 @@ async fn status_config_lease_and_hot_reload() {
         eprintln!("GAPURA_KIND not set, skipping");
         return;
     }
-    let admin = free_port();
-    let _gw = Gateway(
-        Command::new(env!("CARGO_BIN_EXE_gapura"))
-            .args([
-                "--kubernetes",
-                "--listen-http",
-                "127.0.0.1:8080",
-                "--listen-https",
-                &format!("127.0.0.1:{}", free_port()),
-                "--admin",
-                &format!("127.0.0.1:{admin}"),
-                "--lease-namespace",
-                "gapura-system",
-                "--identity",
-                "kind-e2e",
-                "--publish-address",
-                "203.0.113.10",
-                "--log-level",
-                "info",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    let admin_url = |p: &str| format!("http://127.0.0.1:{admin}{p}");
-    let readyz_url = admin_url("/readyz");
-    let config_url = admin_url("/debug/config");
     let http = Client::new();
-
-    wait_for("readyz", Duration::from_secs(60), || {
-        let http = http.clone();
-        let url = readyz_url.clone();
-        async move {
-            http.get(url)
-                .send()
-                .await
-                .map(|r| r.status() == 200)
-                .unwrap_or(false)
-        }
-    })
-    .await;
+    let (_gw, admin) = start(&http).await;
+    let admin_url = |p: &str| format!("http://127.0.0.1:{admin}{p}");
+    let config_url = admin_url("/debug/config");
 
     let cfg = fetch_config(http.clone(), config_url.clone()).await;
     assert_eq!(cfg["listeners"][0]["id"], "gapura-e2e/main/http");

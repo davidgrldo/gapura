@@ -211,42 +211,66 @@ impl Drop for Gateway {
     }
 }
 
-async fn start(yaml: String, http: u16) -> Gateway {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
-    let (admin, https) = (free_port(), free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
-        .args([
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-            "--listen-http",
-            &format!("127.0.0.1:{http}"),
-            "--listen-https",
-            &format!("127.0.0.1:{https}"),
-            "--admin",
-            &format!("127.0.0.1:{admin}"),
-            "--log-level",
-            "warn",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let gw = Gateway {
-        child,
-        http,
-        admin,
-        _dir: dir,
-    };
-    for _ in 0..200 {
-        if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-            if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
-                return gw;
+/// Start the binary on ports chosen here, rendering the config once the http port is known.
+///
+/// `free_port` drops its listener before the child binds, so anything else on the machine can take
+/// the port in between. The gateway refuses to start on an address it cannot bind, so that race
+/// shows up as an immediate clean exit; retrying on fresh ports is the fix. A child that starts but
+/// never becomes ready is a real failure, not a race.
+async fn start(render: impl Fn(u16) -> String) -> Gateway {
+    for attempt in 1..=5u32 {
+        let (http, admin, https) = (free_port(), free_port(), free_port());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.yaml"), render(http)).unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+            .args([
+                "--config-dir",
+                dir.path().to_str().unwrap(),
+                "--listen-http",
+                &format!("127.0.0.1:{http}"),
+                "--listen-https",
+                &format!("127.0.0.1:{https}"),
+                "--admin",
+                &format!("127.0.0.1:{admin}"),
+                "--log-level",
+                "warn",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut gw = Gateway {
+            child,
+            http,
+            admin,
+            _dir: dir,
+        };
+        let mut exited = false;
+        let mut ready = false;
+        for _ in 0..200 {
+            if matches!(gw.child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
             }
+            if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
+                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                    ready = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if ready {
+            return gw;
+        }
+        if !exited {
+            panic!("gateway started on http={http} admin={admin} but never became ready");
+        }
+        eprintln!(
+            "gateway exited before becoming ready on attempt {attempt}, retrying on new ports"
+        );
     }
-    panic!("gateway did not become ready");
+    panic!("gateway lost the port race five times running");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -257,8 +281,7 @@ async fn upstream_tls_verified_insecure_and_invalid() {
     let (self_cert, self_key) = leaf("selfsigned.apps.svc", &ca_b);
     let verified = spawn_tls_upstream(echo_cert, echo_key).await;
     let selfsigned = spawn_tls_upstream(self_cert, self_key).await;
-    let http = free_port();
-    let gw = start(config(http, verified, selfsigned, &ca_a.0.pem()), http).await;
+    let gw = start(|http| config(http, verified, selfsigned, &ca_a.0.pem())).await;
     let c = reqwest::Client::builder()
         .resolve(
             "tls.test",

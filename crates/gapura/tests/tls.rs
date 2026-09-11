@@ -150,45 +150,69 @@ impl Drop for Gateway {
     }
 }
 
-async fn start(yaml: String, http: u16, https: u16) -> Gateway {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
-    let admin = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
-        .args([
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-            "--listen-http",
-            &format!("127.0.0.1:{http}"),
-            "--listen-https",
-            &format!("127.0.0.1:{https}"),
-            "--admin",
-            &format!("127.0.0.1:{admin}"),
-            "--log-level",
-            "warn",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let gw = Gateway {
-        child,
-        https,
-        _dir: dir,
-    };
-    for _ in 0..200 {
-        if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-            // Pingora binds each service independently: /readyz only proves the admin listener
-            // and the loaded config, so also wait for the data-plane service to accept connections.
-            // Probe the plain HTTP port of the same service: a bare connect to the TLS port would
-            // log a handshake error on every run.
-            if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
-                return gw;
+/// Start the binary on ports chosen here, rendering the config once they are known.
+///
+/// `free_port` drops its listener before the child binds, so anything else on the machine can take
+/// the port in between. The gateway refuses to start on an address it cannot bind, so that race
+/// shows up as an immediate clean exit; retrying on fresh ports is the fix. A child that starts but
+/// never becomes ready is a real failure, not a race.
+async fn start(render: impl Fn(u16, u16) -> String) -> Gateway {
+    for attempt in 1..=5u32 {
+        let (http, https, admin) = (free_port(), free_port(), free_port());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.yaml"), render(http, https)).unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+            .args([
+                "--config-dir",
+                dir.path().to_str().unwrap(),
+                "--listen-http",
+                &format!("127.0.0.1:{http}"),
+                "--listen-https",
+                &format!("127.0.0.1:{https}"),
+                "--admin",
+                &format!("127.0.0.1:{admin}"),
+                "--log-level",
+                "warn",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut gw = Gateway {
+            child,
+            https,
+            _dir: dir,
+        };
+        let mut exited = false;
+        let mut ready = false;
+        for _ in 0..200 {
+            if matches!(gw.child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
             }
+            if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
+                // Pingora binds each service independently: /readyz only proves the admin listener
+                // and the loaded config, so also wait for the data-plane service to accept
+                // connections. Probe the plain HTTP port of the same service: a bare connect to the
+                // TLS port would log a handshake error on every run.
+                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                    ready = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if ready {
+            return gw;
+        }
+        if !exited {
+            panic!("gateway started on https={https} but never became ready");
+        }
+        eprintln!(
+            "gateway exited before becoming ready on attempt {attempt}, retrying on new ports"
+        );
     }
-    panic!("gateway did not become ready");
+    panic!("gateway lost the port race five times running");
 }
 
 fn client_trusting(ca_pem: &str, gw: &Gateway) -> reqwest::Client {
@@ -209,8 +233,8 @@ async fn certificate_is_selected_by_sni() {
     let leaf_a = leaf("a.gw.test", &ca_a);
     let leaf_w = leaf("*.gw.test", &ca_w);
     let upstream = spawn_upstream().await;
-    let (http, https) = (free_port(), free_port());
-    let gw = start(config(http, https, upstream, &leaf_a, &leaf_w), http, https).await;
+    let gw = start(|http, https| config(http, https, upstream, &leaf_a, &leaf_w)).await;
+    let https = gw.https;
 
     let trust_a = client_trusting(&ca_a.0.pem(), &gw);
     let r = trust_a
