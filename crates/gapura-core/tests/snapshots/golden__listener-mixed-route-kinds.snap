@@ -3,8 +3,54 @@ source: crates/gapura-core/tests/golden.rs
 expression: t
 ---
 config:
-  listeners: []
-  clusters: {}
+  listeners:
+    - id: infra/main/mixed
+      port: 80
+      protocol: Http
+      hostname: ~
+      tls: ~
+      rules:
+        - route: apps/echo
+          rule_index: 0
+          creation_timestamp: "2026-09-01T10:00:00Z"
+          matches:
+            - path:
+                Prefix: /
+              headers: []
+              query: []
+              method: ~
+          filters:
+            request_headers:
+              set: []
+              add: []
+              remove: []
+            response_headers:
+              set: []
+              add: []
+              remove: []
+            redirect: ~
+            rewrite: ~
+          backends:
+            - cluster: "apps/echo:80"
+              weight: 1
+          timeouts:
+            request_ms: ~
+            backend_request_ms: ~
+      table:
+        - hostname: echo.example.com
+          matcher:
+            path:
+              Prefix: /
+            headers: []
+            query: []
+            method: ~
+          rule: 0
+  clusters:
+    "apps/echo:80":
+      endpoints:
+        - address: 10.1.0.5
+          port: 8080
+      tls: ~
 status:
   - kind: GatewayClass
     name: gapura
@@ -21,21 +67,21 @@ status:
       - 10.0.0.1
     conditions:
       - type: Accepted
-        status: "False"
+        status: "True"
         reason: ListenersNotValid
-        message: No listener is valid
+        message: Some listeners are not valid
         observedGeneration: 1
       - type: Programmed
-        status: "False"
-        reason: Invalid
-        message: No listener is programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
         observedGeneration: 1
     listeners:
       - name: mixed
         supportedKinds:
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
-        attachedRoutes: 0
+        attachedRoutes: 1
         conditions:
           - type: Accepted
             status: "True"
@@ -43,9 +89,9 @@ status:
             message: Listener is accepted
             observedGeneration: 1
           - type: Programmed
-            status: "False"
-            reason: Invalid
-            message: Listener is not valid
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
             observedGeneration: 1
           - type: ResolvedRefs
             status: "False"
@@ -80,4 +126,27 @@ status:
             status: "False"
             reason: NoConflicts
             message: No conflicts
+            observedGeneration: 1
+  - kind: HTTPRoute
+    namespace: apps
+    name: echo
+    parents:
+      - parentRef:
+          group: ~
+          kind: ~
+          namespace: infra
+          name: main
+          sectionName: ~
+          port: ~
+        controllerName: gapura.dev/controller
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Route is accepted
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
             observedGeneration: 1

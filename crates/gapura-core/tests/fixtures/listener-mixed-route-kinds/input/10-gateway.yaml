@@ -8,12 +8,14 @@ spec:
     port: 80
     protocol: HTTP
     allowedRoutes:
+      namespaces: { from: All }
       kinds:
-      - { group: gateway.networking.k8s.io, kind: TCPRoute }
-      - { group: gateway.networking.k8s.io, kind: HTTPRoute }
+      - { kind: TCPRoute }
+      - { kind: HTTPRoute }
   - name: only-bad
     port: 80
     protocol: HTTP
     hostname: bad.example.com
     allowedRoutes:
+      namespaces: { from: All }
       kinds: [{ kind: TCPRoute }]

@@ -789,9 +789,22 @@ fn listener_mixed_route_kinds_is_not_resolved() {
         (ConditionStatus::False, "InvalidRouteKinds")
     );
     assert!(only_bad.supported_kinds.is_empty());
-    assert!(
-        t.config.listeners.is_empty(),
-        "neither listener is programmed"
+    assert_eq!(
+        cond(&mixed.conditions, "Programmed"),
+        (ConditionStatus::True, "Programmed"),
+        "the kinds we do serve keep working, so the listener is still programmed"
+    );
+    assert_eq!(mixed.attached_routes, 1);
+    let ids: Vec<&str> = t.config.listeners.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["infra/main/mixed"],
+        "only the listener with no usable kind is dropped"
+    );
+    assert_eq!(
+        t.config.listeners[0].rules.len(),
+        1,
+        "an HTTPRoute still attaches to it"
     );
     insta::assert_yaml_snapshot!("listener-mixed-route-kinds", t);
 }
@@ -813,10 +826,31 @@ fn gateway_with_parameters_ref_is_rejected() {
         (ConditionStatus::True, "Accepted"),
         "the listener itself is fine; the Gateway is what we refuse"
     );
-    assert!(
-        t.config.listeners.is_empty(),
-        "a rejected Gateway serves nothing"
+    assert_eq!(
+        cond(&listener(listeners, "http").conditions, "Programmed"),
+        (ConditionStatus::False, "Invalid"),
+        "a refused Gateway programs nothing, whatever its listeners look like"
     );
-    assert!(t.config.clusters.is_empty());
+    let ids: Vec<&str> = t.config.listeners.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["infra/plain/http"],
+        "the refusal is scoped to the Gateway that asked for parameters"
+    );
+    let plain = t
+        .status
+        .iter()
+        .find_map(|p| match p {
+            gapura_core::status::StatusPatch::Gateway {
+                name, conditions, ..
+            } if name == "plain" => Some(conditions),
+            _ => None,
+        })
+        .expect("the second Gateway has a status patch");
+    assert_eq!(
+        cond(plain, "Accepted"),
+        (ConditionStatus::True, "Accepted"),
+        "infrastructure without parametersRef is fine"
+    );
     insta::assert_yaml_snapshot!("gateway-invalid-parameters-ref", t);
 }

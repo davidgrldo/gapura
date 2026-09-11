@@ -3,7 +3,14 @@ source: crates/gapura-core/tests/golden.rs
 expression: t
 ---
 config:
-  listeners: []
+  listeners:
+    - id: infra/plain/http
+      port: 80
+      protocol: Http
+      hostname: ~
+      tls: ~
+      rules: []
+      table: []
   clusters: {}
 status:
   - kind: GatewayClass
@@ -36,6 +43,49 @@ status:
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
         attachedRoutes: 1
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "False"
+            reason: Invalid
+            message: Listener is not valid
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: plain
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Gateway is accepted
+        observedGeneration: 1
+      - type: Programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
+        observedGeneration: 1
+    listeners:
+      - name: http
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 0
         conditions:
           - type: Accepted
             status: "True"

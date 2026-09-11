@@ -72,7 +72,7 @@ fn assemble(
                 name: l.name.clone(),
                 supported_kinds: l.supported_kinds.clone(),
                 attached_routes: l.attached_routes,
-                conditions: l.conditions(generation),
+                conditions: l.conditions(generation, gateway_ok),
             });
             if !programmed {
                 continue;

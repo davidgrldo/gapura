@@ -44,11 +44,24 @@ pub(crate) struct ListenerBuild {
 
 impl ListenerBuild {
     pub fn programmed(&self) -> bool {
-        self.accepted.is_ok() && self.resolved.is_ok() && self.conflict.is_none()
+        self.accepted.is_ok() && self.conflict.is_none() && self.serves()
     }
 
-    /// Conditions in a fixed order: Accepted, Programmed, ResolvedRefs, Conflicted.
-    pub fn conditions(&self, generation: Option<i64>) -> Vec<Condition> {
+    /// Whether the data plane can carry this listener at all. An `allowedRoutes.kinds` that also
+    /// names a kind we do not serve sets `ResolvedRefs=False`, but the kinds we do serve keep
+    /// working; every other unresolved reference (a broken TLS Secret, say) means we serve nothing.
+    fn serves(&self) -> bool {
+        match &self.resolved {
+            Ok(()) => true,
+            Err((reason, _)) => {
+                *reason == reasons::INVALID_ROUTE_KINDS && !self.supported_kinds.is_empty()
+            }
+        }
+    }
+
+    /// Conditions in a fixed order: Accepted, Programmed, ResolvedRefs, Conflicted. The Gateway can
+    /// veto: a listener of a refused Gateway is never programmed.
+    pub fn conditions(&self, generation: Option<i64>, gateway_ok: bool) -> Vec<Condition> {
         let accepted = match &self.accepted {
             Ok(()) => Condition::new(
                 types::ACCEPTED,
@@ -65,7 +78,7 @@ impl ListenerBuild {
                 generation,
             ),
         };
-        let programmed = if self.programmed() {
+        let programmed = if gateway_ok && self.programmed() {
             Condition::new(
                 types::PROGRAMMED,
                 ConditionStatus::True,
