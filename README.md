@@ -2,7 +2,7 @@
 
 The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
-Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes 34 of 37 core tests; the report and the reason for the three failures are in [conformance/](conformance/).
+Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes 36 of 37 core tests; the report and the reason for the one remaining failure are in [conformance/](conformance/).
 
 - Design spec (Indonesian): [docs/superpowers/specs/2026-09-09-gapura-sp1-design.md](docs/superpowers/specs/2026-09-09-gapura-sp1-design.md)
 - Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
@@ -52,6 +52,10 @@ The conformance report is in [conformance/](conformance/). To reproduce everythi
 ./hack/kind-deploy.sh      # image + chart in kind, one request through the gateway
 ./hack/conformance.sh      # Gateway API GATEWAY-HTTP suite (needs Go 1.26)
 ```
+
+`hack/conformance.sh` defaults `FIXTURE=0`, so it deploys the chart without the e2e fixture from
+`hack/kind-deploy.sh`: the suite brings its own Gateways on port 80 and the fixture would compete
+for that address. Pass `FIXTURE=1 ./hack/conformance.sh` to keep the fixture as well.
 
 ## Development
 
