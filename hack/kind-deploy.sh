@@ -1,36 +1,16 @@
 #!/usr/bin/env bash
 # Build the image, load it into kind, install the chart, and prove a request goes through the
 # gateway to a backend. Needs: docker, kind, kubectl, helm.
-# The cluster must have hack/kind-config.yaml's port mappings; the script creates it when missing
-# and tells you to delete it when it exists without them.
+# The cluster must have hack/kind-config.yaml's port mappings; hack/kind-up.sh creates it when
+# missing and tells you to delete it when it exists without them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CLUSTER=${CLUSTER:-gapura}
-GWAPI=${GWAPI:-v1.6.2}
 IMAGE=${IMAGE:-gapura:dev}
 NS=${NS:-gapura-system}
 
-if kind get clusters | grep -qx "$CLUSTER"; then
-  if ! docker port "${CLUSTER}-control-plane" | grep -q '^30080/tcp'; then
-    cat >&2 <<EOF
-Cluster "$CLUSTER" exists without the port mappings this script needs.
-Delete it and rerun (it only ever holds test fixtures):
-    kind delete cluster --name $CLUSTER
-EOF
-    exit 1
-  fi
-else
-  kind create cluster --name "$CLUSTER" --config hack/kind-config.yaml --wait 120s
-fi
-kubectl config use-context "kind-$CLUSTER"
-
-kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GWAPI}/standard-install.yaml"
-kubectl wait --for=condition=Established --timeout=60s \
-  crd/gatewayclasses.gateway.networking.k8s.io \
-  crd/gateways.gateway.networking.k8s.io \
-  crd/httproutes.gateway.networking.k8s.io \
-  crd/backendtlspolicies.gateway.networking.k8s.io
+./hack/kind-up.sh
 
 docker build -t "$IMAGE" .
 kind load docker-image "$IMAGE" --name "$CLUSTER"
