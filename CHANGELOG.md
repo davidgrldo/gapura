@@ -1,9 +1,26 @@
 # Changelog
 
-Notable changes, newest first. Gapura has not had a tagged release yet: v0.1.0 is still
-unreleased, so "upgrading" below means `helm upgrade` from an older checkout of this repository.
+Notable changes, newest first. v0.1.0 is the first release: nothing was tagged before it, so
+everyone running Gapura until now has been running a checkout of this repository, and "upgrading"
+to v0.1.0 means `helm upgrade` from that checkout to the published chart. From v0.1.0 onward it
+means what it usually does, moving from one version below to a later one. Release procedure:
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Unreleased
+
+Nothing yet.
+
+## 0.1.0 — 2026-09-11
+
+The first release, and the first time any of this installs without a checkout. What ships: the
+Gateway API core objects — `Gateway`, `HTTPRoute` and `ReferenceGrant` — served by one binary that
+watches the API server and translates them into a routing table, at 36 of 37 GATEWAY-HTTP core
+conformance tests. TLS terminates from a `Secret` on the listener, and is re-established to
+backends through `BackendTLSPolicy`. Observability is open formats only: Prometheus metrics on the
+admin port next to `/healthz` and `/readyz`, one JSON access log line per request on stdout, and
+W3C `traceparent` plus `X-Request-Id` propagated upstream, created when the client sent neither.
+It is delivered as a `linux/amd64` and `linux/arm64` image and the Helm chart in
+[charts/gapura](charts/gapura).
 
 ### Read this before upgrading
 
