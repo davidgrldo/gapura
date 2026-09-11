@@ -13,9 +13,13 @@ GWAPI=${GWAPI:-v1.6.2}
 CHECKOUT=${CHECKOUT:-/tmp/gateway-api-$GWAPI}
 ORG=${ORG:-davidgrldo}
 PROJECT=${PROJECT:-gapura}
-URL=${URL:-https://github.com/davidgrldo/gapura}
+# Derived, not repeated: the report folder is already ${ORG}-${PROJECT}, so a fork running with
+# its own ORG would otherwise file a report under its own name while still stamping this repo's
+# URL and issue tracker inside it. A report may not be hand-edited, so that mistake costs a whole
+# rerun to undo.
+URL=${URL:-https://github.com/$ORG/$PROJECT}
 VERSION=${VERSION:-v0.1.0}
-CONTACT=${CONTACT:-https://github.com/davidgrldo/gapura/issues}
+CONTACT=${CONTACT:-https://github.com/$ORG/$PROJECT/issues}
 PROFILE=${PROFILE:-GATEWAY-HTTP}
 REPORT_DIR="$REPO_ROOT/conformance/reports/v1.6/${ORG}-${PROJECT}"
 REPORT="$REPORT_DIR/standard-${VERSION}-default-report.yaml"
