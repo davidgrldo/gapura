@@ -143,11 +143,30 @@ impl KubeSource {
                 // instead of every `RECHECK`.
                 let mut tick =
                     tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
+                // Both failures below repeat every `RECHECK` for as long as the cluster stays
+                // misconfigured, so each one is loud once and quiet after that. Logging them at
+                // warn forever is the same alert-fatigue problem this channel exists to avoid.
+                let mut reported: std::collections::HashSet<(&'static str, &'static str)> =
+                    std::collections::HashSet::new();
                 loop {
                     tick.tick().await;
                     for kind in &missing {
-                        let Ok(Some(ar)) = kind.resolve(&client).await else {
-                            continue;
+                        let ar = match kind.resolve(&client).await {
+                            Ok(Some(ar)) => ar,
+                            // Still absent, which is the expected state here.
+                            Ok(None) => continue,
+                            Err(e) => {
+                                // Otherwise a dead rediscovery loop looks exactly like a kind
+                                // that simply has not been installed yet.
+                                if reported.insert((kind.name, "resolve")) {
+                                    tracing::warn!(
+                                        kind = kind.name,
+                                        error = %e,
+                                        "cannot ask whether this kind is served yet, still trying"
+                                    );
+                                }
+                                continue;
+                            }
                         };
                         // Served is not the same as usable. If listing the kind is forbidden,
                         // its watcher retries its initial list forever, that kind never syncs,
@@ -159,11 +178,15 @@ impl KubeSource {
                                 let _ = found_tx.send(kind.name).await;
                                 return;
                             }
-                            Err(e) => tracing::warn!(
-                                kind = kind.name,
-                                error = %e,
-                                "kind is served but cannot be listed, not restarting; check RBAC"
-                            ),
+                            Err(e) => {
+                                if reported.insert((kind.name, "list")) {
+                                    tracing::warn!(
+                                        kind = kind.name,
+                                        error = %e,
+                                        "kind is served but cannot be listed, not restarting; check RBAC"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -251,7 +274,14 @@ impl KubeSource {
             let first = tokio::select! {
                 c = rx.recv() => c,
                 Some(ended) = tasks.join_next() => anyhow::bail!("a watcher task ended: {ended:?}"),
-                Some(kind) = found_rx.recv() => return Ok(Stopped::KindAppeared(kind)),
+                Some(kind) = found_rx.recv() => {
+                    // Shutdown can fire while this message is in flight; announcing a restart on
+                    // the way out would be a confusing log line for something that never happens.
+                    if *shutdown.borrow() {
+                        return Ok(Stopped::Shutdown);
+                    }
+                    return Ok(Stopped::KindAppeared(kind));
+                }
                 Some(ended) = aux.join_next() => {
                     // The leader and the writer end at shutdown too, and that can win the race
                     // against the arm below, so a clean stop must not be reported as a failure.
