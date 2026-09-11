@@ -2,11 +2,46 @@
 
 The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
-Status: Plan 3 done: the binary runs as a Kubernetes controller (`--kubernetes`) with status writes and leader election and speaks TLS to backends via BackendTLSPolicy; the Helm chart and the conformance suite follow in Plan 4.
+Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite has not been run yet, so no report is published.
 
 - Design spec (Indonesian): [docs/superpowers/specs/2026-09-09-gapura-sp1-design.md](docs/superpowers/specs/2026-09-09-gapura-sp1-design.md)
 - Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
 - Market research and gap analysis: [docs/superpowers/specs/research/](docs/superpowers/specs/research/)
+
+## Quickstart
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml
+helm install gapura oci://ghcr.io/gapura-dev/charts/gapura --namespace gapura-system --create-namespace
+```
+
+The `oci://ghcr.io/gapura-dev/charts/gapura` reference above, and the `home` and `sources` URLs in
+[charts/gapura/Chart.yaml](charts/gapura/Chart.yaml), are placeholders for a public repository that
+does not exist yet: nothing has been pushed to GHCR, so that install command and those links do not
+work. Until the first release, install from a checkout with `helm install gapura ./charts/gapura`.
+
+Then point a Gateway at the `gapura` class:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: main }
+spec:
+  gatewayClassName: gapura
+  listeners: [{ name: http, port: 80, protocol: HTTP }]
+EOF
+kubectl get gateway main -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}{"\n"}'
+```
+
+Chart values, RBAC, and the admin endpoints are documented in [charts/gapura/values.yaml](charts/gapura/values.yaml).
+The Grafana dashboard is [deploy/grafana/gapura-overview.json](deploy/grafana/gapura-overview.json); `--set metrics.dashboard.enabled=true` ships it as a ConfigMap for the Grafana sidecar.
+Conformance reports land in `conformance/reports/` once the suite runs, which has not happened yet. To reproduce everything locally:
+
+```bash
+./hack/kind-deploy.sh      # image + chart in kind, one request through the gateway
+./hack/conformance.sh      # Gateway API GATEWAY-HTTP suite (needs Go 1.26)
+```
 
 ## Development
 
@@ -15,6 +50,8 @@ cargo test -p gapura-core                 # unit + golden tests (< 60 s)
 cargo install cargo-insta                 # once; needed for the review command below
 cargo insta review                        # review changed golden snapshots
 cargo run -p gapura-core --example dump -- crates/gapura-core/tests/fixtures/basic-http/input
+./hack/chart-render.sh                    # helm lint plus rendered output vs the golden files
+cargo deny check all                      # licenses and advisories
 ```
 
 ### Running the data plane locally
@@ -42,6 +79,6 @@ TLS to backends: attach a `BackendTLSPolicy` (CA from a ConfigMap `ca.crt`, or
 `wellKnownCACertificates: System`) to a Service, or annotate the Service with
 `gapura.dev/backend-tls: insecure` to encrypt without verification.
 
-`gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The Kubernetes controller lives in the `gapura` binary; the Helm chart follows in Plan 4.
+`gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The Kubernetes controller lives in the `gapura` binary, packaged by the Dockerfile and the chart in [charts/gapura](charts/gapura).
 
 License: Apache-2.0.

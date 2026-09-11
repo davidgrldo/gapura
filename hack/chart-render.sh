@@ -11,6 +11,11 @@ UPDATE=${1:-}
 mkdir -p "$GOLDEN"
 status=0
 
+if ! diff -q deploy/grafana/gapura-overview.json charts/gapura/dashboards/gapura-overview.json; then
+  echo "FAIL dashboards differ: cp deploy/grafana/gapura-overview.json charts/gapura/dashboards/" >&2
+  exit 1
+fi
+
 helm lint "$CHART"
 
 for values in "$CHART"/tests/values-*.yaml; do
