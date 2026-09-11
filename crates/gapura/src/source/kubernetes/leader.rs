@@ -1,8 +1,6 @@
 //! Leader election on a coordination.k8s.io Lease. Only the leader writes status; every
 //! replica keeps serving traffic. The decision is pure, the loop is thin.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
@@ -64,10 +62,22 @@ pub fn decide(spec: Option<&LeaseSpec>, identity: &str, now_secs: i64) -> Decisi
     }
 }
 
+/// Publish leadership without waking anyone when nothing changed.
+pub fn publish(tx: &tokio::sync::watch::Sender<bool>, leader: bool) {
+    tx.send_if_modified(|current| {
+        if *current == leader {
+            false
+        } else {
+            *current = leader;
+            true
+        }
+    });
+}
+
 pub async fn run(
     client: Client,
     opts: LeaderOpts,
-    is_leader: Arc<AtomicBool>,
+    leadership: tokio::sync::watch::Sender<bool>,
     mut shutdown: ShutdownWatch,
 ) {
     let api = Api::<Lease>::namespaced(client, &opts.namespace);
@@ -100,7 +110,8 @@ pub async fn run(
                 false
             }
         };
-        let was = is_leader.swap(leader, Ordering::AcqRel);
+        let was = *leadership.borrow();
+        publish(&leadership, leader);
         METRICS.leader.set(i64::from(leader));
         if was != leader {
             tracing::info!(identity = %opts.identity, leader, "leadership changed");
@@ -189,5 +200,19 @@ mod tests {
             Decision::Acquire,
             "never renewed counts as expired"
         );
+    }
+
+    #[test]
+    fn leadership_is_published_on_a_watch_channel() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        assert!(!*rx.borrow());
+        publish(&tx, true);
+        assert!(
+            *rx.borrow_and_update(),
+            "a new leader is visible immediately"
+        );
+        publish(&tx, true);
+        publish(&tx, false);
+        assert!(!*rx.borrow_and_update());
     }
 }

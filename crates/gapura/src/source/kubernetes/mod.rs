@@ -11,7 +11,6 @@ pub mod reconcile;
 pub mod status;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -132,13 +131,13 @@ impl KubeSource {
         // Leader and writer end only at shutdown; watchers never end on their own, so a finished
         // watcher task is a failure that restarts the source.
         let mut aux = tokio::task::JoinSet::new();
-        let is_leader = Arc::new(AtomicBool::new(false));
         let (status_tx, status_rx) = watch::channel::<Vec<StatusPatch>>(Vec::new());
         if !self.read_only {
+            let (leadership_tx, leadership_rx) = watch::channel(false);
             aux.spawn(leader::run(
                 client.clone(),
                 self.leader.clone(),
-                is_leader.clone(),
+                leadership_tx,
                 shutdown.clone(),
             ));
             let resources: HashMap<&'static str, ApiResource> = resolved
@@ -150,7 +149,7 @@ impl KubeSource {
                 client.clone(),
                 resources,
                 self.settings.controller_name.clone(),
-                is_leader,
+                leadership_rx,
             );
             aux.spawn(writer.run(status_rx, shutdown.clone()));
         }

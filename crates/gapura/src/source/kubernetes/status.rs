@@ -4,10 +4,9 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use gapura_core::input::ParentReference;
 use gapura_core::status::{Condition, StatusPatch};
 use kube::api::{Api, ApiResource, DynamicObject, Patch, PatchParams};
@@ -207,7 +206,7 @@ pub struct Writer {
     client: Client,
     resources: HashMap<&'static str, ApiResource>,
     controller_name: String,
-    is_leader: Arc<AtomicBool>,
+    leadership: watch::Receiver<bool>,
     written: HashMap<Target, u64>,
 }
 
@@ -216,13 +215,13 @@ impl Writer {
         client: Client,
         resources: HashMap<&'static str, ApiResource>,
         controller_name: String,
-        is_leader: Arc<AtomicBool>,
+        leadership: watch::Receiver<bool>,
     ) -> Self {
         Self {
             client,
             resources,
             controller_name,
-            is_leader,
+            leadership,
             written: HashMap::new(),
         }
     }
@@ -249,6 +248,12 @@ impl Writer {
                         self.written.clear();
                     }
                 }
+                changed = self.leadership.changed() => {
+                    if changed.is_err() { return; }
+                    // A leader that just took over must write everything it has, now, instead of
+                    // waiting for the next translation or tick.
+                    self.written.clear();
+                }
                 _ = shutdown.changed() => return,
             }
             let patches = latest.borrow_and_update().clone();
@@ -257,7 +262,7 @@ impl Writer {
     }
 
     async fn flush(&mut self, patches: &[StatusPatch]) {
-        if !self.is_leader.load(Ordering::Acquire) {
+        if !*self.leadership.borrow() {
             // A future leader must rewrite everything, including what we wrote before.
             self.written.clear();
             return;
@@ -265,28 +270,49 @@ impl Writer {
         // Objects that left the translation are forgotten, so a recreated one is written again.
         let current: std::collections::HashSet<Target> = patches.iter().map(target_of).collect();
         self.written.retain(|t, _| current.contains(t));
-        for p in patches {
-            if !self.is_leader.load(Ordering::Acquire) {
-                self.written.clear();
-                return;
-            }
-            self.write(p).await;
+        let pending: Vec<&StatusPatch> = patches
+            .iter()
+            .filter(|p| {
+                let target = target_of(p);
+                self.written.get(&target) != Some(&hash_of(p))
+            })
+            .collect();
+        // Sequential writes make a thousand-route cluster take minutes to converge after a leader
+        // change; eight at a time keeps the API server calm and the wall clock short.
+        // A shared reborrow: `&Self` is Copy, so every in-flight write can hold one, and the
+        // borrow ends with the stream, before `written` is updated below. The jobs are built in a
+        // loop rather than a closure: a closure returning a future that borrows its argument is
+        // not inferred as higher-ranked over that borrow.
+        let this = &*self;
+        let mut jobs = Vec::with_capacity(pending.len());
+        for p in pending {
+            let target = target_of(p);
+            let hash = hash_of(p);
+            jobs.push(async move {
+                let written = this.write_one(p, &target).await;
+                written.then_some((target, hash))
+            });
+        }
+        let done: Vec<(Target, u64)> = futures::stream::iter(jobs)
+            .buffer_unordered(8)
+            .filter_map(|r| async move { r })
+            .collect()
+            .await;
+        for (target, hash) in done {
+            self.written.insert(target, hash);
         }
     }
 
-    async fn write(&mut self, p: &StatusPatch) {
-        let target = target_of(p);
-        let hash = hash_of(p);
-        if self.written.get(&target) == Some(&hash) {
-            return;
-        }
+    /// Write one object's status. Returns `true` only when a patch actually reached the API
+    /// server, so the caller never caches a status it did not write.
+    async fn write_one(&self, p: &StatusPatch, target: &Target) -> bool {
         let Some(ar) = self.resources.get(target.kind) else {
             tracing::debug!(?target, "kind not served by the API server, status skipped");
             METRICS
                 .status_writes_total
                 .with_label_values(&["skipped"])
                 .inc();
-            return;
+            return false;
         };
         let api: Api<DynamicObject> = match &target.namespace {
             Some(ns) => Api::namespaced_with(self.client.clone(), ns, ar),
@@ -305,19 +331,23 @@ impl Writer {
         .await;
         match result {
             Ok(true) => {
-                self.written.insert(target, hash);
                 METRICS
                     .status_writes_total
                     .with_label_values(&["success"])
                     .inc();
+                true
             }
-            Ok(false) => tracing::debug!(?target, "object gone before its status was written"),
+            Ok(false) => {
+                tracing::debug!(?target, "object gone before its status was written");
+                false
+            }
             Err(e) => {
                 tracing::warn!(?target, error = %e, "status patch failed, will retry");
                 METRICS
                     .status_writes_total
                     .with_label_values(&["failure"])
                     .inc();
+                false
             }
         }
     }
