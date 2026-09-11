@@ -928,3 +928,61 @@ fn listener_with_unsupported_protocol_advertises_no_kinds() {
     );
     insta::assert_yaml_snapshot!("listener-unsupported-protocol", t);
 }
+
+#[test]
+fn two_gateways_share_a_port_and_both_are_reachable() {
+    let t = run("two-gateways-one-port");
+    let ids: Vec<&str> = t.config.listeners.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(ids, vec!["infra/first/http", "infra/second/http"]);
+    let port80 = &t.config.ports[&80];
+    assert_eq!(port80.len(), 2, "one entry per Gateway");
+    // Both hostnames live in the same table and each points at its own Gateway. Their relative
+    // order is not asserted: two disjoint exact hostnames never match the same request, so the
+    // order between them carries no meaning (today the longer hostname happens to sort first,
+    // because equal-kind specificity falls back to length).
+    let mut pairs: Vec<(&str, &str)> = port80
+        .iter()
+        .map(|e| {
+            (
+                e.hostname
+                    .as_deref()
+                    .expect("both listeners have a hostname"),
+                t.config.listeners[e.listener].id.as_str(),
+            )
+        })
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("first.example.com", "infra/first/http"),
+            ("second.example.com", "infra/second/http"),
+        ],
+        "each Gateway's route is reachable under its own hostname"
+    );
+    for (i, entry) in port80.iter().enumerate() {
+        let listener = &t.config.listeners[entry.listener];
+        assert!(
+            listener.rules.get(entry.rule).is_some(),
+            "entry {i} points at a real rule"
+        );
+    }
+    insta::assert_yaml_snapshot!("two-gateways-one-port", t);
+}
+
+#[test]
+fn two_identical_listeners_order_by_listener_id() {
+    let t = run("two-gateways-same-hostname");
+    let port80 = &t.config.ports[&80];
+    assert_eq!(port80.len(), 2);
+    // Nothing in a request can tell these apart, so the order must at least be stable. Here the
+    // route names already decide it (they sort before the listener id in the key); the listener id
+    // is what breaks the tie when even the route is the same, which
+    // `precedence::the_listener_id_breaks_a_tie_between_two_gateways` covers.
+    // `HTTPRouteMultipleGateways` fails for exactly this ambiguity; see conformance/README.md.
+    let first = &t.config.listeners[port80[0].listener];
+    let second = &t.config.listeners[port80[1].listener];
+    assert_eq!(first.id, "infra/alpha/http");
+    assert_eq!(second.id, "infra/beta/http");
+    insta::assert_yaml_snapshot!("two-gateways-same-hostname", t);
+}

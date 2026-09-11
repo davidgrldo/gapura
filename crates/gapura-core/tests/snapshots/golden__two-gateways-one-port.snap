@@ -1,0 +1,241 @@
+---
+source: crates/gapura-core/tests/golden.rs
+expression: t
+---
+config:
+  listeners:
+    - id: infra/first/http
+      port: 80
+      protocol: Http
+      hostname: first.example.com
+      tls: ~
+      rules:
+        - route: apps/to-first
+          rule_index: 0
+          creation_timestamp: "2026-09-01T10:00:00Z"
+          matches:
+            - path:
+                Prefix: /
+              headers: []
+              query: []
+              method: ~
+          filters:
+            request_headers:
+              set: []
+              add: []
+              remove: []
+            response_headers:
+              set: []
+              add: []
+              remove: []
+            redirect: ~
+            rewrite: ~
+          backends:
+            - cluster: "apps/echo:80"
+              weight: 1
+          timeouts:
+            request_ms: ~
+            backend_request_ms: ~
+    - id: infra/second/http
+      port: 80
+      protocol: Http
+      hostname: ~
+      tls: ~
+      rules:
+        - route: apps/to-second
+          rule_index: 0
+          creation_timestamp: "2026-09-01T10:00:00Z"
+          matches:
+            - path:
+                Prefix: /
+              headers: []
+              query: []
+              method: ~
+          filters:
+            request_headers:
+              set: []
+              add: []
+              remove: []
+            response_headers:
+              set: []
+              add: []
+              remove: []
+            redirect: ~
+            rewrite: ~
+          backends:
+            - cluster: "apps/echo:80"
+              weight: 1
+          timeouts:
+            request_ms: ~
+            backend_request_ms: ~
+  ports:
+    80:
+      - listener: 1
+        hostname: second.example.com
+        matcher:
+          path:
+            Prefix: /
+          headers: []
+          query: []
+          method: ~
+        rule: 0
+      - listener: 0
+        hostname: first.example.com
+        matcher:
+          path:
+            Prefix: /
+          headers: []
+          query: []
+          method: ~
+        rule: 0
+  clusters:
+    "apps/echo:80":
+      endpoints:
+        - address: 10.1.0.5
+          port: 8080
+      tls: ~
+status:
+  - kind: GatewayClass
+    name: gapura
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Handled by Gapura
+        observedGeneration: 1
+    supportedFeatures:
+      - Gateway
+      - HTTPRoute
+      - ReferenceGrant
+  - kind: Gateway
+    namespace: infra
+    name: first
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Gateway is accepted
+        observedGeneration: 1
+      - type: Programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
+        observedGeneration: 1
+    listeners:
+      - name: http
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 1
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+  - kind: Gateway
+    namespace: infra
+    name: second
+    addresses:
+      - 10.0.0.1
+    conditions:
+      - type: Accepted
+        status: "True"
+        reason: Accepted
+        message: Gateway is accepted
+        observedGeneration: 1
+      - type: Programmed
+        status: "True"
+        reason: Programmed
+        message: Gateway is programmed
+        observedGeneration: 1
+    listeners:
+      - name: http
+        supportedKinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+        attachedRoutes: 1
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Listener is accepted
+            observedGeneration: 1
+          - type: Programmed
+            status: "True"
+            reason: Programmed
+            message: Listener is programmed
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+          - type: Conflicted
+            status: "False"
+            reason: NoConflicts
+            message: No conflicts
+            observedGeneration: 1
+  - kind: HTTPRoute
+    namespace: apps
+    name: to-first
+    parents:
+      - parentRef:
+          group: ~
+          kind: ~
+          namespace: infra
+          name: first
+          sectionName: ~
+          port: ~
+        controllerName: gapura.dev/controller
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Route is accepted
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
+  - kind: HTTPRoute
+    namespace: apps
+    name: to-second
+    parents:
+      - parentRef:
+          group: ~
+          kind: ~
+          namespace: infra
+          name: second
+          sectionName: ~
+          port: ~
+        controllerName: gapura.dev/controller
+        conditions:
+          - type: Accepted
+            status: "True"
+            reason: Accepted
+            message: Route is accepted
+            observedGeneration: 1
+          - type: ResolvedRefs
+            status: "True"
+            reason: ResolvedRefs
+            message: All references resolved
+            observedGeneration: 1
