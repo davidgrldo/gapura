@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -27,12 +27,12 @@
 <body>
   <div class="frame">
     <p class="eyebrow">Sequence · Gapura SP1 · v0.1</p>
-    <h1>Data flow: jalur request dan jalur reload config</h1>
+    <h1>Data flow: the request path and the config reload path</h1>
 
-    <h2>A. Jalur request (hot path, per request)</h2>
+    <h2>A. Request path (hot path, every request)</h2>
     <svg viewBox="0 0 1000 760" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="gapura-req-title gapura-req-desc">
-      <title id="gapura-req-title">Gapura v0.1: jalur request melalui proxy Pingora</title>
-      <desc id="gapura-req-desc">Sequence diagram: klien mengirim request ke proxy Pingora, proxy membaca Config dari store tanpa lock, mencocokkan route dan memilih endpoint, lalu meneruskan ke backend pod dan mengembalikan 200, atau menjawab 404, 503, atau redirect secara lokal bila tidak ada route atau endpoint.</desc>
+      <title id="gapura-req-title">Gapura v0.1: request path through the Pingora proxy</title>
+      <desc id="gapura-req-desc">Sequence diagram: the client sends a request to the Pingora proxy, the proxy reads the Config from the store without taking a lock, matches a route and picks an endpoint, then forwards to the backend pod and returns 200, or answers locally with 404, 503, or a redirect when no route or endpoint is available.</desc>
       <defs>
         <marker id="req-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="req-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
@@ -154,10 +154,10 @@
       <text x="740" y="728" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Headline success</text>
     </svg>
 
-    <h2>B. Jalur reload config (control path, per perubahan resource)</h2>
+    <h2>B. Config reload path (control path, every resource change)</h2>
     <svg viewBox="0 0 1000 648" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="gapura-reload-title gapura-reload-desc">
-      <title id="gapura-reload-title">Gapura v0.1: jalur reload config dari event Kubernetes</title>
-      <desc id="gapura-reload-desc">Sequence diagram: event watch dari API server diterima reconciler, di-debounce 200 milidetik, diterjemahkan oleh translator murni menjadi Config dan status patch, Config di-swap atomik ke store, dan hanya replika leader yang menulis status kembali ke API server.</desc>
+      <title id="gapura-reload-title">Gapura v0.1: config reload path from a Kubernetes event</title>
+      <desc id="gapura-reload-desc">Sequence diagram: a watch event from the API server reaches the reconciler, is debounced for 200 milliseconds, and is turned by the pure translator into a Config and status patches; the Config is swapped atomically into the store, and only the leader replica writes status back to the API server.</desc>
       <defs>
         <marker id="rl-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="rl-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>

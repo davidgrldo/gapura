@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gapura SP1 · Arsitektur</title>
+  <title>Gapura SP1 · Architecture</title>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -51,11 +51,11 @@
 <body>
   <div class="frame">
     <p class="eyebrow">Architecture · Gapura SP1 · v0.1</p>
-    <h1>Satu binary: control plane kube-rs dan data plane Pingora</h1>
+    <h1>One binary: kube-rs control plane and Pingora data plane</h1>
 
     <svg viewBox="0 0 1000 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="gapura-arch-title gapura-arch-desc">
-      <title id="gapura-arch-title">Gapura v0.1: arsitektur runtime satu binary</title>
-      <desc id="gapura-arch-desc">Diagram arsitektur Gapura v0.1: watcher kube-rs membaca resource Gateway API dari API server, translator murni menghasilkan Config yang di-swap atomik dan dibaca proxy Pingora per request, sementara status ditulis kembali ke API server oleh replika leader.</desc>
+      <title id="gapura-arch-title">Gapura v0.1: single-binary runtime architecture</title>
+      <desc id="gapura-arch-desc">Architecture diagram of Gapura v0.1: kube-rs watchers read Gateway API resources from the API server, a pure translator produces a Config that is swapped atomically and read by the Pingora proxy on every request, while status is written back to the API server by the leader replica.</desc>
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
