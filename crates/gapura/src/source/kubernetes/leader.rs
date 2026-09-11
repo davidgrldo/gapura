@@ -212,6 +212,11 @@ mod tests {
             "a new leader is visible immediately"
         );
         publish(&tx, true);
+        assert!(
+            !rx.has_changed().unwrap(),
+            "publishing an unchanged value must not wake receivers, or every renew tick would \
+             force a full status rewrite"
+        );
         publish(&tx, false);
         assert!(!*rx.borrow_and_update());
     }

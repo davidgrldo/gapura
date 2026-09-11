@@ -249,7 +249,10 @@ impl Writer {
                     }
                 }
                 changed = self.leadership.changed() => {
-                    if changed.is_err() { return; }
+                    if changed.is_err() {
+                        tracing::warn!("leadership channel closed, the status writer is stopping");
+                        return;
+                    }
                     // A leader that just took over must write everything it has, now, instead of
                     // waiting for the next translation or tick.
                     self.written.clear();
@@ -270,11 +273,15 @@ impl Writer {
         // Objects that left the translation are forgotten, so a recreated one is written again.
         let current: std::collections::HashSet<Target> = patches.iter().map(target_of).collect();
         self.written.retain(|t, _| current.contains(t));
-        let pending: Vec<&StatusPatch> = patches
+        // `target_of` and `hash_of` are kept from this pass: `hash_of` serialises the whole patch,
+        // and recomputing both in the job loop doubled that work on exactly the large batch this
+        // concurrency exists for.
+        let pending: Vec<(Target, u64, &StatusPatch)> = patches
             .iter()
-            .filter(|p| {
+            .filter_map(|p| {
                 let target = target_of(p);
-                self.written.get(&target) != Some(&hash_of(p))
+                let hash = hash_of(p);
+                (self.written.get(&target) != Some(&hash)).then_some((target, hash, p))
             })
             .collect();
         // Sequential writes make a thousand-route cluster take minutes to converge after a leader
@@ -285,9 +292,7 @@ impl Writer {
         // not inferred as higher-ranked over that borrow.
         let this = &*self;
         let mut jobs = Vec::with_capacity(pending.len());
-        for p in pending {
-            let target = target_of(p);
-            let hash = hash_of(p);
+        for (target, hash, p) in pending {
             jobs.push(async move {
                 let written = this.write_one(p, &target).await;
                 written.then_some((target, hash))
@@ -306,6 +311,13 @@ impl Writer {
     /// Write one object's status. Returns `true` only when a patch actually reached the API
     /// server, so the caller never caches a status it did not write.
     async fn write_one(&self, p: &StatusPatch, target: &Target) -> bool {
+        // Leadership can be lost while this batch is in flight. Without this check a demoted
+        // instance keeps patching, and can land stale status on top of what the new leader
+        // already wrote; the new leader's `written` cache would then suppress the repair for
+        // up to ten minutes. A watch borrow is far cheaper than the two API calls it guards.
+        if !*self.leadership.borrow() {
+            return false;
+        }
         let Some(ar) = self.resources.get(target.kind) else {
             tracing::debug!(?target, "kind not served by the API server, status skipped");
             METRICS

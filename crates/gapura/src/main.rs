@@ -25,6 +25,10 @@ use pingora::services::listening::Service;
 /// listener while every probe on the admin port stays green. Checking here turns that into a clear
 /// exit. The socket is released immediately, so a competing process could still take the port in
 /// the window between this check and Pingora's own bind; that race costs a restart, not silence.
+/// If a future version enables Pingora's graceful upgrade (`Opt { upgrade: true }`, where the new
+/// process takes the listening sockets from the old one), this check must become conditional on
+/// that flag, or it would refuse to start for exactly the upgrade it exists to protect, the old
+/// process still holding the ports.
 fn first_unbindable(addrs: &[std::net::SocketAddr]) -> Option<(std::net::SocketAddr, String)> {
     addrs
         .iter()
