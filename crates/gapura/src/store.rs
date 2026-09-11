@@ -172,7 +172,6 @@ mod tests {
             hostname: None,
             tls,
             rules: vec![],
-            table: vec![],
         }
     }
 
@@ -192,6 +191,7 @@ mod tests {
         let rt = Runtime::new(
             Config {
                 listeners: vec![],
+                ports: BTreeMap::new(),
                 clusters,
             },
             1,
@@ -233,6 +233,7 @@ mod tests {
         let rt = Runtime::new(
             Config {
                 listeners: vec![listener(Some(bad)), listener(Some(good))],
+                ports: BTreeMap::new(),
                 clusters: BTreeMap::new(),
             },
             1,
@@ -260,6 +261,7 @@ mod tests {
         let rt = Runtime::new(
             Config {
                 listeners: vec![listener(Some(bad.clone())), listener(Some(bad))],
+                ports: BTreeMap::new(),
                 clusters: BTreeMap::new(),
             },
             1,
@@ -294,6 +296,7 @@ mod tests {
         let rt = Runtime::new(
             Config {
                 listeners: vec![listener(Some(bundle))],
+                ports: BTreeMap::new(),
                 clusters: BTreeMap::new(),
             },
             1,

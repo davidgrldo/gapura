@@ -230,54 +230,44 @@ impl ProxyHttp for GapuraProxy {
 
         let decision = {
             let ex = ctx.extracted.as_ref().expect("set above");
-            match rt.config.select_listener(ctx.port, &ex.host) {
+            match rt.config.match_port(ctx.port, &ex.attrs()) {
                 None => Decision::NotFound,
-                Some(listener) => {
-                    let listener_idx = rt
-                        .config
-                        .listeners
-                        .iter()
-                        .position(|l| l.id == listener.id)
-                        .expect("listener from this config");
-                    let scheme = match listener.protocol {
+                Some(hit) => {
+                    // The scheme comes from the listener that actually won the match, and feeds
+                    // both the redirect Location and X-Forwarded-Proto.
+                    ctx.scheme = match hit.listener.protocol {
                         Protocol::Https => "https",
                         Protocol::Http => "http",
                     };
-                    ctx.scheme = scheme;
-                    match listener.match_entry(&ex.attrs()) {
-                        None => Decision::NotFound,
-                        Some((entry, rule)) => {
-                            if let Some(redirect) = &rule.filters.redirect {
-                                let location = redirect_location(
-                                    redirect,
-                                    scheme,
-                                    &ex.host,
-                                    ctx.port,
-                                    &ex.path,
-                                    ex.query_string.as_deref(),
-                                    &entry.matcher.path,
-                                );
-                                Decision::Redirect {
-                                    status: redirect.status,
-                                    location,
+                    if let Some(redirect) = &hit.rule.filters.redirect {
+                        let location = redirect_location(
+                            redirect,
+                            ctx.scheme,
+                            &ex.host,
+                            ctx.port,
+                            &ex.path,
+                            ex.query_string.as_deref(),
+                            &hit.entry.matcher.path,
+                        );
+                        Decision::Redirect {
+                            status: redirect.status,
+                            location,
+                        }
+                    } else {
+                        match pick_backend(&hit.rule.backends, random_roll) {
+                            Err(local) => Decision::Local(local),
+                            Ok(key) => match rt.config.clusters.get(key) {
+                                None => Decision::Local(Local::NoBackend),
+                                Some(cluster) if cluster.endpoints.is_empty() => {
+                                    Decision::Local(Local::NoEndpoints)
                                 }
-                            } else {
-                                match pick_backend(&rule.backends, random_roll) {
-                                    Err(local) => Decision::Local(local),
-                                    Ok(key) => match rt.config.clusters.get(key) {
-                                        None => Decision::Local(Local::NoBackend),
-                                        Some(cluster) if cluster.endpoints.is_empty() => {
-                                            Decision::Local(Local::NoEndpoints)
-                                        }
-                                        Some(_) => Decision::Proxy {
-                                            listener: listener_idx,
-                                            rule: entry.rule,
-                                            matched: entry.matcher.path.clone(),
-                                            cluster: key.to_string(),
-                                        },
-                                    },
-                                }
-                            }
+                                Some(_) => Decision::Proxy {
+                                    listener: hit.listener_index,
+                                    rule: hit.entry.rule,
+                                    matched: hit.entry.matcher.path.clone(),
+                                    cluster: key.to_string(),
+                                },
+                            },
                         }
                     }
                 }

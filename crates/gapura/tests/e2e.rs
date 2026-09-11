@@ -84,6 +84,7 @@ fn client(gw: &Gateway) -> reqwest::Client {
         .redirect(reqwest::redirect::Policy::none())
         .resolve("echo.test", addr)
         .resolve("other.test", addr)
+        .resolve("second.test", addr)
         .resolve("unknown.test", addr)
         .build()
         .unwrap()
@@ -154,6 +155,26 @@ spec:
   hostnames: [other.test]
   rules:
   - backendRefs: [{{ name: echo, port: 80 }}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {{ name: second, namespace: infra, generation: 1 }}
+spec:
+  gatewayClassName: gapura
+  listeners:
+  - {{ name: http, port: {http_port}, protocol: HTTP, allowedRoutes: {{ namespaces: {{ from: All }} }} }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {{ name: onsecond, namespace: apps, generation: 1, creationTimestamp: "2026-09-10T00:00:00Z" }}
+spec:
+  parentRefs: [{{ name: second, namespace: infra }}]
+  hostnames: [second.test]
+  rules:
+  - filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier: {{ set: [{{ name: X-Gateway-Name, value: second }}] }}
+    backendRefs: [{{ name: echo, port: 80 }}]
 ---
 apiVersion: v1
 kind: Service
@@ -446,4 +467,26 @@ async fn admin_endpoints() {
         reqwest::get(format!("{base}/nope")).await.unwrap().status(),
         404
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_gateway_on_the_same_port_is_reachable() {
+    let (gw, c) = setup().await;
+    let r = c
+        .get(url(&gw, "second.test", "/anything"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "a route attached to the second Gateway must be served"
+    );
+    assert_eq!(r.headers()["x-gateway-name"], "second");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["headers"]["x-forwarded-host"], "second.test");
+    // The first Gateway keeps working on the same port.
+    let first = c.get(url(&gw, "echo.test", "/api")).send().await.unwrap();
+    assert_eq!(first.status(), 200);
+    assert_eq!(first.headers()["x-resp"], "yes");
 }

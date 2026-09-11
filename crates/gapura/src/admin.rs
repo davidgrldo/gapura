@@ -125,8 +125,8 @@ mod tests {
                     key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n".into(),
                 }),
                 rules: vec![],
-                table: vec![],
             }],
+            ports: Default::default(),
             clusters: Default::default(),
         });
         let ready = app.handle("/readyz");
