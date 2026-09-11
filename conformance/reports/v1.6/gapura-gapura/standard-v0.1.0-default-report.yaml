@@ -1,0 +1,26 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-09-11T14:34:33+07:00"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.6.2
+implementation:
+  contact:
+  - https://github.com/gapura-dev/gapura/issues
+  organization: gapura
+  project: gapura
+  url: https://github.com/gapura-dev/gapura
+  version: v0.1.0
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    failedTests:
+    - HTTPRouteCrossNamespace
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteMultipleGateways
+    result: failure
+    statistics:
+      Failed: 3
+      Passed: 34
+      Skipped: 0
+  name: GATEWAY-HTTP
+  summary: Core tests failed with 3 test failures.
