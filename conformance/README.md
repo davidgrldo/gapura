@@ -38,9 +38,17 @@ the same reason a shared ingress controller cannot pass this test.
 The folder `reports/v1.6/davidgrldo-gapura/` already carries the `README.md` upstream requires, so a
 submission there is a folder copy rather than a rewrite; sending it waits for 37 of 37.
 
+The nightly `conformance` workflow runs the same script, and treats that one test as the expected
+failure: the set is pinned as `EXPECTED_FAILURES` at the top of `hack/conformance.sh`, with the
+reason next to it. The check is an equality, so the job goes red both when some other test fails and
+when `HTTPRouteMultipleGateways` starts passing -- the second is the good outcome, but it makes the
+counts on this page wrong and should not slip by unnoticed. None of that weakens the run: the suite
+is still invoked with no `--skip-tests` and no `--exempt-features`, and the committed report records
+whatever actually happened.
+
 ## Reproduce
 
-<!-- REMOVE WHEN PUBLIC: delete this line once github.com/davidgrldo/gapura is public and v0.1.0 is tagged. -->
+<!-- REMOVE WHEN PUBLIC: delete this paragraph once github.com/davidgrldo/gapura is public and v0.1.0 is tagged. -->
 The clone URL below does not resolve yet: the repository is published with the first release.
 
 ```bash

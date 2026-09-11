@@ -8,10 +8,14 @@
 #
 # Nothing here ever contacts ghcr.io. The only registry is the local container.
 #
-# Needs: docker (with buildx), kind, kubectl, helm 3.13 or newer, jq. The helm floor is `--plain-http`,
-# which is what lets `push` and `install` talk to a registry with no TLS; it landed in 3.13 and there
-# is no substitute on an older helm. Runs under bash, not sh: the manifest-list join relies on word
-# splitting and on process substitution, exactly as release.yml's `run:` does.
+# Needs: docker (with buildx), kind, kubectl, helm 4.1.4, jq. Two helm floors meet here and the
+# higher one is the requirement. `--plain-http` is what lets `push` and `install` talk to a registry
+# with no TLS; it landed in 3.13 and there is no substitute on an older helm. But this script also
+# runs ./hack/chart-render.sh, and the golden renders under charts/gapura/tests/golden/ were produced
+# by helm 4.1.4 -- the version CONTRIBUTING.md and all three CI workflows pin -- so on any other
+# helm the run dies on a golden diff that has nothing to do with the release. Runs under bash, not
+# sh: the manifest-list join relies on word splitting and on process substitution, exactly as
+# release.yml's `run:` does.
 #
 # Two addresses, one registry. The registry container publishes 5000 on the host as
 # localhost:5001, and is also joined to the `kind` docker network, where the node reaches it by

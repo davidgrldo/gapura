@@ -15,10 +15,16 @@ Status: SP1 v0.1 is code-complete: the data plane, the Kubernetes controller (`-
 You need a cluster (Kubernetes 1.29 or newer), `kubectl`, and Helm 3.8 or newer. Steps 1 to 4 are
 meant to be pasted in order and end with a request that goes through the gateway to a backend.
 
+<!-- REMOVE WHEN PUBLIC: delete this blockquote once v0.1.0 is tagged and both ghcr.io/davidgrldo packages, gapura and charts/gapura, are public. -->
 > **Step 2 does not work yet.** Nothing has been published to `ghcr.io/davidgrldo`, so
-> `helm install ... oci://ghcr.io/...` fails until the `v0.1.0` tag is pushed; the `home` and
-> `sources` URLs in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same
-> repository and are equally unpublished. Until the tag exists, install from a checkout instead:
+> `helm install ... oci://ghcr.io/...` fails, and two separate things have to happen before it
+> works. The `v0.1.0` tag has to be pushed, which is what builds and publishes the image and the
+> chart. Then both GHCR packages -- `gapura` and `charts/gapura` -- have to be made public by hand:
+> a new package defaults to private, GitHub documents no API for changing that, and a private
+> package pulls fine for the maintainer while 401ing for everyone else. The tag alone is not enough;
+> [docs/RELEASING.md](docs/RELEASING.md) section 5.3 is the procedure. The `home` and `sources` URLs
+> in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same repository and are
+> equally unpublished. Until both are done, install from a checkout instead:
 > `./hack/kind-deploy.sh` does all of this on a local kind cluster, and against any other cluster
 > build the image, push it somewhere your nodes can read, and replace step 2 with
 > `helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set

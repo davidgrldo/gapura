@@ -27,6 +27,25 @@ PROFILE=${PROFILE:-GATEWAY-HTTP}
 REPORT_DIR="$REPO_ROOT/conformance/reports/v1.6/${ORG}-${PROJECT}"
 REPORT="$REPORT_DIR/standard-${VERSION}-default-report.yaml"
 
+# The tests that fail by construction today, and therefore the only failures a run is allowed to
+# have. This changes nothing about the suite: it still runs at full strength below, with no
+# --skip-tests and no --exempt-features, and the report still records whatever actually happened.
+# All this list decides is the exit status of *this script*, so that the nightly job in
+# .github/workflows/conformance.yml is a signal rather than a light that is red every night for
+# something already known, documented, and indistinguishable from a real regression.
+#
+#   HTTPRouteMultipleGateways -- two Gateways, two routes that both match `PathPrefix /` with no
+#   hostname, and a different backend expected from each. Gapura publishes one address for every
+#   Gateway of its class, so nothing in the request tells the two apart and one of the backends is
+#   unreachable by construction. Closing it needs a listening address per Gateway, which spec
+#   section 5.1 defers to SP4. conformance/README.md has the long version.
+#
+# The comparison at the end of this script is an equality, not a subset: a test that fails and is
+# not on this list is a regression and fails the run, and a test on this list that starts passing
+# also fails the run -- that is good news, but it makes the counts in the docs and in the committed
+# report wrong, so it must not pass silently. Keep the list non-empty, or rework that comparison.
+EXPECTED_FAILURES=(HTTPRouteMultipleGateways)
+
 # The suite brings its own Gateways on port 80; the e2e fixture would put a second one there
 # and change what is being measured. Default it off here so a plain run reproduces the
 # recorded report, while FIXTURE=1 still works for anyone who wants both.
@@ -41,6 +60,12 @@ if [ ! -d "$CHECKOUT" ]; then
 fi
 
 mkdir -p "$REPORT_DIR"
+# A suite that panics, fails to build, or is killed by the -timeout never writes a report, and the
+# committed one from the last good run is still sitting there. Without something to date the run
+# against, that stale file would read as a clean result for a run that measured nothing.
+STAMP=$(mktemp)
+trap 'rm -f "$STAMP"' EXIT
+
 echo "==> running $PROFILE conformance, this takes 10 to 40 minutes"
 cd "$CHECKOUT/conformance"
 # --supported-features is passed explicitly: without it the suite infers the set from
@@ -51,6 +76,10 @@ cd "$CHECKOUT/conformance"
 # links a dozen extra test binaries and needs about 1.5 GB more disk for no added coverage.
 # `.` not `./...`: TestConformance lives only in the root conformance package, and linking the
 # echo-server helper binaries alongside it costs disk for nothing.
+# `go test` exits non-zero whenever a test fails, and the known failure above makes that the normal
+# outcome, so its status is captured rather than left to `set -e`. Nothing is decided here: the
+# verdict is the expected-failure comparison at the bottom.
+set +e
 go test -timeout 60m . -run TestConformance -args \
   --gateway-class=gapura \
   --supported-features=Gateway,ReferenceGrant,HTTPRoute \
@@ -62,6 +91,45 @@ go test -timeout 60m . -run TestConformance -args \
   --contact="$CONTACT" \
   --report-output="$REPORT" \
   --cleanup-base-resources=true
+GO_RC=$?
+set -e
+
+if [ ! "$REPORT" -nt "$STAMP" ]; then
+  echo "" >&2
+  echo "FAIL go test exited $GO_RC without writing $REPORT." >&2
+  echo "     Nothing was measured, so there is no result to compare: that is a broken run, not a" >&2
+  echo "     test outcome. The go test output above says why." >&2
+  exit 1
+fi
 
 echo "==> report at $REPORT"
 grep -A6 '^profiles:' "$REPORT" || true
+
+# The report's own failedTests list, rather than a scrape of go test's output: it is what the suite
+# recorded, what the committed report shows, and what a reader of either one sees. Every
+# failedTests block in the file is collected, so a failure under any profile counts.
+ACTUAL=$(awk '
+  /^[[:space:]]*failedTests:[[:space:]]*$/ { collecting = 1; next }
+  collecting && /^[[:space:]]*-[[:space:]]+/ {
+    sub(/^[[:space:]]*-[[:space:]]+/, ""); gsub(/^"|"$/, ""); print; next
+  }
+  { collecting = 0 }
+' "$REPORT" | sort -u)
+EXPECTED=$(printf '%s\n' "${EXPECTED_FAILURES[@]}" | sort -u)
+
+if [ "$ACTUAL" = "$EXPECTED" ]; then
+  echo "==> the failures are exactly the expected set, so this run passes (go test exited $GO_RC):"
+  printf '    %s\n' "${EXPECTED_FAILURES[@]}"
+  exit 0
+fi
+
+echo "" >&2
+echo "FAIL the set of failing tests changed. Expected on the left, this run on the right:" >&2
+diff <(printf '%s\n' "$EXPECTED" | grep -v '^$') \
+     <(printf '%s\n' "$ACTUAL" | grep -v '^$') >&2 || true
+echo "" >&2
+echo "     A '>' line is a test that failed and was not expected to: a regression. Fix the code." >&2
+echo "     A '<' line is an expected failure that now passes: drop it from EXPECTED_FAILURES at the" >&2
+echo "     top of this script, and correct the pass counts quoted in conformance/README.md," >&2
+echo "     README.md and conformance/reports/v1.6/${ORG}-${PROJECT}/README.md." >&2
+exit 1

@@ -86,11 +86,16 @@ contacts ghcr.io.
 ./hack/release-dry-run.sh
 ```
 
-It needs docker with buildx, kind, kubectl, helm 3.13 or newer, and jq. It also needs disk: two
-from-scratch Rust release builds with vendored OpenSSL. The script watches both the host filesystem
-and the docker VM during each build and stops at a floor rather than filling a disk, so a run that
-exits early with `FAIL out of disk` has told you the truth about this machine, not about the
-release. Clear space and run it again.
+It needs docker with buildx, kind, kubectl, helm 4.1.4, and jq. Two helm floors meet in that script
+and the higher one is the requirement: `--plain-http`, which is what lets it push to and install
+from a registry with no TLS, landed in 3.13 — but the script also runs `./hack/chart-render.sh`, and
+the golden renders under `charts/gapura/tests/golden/` were produced by helm 4.1.4, the version
+`CONTRIBUTING.md` and all three CI workflows pin. On any other helm the dry run dies on a golden
+diff that has nothing to do with the release. It also needs disk: two from-scratch Rust release
+builds with vendored OpenSSL. The script watches both the host filesystem and the docker VM during
+each build and stops at a floor rather than filling a disk, so a run that exits early with
+`FAIL out of disk` has told you the truth about this machine, not about the release. Clear space and
+run it again.
 
 This is the only rehearsal of the release path that exists. The workflow itself has no other
 trigger than a pushed tag, and by then a mistake is already public.
@@ -370,10 +375,12 @@ With both packages public, the README quickstart is finally runnable as written.
 cluster and paste steps 1 to 4. Only once that works should a **separate commit** remove the
 pre-publication notices, which stop being true the moment the tag exists:
 
-- the "Step 2 does not work yet" block above step 2 in `README.md`;
+- the "Step 2 does not work yet" block in `README.md` — it sits above step **1**, with the
+  `kind create cluster` block in between, not immediately above the step it is about;
 - the `<!-- REMOVE WHEN PUBLIC: ... -->` paragraph under the table of contents in
-  `conformance/reports/v1.6/davidgrldo-gapura/README.md`, together with the
-  `markdown-link-check-disable`/`markdown-link-check-enable` pair wrapping the links above it;
+  `conformance/reports/v1.6/davidgrldo-gapura/README.md`, together with **both**
+  `markdown-link-check-disable`/`markdown-link-check-enable` pairs wrapping the links above it —
+  one on the "Source and issues" line, one inside the table;
 - the `<!-- REMOVE WHEN PUBLIC: ... -->` sentence in the Reproduce section of
   `conformance/README.md`.
 

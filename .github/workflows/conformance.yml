@@ -25,6 +25,10 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
+      # Green here means "the tests that failed are exactly the ones expected to", not "nothing
+      # failed": HTTPRouteMultipleGateways fails by construction and is pinned, with the reason, as
+      # EXPECTED_FAILURES at the top of hack/conformance.sh. Any other test failing turns this job
+      # red, and so does that one starting to pass. The suite itself is run at full strength.
       - name: Run the suite
         run: ./hack/conformance.sh
       - if: always()
