@@ -1,0 +1,51 @@
+# cargo-deny 0.20 configuration. Run: cargo deny check all
+# Do not copy cargo-deny's own deny.toml: it bans openssl, openssl-sys and cmake, all of which
+# Pingora requires (vendored OpenSSL, zlib-ng via cmake).
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+all-features = false
+
+[advisories]
+# Every advisory denies by default in this version; list exceptions in `ignore` with a reason.
+unmaintained = "workspace"
+unsound = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.93
+include-build = true
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "ISC",                  # ring is `Apache-2.0 AND ISC`; rustls-webpki and untrusted are ISC only
+    "BSD-2-Clause",
+    "BSD-3-Clause",         # zstd-sys, subtle, neli; `AND BSD-3-Clause` in encoding_rs and matchit
+    "Zlib",                 # foldhash
+    "Unicode-3.0",          # the ICU crates, and `AND Unicode-3.0` in unicode-ident
+    "CDLA-Permissive-2.0",  # webpki-roots, webpki-root-certs
+    "Unlicense",            # jiff, memchr, aho-corasick (all also offer MIT)
+    "0BSD",
+    "BSL-1.0",
+]
+exceptions = []
+
+[bans]
+# The graph has real duplicates today (openssl-probe 0.1/0.2, zstd 0.13/0.14, zstd-safe 7/8,
+# r-efi 5/6, three windows-sys, two thiserror, two getrandom). Warn until they are triaged.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
