@@ -1,4 +1,9 @@
-# Gapura
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/gapura-lockup-reversed.svg">
+    <img alt="Gapura" src="assets/logo/gapura-lockup.svg" width="280">
+  </picture>
+</h1>
 
 The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
@@ -7,6 +12,22 @@ Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kub
 - Release notes, and what changes for operators on upgrade: [CHANGELOG.md](CHANGELOG.md)
 - Contributing, security policy, and code of conduct: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
+- The mark, its variants, and how to use them: [assets/logo/](assets/logo/)
+
+## The name
+
+A *gapura* is the gate of a Javanese or Balinese temple. The one the mark is
+drawn from is a *candi bentar*: a stepped tower split down the middle and pulled
+apart, leaving a gap with no door in it. Nothing is kept out. What the gate does
+is mark where one place ends and another begins, and make everything crossing
+that line take one known path.
+
+That is the whole job of this program. It does not hold your traffic, it does
+not store it, and there is nothing behind the wall for it to guard -- no
+database, no separate control plane, no edition you have to buy. It stands where
+the cluster meets everything else and gives what arrives a single legible way
+in. The mark sets that gate inside the hexagon Kubernetes tooling is drawn in,
+in a rust that is both the language and the colour of temple brick.
 
 ## Quickstart
 
