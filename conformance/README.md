@@ -35,6 +35,9 @@ needs a listening address per Gateway, or a Deployment per Gateway; spec section
 per-Gateway isolation to SP4 and beyond, so this is a known trade-off rather than a surprise. It is
 the same reason a shared ingress controller cannot pass this test.
 
+The folder `reports/v1.6/davidgrldo-gapura/` already carries the `README.md` upstream requires, so a
+submission there is a folder copy rather than a rewrite; sending it waits for 37 of 37.
+
 ## Reproduce
 
 ```bash
@@ -48,6 +51,3 @@ and loads it into the cluster, installs `charts/gapura` with `charts/gapura/test
 then runs the upstream suite from a v1.6.2 checkout with
 `--supported-features=Gateway,ReferenceGrant,HTTPRoute --conformance-profiles=GATEWAY-HTTP`.
 Requires docker, kind, kubectl, helm and Go 1.26.
-
-The organization, URLs and contact in the report are placeholders until the project has a public
-repository, which is why this report has not been submitted to kubernetes-sigs/gateway-api.
