@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 CLUSTER=${CLUSTER:-gapura}
 GWAPI=${GWAPI:-v1.6.2}
 
-kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --wait 120s
+kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --config hack/kind-config.yaml --wait 120s
 kubectl config use-context "kind-$CLUSTER"
 kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GWAPI}/standard-install.yaml"
 kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io crd/httproutes.gateway.networking.k8s.io --timeout=60s

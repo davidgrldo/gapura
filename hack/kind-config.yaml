@@ -1,0 +1,10 @@
+# Cluster for the in-cluster tests and for conformance: host ports 80 and 443 reach the NodePorts
+# the chart uses, so Gateway.status.addresses can be 127.0.0.1 and a Gateway listener on port 80
+# is dialable from the host. Gateway API conformance requires exactly that.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - { containerPort: 30080, hostPort: 80, protocol: TCP }
+  - { containerPort: 30443, hostPort: 443, protocol: TCP }
