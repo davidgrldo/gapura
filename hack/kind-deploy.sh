@@ -62,7 +62,19 @@ kubectl -n gapura-e2e get gateway main -o wide
 kubectl -n gapura-e2e get httproute echo -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}{"\n"}'
 
 echo "==> request through the gateway"
-curl -sS --fail-with-body -H 'Host: echo.e2e' http://127.0.0.1/ | head -5
+# Right after a rollout the NodePort can still hand a connection to the terminating pod, so give
+# the first request a few tries before calling it a failure.
+for attempt in $(seq 10); do
+  if body=$(curl -sS --fail-with-body -H 'Host: echo.e2e' http://127.0.0.1/ 2>&1); then
+    printf '%s\n' "$body" | head -5
+    break
+  fi
+  if [ "$attempt" = 10 ]; then
+    echo "no answer through the gateway after 10 tries: $body" >&2
+    exit 1
+  fi
+  sleep 2
+done
 echo "==> admin endpoints"
 kubectl -n "$NS" port-forward "svc/gapura-admin" 19090:9090 >/tmp/gapura-pf.log 2>&1 &
 pf=$!
