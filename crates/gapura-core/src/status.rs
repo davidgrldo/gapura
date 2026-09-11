@@ -139,6 +139,17 @@ mod tests {
     }
 
     #[test]
+    fn supported_features_satisfy_the_crd_constraints() {
+        // GatewayClass.status.supportedFeatures is a list-map keyed by name: ascending, unique,
+        // at most 64 entries. The CRD rejects anything else.
+        assert!(
+            SUPPORTED_FEATURES.windows(2).all(|w| w[0] < w[1]),
+            "must be sorted ascending and free of duplicates: {SUPPORTED_FEATURES:?}"
+        );
+        assert!(SUPPORTED_FEATURES.len() <= 64);
+    }
+
+    #[test]
     fn status_patch_is_tagged_by_kind() {
         let p = StatusPatch::HttpRoute {
             namespace: "apps".into(),
