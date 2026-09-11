@@ -50,20 +50,16 @@ async fn spawn_upstream(listener: TcpListener) -> SocketAddr {
     addr
 }
 
-/// `(dead, live)` on 127.0.0.1 with `dead.port() < live.port()`. The dead listener is dropped so
-/// connects are refused; the live one serves the echo upstream. Clusters sort endpoints by
-/// (address, port) and round-robin starts at 0, so the retry scenario always tries dead first.
+/// `(dead, live)`. Port 1 is the dead endpoint: binding it needs root, so nothing on the machine
+/// can turn it live mid-test the way a freed ephemeral port can, and it always sorts below the
+/// live port. Clusters sort endpoints by (address, port) and round-robin starts at 0, so the retry
+/// scenario always tries dead first.
 async fn spawn_dead_and_upstream() -> (SocketAddr, SocketAddr) {
-    let a = TcpListener::bind("127.0.0.1:0").unwrap();
-    let b = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (dead, live) = if a.local_addr().unwrap().port() < b.local_addr().unwrap().port() {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    let dead_addr = dead.local_addr().unwrap();
-    drop(dead);
-    (dead_addr, spawn_upstream(live).await)
+    let live = TcpListener::bind("127.0.0.1:0").unwrap();
+    (
+        SocketAddr::from(([127, 0, 0, 1], 1)),
+        spawn_upstream(live).await,
+    )
 }
 
 struct Gateway {
@@ -456,10 +452,15 @@ async fn invalid_backend_is_500_and_no_endpoints_is_503() {
 async fn connect_failure_retries_once_on_another_endpoint() {
     let (gw, c) = setup().await;
     let r = c.get(url(&gw, "echo.test", "/retry")).send().await.unwrap();
+    let status = r.status();
+    // Which endpoint answered, and why it failed, is only visible in the body and the access log
+    // (it carries the upstream address and the error), so a failure here has to carry both.
+    let body = r.text().await.unwrap();
     assert_eq!(
-        r.status(),
+        status,
         200,
-        "first endpoint is dead, retry hits the live one"
+        "first endpoint is dead, retry hits the live one; body={body:?} log={:?}",
+        gw.logs.lock().unwrap()
     );
     let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
         .await
