@@ -33,10 +33,10 @@ otherwise silently win over the 1.89 you asked for and check nothing.
 
 | Tool | Version | Needed for |
 | --- | --- | --- |
-| `cargo-deny` | any recent | `cargo deny check all` (licenses and advisories) |
+| `cargo-deny` | 0.20 or newer | `cargo deny check all` (licenses and advisories) |
 | `helm` | **4.1.4** | `./hack/chart-render.sh` |
-| `cargo-insta` | any recent | reviewing golden snapshots (optional, see below) |
-| `docker`, `kind`, `kubectl` | any recent | `./hack/kind-deploy.sh`, `./hack/kind-e2e.sh` |
+| `cargo-insta` | 0.20 or newer | reviewing golden snapshots (optional, see below) |
+| `docker`, `kind`, `kubectl` | 0.20 or newer | `./hack/kind-deploy.sh`, `./hack/kind-e2e.sh` |
 | `go` | **1.26 or newer** | `./hack/conformance.sh` only |
 
 Install the cargo tools with `cargo install cargo-deny cargo-insta`.
