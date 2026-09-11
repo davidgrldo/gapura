@@ -1,0 +1,95 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version to build, e.g. v0.1.0
+        required: true
+permissions:
+  contents: read
+  packages: write
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      digest-amd64: ${{ steps.export.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export.outputs.digest-arm64 }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # Push by digest; the tags are attached by the merge job below.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - id: export
+        run: echo "digest-${{ matrix.arch }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+      - name: Join the per-arch digests into one manifest list
+        run: |
+          set -euo pipefail
+          tags=$(jq -r '.tags | map("--tag " + .) | join(" ")' <<<'${{ steps.meta.outputs.json }}')
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags \
+            "${IMAGE}@${{ needs.build.outputs.digest-amd64 }}" \
+            "${IMAGE}@${{ needs.build.outputs.digest-arm64 }}"
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+
+  chart:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - run: ./hack/chart-render.sh
+      - name: Package and push the chart
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          helm package charts/gapura --version "$version" --app-version "$version"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # helm push appends the chart name, so the remote is the parent path.
+          helm push "gapura-${version}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
