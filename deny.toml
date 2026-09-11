@@ -15,7 +15,13 @@ all-features = false
 unmaintained = "workspace"
 unsound = "workspace"
 yanked = "deny"
-ignore = []
+ignore = [
+    # protobuf 2.28 crashes on deeply nested *input*. It reaches us through prometheus 0.13, which
+    # pingora-core 0.8 also pins, so we cannot move off it on our own. Gapura only ever encodes
+    # metrics (TextEncoder over the default registry) and never parses protobuf from any source,
+    # so the vulnerable path is unreachable. Revisit when pingora bumps prometheus.
+    { id = "RUSTSEC-2024-0437", reason = "we encode metrics, we never parse protobuf input" },
+]
 
 [licenses]
 confidence-threshold = 0.93
@@ -41,6 +47,9 @@ exceptions = []
 # r-efi 5/6, three windows-sys, two thiserror, two getrandom). Warn until they are triaged.
 multiple-versions = "warn"
 wildcards = "deny"
+# `gapura-core = { path = "../gapura-core" }` has no version, which is right for a workspace member
+# that is never published.
+allow-wildcard-paths = true
 deny = []
 skip = []
 skip-tree = []
