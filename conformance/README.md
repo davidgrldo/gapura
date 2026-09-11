@@ -40,6 +40,9 @@ submission there is a folder copy rather than a rewrite; sending it waits for 37
 
 ## Reproduce
 
+<!-- REMOVE WHEN PUBLIC: delete this line once github.com/davidgrldo/gapura is public and v0.1.0 is tagged. -->
+The clone URL below does not resolve yet: the repository is published with the first release.
+
 ```bash
 git clone https://github.com/davidgrldo/gapura.git && cd gapura
 ./hack/conformance.sh

@@ -2,13 +2,18 @@
 
 Gapura is a Kubernetes Gateway API gateway built on Pingora. One binary, no database: each replica
 watches the API server, translates Gateway API resources into a routing table, and serves traffic
-from it. Source and issues: https://github.com/davidgrldo/gapura
+from it. Source and issues: <!-- markdown-link-check-disable --> https://github.com/davidgrldo/gapura <!-- markdown-link-check-enable -->
 
 ## Table of contents
 
 | API channel | Implementation version | Mode | Report |
 |-------------|------------------------|------|--------|
-| standard | [v0.1.0](https://github.com/davidgrldo/gapura/releases/tag/v0.1.0) | default | [v0.1.0 report](./standard-v0.1.0-default-report.yaml) |
+| standard | <!-- markdown-link-check-disable --> [v0.1.0](https://github.com/davidgrldo/gapura/releases/tag/v0.1.0) <!-- markdown-link-check-enable --> | default | [v0.1.0 report](./standard-v0.1.0-default-report.yaml) |
+
+<!-- REMOVE WHEN PUBLIC: delete this paragraph, and the markdown-link-check-disable/enable comments above, once github.com/davidgrldo/gapura is public and v0.1.0 is tagged. -->
+Neither GitHub link above resolves yet: the repository has not been published and no `v0.1.0` tag
+exists. Both arrive with the first release, and every URL here is written in its final form so that
+this folder can be copied upstream unchanged.
 
 ## Not yet submitted
 
@@ -28,14 +33,10 @@ suite did not expect, never a test that failed. Skipping a test we know fails wo
 conformance we do not have. Submission waits for an address per Gateway, which takes the profile to
 37 of 37.
 
-The GitHub links in this file do not resolve yet: the repository has not been published and no
-`v0.1.0` tag exists. Both arrive with the first release; the URLs are written in their final form so
-that this folder can be copied upstream unchanged.
-
 ## Reproduce
 
 ```bash
-git clone https://github.com/davidgrldo/gapura.git && cd gapura
+git clone https://github.com/davidgrldo/gapura.git && cd gapura && git checkout tags/v0.1.0
 ./hack/conformance.sh
 ```
 
