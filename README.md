@@ -23,7 +23,9 @@ meant to be pasted in order and end with a request that goes through the gateway
 > build the image, push it somewhere your nodes can read, and replace step 2 with
 > `helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set
 > image.repository=<your-registry>/gapura --set image.tag=0.1.0`, adding the no-LoadBalancer flags
-> step 2 lists if your cluster needs them. Steps 1, 3 and 4 are unchanged.
+> step 2 lists if your cluster needs them. Without those two `image.*` values the chart points at
+> the same unpublished registry and the pods sit in `ImagePullBackOff`. Steps 1, 3 and 4 are
+> unchanged.
 
 No cluster? kind will do. It has no LoadBalancer, so give the node a host port that reaches the
 NodePort step 2 will ask for:
@@ -48,16 +50,20 @@ kubectl wait --for=condition=Established --timeout=60s \
   crd/httproutes.gateway.networking.k8s.io
 ```
 
-**2. Gapura:**
+**2. Gapura.** Two commands, and the choice between them is worth making before you paste either
+one. The chart's Service is a `LoadBalancer`, its address is what lands in Gateway status, and
+`--wait` blocks until that address exists -- so on a cluster where nothing assigns LoadBalancer
+addresses the first command does not fail, it hangs for Helm's five-minute default and then times
+out, which is the entire quickstart budget spent on the wrong command. Use it when something does
+assign them: a managed cluster, or minikube with `minikube tunnel` running in another terminal.
 
 ```bash
 helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
   --namespace gapura-system --create-namespace --wait
 ```
 
-The chart's Service is a `LoadBalancer`, and its address is what lands in Gateway status. On a
-cluster without a LoadBalancer -- kind, or minikube without `minikube tunnel` -- publish a fixed
-address and a NodePort instead:
+Without a LoadBalancer -- a kind cluster, or anything else where a `LoadBalancer` Service stays
+`<pending>` -- publish a fixed address and a NodePort instead:
 
 ```bash
 helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
@@ -65,6 +71,22 @@ helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
   --set service.type=NodePort --set service.nodePorts.http=30080 \
   --set publishService=false --set 'publishAddresses={127.0.0.1}'
 ```
+
+**That `127.0.0.1` assumes your node maps host port 80 to the NodePort.** It is the address step 4
+reads out of Gateway status and dials, a Gateway address carries no port, so step 4 goes to
+`127.0.0.1:80` while the Service above is on NodePort 30080. The `kind create cluster` block above
+bridges the two with `extraPortMappings`; a cluster you already had almost certainly does not. If
+yours does not, either recreate it with that mapping, or find the host port that does reach 30080
+and put it into step 4's `curl` by hand -- `http://127.0.0.1:<hostPort>/echo?msg=it-works` -- since
+the published address stays `127.0.0.1` with no port to carry it. Skip this and nothing upstream
+looks wrong: the Gateway reports `Programmed=True` with address `127.0.0.1`, and step 4 answers
+`curl: (7) Failed to connect to 127.0.0.1 port 80`.
+
+minikube is deliberately not on that list. Its NodePort answers at `$(minikube ip):30080`, and
+nothing listens on `127.0.0.1:80` by default, so `publishAddresses={127.0.0.1}` publishes an address
+that was never going to answer. Run `minikube tunnel` in another terminal and use the LoadBalancer
+command above: the tunnel is what gives the `LoadBalancer` Service a reachable address, on port 80,
+which is exactly what step 4 expects.
 
 **3. A Gateway, a route, and something to route to.** The echo backend is the one
 [deploy/kind/fixture.yaml](deploy/kind/fixture.yaml) uses:

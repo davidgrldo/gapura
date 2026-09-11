@@ -2,13 +2,13 @@
 
 ## Supported versions
 
-Gapura has not had a tagged release yet; v0.1.0 is still unreleased. Until it ships, the only
-supported version is the current `main`.
+For as long as Gapura is on a `0.x` version, **only the most recent release receives security
+fixes**. There are no backports to earlier `0.x` releases: a fix lands on `main` and goes out in
+the next release.
 
-Once releases begin, and for as long as Gapura is on a `0.x` version, **only the most recent
-release receives security fixes**. There are no backports to earlier `0.x` releases: a fix lands on
-`main` and goes out in the next release. If you are running an older checkout, the upgrade path is
-forward.
+v0.1.0 is the first release; nothing was tagged before it. So anything older than v0.1.0 is a
+checkout of this repository rather than a version there is anything to backport to, and the upgrade
+path from one is forward, to the most recent release.
 
 ## Reporting a vulnerability
 
