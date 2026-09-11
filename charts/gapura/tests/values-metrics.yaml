@@ -1,5 +1,6 @@
-# Exercises the template branches no other permutation reaches: the ServiceMonitor, the dashboard
-# ConfigMap, the unprivileged-port sysctl, the read-only controller, and the admin liveness probe.
+# Exercises the template branches no other permutation reaches: the ServiceMonitor, the
+# PrometheusRule, the dashboard ConfigMap, the unprivileged-port sysctl, the read-only controller,
+# and the admin liveness probe.
 replicaCount: 1
 privilegedPorts: sysctl
 readOnly: true
@@ -17,3 +18,6 @@ metrics:
     labels: { release: kube-prometheus-stack }
   dashboard:
     enabled: true
+  prometheusRule:
+    enabled: true
+    labels: { release: kube-prometheus-stack }

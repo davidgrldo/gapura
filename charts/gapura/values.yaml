@@ -121,3 +121,8 @@ metrics:
     enabled: false
     label: grafana_dashboard
     labelValue: "1"
+  prometheusRule:
+    # Ship deploy/prometheus-rule.yaml's example alerts as a PrometheusRule.
+    # Needs the Prometheus Operator CRDs.
+    enabled: false
+    labels: {}

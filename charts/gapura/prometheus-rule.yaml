@@ -1,0 +1,50 @@
+# Example alerts for Gapura. The chart can ship these as a PrometheusRule
+# (metrics.prometheusRule.enabled=true); the thresholds are starting points, not SLOs.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gapura
+spec:
+  groups:
+  - name: gapura
+    rules:
+    # gapura_leader is an unlabelled per-replica gauge: the leader reports 1, every other
+    # replica reports 0, so the sum is 0 exactly when nobody holds the Lease. Two caveats:
+    # a read-only install never runs leader election, so this fires permanently there, and a
+    # deployment scraped by nothing returns an empty vector, which never fires -- pair it with
+    # an `up` or `absent()` alert.
+    - alert: GapuraNoLeader
+      expr: sum(gapura_leader) == 0
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: No Gapura replica holds the Lease
+        description: Gateway API status stops being written, while traffic keeps flowing.
+    - alert: GapuraConfigStale
+      expr: time() - max(gapura_config_last_reload_timestamp_seconds) > 900
+      for: 10m
+      labels: { severity: warning }
+      annotations:
+        summary: Gapura has not loaded a config for 15 minutes
+        description: Either nothing changed, or reloads are failing; check gapura_config_reloads_total.
+    - alert: GapuraConfigReloadFailing
+      expr: increase(gapura_config_reloads_total{result="failure"}[15m]) > 0
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: Gapura config reloads are failing
+        description: The previous config is still being served; the logs carry the translator error.
+    - alert: GapuraUpstreamErrors
+      expr: |
+        sum(rate(gapura_upstream_errors_total[5m]))
+          / clamp_min(sum(rate(gapura_requests_total[5m])), 0.001) > 0.05
+      for: 10m
+      labels: { severity: critical }
+      annotations:
+        summary: More than 5 percent of Gapura requests fail upstream
+    - alert: GapuraTlsSniMisses
+      expr: sum(rate(gapura_tls_sni_misses_total[15m])) > 0
+      for: 15m
+      labels: { severity: info }
+      annotations:
+        summary: TLS handshakes arrive with an SNI no listener serves

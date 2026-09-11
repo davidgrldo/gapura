@@ -1,0 +1,16 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- $rule := .Files.Get "prometheus-rule.yaml" }}
+{{- if not $rule }}
+{{- fail "metrics.prometheusRule.enabled is true but charts/gapura/prometheus-rule.yaml is missing" }}
+{{- end }}
+{{- $parsed := $rule | fromYaml }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "gapura.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+spec: {{- toYaml $parsed.spec | nindent 2 }}
+{{- end }}

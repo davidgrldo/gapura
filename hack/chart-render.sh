@@ -16,6 +16,11 @@ if ! diff -q deploy/grafana/gapura-overview.json charts/gapura/dashboards/gapura
   exit 1
 fi
 
+if ! diff -q deploy/prometheus-rule.yaml charts/gapura/prometheus-rule.yaml; then
+  echo "FAIL prometheus rules differ: cp deploy/prometheus-rule.yaml charts/gapura/" >&2
+  exit 1
+fi
+
 helm lint "$CHART"
 
 for values in "$CHART"/tests/values-*.yaml; do
