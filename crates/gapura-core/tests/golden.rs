@@ -898,3 +898,25 @@ fn gateway_with_parameters_ref_is_rejected() {
     );
     insta::assert_yaml_snapshot!("gateway-invalid-parameters-ref", t);
 }
+
+#[test]
+fn listener_with_unsupported_protocol_advertises_no_kinds() {
+    let t = run("listener-unsupported-protocol");
+    let (_, listeners, _) = gateway_patch(&t);
+    let tcp = listener(listeners, "tcp");
+    assert_eq!(
+        cond(&tcp.conditions, "Accepted"),
+        (ConditionStatus::False, "UnsupportedProtocol")
+    );
+    assert!(
+        tcp.supported_kinds.is_empty(),
+        "a protocol we do not serve carries no route kind: {:?}",
+        tcp.supported_kinds
+    );
+    assert_eq!(
+        cond(&listener(listeners, "http").conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted"),
+        "the sibling listener is unaffected"
+    );
+    insta::assert_yaml_snapshot!("listener-unsupported-protocol", t);
+}

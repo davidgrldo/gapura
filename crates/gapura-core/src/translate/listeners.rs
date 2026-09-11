@@ -246,7 +246,12 @@ fn build_listener(
         Ok(())
     };
 
-    let (supported_kinds, kinds_ok) = supported_kinds(l.allowed_routes.as_ref());
+    let (mut supported_kinds, kinds_ok) = supported_kinds(l.allowed_routes.as_ref());
+    if protocol.is_none() {
+        // A listener whose protocol we do not serve carries no route kind at all, whatever
+        // `allowedRoutes.kinds` asks for.
+        supported_kinds.clear();
+    }
 
     // TLS is resolved whatever `allowedRoutes.kinds` says: a listener that also names a kind we do
     // not serve still terminates TLS for the kinds we do, and a programmed HTTPS listener must
