@@ -39,6 +39,7 @@ config:
             backend_request_ms: ~
     - id: infra/beta/http
       port: 10000
+      client_port: 80
       protocol: Http
       hostname: ~
       tls: ~

@@ -200,6 +200,7 @@ mod tests {
         ListenerConfig {
             id: id.to_string(),
             port,
+            client_port: None,
             protocol: if port == 443 {
                 Protocol::Https
             } else {

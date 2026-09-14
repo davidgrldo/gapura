@@ -82,6 +82,7 @@ fn remap_overridden_listeners(
             crate::config::Protocol::Https => &settings.https_ports,
         };
         if let Some(p) = pool.iter().copied().find(|p| !taken.contains(p)) {
+            listeners[i].client_port = Some(listeners[i].port);
             listeners[i].port = p;
             taken.insert(p);
         }
@@ -163,6 +164,7 @@ fn assemble(
             listeners_cfg.push(ListenerConfig {
                 id: format!("{}/{}/{}", gw.r#ref.namespace, gw.r#ref.name, l.name),
                 port: l.port,
+                client_port: None,
                 protocol: l
                     .protocol
                     .expect("a programmed listener has a supported protocol"),
@@ -265,6 +267,7 @@ mod remap_tests {
         ListenerConfig {
             id: format!("ns/gw/{name}"),
             port,
+            client_port: None,
             protocol: crate::config::Protocol::Http,
             hostname: None,
             tls: None,

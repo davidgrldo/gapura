@@ -185,6 +185,7 @@ mod tests {
         ListenerConfig {
             id: "infra/main/https".into(),
             port: 443,
+            client_port: None,
             protocol: Protocol::Https,
             hostname: None,
             tls,
@@ -349,6 +350,7 @@ mod tests {
                 listeners: vec![ListenerConfig {
                     id: "infra/main/http".into(),
                     port: 80,
+                    client_port: None,
                     protocol: Protocol::Http,
                     hostname: None,
                     tls: None,

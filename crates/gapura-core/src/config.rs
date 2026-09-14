@@ -20,6 +20,12 @@ pub struct ListenerConfig {
     /// `namespace/gateway/listener`.
     pub id: String,
     pub port: u16,
+    /// The port the client dialed, when it differs from `port`. `port` is the bound socket; a
+    /// listener remapped for an address-per-Gateway Gateway is dialed through a Service that
+    /// maps this client-facing port onto it, so anything client-facing (redirect Locations)
+    /// must name this one, never `port`. Absent when the two are the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_port: Option<u16>,
     pub protocol: Protocol,
     pub hostname: Option<String>,
     pub tls: Option<TlsBundle>,
@@ -196,6 +202,7 @@ mod tests {
             listeners: vec![ListenerConfig {
                 id: "infra/main/http".into(),
                 port: 80,
+                client_port: None,
                 protocol: Protocol::Http,
                 hostname: None,
                 tls: None,
