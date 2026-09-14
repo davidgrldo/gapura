@@ -32,6 +32,11 @@ shipping a gateway that wanted a database behind every node.
 - **`gapura-control`**, new, owns Postgres, the admin API, the console, and the
   accounts and roles that go with them.
 
+Because the control plane writes Gateway API resources, it is a client of the
+Kubernetes API rather than a configuration source of its own, and a deployment
+that runs it is a deployment in `--kubernetes` mode. There is no combination of
+the two to arbitrate: the data plane still reads from exactly one source.
+
 What Postgres holds is identity, authorisation and an audit trail. It does not
 hold routing configuration, and for now it does not hold consumers either.
 
@@ -67,8 +72,10 @@ configuration source, because Docker deployments need API keys too.
   behalf of everyone. Its roles are the only thing between an API team and every
   namespace it can reach. That is the security surface this creates.
 - GitOps and the console write the same resources and will fight over any
-  namespace driven by both. One or the other per namespace is an operational rule
-  to document; code cannot settle it.
+  namespace driven by both. A rule that lives only in documentation gets broken,
+  so the console refuses to write to a namespace carrying
+  `gapura.dev/managed-by: gitops` and says why, rather than leaving an operator
+  to work the conflict out from a reconciliation loop.
 
 ## When the credential store should move
 
@@ -81,6 +88,41 @@ justified.
 At that point `gapura-control` gains a Postgres-backed implementation of the same
 interface and a channel to push credentials down. Routing configuration does not
 have to move with it.
+
+## The order the plugins land
+
+JWT and OIDC first, then API keys, then rate limiting with counters held locally,
+and a shared counter store only if somebody asks for one.
+
+This is about splitting risk, not ranking features. Two separate things are
+unproven: the extension mechanism itself, meaning `ExtensionRef`, the filter
+wiring and the route status an unsupported value produces; and the credential
+seam above. JWT exercises the first and touches none of the second, because
+checking a signature against a JWKS needs nothing looked up and nothing stored.
+Taking both bets inside one plugin would leave a failure ambiguous.
+
+It pays twice over. Every team that authenticates with JWT is a consumer that
+never reaches etcd, which pushes the ceiling in the previous section further out;
+and for those teams gapura holds no credential of theirs at all.
+
+## State that is not configuration
+
+Rate limit counters have to be shared across replicas to mean anything, which
+sounds like it contradicts the claim this record has spent its length defending.
+It does not. What is worth defending in "no database" is a source of truth that
+must be backed up, migrated, and never lost. A counter is none of those. Losing
+one resets a limit; it does not corrupt a gateway.
+
+A shared counter store is therefore allowed, on three conditions. It stays
+optional, the feature degrading rather than disappearing without it. It stays
+disposable, with nothing to back up and no schema to migrate. And it stays out of
+the startup path, so a gateway comes up and serves whether or not it is there.
+
+Counters start local to each replica regardless, which is the honest
+zero-dependency answer for as long as the documentation says plainly that a limit
+of R across N replicas admits something closer to R times N. Redis arrives later
+as an opt-in strategy for deployments that need the arithmetic exact. Shipping
+rate limiting does not wait on any of this.
 
 ## Alternatives
 
@@ -103,9 +145,9 @@ takes if the measurement ever arrives.
 
 ## Open questions
 
-- Whether one deployment may run the Kubernetes source and the control plane at
-  the same time, or whether the two have to be mutually exclusive.
-- Rate limit counters need state shared across replicas and belong in Redis
-  rather than here. How that sits with the no-database claim is not settled.
-- Whether JWT and OIDC, which need no credential store at all, should land before
-  API keys and reduce how much that store has to carry.
+- How the console's own roles are scoped, and whether a role names namespaces
+  directly or something coarser that maps onto them.
+- Whether the API teams this console exists for get accounts local to Postgres,
+  or whether it federates to an identity provider the organisation already runs.
+  Local accounts are the smaller thing to build and the larger thing to defend.
+- Whether `gapura-control` ships inside the existing chart or one of its own.
