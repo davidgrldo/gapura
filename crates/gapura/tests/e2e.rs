@@ -267,6 +267,11 @@ async fn setup() -> (Gateway, reqwest::Client) {
 /// ports is the fix. A child that starts but never becomes ready is a real failure, not a race,
 /// and fails the test with whatever it managed to log.
 async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
+    start_gateway_with(render, &[]).await
+}
+
+/// `start_gateway`, plus arguments the scenario needs on the command line.
+async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> Gateway {
     const ATTEMPTS: u32 = 5;
     // What the last child to exit managed to say, so the final panic can show it.
     let mut last_logs = String::new();
@@ -287,6 +292,7 @@ async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
                 "--log-level",
                 "warn",
             ])
+            .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -644,4 +650,43 @@ async fn access_log_records_a_client_that_went_away() {
         "an abort is not answered, so there is no status to log: {line}"
     );
     drop(sock);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead),
+        &["--trusted-proxy", "127.0.0.0/8"],
+    )
+    .await;
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x"))
+        .header("x-forwarded-for", "198.51.100.5")
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert_eq!(
+        line["client_ip"], "198.51.100.5",
+        "the connection came from a trusted network, so its header names the client"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_untrusted_caller_cannot_name_itself_in_the_access_log() {
+    let (gw, c) = setup().await;
+    let r = c
+        .get(url(&gw, "echo.test", "/api/x"))
+        .header("x-forwarded-for", "198.51.100.5")
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert_eq!(
+        line["client_ip"], "127.0.0.1",
+        "no trusted network is configured, so the header is not believed"
+    );
 }
