@@ -45,5 +45,6 @@ git clone https://github.com/davidgrldo/gapura.git && cd gapura && git checkout 
 mapped to the chart's NodePorts), installs the Gateway API standard channel v1.6.2, builds the
 image and loads it into the cluster, installs `charts/gapura` with
 `charts/gapura/tests/values-kind.yaml`, then runs the upstream suite from a v1.6.2 checkout with
-`--supported-features=Gateway,ReferenceGrant,HTTPRoute --conformance-profiles=GATEWAY-HTTP`, no
+`--supported-features=Gateway,ReferenceGrant,HTTPRoute,PathMatchRegularExpression
+--conformance-profiles=GATEWAY-HTTP`, no
 `--skip-tests` and no `--exempt-features`. Requires docker, kind, kubectl, helm and Go 1.26.

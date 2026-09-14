@@ -82,6 +82,11 @@ pub fn rewrite_path(modifier: &PathRewrite, path_in: &str, matched: &PathMatch) 
                 }
                 PathMatch::Prefix(_) => path_in,
                 PathMatch::Exact(_) => "",
+                // Translation rejects ReplacePrefixMatch combined with a regex path match, so a
+                // regex winner has no prefix to strip: there is nothing sensible to compute here.
+                PathMatch::Regex(_) => unreachable!(
+                    "ReplacePrefixMatch with a RegularExpression path match is rejected at translate time"
+                ),
             };
             if replacement == "/" {
                 return if rest.is_empty() {

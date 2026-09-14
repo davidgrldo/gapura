@@ -62,6 +62,7 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - PathMatchRegularExpression
       - ReferenceGrant
   - kind: Gateway
     namespace: infra
