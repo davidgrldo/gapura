@@ -25,6 +25,9 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - HTTPRoute303RedirectStatusCode
+      - HTTPRoute307RedirectStatusCode
+      - HTTPRoute308RedirectStatusCode
       - HTTPRouteRequestMirror
       - PathMatchRegularExpression
       - ReferenceGrant

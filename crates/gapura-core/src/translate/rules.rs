@@ -302,9 +302,10 @@ fn redirect(r: Option<&RequestRedirect>) -> Result<Redirect, Unsupported> {
         Unsupported("RequestRedirect filter without requestRedirect body".to_string())
     })?;
     let status = r.status_code.unwrap_or(302);
-    if status != 301 && status != 302 {
+    // The full statusCode enum the RequestRedirect CRD allows; 306 and friends stay Unsupported.
+    if !matches!(status, 301 | 302 | 303 | 307 | 308) {
         return Err(Unsupported(format!(
-            "redirect statusCode {status} is not supported, use 301 or 302"
+            "redirect statusCode {status} is not supported, use one of 301, 302, 303, 307, 308"
         )));
     }
     Ok(Redirect {
@@ -638,6 +639,65 @@ spec: { ports: [{ name: http, port: 80 }] }
         assert!(
             matches!(compile_first(yaml).0, Err(Unsupported(m)) if m.contains("weight")),
             "a weighted mirror is meaningless: all traffic is mirrored"
+        );
+    }
+
+    #[test]
+    fn redirect_status_codes_match_the_crd_enum() {
+        for code in [301u16, 302, 303, 307, 308] {
+            let yaml = format!(
+                r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {{ name: r, namespace: apps }}
+spec:
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect: {{ statusCode: {code} }}
+"#
+            );
+            let (result, _) = compile_first(&yaml);
+            let c = result.unwrap();
+            assert_eq!(c.rules[0].filters.redirect.as_ref().unwrap().status, code);
+        }
+        // The new codes compose with hostname and path modifiers exactly like 301 does.
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect:
+        { hostname: new.test, statusCode: 307, path: { type: ReplaceFullPath, replaceFullPath: /moved } }
+"#;
+        let (result, _) = compile_first(yaml);
+        let redirect = result.unwrap().rules[0].filters.redirect.clone().unwrap();
+        assert_eq!(redirect.status, 307);
+        assert_eq!(redirect.hostname.as_deref(), Some("new.test"));
+        assert_eq!(
+            redirect.path,
+            Some(PathRewrite::ReplaceFullPath("/moved".into()))
+        );
+    }
+
+    #[test]
+    fn off_enum_redirect_status_code_rejects_route() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect: { statusCode: 306 }
+"#;
+        assert!(
+            matches!(compile_first(yaml).0, Err(Unsupported(m)) if m.contains("306")),
+            "a code outside the CRD enum must keep the Unsupported path"
         );
     }
 
