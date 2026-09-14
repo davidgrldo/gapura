@@ -109,6 +109,15 @@ pub struct Filters {
     pub response_headers: HeaderOps,
     pub redirect: Option<Redirect>,
     pub rewrite: Option<Rewrite>,
+    /// Fire-and-forget copy of the request. Plain data like the rest: the resolved cluster key,
+    /// with the endpoint picked by the data plane at fire time.
+    pub mirror: Option<Mirror>,
+}
+
+/// Where mirrored requests go: a cluster key into `Config::clusters`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Mirror {
+    pub cluster: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

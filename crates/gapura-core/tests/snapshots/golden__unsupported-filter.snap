@@ -25,6 +25,7 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - HTTPRouteRequestMirror
       - PathMatchRegularExpression
       - ReferenceGrant
   - kind: Gateway
@@ -86,7 +87,7 @@ status:
           - type: Accepted
             status: "False"
             reason: UnsupportedValue
-            message: filter type RequestMirror is not supported
+            message: RequestMirror filter without requestMirror body
             observedGeneration: 1
           - type: ResolvedRefs
             status: "True"

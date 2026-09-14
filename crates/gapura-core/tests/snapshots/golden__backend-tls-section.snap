@@ -30,6 +30,7 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
+            mirror: ~
           backends:
             - cluster: "apps/echo:443"
               weight: 1
@@ -68,6 +69,7 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - HTTPRouteRequestMirror
       - PathMatchRegularExpression
       - ReferenceGrant
   - kind: Gateway

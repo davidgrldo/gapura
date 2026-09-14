@@ -1,0 +1,15 @@
+# The shadow Service is referenced ONLY by the RequestMirror filter: if assemble forgets to mark
+# mirror clusters used, the cluster silently vanishes from the Config.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: shadowed, namespace: apps, generation: 1, creationTimestamp: "2026-09-01T10:00:00Z" }
+spec:
+  parentRefs: [{ name: main, namespace: infra }]
+  rules:
+  - matches: [{ path: { type: PathPrefix, value: /api } }]
+    filters:
+    - type: RequestMirror
+      requestMirror: { backendRef: { name: shadow, port: 80 } }
+    - type: RequestHeaderModifier
+      requestHeaderModifier: { set: [{ name: X-Gateway, value: gapura }] }
+    backendRefs: [{ name: echo, port: 80 }]
