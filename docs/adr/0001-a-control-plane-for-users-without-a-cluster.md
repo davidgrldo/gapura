@@ -132,33 +132,38 @@ rate limiting does not wait on any of this.
 
 ## What the console authorises
 
-Three roles, named as Kong names them: superuser, admin, viewer. Picking one
-ticks a set of boxes -- viewer none, admin create and update, superuser those and
-delete -- and the boxes stay editable afterwards.
+Three roles inside a namespace, with fixed meanings and nothing to tick:
 
-Reading is not one of the boxes. An assignment that cannot read is not worth
-storing, so holding any assignment in a namespace means being able to see it, and
-the matrix is only create, update and delete. Viewer is then simply an assignment
-with nothing ticked, rather than a row with one box that must not be unticked.
+| Role | May |
+| --- | --- |
+| `viewer` | read |
+| `editor` | read, create, update |
+| `admin` | read, create, update, delete |
 
-What is stored is the permissions an assignment ended up with, not a pointer to
-the role it started from -- though the role it started from is kept alongside, so
-an assignment that has drifted reads as `admin (+delete)` rather than as plain
-`admin`. Editing a role in place would have been the other option, and was not
-taken: it would mean that ticking one box silently re-grants every person already
-holding that role, which is the kind of change nobody is looking at when it
-happens.
+Above them sits `superuser`, which holds `admin` over every namespace and exists
+mainly to grant the others.
+
+The permissions are not editable. A role is an answer, not a starting position:
+asked what somebody may do, the name says it, and it says the same thing for
+everybody who holds it. The alternative was to let the boxes be ticked per
+person, and it was turned down for what it costs to read back -- two people both
+called admin could mean different things, so no question about access could be
+settled without opening the row. Losing per-person flexibility is the price, and
+nothing has asked for that flexibility yet. If something does, it is a fourth
+role, not a checkbox.
+
+The split between `editor` and `admin` is where deleting lives, since that is the
+verb worth holding back. These are also the three names Kubernetes gives its own
+built-in roles, so a platform engineer reading the console already knows what
+they mean.
 
 A role is granted **per namespace**, not globally. That one extra column is what
 makes the console multi-tenant, and multi-tenancy is the reason it exists: the
 teams it serves must not be able to reach each other's routes. Namespaces are
 already the boundary gapura writes into, so the scope costs nothing to invent and
 nothing to enforce -- the control plane simply declines to write outside it.
-Superuser is the exception that spans every namespace, and exists mainly to grant
-the others. It is not the same as an admin who may also delete: somebody who runs
-one namespace completely is an admin with delete ticked, and if that were spelled
-superuser instead then every team lead would hold every namespace and the scope
-above would mean nothing.
+Reading needs no grant of its own, because holding any assignment in a namespace
+is what lets somebody see it.
 
 Because identity is federated, there is no first account to log in as. The first
 superuser comes from naming an identity provider group in configuration, which
@@ -177,6 +182,16 @@ that can never break. It also puts the control plane in the path of every
 configuration change, where an outage stops updates instead of merely closing the
 console. Nothing here forecloses it: the control plane would already exist and
 already hold Postgres.
+
+**Letting Kubernetes decide, by impersonating a ServiceAccount per team.** The
+console would map an identity provider group to a ServiceAccount and write under
+impersonation, so the cluster authorises every write, its audit log records both
+identities, and the control plane needs the right to impersonate rather than the
+right to write everywhere. It is the stronger posture and the smaller amount of
+authorisation code, and it was not taken because it binds authorisation to
+Kubernetes at the moment this record is trying to keep later steps reachable, and
+because it puts a platform engineer in the path of every new team. It stays
+available behind the same interface the credential store uses.
 
 **Consumers pushed from the control plane while configuration stays in
 Kubernetes.** Rejected as a starting point, because it pays the largest cost, the
