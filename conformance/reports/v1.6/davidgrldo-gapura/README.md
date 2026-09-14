@@ -35,8 +35,8 @@ conformance we do not have. Submission waits for an address per Gateway, which t
 37 of 37.
 
 The extended section records the one extended feature claimed, `HTTPRouteRequestMirror`, passing
-1 of 1: a fire-and-forget, headers-only copy with a bounded in-flight count, never able to delay
-or fail the request it shadows.
+1 of 1: a fire-and-forget, headers-only, plaintext-only copy with a bounded in-flight count, never
+able to delay or fail the request it shadows.
 
 ## Reproduce
 
