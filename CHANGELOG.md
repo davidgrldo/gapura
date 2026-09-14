@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- `RequestRedirect` accepts the full statusCode enum the CRD defines: 301, 302 (the default),
+  303, 307 and 308. The response was already status-plus-Location with nothing rewritten —
+  method and body preservation on 307/308 is the client's obligation, and the server's duty is
+  not to touch them, which this path never did — so widening the accepted set is the whole
+  change. Codes outside the enum (306 and friends) still reject the route as `Unsupported`.
+  Three extended features claimed (`HTTPRoute303/307/308RedirectStatusCode`): the extended
+  section is now 4 of 4, core still 36 of 37.
+
 - The release workflow can no longer publish a release whose notes say nothing. The check meant
   to catch that ran over the finished file, which by then already carried the `## Packages` list
   the same step writes, so both of its conditions were satisfied by its own output and it passed

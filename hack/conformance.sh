@@ -82,7 +82,7 @@ cd "$CHECKOUT/conformance"
 set +e
 go test -timeout 60m . -run TestConformance -args \
   --gateway-class=gapura \
-  --supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRouteRequestMirror,PathMatchRegularExpression \
+  --supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteRequestMirror,PathMatchRegularExpression \
   --conformance-profiles="$PROFILE" \
   --organization="$ORG" \
   --project="$PROJECT" \
