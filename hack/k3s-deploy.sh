@@ -49,9 +49,13 @@ docker build -t "$IMAGE" .
 NODE="k3d-${CLUSTER}-server-0"
 docker save "$IMAGE" -o /tmp/gapura-image.tar
 docker cp /tmp/gapura-image.tar "$NODE:/tmp/gapura-image.tar"
-docker exec "$NODE" k3s ctr --namespace k8s.io images import /tmp/gapura-image.tar
+# The node image ships a bare ctr (it is what k3d itself execs; `k3s ctr` answers "No help topic
+# for 'ctr'" there), and it defaults to upstream's /run/containerd socket, so the k3s one is
+# spelled out.
+CTR=(ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io)
+docker exec "$NODE" "${CTR[@]}" images import /tmp/gapura-image.tar
 docker exec "$NODE" rm -f /tmp/gapura-image.tar
-docker exec "$NODE" k3s ctr --namespace k8s.io images ls | grep -F "$IMAGE"
+docker exec "$NODE" "${CTR[@]}" images ls | grep -F "$IMAGE"
 
 helm upgrade --install gapura charts/gapura \
   --namespace "$NS" --create-namespace \
