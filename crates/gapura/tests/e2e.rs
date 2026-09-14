@@ -158,6 +158,18 @@ spec:
     filters:
     - type: RequestRedirect
       requestRedirect: {{ scheme: https, hostname: new.test, statusCode: 301, path: {{ type: ReplaceFullPath, replaceFullPath: /new }} }}
+  - matches: [{{ path: {{ type: PathPrefix, value: /status303 }} }}]
+    filters:
+    - type: RequestRedirect
+      requestRedirect: {{ scheme: https, hostname: new.test, statusCode: 303 }}
+  - matches: [{{ path: {{ type: PathPrefix, value: /status307 }} }}]
+    filters:
+    - type: RequestRedirect
+      requestRedirect: {{ scheme: https, hostname: new.test, statusCode: 307 }}
+  - matches: [{{ path: {{ type: PathPrefix, value: /status308 }} }}]
+    filters:
+    - type: RequestRedirect
+      requestRedirect: {{ scheme: https, hostname: new.test, statusCode: 308 }}
   - matches: [{{ path: {{ type: PathPrefix, value: /slow }} }}]
     timeouts: {{ backendRequest: 300ms }}
     backendRefs: [{{ name: echo, port: 80 }}]
@@ -457,6 +469,40 @@ async fn redirect_is_answered_locally() {
     assert_eq!(r.status(), 301);
     assert_eq!(r.headers()["location"], "https://new.test/new");
     assert!(r.headers().contains_key("x-request-id"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remaining_crd_redirect_status_codes_answer_locally() {
+    let (gw, c) = setup().await;
+    for code in [303u16, 307, 308] {
+        let r = c
+            .get(url(&gw, "echo.test", &format!("/status{code}/x")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), code, "GET /status{code}");
+        assert_eq!(
+            r.headers()["location"],
+            format!("https://new.test/status{code}/x")
+        );
+        assert!(
+            r.headers().contains_key("x-request-id"),
+            "answered locally like every redirect"
+        );
+        // A redirect response is headers-only and never touches the method: a POST is answered
+        // with the same status instead of being proxied or rewritten.
+        let r = c
+            .post(url(&gw, "echo.test", &format!("/status{code}/x")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), code, "POST /status{code}");
+        assert_eq!(
+            r.headers()["location"],
+            format!("https://new.test/status{code}/x")
+        );
+        assert_eq!(r.text().await.unwrap(), "", "no body on a redirect");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
