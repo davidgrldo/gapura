@@ -372,8 +372,11 @@ release produces, and a setting nobody re-checks is a setting that quietly rever
 ### 5.5 The quickstart, from a cluster that has never seen Gapura
 
 With both packages public, the README quickstart is finally runnable as written. Create a throwaway
-cluster and paste steps 1 to 4. Only once that works should a **separate commit** remove the
-pre-publication notices, which stop being true the moment the tag exists:
+cluster and paste steps 1 to 4. The `quickstart` workflow already does exactly this on every
+tag release and weekly, with no credentials of ours anywhere — but flip the visibility in the web
+UI and then run it once by hand (`gh workflow run quickstart`) and watch it, because that first
+green run is the moment 5.3 is actually done. Only once that works should a **separate commit**
+remove the pre-publication notices, which stop being true the moment the tag exists:
 
 - the "Step 2 does not work yet" block in `README.md` — it sits above step **1**, with the
   `kind create cluster` block in between, not immediately above the step it is about;

@@ -8,7 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-Nothing yet.
+- `helm test` on a release now proves it routes: the chart ships a throwaway Gateway, HTTPRoute
+  and echo backend as `helm.sh/hook: test` resources, plus a curl pod that drives one request
+  through the data plane and checks the answer. Nothing exists at install time; `helm test`
+  creates it, waits, and cleans up after itself (gated by `tests.smoke.enabled`, on by default).
+- New `quickstart` workflow: the README quickstart, verbatim, on a fresh kind cluster, with no
+  ghcr credentials anywhere. Automates the anonymous check of RELEASING 5.3 and all of 5.5 —
+  red while a package is private, the tripwire for every release after that.
+- The release workflow now publishes a GitHub Release from the tag: the CHANGELOG section for
+  the version as notes, the conformance report attached as an asset.
 
 ## 0.1.0 — 2026-09-11
 
