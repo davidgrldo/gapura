@@ -37,8 +37,10 @@ Kubernetes API rather than a configuration source of its own, and a deployment
 that runs it is a deployment in `--kubernetes` mode. There is no combination of
 the two to arbitrate: the data plane still reads from exactly one source.
 
-What Postgres holds is identity, authorisation and an audit trail. It does not
-hold routing configuration, and for now it does not hold consumers either.
+What Postgres holds is authorisation and an audit trail. It does not hold
+routing configuration, and for now it does not hold consumers either. It does not
+hold passwords: the console federates to an identity provider the organisation
+already runs, so a person is a subject claim we recognise, not a row we secure.
 
 Consumers and their credentials are configuration, and stay where the rest of the
 configuration is: a CRD under Kubernetes, a YAML document under `--config-dir`.
@@ -68,6 +70,10 @@ configuration source, because Docker deployments need API keys too.
 - etcd becomes a credential store, which it was not built to be. Every key
   written is a watch event and a reload. That is the cost this decision accepts,
   and the reason the seam above exists.
+- `gapura-control` ships in the existing chart, disabled by default, so a
+  deployment that only wants the gateway is unchanged by its arrival. Postgres is
+  required to be external rather than bundled: a database shipped inside a chart
+  is one nobody backs up.
 - The control plane's own credentials become powerful, because it writes on
   behalf of everyone. Its roles are the only thing between an API team and every
   namespace it can reach. That is the security surface this creates.
@@ -124,6 +130,24 @@ of R across N replicas admits something closer to R times N. Redis arrives later
 as an opt-in strategy for deployments that need the arithmetic exact. Shipping
 rate limiting does not wait on any of this.
 
+## What the console authorises
+
+Three roles, named as Kong names them: superuser, admin, viewer. What each may do
+is a matrix of create, read, update and delete against each kind of resource, so
+the roles are defined by ticking boxes rather than by writing code.
+
+A role is granted **per namespace**, not globally. That one extra column is what
+makes the console multi-tenant, and multi-tenancy is the reason it exists: the
+teams it serves must not be able to reach each other's routes. Namespaces are
+already the boundary gapura writes into, so the scope costs nothing to invent and
+nothing to enforce -- the control plane simply declines to write outside it.
+Superuser is the exception that spans all namespaces, and exists mainly to grant
+the others.
+
+Because identity is federated, there is no first account to log in as. The first
+superuser comes from naming an identity provider group in configuration, which
+also means losing the database does not lock anybody out permanently.
+
 ## Alternatives
 
 **Kubernetes RBAC with impersonation.** Turned down for this audience only, not
@@ -145,9 +169,7 @@ takes if the measurement ever arrives.
 
 ## Open questions
 
-- How the console's own roles are scoped, and whether a role names namespaces
-  directly or something coarser that maps onto them.
-- Whether the API teams this console exists for get accounts local to Postgres,
-  or whether it federates to an identity provider the organisation already runs.
-  Local accounts are the smaller thing to build and the larger thing to defend.
-- Whether `gapura-control` ships inside the existing chart or one of its own.
+- Whether the CRUD matrix is per kind of resource or something finer, which only
+  matters once there are more kinds than HTTPRoute and the consumer.
+- What the console does when the identity provider is unreachable. Refusing every
+  login is correct and also means an outage there closes the console entirely.
