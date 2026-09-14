@@ -220,6 +220,7 @@ spec:
         args:
         - --kubernetes
         - --listen-http=0.0.0.0:80
+        - --listen-http=0.0.0.0:10000
         - --listen-https=0.0.0.0:443
         - --admin=0.0.0.0:9090
         - --controller-name=gapura.dev/controller
@@ -227,6 +228,7 @@ spec:
         - --lease-name=gapura-leader
         - --threads=2
         - --publish-address=127.0.0.1
+        - --gateway-address=gateway-conformance-infra/same-namespace=127.0.0.2
         env:
         - name: POD_NAME
           valueFrom: { fieldRef: { fieldPath: metadata.name } }
