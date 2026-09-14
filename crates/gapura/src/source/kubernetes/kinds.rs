@@ -8,6 +8,12 @@ use serde_json::{json, Value};
 
 pub const GATEWAY_GROUP: &str = "gateway.networking.k8s.io";
 
+/// The Gateway API standard channel this build is developed and tested against. It is
+/// operator-facing information, not a version check: nothing in the controller refuses a cluster
+/// whose CRDs are older — discovery decides kind by kind, and the messages that quote this
+/// constant are the ones an operator with stale CRDs needs to read.
+pub const EXPECTED_CHANNEL: &str = "v1.6.2";
+
 /// kubectl stores the whole applied manifest here; keeping it would double every object's
 /// footprint for the life of the Snapshot.
 const LAST_APPLIED_ANNOTATION: &str = "kubectl.kubernetes.io/last-applied-configuration";
@@ -22,6 +28,9 @@ pub struct Kind {
     pub field_selector: Option<&'static str>,
     /// Missing CRD is a warning, not a startup failure.
     pub optional: bool,
+    /// What the operator loses while this kind is absent. Empty for required kinds: their
+    /// absence fails startup instead of disabling a feature, so there is nothing to describe.
+    pub absent_hint: &'static str,
 }
 
 const fn kind(
@@ -37,6 +46,7 @@ const fn kind(
         plural,
         field_selector: None,
         optional: false,
+        absent_hint: "",
     }
 }
 
@@ -53,6 +63,8 @@ pub static KINDS: [Kind; 10] = [
     ),
     Kind {
         optional: true,
+        absent_hint: "TLS to backends via BackendTLSPolicy is unavailable; requests to backends \
+                      stay plaintext unless the Service carries the gapura.dev/backend-tls annotation",
         ..kind(
             "BackendTLSPolicy",
             GATEWAY_GROUP,
@@ -282,6 +294,21 @@ mod tests {
             "marking a mandatory Gateway API kind optional would turn a hard startup failure \
              into a feature that is silently disabled"
         );
+    }
+
+    #[test]
+    fn absent_hints_belong_to_optional_kinds_only() {
+        for k in KINDS.iter() {
+            assert_eq!(
+                !k.absent_hint.is_empty(),
+                k.optional,
+                "{}: a hint describes what an absence costs, which only a survivable absence can",
+                k.name
+            );
+        }
+        assert!(kind_named("BackendTLSPolicy")
+            .absent_hint
+            .contains("BackendTLSPolicy"));
     }
 
     fn resolved_without(absent: &str) -> Vec<&'static str> {

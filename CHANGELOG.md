@@ -20,6 +20,13 @@ means what it usually does, moving from one version below to a later one. Releas
 - The chart's NOTES now cover NodePort installs: they print the exact `curl`, NodePort included,
   because a Gateway's published address never carries a port and that is the trap every NodePort
   install hits.
+- The controller now diagnoses absent or stale Gateway API CRDs out loud. A missing optional
+  kind logs what stops working (a `loses` field: absent `BackendTLSPolicy` means TLS to
+  backends is off), the aggregate warning names the expected channel (`v1.6.2`) and says the
+  fix needs no restart, a missing required kind says the same at startup, and one info line
+  summarizes every watched kind with its apiVersion. Verified live: CRD deleted at startup,
+  pod warned and degraded; CRD reinstalled, the 60s recheck picked it up and rebuilt the watch
+  list, traffic uninterrupted. Chart NOTES say which channel the build is made for.
 - k3s gets a first-class seat: a `k3s` workflow runs `hack/k3s-deploy.sh` — build, import into a
   k3d cluster with traefik deliberately left on, NodePort install, one request through the
   gateway — on every PR and push to main. The README quickstart documents the stock-k3s case

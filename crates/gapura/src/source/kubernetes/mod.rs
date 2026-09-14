@@ -106,15 +106,26 @@ impl KubeSource {
                 Some(ar) => resolved.push((kind, ar)),
                 None if kind.optional => tracing::warn!(
                     kind = kind.name,
+                    loses = kind.absent_hint,
                     "not served by the API server, feature disabled"
                 ),
                 None => anyhow::bail!(
-                    "{} is not served by the API server; install the Gateway API CRDs",
-                    kind.name
+                    "{} is not served by the API server; install the Gateway API CRDs (this build \
+                     is made for the {} standard channel)",
+                    kind.name,
+                    kinds::EXPECTED_CHANNEL
                 ),
             }
         }
         let watched: Vec<&str> = resolved.iter().map(|(k, _)| k.name).collect();
+        // Discovery's one happy-path line: what is watched and at which apiVersion, so a support
+        // conversation starts from the logs instead of from a kubectl exegesis. Absences have
+        // their own lines below.
+        let summary: Vec<String> = resolved
+            .iter()
+            .map(|(k, ar)| format!("{}: {}", k.name, ar.api_version))
+            .collect();
+        tracing::info!(kinds = ?summary, "discovery complete, watching");
         // Each task reports what it was, so an unexpected end can name itself.
         let mut aux: tokio::task::JoinSet<&'static str> = tokio::task::JoinSet::new();
         let missing = kinds::missing_optional(&watched);
@@ -193,8 +204,11 @@ impl KubeSource {
             });
             tracing::warn!(
                 ?names,
+                expected = kinds::EXPECTED_CHANNEL,
                 recheck_secs = RECHECK.as_secs(),
-                "optional kinds absent, rechecking"
+                "optional kinds absent, so part of the spec is inert: the Gateway API CRDs are \
+                 missing or older than the expected channel, and installing or upgrading them is \
+                 picked up here without a restart, rechecking"
             );
         }
         // Without a rediscovery task the channel closes here, which disables its select arm.
