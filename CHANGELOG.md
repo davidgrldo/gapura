@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The release workflow can no longer publish a release whose notes say nothing. The check meant
+  to catch that ran over the finished file, which by then already carried the `## Packages` list
+  the same step writes, so both of its conditions were satisfied by its own output and it passed
+  for every version -- including ones with no section in this file at all. It now reads the
+  section before anything else is added and stops there when it is empty. A dispatch of the
+  workflow also stops trying to create a release: it builds a branch and makes no tag, so there
+  is nothing to hang one on, and the image and chart it publishes are the point of that path.
 - `RequestMirror` fires a bounded, fire-and-forget copy of the request. Headers-only: the mirror
   never promises a body it does not send (content-length and transfer-encoding are stripped), and
   body tee-ing is a follow-up. The mirror also dials plaintext HTTP regardless of the cluster's

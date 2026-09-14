@@ -123,6 +123,10 @@ jobs:
   # Idempotent on re-run: a re-run of the release workflow finds the release and re-uploads.
   notes:
     needs: chart
+    # A dispatch builds a branch and creates no tag, so there is no tag to hang a release on
+    # and `gh release create --verify-tag` refuses, correctly. Publishing the image and the
+    # chart is the whole point of that path, so let it finish green instead of red.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,14 +137,23 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          body="$(awk -v v="$version" '
+            !p && $0 ~ "^## "v"([[:space:]]|$)" {p=1; next}
+            p && /^## / {exit}
+            p {print}
+          ' CHANGELOG.md)"
+          # Stop here when CHANGELOG.md has no section for this version, rather than after
+          # assembling the file: the boilerplate below writes list items of its own, so any
+          # check on the finished notes is satisfied by this step's own output and a release
+          # with an empty "What changed" sails through.
+          if [ -z "${body//[[:space:]]/}" ]; then
+            echo "CHANGELOG.md has no '## ${version}' section to release from" >&2
+            exit 1
+          fi
           {
             echo "## What changed"
             echo
-            awk -v v="$version" '
-              !p && $0 ~ "^## "v"([[:space:]]|$)" {p=1; next}
-              p && /^## / {exit}
-              p {print}
-            ' CHANGELOG.md
+            printf '%s\n\n' "$body"
             echo "## Packages"
             echo
             echo "- Image: ghcr.io/davidgrldo/gapura:${version} (linux/amd64, linux/arm64)"
@@ -149,9 +162,6 @@ jobs:
             echo "Verify the install the way a stranger would, with no ghcr credentials: the"
             echo "quickstart workflow does exactly that on every release."
           } > /tmp/notes.md
-          # The awk found nothing if the body is just headers: fail loudly instead of publishing
-          # an empty release.
-          test "$(grep -c '^-' /tmp/notes.md)" -gt 0 || grep -q '.' /tmp/notes.md
           head -5 /tmp/notes.md
       - name: Create the release, attach the conformance report
         env:
