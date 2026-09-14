@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- `path.type: RegularExpression` is matched, not rejected. Patterns compile once per config
+  generation into a side map next to the round-robin cursors, match the raw request path, and
+  rank below `Exact` and `PathPrefix` in the precedence chain, the pattern length breaking ties
+  inside the type. A pattern that does not compile, or a `ReplacePrefixMatch` rewrite on a regex
+  match, still rejects the route as `Unsupported`. `PathMatchRegularExpression` is now claimed in
+  `GatewayClass.status.supportedFeatures` and passed to the suite; v1.6.2's standard channel has
+  no core regex cases, so the conformance counts stand at 36 of 37.
 - `helm test` on a release now proves it routes: the chart ships a throwaway Gateway, HTTPRoute
   and echo backend as `helm.sh/hook: test` resources, plus a curl pod that drives one request
   through the data plane and checks the answer. Nothing exists at install time; `helm test`

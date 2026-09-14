@@ -18,7 +18,8 @@ Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kub
 
 Gateway API core, served out of one binary with no database and no separate control plane:
 
-- **Routing** on hostname, path (`Exact` and `PathPrefix`), header, query parameter and method.
+- **Routing** on hostname, path (`Exact`, `PathPrefix` and `RegularExpression`), header, query
+  parameter and method.
 - **Filters**: request and response header modification, `RequestRedirect`, and `URLRewrite`.
 - **TLS**: termination with the certificate chosen per SNI, and TLS to backends via
   `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.
@@ -28,8 +29,7 @@ Gateway API core, served out of one binary with no database and no separate cont
   and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
   config swap so in-flight requests finish on the config they started with.
 
-Deliberately not here yet, each with its own issue: regular-expression path matching
-([#5](https://github.com/davidgrldo/gapura/issues/5)), `RequestMirror`
+Deliberately not here yet, each with its own issue: `RequestMirror`
 ([#6](https://github.com/davidgrldo/gapura/issues/6)), 307 and 308 redirects
 ([#7](https://github.com/davidgrldo/gapura/issues/7)), and an address per Gateway
 ([#8](https://github.com/davidgrldo/gapura/issues/8)). That last one is why a single conformance
