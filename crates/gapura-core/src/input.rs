@@ -171,7 +171,7 @@ pub struct HttpRouteMatch {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HttpPathMatch {
-    /// `Exact`, `PathPrefix` (default), `RegularExpression` (unsupported in v0.1).
+    /// `Exact`, `PathPrefix` (default), `RegularExpression`.
     #[serde(rename = "type")]
     pub type_: Option<String>,
     pub value: Option<String>,
