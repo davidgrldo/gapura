@@ -62,7 +62,13 @@ spec:
         args:
         - --kubernetes
         - --listen-http=0.0.0.0:{{ .Values.ports.http }}
+        {{- range .Values.extraListenHttp }}
+        - --listen-http=0.0.0.0:{{ . }}
+        {{- end }}
         - --listen-https=0.0.0.0:{{ .Values.ports.https }}
+        {{- range .Values.extraListenHttps }}
+        - --listen-https=0.0.0.0:{{ . }}
+        {{- end }}
         - --admin=0.0.0.0:{{ .Values.ports.admin }}
         - --controller-name={{ .Values.controllerName }}
         - --log-level={{ .Values.logLevel }}
@@ -75,6 +81,11 @@ spec:
         {{- end }}
         {{- range .Values.publishAddresses }}
         - --publish-address={{ . }}
+        {{- end }}
+        {{- range $ref, $addrs := .Values.gatewayAddresses }}
+        {{- range $addrs }}
+        - --gateway-address={{ $ref }}={{ . }}
+        {{- end }}
         {{- end }}
         {{- range .Values.trustedProxies }}
         - --trusted-proxy={{ . }}

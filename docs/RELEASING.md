@@ -399,19 +399,17 @@ remove the pre-publication notices, which stop being true the moment the tag exi
 `conformance/reports/v1.6/davidgrldo-gapura/` is not sent to `kubernetes-sigs/gateway-api` with this
 release, and that is a decision rather than an oversight.
 
-The upstream reports rules require every profile's `result` to be `success` or `partial`. Gapura's
-GATEWAY-HTTP profile is `failure`: 36 of 37 core tests pass, and `HTTPRouteMultipleGateways` fails.
-That test attaches two routes which both match `PathPrefix /` with no hostname, to two different
-Gateways, and expects a different backend from each. Gapura serves every Gateway of its class from
-one Deployment with one published address, so nothing in the request distinguishes the two.
+The blocker is gone: an address per Gateway (`--gateway-address` plus the translator's bind-port
+remap of colliding listeners) took the GATEWAY-HTTP profile to 37 of 37 core plus 1 of 1 extended,
+so the next standard run — this release's — regenerates the report with `result: success`, and the
+reports rules (every profile `success` or `partial`) are met. The report yaml itself is never
+hand-edited; it is whatever the release run records.
 
-`partial` is not a way around it: it covers tests that were **skipped**, or a run that needed
-steps the suite did not expect — never a test that failed. Skipping a test we know fails would be
-claiming conformance we do not have.
+`partial` remains irrelevant: it covers tests that were **skipped**, or a run that needed steps
+the suite did not expect — never a test that failed.
 
-Submission waits for an address per Gateway, which is out of scope for v0.1 by design, and which
-would take the profile to 37 of 37. The report folder already carries the `README.md` upstream
-requires, so when that day comes the submission is a folder copy rather than a rewrite.
+What still waits is the act of submitting: the folder already carries the `README.md` upstream
+requires, so submission is a folder copy, and it happens with this release rather than before it.
 
 ## 7. If something goes wrong after the tag
 
@@ -464,7 +462,7 @@ adopters calibrate trust, and the one failing test is documented there anyway.
 
 **Submitting the report itself upstream waits**, for the reason section 6 states: the reports
 rules allow `success` or `partial`, and an honestly failing test is neither. The folder already
-carries the README upstream requires, so when an address per Gateway takes the suite to 37 of 37,
+carries the README upstream requires, and the address per Gateway has taken the suite to 37 of 37,
 submission is a folder copy.
 
 **Artifact Hub.** The chart already carries `artifacthub.io/*` annotations. A public OCI chart

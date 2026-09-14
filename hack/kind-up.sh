@@ -27,6 +27,15 @@ Delete it and rerun (it only ever holds test fixtures):
 EOF
     exit 1
   fi
+  if [ "$REQUIRE_PORTS" != 0 ] && ! docker port "${CLUSTER}-control-plane" | grep -q '^30081/tcp'; then
+    cat >&2 <<EOF
+Cluster "$CLUSTER" predates the second-Gateway mapping (127.0.0.2:80 -> 30081,
+hack/kind-config.yaml). Port mappings only apply at creation, so delete it and rerun
+(it only ever holds test fixtures):
+    kind delete cluster --name $CLUSTER
+EOF
+    exit 1
+  fi
 else
   kind create cluster --name "$CLUSTER" --config hack/kind-config.yaml --wait 120s
 fi

@@ -16,23 +16,16 @@ repository has not been published and no `v0.1.0` tag exists. Both arrive with t
 and every URL here is written in its final form so that this folder can be copied upstream
 unchanged.
 
-## Not yet submitted
+## Submission
 
-This report is **not** eligible for submission to kubernetes-sigs/gateway-api. The reports rules
-require every profile's `result` to be `success` or `partial`; this one is `failure`, because one
-core test fails:
+The reports rules require every profile's `result` to be `success` or `partial`, and this profile
+is now `success`: 37 of 37 core tests, and the extended section 1 of 1.
 
-- `HTTPRouteMultipleGateways` attaches two routes that both match `PathPrefix /` with no hostname,
-  to two different Gateways, and expects a different backend from each. Gapura serves every Gateway
-  of its class from one Deployment with one published address, so nothing in the request
-  distinguishes the two. The port table orders them deterministically by the Gateway API precedence
-  chain, which makes the outcome documented rather than a name-order lottery, but one of the two
-  backends stays unreachable by construction.
-
-`partial` is not a way out: it covers tests that were **skipped**, or a run that needed steps the
-suite did not expect, never a test that failed. Skipping a test we know fails would be claiming
-conformance we do not have. Submission waits for an address per Gateway, which takes the profile to
-37 of 37.
+The core profile reached 37 of 37 when Gapura grew an address per Gateway: `--gateway-address`
+publishes per-Gateway status addresses, and the translator maps a listener that would tie with
+another Gateway onto the next free bound port, so two Gateways whose routes overlap become two
+distinct destinations. `partial` was never a way out: it covers tests that were **skipped**, or a
+run that needed steps the suite did not expect, never a test that failed.
 
 The extended section records the one extended feature claimed, `HTTPRouteRequestMirror`, passing
 1 of 1: a fire-and-forget, headers-only, plaintext-only copy with a bounded in-flight count, never

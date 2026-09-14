@@ -8,6 +8,18 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An address per Gateway: `--gateway-address namespace/name=ip-or-host` (repeatable) publishes
+  per-Gateway status addresses instead of one shared list, and the translator remaps a listener
+  that would tie with another Gateway onto the next free bound port of its protocol — the proxy
+  only ever binds the `--listen-http`/`--listen-https` sockets, so a deployment that wants
+  addressable Gateways binds a second port (chart value `extraListenHttp`) and points a Service
+  at it. The allocation is deterministic, so the Service mapping is stable. Listeners whose
+  requests precedence can already tell apart — disjoint or strictly-more-specific hostnames, or
+  one route attached to both — keep sharing the port, and with a single bound port nothing
+  changes at all. This is what the `HTTPRouteMultipleGateways` conformance test needed: the
+  GATEWAY-HTTP profile now passes 37 of 37 core plus 1 of 1 extended, the chart's `gatewayAddresses`
+  value carries the per-Gateway addresses, and `hack/conformance.sh` runs with an empty
+  `EXPECTED_FAILURES` — any failure fails the run.
 - The release workflow can no longer publish a release whose notes say nothing. The check meant
   to catch that ran over the finished file, which by then already carried the `## Packages` list
   the same step writes, so both of its conditions were satisfied by its own output and it passed

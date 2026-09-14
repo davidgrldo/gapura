@@ -61,6 +61,10 @@ pub struct Settings {
     pub https_ports: Vec<u16>,
     /// Addresses published into `Gateway.status.addresses` (the LoadBalancer IPs of our Service).
     pub gateway_addresses: Vec<String>,
+    /// Per-Gateway overrides of `gateway_addresses`, keyed `namespace/name`: an address per
+    /// Gateway, so two Gateways whose routes overlap can be told apart by destination address.
+    /// A Gateway missing here falls back to `gateway_addresses`.
+    pub gateway_address_overrides: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -70,6 +74,7 @@ impl Default for Settings {
             http_ports: vec![80],
             https_ports: vec![443],
             gateway_addresses: Vec::new(),
+            gateway_address_overrides: BTreeMap::new(),
         }
     }
 }

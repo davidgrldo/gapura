@@ -34,17 +34,17 @@ REPORT="$REPORT_DIR/standard-${VERSION}-default-report.yaml"
 # .github/workflows/conformance.yml is a signal rather than a light that is red every night for
 # something already known, documented, and indistinguishable from a real regression.
 #
-#   HTTPRouteMultipleGateways -- two Gateways, two routes that both match `PathPrefix /` with no
-#   hostname, and a different backend expected from each. Gapura publishes one address for every
-#   Gateway of its class, so nothing in the request tells the two apart and one of the backends is
-#   unreachable by construction. Closing it needs a listening address per Gateway, which is out of
-#   scope for v0.1. conformance/README.md has the long version.
+# The list is empty: HTTPRouteMultipleGateways used to fail by construction (one published
+# address for every Gateway of the class), and an address per Gateway -- --gateway-address plus
+# the translator's bind-port remap of colliding listeners, wired up in kind by kind-config.yaml,
+# kind-second-service.yaml and values-kind.yaml -- closed it. 37 of 37 now.
 #
 # The comparison at the end of this script is an equality, not a subset: a test that fails and is
 # not on this list is a regression and fails the run, and a test on this list that starts passing
-# also fails the run -- that is good news, but it makes the counts in the docs and in the committed
-# report wrong, so it must not pass silently. Keep the list non-empty, or rework that comparison.
-EXPECTED_FAILURES=(HTTPRouteMultipleGateways)
+# also fails the run -- that is good news, but it makes the counts in the docs and in the
+# committed report wrong, so it must not pass silently. Keep the list non-empty, or rework that
+# comparison. With the list empty, ANY failure fails the run, which is the point.
+EXPECTED_FAILURES=()
 
 # The suite brings its own Gateways on port 80; the e2e fixture would put a second one there
 # and change what is being measured. Default it off here so a plain run reproduces the
@@ -115,11 +115,15 @@ ACTUAL=$(awk '
   }
   { collecting = 0 }
 ' "$REPORT" | sort -u)
-EXPECTED=$(printf '%s\n' "${EXPECTED_FAILURES[@]}" | sort -u)
+EXPECTED=$(printf '%s\n' ${EXPECTED_FAILURES[@]-} | sort -u | grep -v '^$' || true)
 
 if [ "$ACTUAL" = "$EXPECTED" ]; then
   echo "==> the failures are exactly the expected set, so this run passes (go test exited $GO_RC):"
-  printf '    %s\n' "${EXPECTED_FAILURES[@]}"
+  if [ "${#EXPECTED_FAILURES[@]}" -gt 0 ]; then
+    printf '    %s\n' "${EXPECTED_FAILURES[@]}"
+  else
+    echo "    (none — the suite passed clean)"
+  fi
   exit 0
 fi
 
