@@ -39,25 +39,19 @@ kubectl wait --for=condition=Established --timeout=60s \
 
 docker build -t "$IMAGE" .
 
-# k3d image import has a long-standing race: the tools node writes the tar to the image volume and
-# ctr inside the node reads it, and when the read loses the race ctr answers
-# "no such file or directory" -- while k3d exits 0 and prints "Successfully imported" anyway.
-# So: import in direct mode (docker cp into the node, no image volume), then verify the image is
-# really in the node's containerd, and only believe it when it is. A lost image must fail here,
-# not three minutes later as "Available: 0/2" at helm --wait. The check uses `k3s ctr`: the k3s
-# node image ships no bare `ctr` on PATH, k3s embeds it as a subcommand.
-imported() {
-  docker exec "k3d-${CLUSTER}-server-0" \
-    k3s ctr --namespace k8s.io images ls 2>/dev/null \
-    | grep -qF "$IMAGE"
-}
-for attempt in 1 2 3; do
-  out=$(k3d image import "$IMAGE" --cluster "$CLUSTER" --mode direct 2>&1) || true
-  imported && break
-  echo "image import attempt $attempt did not land in the node; k3d said: $out" >&2
-  sleep 2
-done
-imported || { echo "image $IMAGE never reached the node's containerd" >&2; exit 1; }
+# Import straight into the node's containerd: docker save, docker cp, k3s ctr import, with no
+# `k3d image import` in between. Its default mode loses a race between the tools node writing
+# the image volume and ctr reading it -- "no such file or directory" -- while k3d exits 0 and
+# prints "Successfully imported" anyway, and its direct mode did no better in CI: three
+# attempts, no error, no image. Doing it by hand makes every failure visible at the step that
+# caused it, and the grep makes a lost image fail here instead of three minutes later as
+# "Available: 0/2" at helm --wait.
+NODE="k3d-${CLUSTER}-server-0"
+docker save "$IMAGE" -o /tmp/gapura-image.tar
+docker cp /tmp/gapura-image.tar "$NODE:/tmp/gapura-image.tar"
+docker exec "$NODE" k3s ctr --namespace k8s.io images import /tmp/gapura-image.tar
+docker exec "$NODE" rm -f /tmp/gapura-image.tar
+docker exec "$NODE" k3s ctr --namespace k8s.io images ls | grep -F "$IMAGE"
 
 helm upgrade --install gapura charts/gapura \
   --namespace "$NS" --create-namespace \
