@@ -6,6 +6,7 @@
 //! (502/504 mapping), `logging` (access log + metrics).
 
 pub mod attrs;
+pub mod client;
 pub mod select;
 pub mod tls;
 
@@ -47,6 +48,8 @@ static MIRROR_PERMITS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(MIR
 
 pub struct GapuraProxy {
     pub store: Arc<Store>,
+    /// Networks whose `X-Forwarded-For` the access log believes. Empty means none.
+    pub trusted_proxies: Vec<client::Cidr>,
 }
 
 /// Per-request state. Indices point into `runtime.config`; holding the Arc keeps that
@@ -638,10 +641,10 @@ impl ProxyHttp for GapuraProxy {
             .observe(ctx.started.elapsed().as_secs_f64());
 
         let upstream = ctx.upstream.map(|a| a.to_string());
-        let client_ip = session
-            .client_addr()
-            .and_then(|a| a.as_inet())
-            .map(|a| a.ip().to_string());
+        let forwarded_for = header_str(session.req_header(), "x-forwarded-for").map(str::to_string);
+        let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|a| {
+            client::client_ip(a.ip(), forwarded_for.as_deref(), &self.trusted_proxies).to_string()
+        });
         let user_agent = header_str(session.req_header(), "user-agent").map(str::to_string);
         let (host, path, method) = match &ctx.extracted {
             Some(ex) => (ex.host.as_str(), ex.path.as_str(), ex.method.as_str()),
