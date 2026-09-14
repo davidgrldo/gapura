@@ -1029,12 +1029,17 @@ fn two_gateways_share_a_port_and_both_are_reachable() {
 
 #[test]
 fn two_identical_listeners_are_split_by_bind_port() {
-    // The deployment bound a second port (the chart's extraListenHttp), so the translator can
-    // give each addressable Gateway its own destination port: alpha keeps its declared 80,
-    // beta moves to the free bound port, and each published address reaches exactly its own
-    // Gateway — the shape that failed HTTPRouteMultipleGateways.
+    // The deployment bound a second port (the chart's extraListenHttp) and gave beta its own
+    // address via --gateway-address — the declaration that beta is individually addressable,
+    // so the translator may move its listener. Alpha keeps its declared 80, beta moves to the
+    // free bound port, and each published address reaches exactly its own Gateway: the shape
+    // that failed HTTPRouteMultipleGateways. Alpha, without an override, stays reachable on
+    // the shared address exactly as before.
     let settings = Settings {
         http_ports: vec![80, 10000],
+        gateway_address_overrides: [("infra/beta".to_string(), vec!["203.0.113.9".to_string()])]
+            .into_iter()
+            .collect(),
         ..settings()
     };
     let t = translate(&load("two-gateways-same-hostname"), &settings);
@@ -1049,5 +1054,16 @@ fn two_identical_listeners_are_split_by_bind_port() {
     assert_eq!(by_id("infra/beta/http").port, 10000);
     assert_eq!(t.config.ports[&80].len(), 1, "only alpha serves port 80");
     assert_eq!(t.config.ports[&10000].len(), 1, "only beta serves its port");
+    let beta_patch = t.status.iter().find_map(|p| match p {
+        StatusPatch::Gateway {
+            name, addresses, ..
+        } if name == "beta" => Some(addresses),
+        _ => None,
+    });
+    assert_eq!(
+        beta_patch.map(Vec::as_slice),
+        Some(["203.0.113.9".to_string()].as_slice()),
+        "beta's status carries its own address"
+    );
     insta::assert_yaml_snapshot!("two-gateways-same-hostname", t);
 }

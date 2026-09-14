@@ -159,7 +159,7 @@ status:
     namespace: infra
     name: beta
     addresses:
-      - 10.0.0.1
+      - 203.0.113.9
     conditions:
       - type: Accepted
         status: "True"
