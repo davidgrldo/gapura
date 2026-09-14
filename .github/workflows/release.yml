@@ -40,6 +40,13 @@ jobs:
           platforms: ${{ matrix.platform }}
           # Push by digest; the tags are attached by the merge job below.
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Attestations ride along free with push-by-digest, and a project with no edition to
+          # buy should not need one to verify what it runs: provenance mode=max carries the
+          # source repo, commit and builder identity, and the SBOM is the dependency list a
+          # verifier needs. Neither survives loading into the runner's docker, which is why the
+          # ci.yml image job stays without them.
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       # Job-level `outputs` are not merged across matrix legs: each leg records the whole map from

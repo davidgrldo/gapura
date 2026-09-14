@@ -32,6 +32,15 @@ means what it usually does, moving from one version below to a later one. Releas
   gateway — on every PR and push to main. The README quickstart documents the stock-k3s case
   (traefik holds 80/443 through ServiceLB, so the default LoadBalancer Service hangs rather than
   fails) with the NodePort install for it.
+- The chart can pin the image by digest (`image.digest`, taking precedence over the tag), for
+  operators who want the release to run byte-for-byte what CI pushed; `externalTrafficPolicy`'s
+  Local default now says what it costs on a multi-node cluster.
+- Release images now carry `provenance: mode=max` and an SBOM per platform, and the digest-join
+  is asserted to keep them: `hack/release-dry-run.sh` fails if the manifest list arrives without
+  its attestations. A project with no edition to buy should not need one to verify what it runs.
+- RELEASING gains section 8, the post-public listings (Gateway API implementations page,
+  upstream report submission once the profile allows it, Artifact Hub, README badge), and 5.3
+  now points at the quickstart workflow as the standing private-package detector.
 
 ## 0.1.0 — 2026-09-11
 

@@ -1,0 +1,10 @@
+# Digest pinning: digest wins over tag, so the deployment renders repository@sha256 instead of
+# repository:tag. The digest is a made-up but well-formed manifest-list digest; the point under
+# test is the helper's precedence, not this particular image.
+image:
+  repository: ghcr.io/davidgrldo/gapura
+  digest: "sha256:3f1e2c8e0e1bd0c5a53ba5eb60c93b98f4d1b52faa0d9d0ed5e91b96cd2ea6a94"
+  tag: "0.1.0"
+service:
+  type: ClusterIP
+publishService: false

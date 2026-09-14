@@ -296,8 +296,10 @@ docker buildx imagetools inspect ghcr.io/davidgrldo/gapura:0.1.0 --raw \
 ```
 
 Exactly `linux/amd64` and `linux/arm64`. The `unknown/unknown` entries the `jq` filter drops are
-attestation manifests, not platforms. This is the same assertion `hack/release-dry-run.sh` makes
-against the local registry.
+attestation manifests, not platforms: since the release builds with `provenance: mode=max` and an
+SBOM, expect at least one per architecture — a digest-pulling verifier reads exactly those. This
+is the same assertion `hack/release-dry-run.sh` makes against the local registry, attestations
+included.
 
 ### 5.2 The chart pulls from OCI
 
@@ -308,6 +310,10 @@ helm show chart oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0
 `version` and `appVersion` both `0.1.0`.
 
 ### 5.3 Both GHCR packages are public — the one that usually goes wrong
+
+The `quickstart` workflow is the standing detector for this now: it pulls both packages
+anonymously on every release and weekly, and goes red the moment either one is private. This
+section is the manual override and the diagnosis, not the thing that has to be remembered.
 
 **A new GHCR package is private.** The image and the chart are two separate packages, `gapura` and
 `charts/gapura`, and each defaults to private on first publish. Private packages pull perfectly for
@@ -444,3 +450,28 @@ git tag -d v0.1.0
 
 Treat the version number as spent regardless: you cannot know who fetched it in between. Move to the
 next one.
+
+## 8. After the packages are public — the listings that make the work findable
+
+Nothing here blocks a release; all of it is discoverability, and all of it waits for 5.3, because
+a listing that 401s is worse than no listing.
+
+**The Gateway API implementations page.** `kubernetes-sigs/gateway-api` lists implementations on
+its website; a PR there adds Gapura with exactly what is true today — Gateway API core,
+`GATEWAY-HTTP` at 36 of 37, standard channel, no experimental profile — and links the report in
+[conformance/](../conformance/). Claim nothing the report does not say: the page is where
+adopters calibrate trust, and the one failing test is documented there anyway.
+
+**Submitting the report itself upstream waits**, for the reason section 6 states: the reports
+rules allow `success` or `partial`, and an honestly failing test is neither. The folder already
+carries the README upstream requires, so when an address per Gateway takes the suite to 37 of 37,
+submission is a folder copy.
+
+**Artifact Hub.** The chart already carries `artifacthub.io/*` annotations. A public OCI chart
+repository can be registered as a source; Artifact Hub then needs an `artifacthub-repo.yml`
+pushed as an OCI artifact to the repository path — see its docs for the exact shape before
+starting, the file is validated, not just stored.
+
+**README badge.** Once listed, link the implementations page from the README instead of
+self-asserting conformance numbers in a badge; the report is the artifact, the page is the
+witness.

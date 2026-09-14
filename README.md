@@ -28,9 +28,12 @@ Gateway API core, served out of one binary with no database and no separate cont
   and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
   config swap so in-flight requests finish on the config they started with.
 
-Deliberately not here yet: regular-expression path matching, `RequestMirror`, 307 and 308 redirects,
-and an address per Gateway. That last one is why a single conformance test fails, and
-[conformance/](conformance/) explains it.
+Deliberately not here yet, each with its own issue: regular-expression path matching
+([#5](https://github.com/davidgrldo/gapura/issues/5)), `RequestMirror`
+([#6](https://github.com/davidgrldo/gapura/issues/6)), 307 and 308 redirects
+([#7](https://github.com/davidgrldo/gapura/issues/7)), and an address per Gateway
+([#8](https://github.com/davidgrldo/gapura/issues/8)). That last one is why a single conformance
+test fails, and [conformance/](conformance/) explains it.
 
 ## The name
 
