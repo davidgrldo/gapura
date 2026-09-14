@@ -35,6 +35,8 @@ pub struct Metrics {
     pub leader: IntGauge,
     /// labels: kind
     pub discovery_missing: IntGaugeVec,
+    /// labels: route, result (`sent`, `error`, `timeout`, `overflow`)
+    pub mirror_requests_total: IntCounterVec,
 }
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
@@ -106,6 +108,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
         "gapura_discovery_missing",
         "1 while an optional kind is not served by the API server",
         &["kind"]
+    )
+    .expect("metric registered once"),
+    mirror_requests_total: register_int_counter_vec!(
+        "gapura_mirror_requests_total",
+        "Mirrored requests by route and result",
+        &["route", "result"]
     )
     .expect("metric registered once"),
 });
@@ -194,6 +202,8 @@ pub struct AccessLog<'a> {
     /// mid-request, but any failure against the client connection counts, down to an unreadable
     /// request body. Not an error on our side.
     pub client_abort: bool,
+    /// A fire-and-forget mirror of this request was handed to a background task.
+    pub mirrored: bool,
     pub listener: &'a str,
     pub route: &'a str,
     pub upstream: Option<&'a str>,
@@ -275,6 +285,7 @@ mod tests {
             duration_ms: 4,
             upstream_duration_ms: Some(2),
             client_abort: false,
+            mirrored: false,
             listener: "infra/main/http",
             route: "apps/echo",
             upstream: Some("10.0.0.1:8080"),
@@ -285,6 +296,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&entry).unwrap();
         assert_eq!(v["status"], 200);
         assert_eq!(v["route"], "apps/echo");
+        assert_eq!(v["mirrored"], false);
         assert!(v["client_ip"].is_null());
     }
 
@@ -302,6 +314,7 @@ mod tests {
             duration_ms: 5,
             upstream_duration_ms: Some(3),
             client_abort: true,
+            mirrored: false,
             listener: "l",
             route: "r",
             upstream: None,

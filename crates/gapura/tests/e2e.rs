@@ -172,6 +172,16 @@ spec:
     backendRefs: [{{ name: flaky, port: 80 }}]
   - matches: [{{ path: {{ type: RegularExpression, value: "^/v\\d+/info" }} }}]
     backendRefs: [{{ name: echo, port: 80 }}]
+  - matches: [{{ path: {{ type: PathPrefix, value: /mirror }} }}]
+    filters:
+    - type: RequestMirror
+      requestMirror: {{ backendRef: {{ name: shadow, port: 80 }} }}
+    backendRefs: [{{ name: echo, port: 80 }}]
+  - matches: [{{ path: {{ type: PathPrefix, value: /mirrordown }} }}]
+    filters:
+    - type: RequestMirror
+      requestMirror: {{ backendRef: {{ name: shadow-down, port: 80 }} }}
+    backendRefs: [{{ name: echo, port: 80 }}]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -213,6 +223,30 @@ metadata: {{ name: echo-1, namespace: apps, labels: {{ kubernetes.io/service-nam
 addressType: IPv4
 endpoints: [{{ addresses: ["{up_ip}"], conditions: {{ ready: true }} }}]
 ports: [{{ name: http, port: {up_port} }}]
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: shadow, namespace: apps }}
+spec: {{ ports: [{{ name: http, port: 80 }}] }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {{ name: shadow-1, namespace: apps, labels: {{ kubernetes.io/service-name: shadow }} }}
+addressType: IPv4
+endpoints: [{{ addresses: ["{up_ip}"], conditions: {{ ready: true }} }}]
+ports: [{{ name: http, port: {up_port} }}]
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: shadow-down, namespace: apps }}
+spec: {{ ports: [{{ name: http, port: 80 }}] }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {{ name: shadow-down-1, namespace: apps, labels: {{ kubernetes.io/service-name: shadow-down }} }}
+addressType: IPv4
+endpoints: [{{ addresses: ["{dead_ip}"], conditions: {{ ready: true }} }}]
+ports: [{{ name: http, port: {dead_port} }}]
 ---
 apiVersion: v1
 kind: Service
@@ -440,6 +474,62 @@ async fn regex_path_match_routes() {
         404,
         "a path the pattern does not match has no other rule to catch it"
     );
+}
+
+/// Poll the admin /metrics text until it contains `needle`, or panic with what it last saw.
+/// The mirror is fire-and-forget, so its metric lands shortly after the primary responded.
+async fn wait_for_metric(gw: &Gateway, needle: &str) {
+    for _ in 0..200 {
+        let text = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        if text.contains(needle) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("metric {needle:?} never showed up on the admin endpoint");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mirrored_requests_fire_and_are_counted() {
+    let (gw, c) = setup().await;
+    let r = c
+        .get(url(&gw, "echo.test", "/mirror/x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "the primary is unaffected by the mirror");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["path"], "/mirror/x");
+    wait_for_metric(
+        &gw,
+        "gapura_mirror_requests_total{result=\"sent\",route=\"apps/echo\"}",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_mirror_backend_leaves_the_primary_alone() {
+    let (gw, c) = setup().await;
+    let r = c
+        .get(url(&gw, "echo.test", "/mirrordown/x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "a failing mirror must never fail the primary request"
+    );
+    wait_for_metric(
+        &gw,
+        "gapura_mirror_requests_total{result=\"error\",route=\"apps/echo\"}",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -30,6 +30,7 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
+            mirror: ~
           backends:
             - cluster: "apps/echo:80"
               weight: 1
@@ -58,6 +59,7 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
+            mirror: ~
           backends:
             - cluster: "apps/echo:80"
               weight: 1
@@ -84,6 +86,7 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
+            mirror: ~
           backends:
             - cluster: "apps/echo:80"
               weight: 1
@@ -110,6 +113,7 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
+            mirror: ~
           backends:
             - cluster: "apps/echo:80"
               weight: 1
@@ -174,6 +178,7 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - HTTPRouteRequestMirror
       - PathMatchRegularExpression
       - ReferenceGrant
   - kind: Gateway

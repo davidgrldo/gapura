@@ -94,6 +94,11 @@ fn assemble(
                         used.insert(cluster.clone());
                     }
                 }
+                // A mirror-only cluster has no entry in rule.backends; without this the prune
+                // below would silently drop it and the mirror would have nowhere to go.
+                if let Some(mirror) = &rule.filters.mirror {
+                    used.insert(mirror.cluster.clone());
+                }
             }
             tables.push(std::mem::take(&mut l.table));
             listeners_cfg.push(ListenerConfig {
