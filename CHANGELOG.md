@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- `RequestMirror` fires a bounded, fire-and-forget copy of the request. Headers-only: the mirror
+  never promises a body it does not send (content-length and transfer-encoding are stripped), and
+  body tee-ing is a follow-up. A global 1024 in-flight bound drops mirrors past it, counted as
+  `overflow` on `gapura_mirror_requests_total{route, result}` (`sent|error|timeout|overflow`); each
+  mirror is one 3s attempt with no retries, and the primary's access-log line gains a `mirrored`
+  field. The mirror's backendRef resolves like any other — ReferenceGrant included — and a mirror
+  that cannot resolve sets `ResolvedRefs=False` while the route keeps serving unmirrored. Claiming
+  the extended `HTTPRouteRequestMirror` adds the one extended test that gates on it: the report now
+  carries an extended section, 1 of 1 passing, core still 36 of 37.
 - `path.type: RegularExpression` is matched, not rejected. Patterns compile once per config
   generation into a side map next to the round-robin cursors, match the raw request path, and
   rank below `Exact` and `PathPrefix` in the precedence chain, the pattern length breaking ties
