@@ -76,6 +76,9 @@ spec:
         {{- range .Values.publishAddresses }}
         - --publish-address={{ . }}
         {{- end }}
+        {{- range .Values.trustedProxies }}
+        - --trusted-proxy={{ . }}
+        {{- end }}
         {{- if .Values.readOnly }}
         - --no-status
         {{- end }}

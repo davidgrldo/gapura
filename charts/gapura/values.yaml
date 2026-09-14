@@ -67,6 +67,13 @@ publishAddresses: []
 # Publish the LoadBalancer addresses of this chart's Service (--publish-service).
 publishService: true
 
+# Networks whose X-Forwarded-For the access log believes, as CIDRs or bare addresses. Leave this
+# empty and the header is ignored, so client_ip in the access log is whatever opened the
+# connection -- which behind an ingress, a service mesh or a CDN is that proxy rather than the
+# visitor. Set it to the networks those proxies connect from, and nothing else: any caller may
+# write this header, and every network listed here is one whose word is taken for it.
+trustedProxies: []
+
 # EnvFilter directives, e.g. "info" or "gapura=debug". Pingora logs every failed downstream
 # handshake at error level, including the ones a port scanner causes, so it is quieted by default.
 logLevel: info,pingora_core::services::listening=warn

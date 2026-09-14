@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The access log can name the client again. `client_ip` was read straight off the connection, so
+  anywhere an ingress, a mesh or a CDN sits in front, every line recorded that proxy and the
+  visitor appeared nowhere -- and anything later keyed on the client address would have read the
+  proxy too. `--trusted-proxy` takes a CIDR or a bare address and is repeatable (`trustedProxies`
+  in the chart); with at least one set, a connection arriving from one of those networks has its
+  `X-Forwarded-For` read from the right until an address no listed network vouches for, and that
+  is the client. Anything a caller wrote into the header itself sits further left and is never
+  reached, and a connection from outside those networks is taken at face value however it filled
+  the header in. Nothing is listed by default, which is the old behaviour: the header ignored,
+  the peer logged. What gapura sends upstream does not change.
 - `path.type: RegularExpression` is matched, not rejected. Patterns compile once per config
   generation into a side map next to the round-robin cursors, match the raw request path, and
   rank below `Exact` and `PathPrefix` in the precedence chain, the pattern length breaking ties

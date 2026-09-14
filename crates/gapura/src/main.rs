@@ -111,6 +111,7 @@ fn main() {
         &server.configuration,
         proxy::GapuraProxy {
             store: store.clone(),
+            trusted_proxies: args.trusted_proxies.clone(),
         },
     );
     for addr in &args.listen_http {
