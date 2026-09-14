@@ -39,3 +39,6 @@ in the same cluster needs its own gatewayClass.name and controllerName.
 
 The Gateway API CRDs are not part of this chart. Install the standard channel yourself:
      kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml
+This build is made for the v1.6.2 standard channel. On an older one the API server serves no
+backendtlspolicies, the controller logs the absent kind and disables TLS to backends, and
+upgrading the CRDs to that channel is picked up within a minute, no restart.
