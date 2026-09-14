@@ -118,6 +118,7 @@ mod tests {
         vec![ListenerConfig {
             id: "infra/gw/http".into(),
             port: 80,
+            client_port: None,
             protocol: Protocol::Http,
             hostname: None,
             tls: None,
@@ -328,6 +329,7 @@ mod tests {
             ListenerConfig {
                 id: "b/gw/http".into(),
                 port: 80,
+                client_port: None,
                 protocol: Protocol::Http,
                 hostname: None,
                 tls: None,
@@ -336,6 +338,7 @@ mod tests {
             ListenerConfig {
                 id: "a/gw/http".into(),
                 port: 80,
+                client_port: None,
                 protocol: Protocol::Http,
                 hostname: None,
                 tls: None,

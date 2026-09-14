@@ -332,11 +332,15 @@ impl ProxyHttp for GapuraProxy {
                         Protocol::Http => "http",
                     };
                     if let Some(redirect) = &hit.rule.filters.redirect {
+                        // A remapped listener is dialed through a Service that maps the
+                        // client-facing port onto the bound one: the Location must name the
+                        // port the client used, never the internal socket.
+                        let client_port = hit.listener.client_port.unwrap_or(ctx.port);
                         let location = redirect_location(
                             redirect,
                             ctx.scheme,
                             &ex.host,
-                            ctx.port,
+                            client_port,
                             &ex.path,
                             ex.query_string.as_deref(),
                             &hit.entry.matcher.path,
