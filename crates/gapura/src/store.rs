@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
+use gapura_core::matcher::{compile_regexes, RegexMap};
 use gapura_core::Config;
 use pingora::tls::pkey::{PKey, Private};
 use pingora::tls::x509::X509;
@@ -26,6 +27,9 @@ pub struct Runtime {
     certs: HashMap<String, Arc<ParsedCert>>,
     /// Upstream CA bundles by cluster key, for `PeerOptions::ca`.
     upstream_cas: HashMap<String, Arc<Box<[X509]>>>,
+    /// Compiled `PathMatch::Regex` patterns, like the cursors and certs compiled once per
+    /// generation instead of per request.
+    regexes: RegexMap,
 }
 
 impl Runtime {
@@ -73,13 +77,20 @@ impl Runtime {
                 }
             }
         }
+        let regexes = compile_regexes(&config);
         Self {
             config,
             generation,
             rr,
             certs,
             upstream_cas,
+            regexes,
         }
+    }
+
+    /// Compiled regex path match patterns of this generation, for `match_port_with`.
+    pub fn regexes(&self) -> &RegexMap {
+        &self.regexes
     }
 
     /// Monotonic round-robin cursor for a cluster; `None` for unknown clusters.
@@ -307,6 +318,53 @@ mod tests {
         assert!(sans
             .iter()
             .any(|san| san.dnsname() == Some("x.example.com")));
+    }
+
+    #[test]
+    fn regexes_are_compiled_once_per_generation() {
+        use gapura_core::config::{PathMatch, PortEntry, RouteMatch, RouteRule, Timeouts};
+        let match_ = RouteMatch {
+            path: PathMatch::Regex("^/api/v[0-9]+/".into()),
+            headers: vec![],
+            query: vec![],
+            method: None,
+        };
+        let rules = vec![RouteRule {
+            route: "apps/r".into(),
+            rule_index: 0,
+            creation_timestamp: "2026-01-01T00:00:00Z".into(),
+            matches: vec![match_.clone()],
+            filters: Default::default(),
+            backends: vec![],
+            timeouts: Timeouts::default(),
+        }];
+        let rt = Runtime::new(
+            Config {
+                listeners: vec![ListenerConfig {
+                    id: "infra/main/http".into(),
+                    port: 80,
+                    protocol: Protocol::Http,
+                    hostname: None,
+                    tls: None,
+                    rules,
+                }],
+                ports: BTreeMap::from([(
+                    80u16,
+                    vec![PortEntry {
+                        listener: 0,
+                        hostname: None,
+                        matcher: match_,
+                        rule: 0,
+                    }],
+                )]),
+                clusters: BTreeMap::new(),
+            },
+            1,
+        );
+        assert!(
+            rt.regexes().contains_key("^/api/v[0-9]+/"),
+            "the runtime carries compiled patterns for the data plane"
+        );
     }
 
     #[test]

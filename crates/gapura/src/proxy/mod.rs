@@ -234,7 +234,10 @@ impl ProxyHttp for GapuraProxy {
 
         let decision = {
             let ex = ctx.extracted.as_ref().expect("set above");
-            match rt.config.match_port(ctx.port, &ex.attrs()) {
+            match rt
+                .config
+                .match_port_with(ctx.port, &ex.attrs(), rt.regexes())
+            {
                 None => Decision::NotFound,
                 Some(hit) => {
                     // The scheme comes from the listener that actually won the match, and feeds

@@ -18,4 +18,5 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - PathMatchRegularExpression
       - ReferenceGrant
