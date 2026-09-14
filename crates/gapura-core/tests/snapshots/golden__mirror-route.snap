@@ -9,28 +9,21 @@ config:
       protocol: Http
       hostname: ~
       tls: ~
-      rules: []
-    - id: infra/main/https
-      port: 443
-      protocol: Https
-      hostname: ~
-      tls:
-        secret: infra/wildcard
-        cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCCQDfixture\n-----END CERTIFICATE-----\n"
-        key_pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgfixture\n-----END PRIVATE KEY-----\n"
       rules:
-        - route: apps/secure
+        - route: apps/shadowed
           rule_index: 0
           creation_timestamp: "2026-09-01T10:00:00Z"
           matches:
             - path:
-                Prefix: /
+                Prefix: /api
               headers: []
               query: []
               method: ~
           filters:
             request_headers:
-              set: []
+              set:
+                - - X-Gateway
+                  - gapura
               add: []
               remove: []
             response_headers:
@@ -39,7 +32,8 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
-            mirror: ~
+            mirror:
+              cluster: "apps/shadow:80"
           backends:
             - cluster: "apps/echo:80"
               weight: 1
@@ -47,13 +41,12 @@ config:
             request_ms: ~
             backend_request_ms: ~
   ports:
-    80: []
-    443:
-      - listener: 1
+    80:
+      - listener: 0
         hostname: ~
         matcher:
           path:
-            Prefix: /
+            Prefix: /api
           headers: []
           query: []
           method: ~
@@ -63,6 +56,11 @@ config:
       endpoints:
         - address: 10.1.0.5
           port: 8080
+      tls: ~
+    "apps/shadow:80":
+      endpoints:
+        - address: 10.1.0.9
+          port: 8180
       tls: ~
 status:
   - kind: GatewayClass
@@ -100,32 +98,6 @@ status:
         supportedKinds:
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
-        attachedRoutes: 0
-        conditions:
-          - type: Accepted
-            status: "True"
-            reason: Accepted
-            message: Listener is accepted
-            observedGeneration: 1
-          - type: Programmed
-            status: "True"
-            reason: Programmed
-            message: Listener is programmed
-            observedGeneration: 1
-          - type: ResolvedRefs
-            status: "True"
-            reason: ResolvedRefs
-            message: All references resolved
-            observedGeneration: 1
-          - type: Conflicted
-            status: "False"
-            reason: NoConflicts
-            message: No conflicts
-            observedGeneration: 1
-      - name: https
-        supportedKinds:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
         attachedRoutes: 1
         conditions:
           - type: Accepted
@@ -150,7 +122,7 @@ status:
             observedGeneration: 1
   - kind: HTTPRoute
     namespace: apps
-    name: secure
+    name: shadowed
     parents:
       - parentRef:
           group: ~
@@ -158,7 +130,7 @@ status:
           namespace: infra
           name: main
           sectionName: ~
-          port: 443
+          port: ~
         controllerName: gapura.dev/controller
         conditions:
           - type: Accepted
