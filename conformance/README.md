@@ -4,16 +4,19 @@
 |---|---|---|---|
 | standard | v0.1.0 | default | [standard-v0.1.0-default-report.yaml](reports/v1.6/davidgrldo-gapura/standard-v0.1.0-default-report.yaml) |
 
-Profile GATEWAY-HTTP against Gateway API v1.6.2. Core features claimed, and advertised in
-`GatewayClass.status.supportedFeatures`: `Gateway`, `HTTPRoute`, `PathMatchRegularExpression`,
-`ReferenceGrant`. The regex claim leaves the counts below untouched: v1.6.2's standard channel
-carries no core regex path-match cases to unlock, so the feature is claimed for the channels and
-versions that gate on it, not for what this run measures.
+Profile GATEWAY-HTTP against Gateway API v1.6.2. Features claimed, and advertised in
+`GatewayClass.status.supportedFeatures`: core `Gateway`, `HTTPRoute`,
+`PathMatchRegularExpression`, `ReferenceGrant`, and the extended `HTTPRouteRequestMirror`. The
+regex claim leaves the counts below untouched: v1.6.2's standard channel carries no core regex
+path-match cases to unlock, so the feature is claimed for the channels and versions that gate on
+it, not for what this run measures. The mirror claim is what extended runs are for: it adds the
+one extended test that gates on it, and the report now carries an extended section.
 
 ## Result
 
-36 of 37 core tests pass, 1 fails, 0 are skipped. The report result is therefore still `failure`, so
-it is not submittable upstream yet. The remaining failure is architectural, not a bug:
+36 of 37 core tests pass, 1 fails, 0 are skipped; the extended section is 1 of 1, the
+RequestMirror test. The report result is therefore still `failure` — the core failure decides it —
+so it is not submittable upstream yet. The remaining failure is architectural, not a bug:
 `HTTPRouteMultipleGateways` attaches two routes that both match `PathPrefix /` with no hostname to
 two different Gateways and expects different backends from the same address. One Deployment with one
 published address cannot distinguish those two requests, whatever the precedence rules say; the
@@ -63,5 +66,5 @@ git clone https://github.com/davidgrldo/gapura.git && cd gapura
 mapped to the chart's NodePorts), installs the Gateway API standard channel v1.6.2, builds the image
 and loads it into the cluster, installs `charts/gapura` with `charts/gapura/tests/values-kind.yaml`,
 then runs the upstream suite from a v1.6.2 checkout with
-`--supported-features=Gateway,ReferenceGrant,HTTPRoute,PathMatchRegularExpression
+`--supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRouteRequestMirror,PathMatchRegularExpression
 --conformance-profiles=GATEWAY-HTTP`. Requires docker, kind, kubectl, helm and Go 1.26.

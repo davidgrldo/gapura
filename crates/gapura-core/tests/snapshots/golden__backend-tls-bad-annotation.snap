@@ -30,6 +30,7 @@ config:
               remove: []
             redirect: ~
             rewrite: ~
+            mirror: ~
           backends:
             - cluster: ~
               weight: 1
@@ -60,6 +61,7 @@ status:
     supportedFeatures:
       - Gateway
       - HTTPRoute
+      - HTTPRouteRequestMirror
       - PathMatchRegularExpression
       - ReferenceGrant
   - kind: Gateway

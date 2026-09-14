@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{
-    Cluster, Filters, HeaderOps, KvMatch, PathMatch, PathRewrite, Redirect, Rewrite, RouteMatch,
-    RouteRule, Timeouts, WeightedBackend,
+    Cluster, Filters, HeaderOps, KvMatch, Mirror, PathMatch, PathRewrite, Redirect, Rewrite,
+    RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 use crate::duration;
 use crate::input::{
@@ -48,7 +48,26 @@ pub(crate) fn compile(
         let regex_matched = matches
             .iter()
             .any(|m| matches!(m.path, PathMatch::Regex(_)));
-        let filters = compile_filters(&r.filters, regex_matched)?;
+        // The mirror backendRef resolves exactly like a primary one: same error mapping into
+        // ResolvedRefs=False, same cluster table. A failed mirror leaves the route unmirrored
+        // (the filter is dropped) instead of failing its primary traffic.
+        let mirror_ref = r
+            .filters
+            .iter()
+            .find(|f| f.type_ == "RequestMirror")
+            .and_then(|f| f.request_mirror.as_ref())
+            .map(|m| &m.backend_ref);
+        let mirror_cluster = match mirror_ref {
+            Some(b) => match backends::resolve(b, rref, snap, clusters) {
+                Ok(key) => Some(key),
+                Err(rejection) => {
+                    first_ref_error.get_or_insert(rejection);
+                    None
+                }
+            },
+            None => None,
+        };
+        let filters = compile_filters(&r.filters, regex_matched, mirror_cluster)?;
         let mut backends = Vec::new();
         for b in &r.backend_refs {
             // Negative weights are rejected by the CRD schema; clamping is defense in depth, not a real path.
@@ -198,6 +217,7 @@ fn normalize_prefix(mut p: String) -> String {
 fn compile_filters(
     filters: &[HttpRouteFilter],
     regex_matched: bool,
+    mirror_cluster: Option<String>,
 ) -> Result<Filters, Unsupported> {
     let mut out = Filters::default();
     let mut seen = BTreeSet::new();
@@ -217,6 +237,20 @@ fn compile_filters(
             }
             "RequestRedirect" => out.redirect = Some(redirect(f.request_redirect.as_ref())?),
             "URLRewrite" => out.rewrite = Some(rewrite(f.url_rewrite.as_ref())?),
+            "RequestMirror" => {
+                let m = f.request_mirror.as_ref().ok_or_else(|| {
+                    Unsupported("RequestMirror filter without requestMirror body".to_string())
+                })?;
+                // The CRD schema allows weight on any backendRef; for a mirror it is meaningless
+                // (every request is copied in full), so only the default weight is accepted.
+                if m.backend_ref.weight.is_some_and(|w| w != 1) {
+                    return Err(Unsupported(
+                        "RequestMirror backendRef weight is not supported: every request is mirrored"
+                            .to_string(),
+                    ));
+                }
+                out.mirror = mirror_cluster.clone().map(|cluster| Mirror { cluster });
+            }
             other => return Err(Unsupported(format!("filter type {other} is not supported"))),
         }
     }
@@ -477,6 +511,134 @@ spec:
       urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: /new } }
 "#;
         assert!(compile_first(mixed).0.is_err());
+    }
+
+    #[test]
+    fn mirror_filter_compiles_with_resolved_cluster() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps, generation: 1 }
+spec:
+  rules:
+  - matches: [{ path: { type: PathPrefix, value: /mirror } }]
+    filters:
+    - type: RequestMirror
+      requestMirror: { backendRef: { name: shadow, port: 80 } }
+    - type: RequestHeaderModifier
+      requestHeaderModifier: { set: [{ name: X-Gateway, value: gapura }] }
+    backendRefs: [{ name: echo, port: 80 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: shadow, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+"#;
+        let (result, clusters) = compile_first(yaml);
+        let c = result.unwrap();
+        assert_eq!(
+            c.rules[0].filters.mirror,
+            Some(Mirror {
+                cluster: "apps/shadow:80".into()
+            })
+        );
+        assert_eq!(
+            c.rules[0].filters.request_headers.set,
+            vec![("X-Gateway".to_string(), "gapura".to_string())],
+            "the header modifier coexists with the mirror"
+        );
+        assert_eq!(c.resolved_refs.status, ConditionStatus::True);
+        assert!(clusters.contains_key("apps/shadow:80"));
+    }
+
+    #[test]
+    fn second_mirror_on_a_rule_rejects_route() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - filters:
+    - { type: RequestMirror, requestMirror: { backendRef: { name: a, port: 80 } } }
+    - { type: RequestMirror, requestMirror: { backendRef: { name: b, port: 80 } } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: a, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: b, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+"#;
+        assert!(
+            matches!(compile_first(yaml).0, Err(Unsupported(m)) if m.contains("once per rule")),
+            "the CRD allows multiple mirrors but excuses implementations that cannot; we say so"
+        );
+    }
+
+    #[test]
+    fn mirror_backend_resolution_failure_flags_resolved_refs() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps, generation: 1 }
+spec:
+  rules:
+  - matches: [{ path: { type: PathPrefix, value: /mirror } }]
+    filters:
+    - type: RequestMirror
+      requestMirror: { backendRef: { name: ghost, port: 80 } }
+    backendRefs: [{ name: echo, port: 80 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+"#;
+        let (result, _) = compile_first(yaml);
+        let c = result.unwrap();
+        assert_eq!(
+            c.rules[0].filters.mirror, None,
+            "the mirror is not configured"
+        );
+        assert_eq!(
+            c.rules[0].backends[0].cluster,
+            Some("apps/echo:80".into()),
+            "the primary keeps serving"
+        );
+        assert_eq!(c.resolved_refs.status, ConditionStatus::False);
+        assert_eq!(c.resolved_refs.reason, reasons::BACKEND_NOT_FOUND);
+    }
+
+    #[test]
+    fn mirror_backend_weight_is_rejected() {
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - filters:
+    - type: RequestMirror
+      requestMirror: { backendRef: { name: shadow, port: 80, weight: 5 } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: shadow, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+"#;
+        assert!(
+            matches!(compile_first(yaml).0, Err(Unsupported(m)) if m.contains("weight")),
+            "a weighted mirror is meaningless: all traffic is mirrored"
+        );
     }
 
     #[test]

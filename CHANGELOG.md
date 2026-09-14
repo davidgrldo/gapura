@@ -8,6 +8,17 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- `RequestMirror` fires a bounded, fire-and-forget copy of the request. Headers-only: the mirror
+  never promises a body it does not send (content-length and transfer-encoding are stripped), and
+  body tee-ing is a follow-up. The mirror also dials plaintext HTTP regardless of the cluster's
+  TLS policy: a TLS-only shadow backend shows up as counted `error`s, a dual listener receives
+  the copy unencrypted, and honoring `BackendTLSPolicy` for mirrors is the same follow-up. A global 1024 in-flight bound drops mirrors past it, counted as
+  `overflow` on `gapura_mirror_requests_total{route, result}` (`sent|error|timeout|overflow`); each
+  mirror is one 3s attempt with no retries, and the primary's access-log line gains a `mirrored`
+  field. The mirror's backendRef resolves like any other — ReferenceGrant included — and a mirror
+  that cannot resolve sets `ResolvedRefs=False` while the route keeps serving unmirrored. Claiming
+  the extended `HTTPRouteRequestMirror` adds the one extended test that gates on it: the report now
+  carries an extended section, 1 of 1 passing, core still 36 of 37.
 - The access log can name the client again. `client_ip` was read straight off the connection, so
   anywhere an ingress, a mesh or a CDN sits in front, every line recorded that proxy and the
   visitor appeared nowhere -- and anything later keyed on the client address would have read the

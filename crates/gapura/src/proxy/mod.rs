@@ -11,16 +11,17 @@ pub mod select;
 pub mod tls;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use gapura_core::config::{HeaderOps, PathMatch, Protocol, RouteRule, Timeouts};
+use gapura_core::config::{HeaderOps, Mirror, PathMatch, Protocol, RouteRule, Timeouts};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorSource, ErrorType, Result};
+use tokio::sync::Semaphore;
 
 use crate::proxy::attrs::Extracted;
 use crate::proxy::select::{
@@ -35,6 +36,15 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(60);
 /// Attempts per request: the first try plus one retry on connect failure.
 const MAX_ATTEMPTS: usize = 2;
+/// In-flight mirrors across all routes; beyond this they are dropped and counted as overflow.
+/// ponytail: one global bound; per-route bounds if a route ever needs its own.
+const MIRROR_INFLIGHT: usize = 1024;
+/// A mirror may never hold resources for long: one bounded attempt, no retries.
+const MIRROR_TIMEOUT: Duration = Duration::from_secs(3);
+/// ponytail: one shared client, HTTP-only mirrors; TLS mirrors and body tee-ing are a follow-up.
+static MIRROR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+/// ponytail: global bound, per-route if it ever matters.
+static MIRROR_PERMITS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(MIRROR_INFLIGHT));
 
 pub struct GapuraProxy {
     pub store: Arc<Store>,
@@ -61,6 +71,7 @@ pub struct Ctx {
     started: Instant,
     upstream_started: Option<Instant>,
     client_abort: bool,
+    mirrored: bool,
 }
 
 impl Ctx {
@@ -191,6 +202,76 @@ fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
     req.headers.get(name).and_then(|v| v.to_str().ok())
 }
 
+/// URL and headers for a headers-only mirror of the outbound request: the rewritten path and
+/// query with the final header set, minus the framing headers that would promise a body we do
+/// not send. Pure, so the shape is unit-tested without a network.
+fn mirror_parts(upstream: &RequestHeader, endpoint: SocketAddr) -> (String, http::HeaderMap) {
+    let path_and_query = upstream
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let url = format!("http://{endpoint}{path_and_query}");
+    let mut headers = upstream.headers.clone();
+    headers.remove(http::header::CONTENT_LENGTH);
+    headers.remove(http::header::TRANSFER_ENCODING);
+    (url, headers)
+}
+
+/// Fire a headers-only mirror of the outbound request, fire-and-forget.
+///
+/// `try_acquire` means the primary is NEVER blocked or delayed by mirroring: no permit, no
+/// mirror (counted as `overflow`). The task owns only cloned data -- an `Arc` snapshot of the
+/// config generation, the route label, and the fully-built request -- so no failure on the
+/// mirror path can touch the primary's decision or its response. Responses from the mirror are
+/// ignored per the Gateway API definition.
+fn fire_mirror(rt: &Arc<Runtime>, mirror: &Mirror, upstream: &RequestHeader, ctx: &mut Ctx) {
+    // Same selection as a primary: round-robin cursor over the mirror cluster's endpoints.
+    // A cluster that vanished between translate and now, or has no endpoints, is an error like
+    // any other mirror failure: counted, never felt by the primary.
+    let endpoint = rt.config.clusters.get(&mirror.cluster).and_then(|cluster| {
+        let cursor = rt.next_index(&mirror.cluster).unwrap_or(0);
+        pick_endpoint(cluster, cursor, &[]).ok()
+    });
+    let Some(endpoint) = endpoint else {
+        METRICS
+            .mirror_requests_total
+            .with_label_values(&[ctx.route_label(), "error"])
+            .inc();
+        return;
+    };
+    let Ok(permit) = MIRROR_PERMITS.try_acquire() else {
+        METRICS
+            .mirror_requests_total
+            .with_label_values(&[ctx.route_label(), "overflow"])
+            .inc();
+        return;
+    };
+    let rt = Arc::clone(rt);
+    let route = ctx.route_label().to_string();
+    let method = upstream.method.clone();
+    let (url, headers) = mirror_parts(upstream, endpoint);
+    let client = MIRROR_CLIENT.get_or_init(reqwest::Client::new);
+    let request = client.request(method, url).headers(headers);
+    ctx.mirrored = true;
+    tokio::spawn(async move {
+        // The permit is held for the whole task: in-flight mirrors stay bounded end to end.
+        let _permit = permit;
+        let result = match tokio::time::timeout(MIRROR_TIMEOUT, request.send()).await {
+            Ok(Ok(_)) => "sent",
+            Ok(Err(_)) => "error",
+            Err(_) => "timeout",
+        };
+        METRICS
+            .mirror_requests_total
+            .with_label_values(&[&route, result])
+            .inc();
+        // Holding `rt` keeps the config generation this mirror was computed against alive
+        // until the request is done, so a reload cannot tear it.
+        drop(rt);
+    });
+}
+
 #[async_trait]
 impl ProxyHttp for GapuraProxy {
     type CTX = Ctx;
@@ -213,6 +294,7 @@ impl ProxyHttp for GapuraProxy {
             started: Instant::now(),
             upstream_started: None,
             client_abort: false,
+            mirrored: false,
         }
     }
 
@@ -428,6 +510,13 @@ impl ProxyHttp for GapuraProxy {
         }
         upstream.insert_header("X-Request-Id", ctx.request_id.clone())?;
         upstream.insert_header("traceparent", ctx.traceparent.clone())?;
+
+        // The mirror fires only on requests that reached an upstream -- redirects answered in
+        // request_filter never get here -- and after every header mutation above, so it copies
+        // the final rewritten, modified header set.
+        if let Some(mirror) = &rule.filters.mirror {
+            fire_mirror(&rt, mirror, upstream, ctx);
+        }
         Ok(())
     }
 
@@ -577,6 +666,7 @@ impl ProxyHttp for GapuraProxy {
             duration_ms: ctx.started.elapsed().as_millis() as u64,
             upstream_duration_ms: ctx.upstream_started.map(|t| t.elapsed().as_millis() as u64),
             client_abort: ctx.client_abort,
+            mirrored: ctx.mirrored,
             listener: &listener,
             route: &route,
             upstream: upstream.as_deref(),
@@ -641,6 +731,22 @@ mod tests {
         assert_eq!(req.headers.get("x-set").unwrap(), "new");
         assert_eq!(req.headers.get_all("x-add").iter().count(), 2);
         assert!(req.headers.get("x-old").is_none());
+    }
+
+    #[test]
+    fn mirror_parts_strips_framing_headers_and_keeps_path_and_query() {
+        let mut req = RequestHeader::build("GET", b"/orig?q=1", None).unwrap();
+        req.insert_header("Content-Length", "42").unwrap();
+        req.insert_header("Transfer-Encoding", "chunked").unwrap();
+        req.insert_header("X-Keep", "yes").unwrap();
+        let (url, headers) = mirror_parts(&req, "127.0.0.1:9".parse().unwrap());
+        assert_eq!(url, "http://127.0.0.1:9/orig?q=1");
+        assert!(
+            headers.get("content-length").is_none(),
+            "a headers-only mirror must not promise a body"
+        );
+        assert!(headers.get("transfer-encoding").is_none());
+        assert_eq!(headers.get("x-keep").unwrap(), "yes");
     }
 
     #[test]

@@ -74,11 +74,12 @@ pub mod reasons {
 }
 
 /// Feature names Gapura claims in `GatewayClass.status.supportedFeatures`. These are the core
-/// features of the Gateway API GATEWAY-HTTP conformance profile, plus regex path matching. The CRD
-/// requires ascending order.
-pub const SUPPORTED_FEATURES: [&str; 4] = [
+/// features of the Gateway API GATEWAY-HTTP conformance profile, plus regex path matching and
+/// request mirroring. The CRD requires ascending order.
+pub const SUPPORTED_FEATURES: [&str; 5] = [
     "Gateway",
     "HTTPRoute",
+    "HTTPRouteRequestMirror",
     "PathMatchRegularExpression",
     "ReferenceGrant",
 ];

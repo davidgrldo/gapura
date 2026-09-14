@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use gapura_core::config::{ClusterTls, PathMatch};
+use gapura_core::config::{ClusterTls, Mirror, PathMatch};
 use gapura_core::status::RouteParentStatus;
 use gapura_core::status::{Condition, ConditionStatus, ListenerStatus, StatusPatch};
 use gapura_core::{translate, Settings, Snapshot, Translation};
@@ -147,10 +147,11 @@ fn gateway_class_advertises_supported_features() {
         &vec![
             "Gateway".to_string(),
             "HTTPRoute".to_string(),
+            "HTTPRouteRequestMirror".to_string(),
             "PathMatchRegularExpression".to_string(),
             "ReferenceGrant".to_string()
         ],
-        "the GATEWAY-HTTP core feature set plus regex path matching, sorted as the CRD requires"
+        "the GATEWAY-HTTP core feature set plus regex path matching and request mirroring, sorted as the CRD requires"
     );
 }
 
@@ -678,6 +679,38 @@ fn regex_path() {
         "Exact beats PathPrefix beats RegularExpression, reversing the spec order"
     );
     insta::assert_yaml_snapshot!("regex-path", t);
+}
+
+#[test]
+fn mirror_route() {
+    let t = run("mirror-route");
+    let parents = route_parents(&t, "apps", "shadowed");
+    assert_eq!(
+        cond(&parents[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    assert_eq!(
+        cond(&parents[0].conditions, "ResolvedRefs"),
+        (ConditionStatus::True, "ResolvedRefs")
+    );
+    let rule = &t.config.listeners[0].rules[0];
+    assert_eq!(
+        rule.filters.mirror,
+        Some(Mirror {
+            cluster: "apps/shadow:80".into()
+        })
+    );
+    assert_eq!(
+        rule.filters.request_headers.set,
+        vec![("X-Gateway".to_string(), "gapura".to_string())]
+    );
+    assert_eq!(rule.backends[0].cluster.as_deref(), Some("apps/echo:80"));
+    assert!(
+        t.config.clusters.contains_key("apps/shadow:80"),
+        "a cluster referenced only by the mirror filter must survive assemble's used-set prune"
+    );
+    assert_eq!(t.config.clusters["apps/shadow:80"].endpoints.len(), 1);
+    insta::assert_yaml_snapshot!("mirror-route", t);
 }
 
 #[test]

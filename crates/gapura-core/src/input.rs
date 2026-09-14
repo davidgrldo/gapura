@@ -204,6 +204,14 @@ pub struct HttpRouteFilter {
     pub response_header_modifier: Option<HeaderModifier>,
     pub request_redirect: Option<RequestRedirect>,
     pub url_rewrite: Option<UrlRewrite>,
+    pub request_mirror: Option<HTTPRequestMirrorFilter>,
+}
+
+/// Mirrors the request to one backendRef; the response is ignored.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HTTPRequestMirrorFilter {
+    pub backend_ref: HttpBackendRef,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
