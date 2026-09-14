@@ -17,5 +17,8 @@ privilegedPorts: none
 publishService: false
 podDisruptionBudget:
   enabled: false
+tests:
+  smoke:
+    enabled: false
 # Helm merges maps, so an empty map would keep the chart defaults; null clears them.
 resources: null
