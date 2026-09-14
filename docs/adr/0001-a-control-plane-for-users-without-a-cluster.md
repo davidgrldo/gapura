@@ -132,17 +132,33 @@ rate limiting does not wait on any of this.
 
 ## What the console authorises
 
-Three roles, named as Kong names them: superuser, admin, viewer. What each may do
-is a matrix of create, read, update and delete against each kind of resource, so
-the roles are defined by ticking boxes rather than by writing code.
+Three roles, named as Kong names them: superuser, admin, viewer. Picking one
+ticks a set of boxes -- viewer none, admin create and update, superuser those and
+delete -- and the boxes stay editable afterwards.
+
+Reading is not one of the boxes. An assignment that cannot read is not worth
+storing, so holding any assignment in a namespace means being able to see it, and
+the matrix is only create, update and delete. Viewer is then simply an assignment
+with nothing ticked, rather than a row with one box that must not be unticked.
+
+What is stored is the permissions an assignment ended up with, not a pointer to
+the role it started from -- though the role it started from is kept alongside, so
+an assignment that has drifted reads as `admin (+delete)` rather than as plain
+`admin`. Editing a role in place would have been the other option, and was not
+taken: it would mean that ticking one box silently re-grants every person already
+holding that role, which is the kind of change nobody is looking at when it
+happens.
 
 A role is granted **per namespace**, not globally. That one extra column is what
 makes the console multi-tenant, and multi-tenancy is the reason it exists: the
 teams it serves must not be able to reach each other's routes. Namespaces are
 already the boundary gapura writes into, so the scope costs nothing to invent and
 nothing to enforce -- the control plane simply declines to write outside it.
-Superuser is the exception that spans all namespaces, and exists mainly to grant
-the others.
+Superuser is the exception that spans every namespace, and exists mainly to grant
+the others. It is not the same as an admin who may also delete: somebody who runs
+one namespace completely is an admin with delete ticked, and if that were spelled
+superuser instead then every team lead would hold every namespace and the scope
+above would mean nothing.
 
 Because identity is federated, there is no first account to log in as. The first
 superuser comes from naming an identity provider group in configuration, which
@@ -169,7 +185,5 @@ takes if the measurement ever arrives.
 
 ## Open questions
 
-- Whether the CRUD matrix is per kind of resource or something finer, which only
-  matters once there are more kinds than HTTPRoute and the consumer.
 - What the console does when the identity provider is unreachable. Refusing every
   login is correct and also means an outage there closes the console entirely.
