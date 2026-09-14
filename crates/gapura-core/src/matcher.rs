@@ -13,27 +13,32 @@ use crate::hostname;
 /// next to the round-robin cursors and parsed TLS certs.
 pub type RegexMap = HashMap<String, Arc<regex::Regex>>;
 
-/// Compile every `PathMatch::Regex` pattern of the port tables into a side map.
+/// Compile every `PathMatch::Regex` pattern of the port tables into a side map, and report the
+/// patterns that could not be compiled (deduped like the map).
 ///
-/// Translation validates each pattern before it reaches a Config, so a failure here would be a
-/// logic bug upstream; the pattern is skipped and therefore matches nothing, mirroring how the
-/// matcher treats a map miss. Logging that belongs to the caller that owns tracing.
-pub fn compile_regexes(config: &Config) -> RegexMap {
+/// Translation validates each pattern before it reaches a Config, so a non-empty Vec means that
+/// invariant regressed; the caller that owns logging should say so. The pattern matches nothing
+/// either way, mirroring how the matcher treats a map miss.
+pub fn compile_regexes(config: &Config) -> (RegexMap, Vec<String>) {
     let mut out = RegexMap::new();
+    let mut skipped = Vec::new();
     for entries in config.ports.values() {
         for e in entries {
             let PathMatch::Regex(pattern) = &e.matcher.path else {
                 continue;
             };
-            if out.contains_key(pattern) {
+            if out.contains_key(pattern) || skipped.iter().any(|s| s == pattern) {
                 continue;
             }
-            if let Ok(re) = regex::Regex::new(pattern) {
-                out.insert(pattern.clone(), Arc::new(re));
+            match regex::Regex::new(pattern) {
+                Ok(re) => {
+                    out.insert(pattern.clone(), Arc::new(re));
+                }
+                Err(_) => skipped.push(pattern.clone()),
             }
         }
     }
-    out
+    (out, skipped)
 }
 
 /// What the proxy extracts from a request before matching.
@@ -270,7 +275,7 @@ mod tests {
     #[test]
     fn most_specific_listener_hostname_wins_on_a_shared_port() {
         let c = config();
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         let hit = c
             .match_port_with(443, &req("/", &[]), &re)
             .expect("a listener matches");
@@ -305,7 +310,7 @@ mod tests {
     #[test]
     fn a_port_with_no_listener_matches_nothing() {
         let c = config();
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         assert!(c.match_port_with(8080, &req("/", &[]), &re).is_none());
     }
 
@@ -327,7 +332,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         let first = c.match_port_with(
             80,
             &RequestAttrs {
@@ -370,7 +375,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         let at = |p: &str| {
             c.match_port_with(
                 80,
@@ -413,7 +418,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         let at = |headers: &[(String, String)]| {
             c.match_port_with(
                 80,
@@ -454,7 +459,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         let miss = |host: &str, path: &str| {
             c.match_port_with(
                 80,
@@ -493,7 +498,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let re = compile_regexes(&c);
+        let (re, _) = compile_regexes(&c);
         let post = RequestAttrs {
             host: "any.test",
             path: "/",
@@ -567,7 +572,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let regexes = compile_regexes(&c);
+        let (regexes, _) = compile_regexes(&c);
         let at = |p: &str| {
             c.match_port_with(
                 80,
@@ -623,7 +628,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let regexes = compile_regexes(&c);
+        let (regexes, _) = compile_regexes(&c);
         let hit = c
             .match_port_with(
                 80,
@@ -673,7 +678,8 @@ mod tests {
             vec![
                 rule("apps/a", rx.clone()),
                 rule("apps/b", rx),
-                rule("apps/c", bad),
+                rule("apps/c", bad.clone()),
+                rule("apps/d", bad),
             ],
         )];
         let c = Config {
@@ -681,16 +687,21 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let regexes = compile_regexes(&c);
+        let (regexes, skipped) = compile_regexes(&c);
         assert_eq!(regexes.len(), 1, "identical patterns share one entry");
         assert!(regexes.contains_key("^/dup"));
+        assert_eq!(
+            skipped,
+            vec!["[unclosed".to_string()],
+            "the uncompilable pattern is named once, deduped like the map"
+        );
     }
 
     proptest::proptest! {
         #[test]
         fn matching_never_panics(host in "[a-z0-9.*-]{0,24}", path in "[a-zA-Z0-9/._%-]{0,40}", method in "[A-Z]{0,7}") {
             let c = config();
-            let re = compile_regexes(&c);
+            let (re, _) = compile_regexes(&c);
             for port in [80u16, 443] {
                 let _ = c.match_port_with(port, &RequestAttrs { host: &host, path: &path, method: &method, headers: &[], query: &[] }, &re);
                 let _ = c.tls_for(port, Some(&host));
@@ -705,7 +716,7 @@ mod tests {
             query in proptest::collection::vec(("[a-z-]{1,8}", "[a-zA-Z0-9]{0,8}"), 0..=3),
         ) {
             let c = config();
-            let re = compile_regexes(&c);
+            let (re, _) = compile_regexes(&c);
             for port in [80u16, 443] {
                 let _ = c.match_port_with(port, &RequestAttrs { host: &host, path: &path, method: "GET", headers: &headers, query: &query }, &re);
             }
