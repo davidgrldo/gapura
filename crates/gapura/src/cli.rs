@@ -41,6 +41,12 @@ pub struct Args {
     #[arg(long = "publish-address")]
     pub publish_addresses: Vec<String>,
 
+    /// Network allowed to set `X-Forwarded-For`, as a CIDR or a bare address. Repeatable.
+    /// Without this the header is ignored and the access log records the peer, which is the
+    /// proxy itself wherever one sits in front.
+    #[arg(long = "trusted-proxy", value_name = "CIDR")]
+    pub trusted_proxies: Vec<crate::proxy::client::Cidr>,
+
     /// Log level filter, e.g. `info` or `gapura=debug`.
     #[arg(long, default_value = "info")]
     pub log_level: String,
@@ -337,5 +343,32 @@ mod tests {
         let (addr, err) = crate::first_unbindable(&[taken]).expect("the held port is not bindable");
         assert_eq!(addr, taken);
         assert!(!err.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod trusted_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn trusted_proxies_are_parsed_and_repeatable() {
+        let args = Args::parse_from([
+            "gapura",
+            "--config-dir",
+            "/tmp/x",
+            "--trusted-proxy",
+            "10.0.0.0/8",
+            "--trusted-proxy",
+            "192.168.1.1",
+        ]);
+        assert_eq!(args.trusted_proxies.len(), 2);
+        assert!(args.trusted_proxies[0].contains("10.9.9.9".parse().unwrap()));
+        assert!(args.trusted_proxies[1].contains("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn no_trusted_proxy_flag_means_an_empty_list() {
+        let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x"]);
+        assert!(args.trusted_proxies.is_empty());
     }
 }
