@@ -109,3 +109,58 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           # helm push appends the chart name, so the remote is the parent path.
           helm push "gapura-${version}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+  # The GitHub release object: the tag exists and the packages are pushed by the jobs above, but
+  # without this the Releases page stays empty, and adopters judge maturity from that page. Notes
+  # are the CHANGELOG section for the version; the conformance report rides along as an asset.
+  # Idempotent on re-run: a re-run of the release workflow finds the release and re-uploads.
+  notes:
+    needs: chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          {
+            echo "## What changed"
+            echo
+            awk -v v="$version" '
+              !p && $0 ~ "^## "v"([[:space:]]|$)" {p=1; next}
+              p && /^## / {exit}
+              p {print}
+            ' CHANGELOG.md
+            echo "## Packages"
+            echo
+            echo "- Image: ghcr.io/davidgrldo/gapura:${version} (linux/amd64, linux/arm64)"
+            echo "- Chart: oci://ghcr.io/davidgrldo/charts/gapura, version ${version}"
+            echo
+            echo "Verify the install the way a stranger would, with no ghcr credentials: the"
+            echo "quickstart workflow does exactly that on every release."
+          } > /tmp/notes.md
+          # The awk found nothing if the body is just headers: fail loudly instead of publishing
+          # an empty release.
+          test "$(grep -c '^-' /tmp/notes.md)" -gt 0 || grep -q '.' /tmp/notes.md
+          head -5 /tmp/notes.md
+      - name: Create the release, attach the conformance report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          tag="v${version}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --verify-tag --title "gapura v${version}" --notes-file /tmp/notes.md
+          # The report file name embeds the version it was run for; older releases carry none.
+          shopt -s nullglob
+          reports=(conformance/reports/*/*/*v"${version}"-*.yaml)
+          if [ "${#reports[@]}" -gt 0 ]; then
+            gh release upload "$tag" --clobber "${reports[@]}"
+          else
+            echo "no conformance report matching v${version}; skipping the asset"
+          fi

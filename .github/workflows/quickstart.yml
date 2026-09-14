@@ -1,0 +1,157 @@
+name: quickstart
+# The README quickstart, verbatim, against a cluster that has never seen Gapura, with no ghcr
+# credentials anywhere: helm pulls the chart anonymously and the kind node pulls the image
+# anonymously. This automates the "prove it the way a stranger would" check of
+# docs/RELEASING.md 5.3 and the whole of 5.5.
+#
+# While the packages are still private (RELEASING 5.3 outstanding) this workflow is EXPECTED TO
+# FAIL at the first registry step, with 401/403 or an ImagePullBackOff. That is its job: a red
+# run here means a stranger cannot install Gapura. It turns green the moment both packages are
+# made public, and from then on it is the tripwire for every future release — no maintainer
+# credential is in play anywhere, so green here is a fact about the packages, not about us.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: quickstart
+  cancel-in-progress: true
+jobs:
+  quickstart:
+    if: github.repository == 'davidgrldo/gapura' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # enough history to resolve the newest tag
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.1.4
+      # kind is not preinstalled on the runner image; kubectl and docker are.
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Resolve the version under test
+        run: |
+          set -euo pipefail
+          tag="$(git tag --list 'v*' | sort -V | tail -1)"
+          test -n "$tag" || { echo "no tags in this checkout" >&2; exit 1; }
+          version="${tag#v}"
+          echo "version=$version" >> "$GITHUB_ENV"
+          echo "testing $tag"
+      # The fast, unmistakable signal: an anonymous chart pull fails in seconds if the package is
+      # private, where the full install below would burn its whole --wait budget on it.
+      - name: Anonymous chart fetch (RELEASING 5.3)
+        run: |
+          set -euo pipefail
+          helm registry logout ghcr.io >/dev/null 2>&1 || true
+          helm show chart oci://ghcr.io/davidgrldo/charts/gapura --version "$version"
+      - name: Kind cluster with a host port that reaches the NodePort
+        run: |
+          kind create cluster --config - <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+          - role: control-plane
+            extraPortMappings: [{ containerPort: 30080, hostPort: 80, protocol: TCP }]
+          EOF
+      - name: Step 1 - Gateway API CRDs (standard channel, v1.6.2)
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/gatewayclasses.gateway.networking.k8s.io \
+            crd/gateways.gateway.networking.k8s.io \
+            crd/httproutes.gateway.networking.k8s.io
+      # The kind command from the README: no LoadBalancer, a fixed NodePort and a published
+      # address of 127.0.0.1. --wait gates on the pods, which is where an anonymous image pull
+      # of a still-private image fails as ImagePullBackOff.
+      - name: Step 2 - Gapura from OCI, no credentials
+        run: |
+          helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version "$version" \
+            --namespace gapura-system --create-namespace --wait \
+            --set service.type=NodePort --set service.nodePorts.http=30080 \
+            --set publishService=false --set 'publishAddresses={127.0.0.1}'
+      - name: Steps 3 and 4 - fixture, then one request through the gateway
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<'EOF'
+          apiVersion: v1
+          kind: Namespace
+          metadata: { name: gapura-demo }
+          ---
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: Gateway
+          metadata: { name: main, namespace: gapura-demo }
+          spec:
+            gatewayClassName: gapura
+            listeners:
+            - name: http
+              port: 80
+              protocol: HTTP
+              allowedRoutes: { namespaces: { from: Same } }
+          ---
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: HTTPRoute
+          metadata: { name: echo, namespace: gapura-demo }
+          spec:
+            parentRefs: [{ name: main }]
+            hostnames: [echo.example]
+            rules:
+            - backendRefs: [{ name: echo, port: 80 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: echo, namespace: gapura-demo }
+          spec:
+            selector: { app: echo }
+            ports: [{ name: http, port: 80, targetPort: 8080 }]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: echo, namespace: gapura-demo }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: echo } }
+            template:
+              metadata: { labels: { app: echo } }
+              spec:
+                containers:
+                - name: echo
+                  image: registry.k8s.io/e2e-test-images/agnhost:2.53
+                  args: [netexec, --http-port=8080]
+                  ports: [{ containerPort: 8080, name: http }]
+          EOF
+          kubectl -n gapura-demo rollout status deploy/echo --timeout=120s
+          kubectl -n gapura-demo wait --for=condition=Programmed --timeout=120s gateway/main
+          GW=$(kubectl -n gapura-demo get gateway main -o jsonpath='{.status.addresses[0].value}')
+          # A NodePort address carries no port; the host port 80 mapped above is the one that
+          # reaches it, which is exactly what the README's kind setup guarantees.
+          for attempt in $(seq 10); do
+            if body=$(curl -sS --fail-with-body -H 'Host: echo.example' "http://${GW}/echo?msg=it-works" 2>&1); then
+              echo "answer through the gateway: $body"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "no answer through the gateway after 10 tries: $body" >&2
+          exit 1
+      - name: Read this before touching anything else
+        if: failure()
+        run: |
+          cat <<'EOF' >&2
+          A failure here almost always means a stranger cannot install Gapura, not that CI is
+          flaky. Diagnose in this order:
+
+          1. "helm show chart" failed with 401/403, or the gapura pods are in
+             ImagePullBackOff: a GHCR package is private. docs/RELEASING.md 5.3 is the fix and
+             the anonymous verification commands; the maintainer's own terminal cannot see this
+             failure, which is why this job exists.
+          2. Everything installed but the curl failed: reproduce the README quickstart by hand
+             before changing anything; check `kubectl -n gapura-system get pods` and the gapura
+             logs first.
+          EOF

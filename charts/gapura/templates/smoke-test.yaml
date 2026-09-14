@@ -1,0 +1,141 @@
+{{- if .Values.tests.smoke.enabled }}
+# `helm test` fixture: one throwaway Gateway, HTTPRoute and echo backend, plus a curl pod that
+# proves a request routes through the data plane of this release. Everything here is a hook
+# (`helm.sh/hook: test`), so none of it exists at install time; `helm test` creates it, waits for
+# the curl pod, and deletes it again (`before-hook-creation,hook-succeeded`: a failed run leaves
+# the resources behind for debugging, the next run cleans them up first).
+#
+# The curl pod carries hook-weight 1 and runs after the weight-0 resources: helm waits for the
+# backend Deployment to report Available before starting it. The retry loop in the curl command
+# covers the remaining race, the config swap reaching the data plane, which no readiness gate can
+# see. The request goes to the chart's Service by its ClusterIP DNS name, so the smoke test works
+# for every service.type and never depends on a LoadBalancer or a published address.
+{{- $fullname := include "gapura.fullname" . -}}
+{{- $hostname := "gapura-smoke.local" }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $fullname }}-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    gapura.dev/smoke: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  gatewayClassName: {{ .Values.gatewayClass.name }}
+  listeners:
+  - name: http
+    port: {{ .Values.ports.http }}
+    protocol: HTTP
+    allowedRoutes: { namespaces: { from: Same } }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    gapura.dev/smoke: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  parentRefs: [{ name: {{ $fullname }}-smoke }]
+  hostnames: [{{ $hostname | quote }}]
+  rules:
+  - backendRefs: [{ name: {{ $fullname }}-smoke-backend, port: 80 }]
+---
+# Deliberately NOT gapura.selectorLabels: that set carries component: gateway, and this Service
+# would then be selected by the chart's own data-plane Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-smoke-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-backend
+    gapura.dev/smoke: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "gapura.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: smoke-backend
+  ports: [{ name: http, port: 80, targetPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-smoke-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-backend
+    gapura.dev/smoke: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gapura.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: smoke-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gapura.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: smoke-backend
+        gapura.dev/smoke: "true"
+    spec:
+      containers:
+      - name: echo
+        # The same echo backend deploy/kind/fixture.yaml uses.
+        image: registry.k8s.io/e2e-test-images/agnhost:2.53
+        args: [netexec, --http-port=8080]
+        ports: [{ containerPort: 8080, name: http }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $fullname }}-smoke-curl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke
+    gapura.dev/smoke: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+  - name: curl
+    image: curlimages/curl:8.11.1
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -eu
+      url="http://{{ $fullname }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.http }}/echo?msg=helm-smoke"
+      out=""
+      for i in $(seq 30); do
+        if out=$(curl -sS --fail-with-body --max-time 5 -H 'Host: {{ $hostname }}' "$url"); then
+          case "$out" in
+            *helm-smoke*) echo "SMOKE OK: request routed through this release's data plane: $out"; exit 0 ;;
+          esac
+          echo "unexpected body, retrying: $out" >&2
+        fi
+        sleep 2
+      done
+      echo "SMOKE FAILED: no routed answer after 30 tries; last response: ${out:-<none>}" >&2
+      exit 1
+{{- end }}

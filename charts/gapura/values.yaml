@@ -130,3 +130,10 @@ metrics:
     # Needs the Prometheus Operator CRDs.
     enabled: false
     labels: {}
+
+# `helm test` fixture: a throwaway Gateway, HTTPRoute and echo backend, plus a curl pod that
+# proves one request routes through this release's data plane. Hook resources: created by
+# `helm test`, never at install; deleted on success, kept on failure for debugging.
+tests:
+  smoke:
+    enabled: true
