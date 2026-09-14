@@ -1,6 +1,6 @@
 # 1. A control plane for users who have no cluster
 
-Status: Proposed -- 2026-09-14
+Status: Accepted -- 2026-09-14
 
 ## Context
 
