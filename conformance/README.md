@@ -5,7 +5,10 @@
 | standard | v0.1.0 | default | [standard-v0.1.0-default-report.yaml](reports/v1.6/davidgrldo-gapura/standard-v0.1.0-default-report.yaml) |
 
 Profile GATEWAY-HTTP against Gateway API v1.6.2. Core features claimed, and advertised in
-`GatewayClass.status.supportedFeatures`: `Gateway`, `HTTPRoute`, `ReferenceGrant`.
+`GatewayClass.status.supportedFeatures`: `Gateway`, `HTTPRoute`, `PathMatchRegularExpression`,
+`ReferenceGrant`. The regex claim leaves the counts below untouched: v1.6.2's standard channel
+carries no core regex path-match cases to unlock, so the feature is claimed for the channels and
+versions that gate on it, not for what this run measures.
 
 ## Result
 
@@ -60,5 +63,5 @@ git clone https://github.com/davidgrldo/gapura.git && cd gapura
 mapped to the chart's NodePorts), installs the Gateway API standard channel v1.6.2, builds the image
 and loads it into the cluster, installs `charts/gapura` with `charts/gapura/tests/values-kind.yaml`,
 then runs the upstream suite from a v1.6.2 checkout with
-`--supported-features=Gateway,ReferenceGrant,HTTPRoute --conformance-profiles=GATEWAY-HTTP`.
-Requires docker, kind, kubectl, helm and Go 1.26.
+`--supported-features=Gateway,ReferenceGrant,HTTPRoute,PathMatchRegularExpression
+--conformance-profiles=GATEWAY-HTTP`. Requires docker, kind, kubectl, helm and Go 1.26.

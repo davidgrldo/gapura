@@ -170,6 +170,8 @@ spec:
     backendRefs: [{{ name: empty, port: 80 }}]
   - matches: [{{ path: {{ type: PathPrefix, value: /retry }} }}]
     backendRefs: [{{ name: flaky, port: 80 }}]
+  - matches: [{{ path: {{ type: RegularExpression, value: "^/v\\d+/info" }} }}]
+    backendRefs: [{{ name: echo, port: 80 }}]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -415,6 +417,29 @@ async fn redirect_is_answered_locally() {
     assert_eq!(r.status(), 301);
     assert_eq!(r.headers()["location"], "https://new.test/new");
     assert!(r.headers().contains_key("x-request-id"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn regex_path_match_routes() {
+    let (gw, c) = setup().await;
+    let r = c
+        .get(url(&gw, "echo.test", "/v42/info"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["path"], "/v42/info");
+    let r = c
+        .get(url(&gw, "echo.test", "/vx/info"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        404,
+        "a path the pattern does not match has no other rule to catch it"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

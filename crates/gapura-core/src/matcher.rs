@@ -1,9 +1,45 @@
 //! Request matching over a translated Config: match the port's table, pick the TLS cert, find the rule.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::config::{
     Config, ListenerConfig, PathMatch, PortEntry, RouteMatch, RouteRule, TlsBundle,
 };
 use crate::hostname;
+
+/// Compiled `PathMatch::Regex` patterns of one Config, keyed by pattern string so identical
+/// patterns are compiled once. Built per generation by the data plane (see `compile_regexes`),
+/// next to the round-robin cursors and parsed TLS certs.
+pub type RegexMap = HashMap<String, Arc<regex::Regex>>;
+
+/// Compile every `PathMatch::Regex` pattern of the port tables into a side map, and report the
+/// patterns that could not be compiled (deduped like the map).
+///
+/// Translation validates each pattern before it reaches a Config, so a non-empty Vec means that
+/// invariant regressed; the caller that owns logging should say so. The pattern matches nothing
+/// either way, mirroring how the matcher treats a map miss.
+pub fn compile_regexes(config: &Config) -> (RegexMap, Vec<String>) {
+    let mut out = RegexMap::new();
+    let mut skipped = Vec::new();
+    for entries in config.ports.values() {
+        for e in entries {
+            let PathMatch::Regex(pattern) = &e.matcher.path else {
+                continue;
+            };
+            if out.contains_key(pattern) || skipped.iter().any(|s| s == pattern) {
+                continue;
+            }
+            match regex::Regex::new(pattern) {
+                Ok(re) => {
+                    out.insert(pattern.clone(), Arc::new(re));
+                }
+                Err(_) => skipped.push(pattern.clone()),
+            }
+        }
+    }
+    (out, skipped)
+}
 
 /// What the proxy extracts from a request before matching.
 ///
@@ -40,12 +76,17 @@ impl Config {
     /// specific listener hostname first and then by normal route precedence, whichever Gateway the
     /// route came from. Two identical entries from two Gateways are ordered by listener id, which
     /// is arbitrary but stable: no single-address data plane can tell those two requests apart.
-    pub fn match_port(&self, port: u16, req: &RequestAttrs<'_>) -> Option<PortMatch<'_>> {
+    pub fn match_port_with(
+        &self,
+        port: u16,
+        req: &RequestAttrs<'_>,
+        regexes: &RegexMap,
+    ) -> Option<PortMatch<'_>> {
         let entry = self.ports.get(&port)?.iter().find(|e| {
             e.hostname
                 .as_deref()
                 .is_none_or(|h| hostname::matches(h, req.host))
-                && matches(&e.matcher, req)
+                && matches(&e.matcher, req, regexes)
         })?;
         let listener = self.listeners.get(entry.listener)?;
         let rule = listener.rules.get(entry.rule)?;
@@ -85,7 +126,8 @@ impl Config {
 }
 
 /// PathPrefix matches on `/` boundaries: `/api` matches `/api` and `/api/x`, not `/apix`.
-fn matches(m: &RouteMatch, req: &RequestAttrs<'_>) -> bool {
+/// RegularExpression matches the RAW request path, no percent-decoding, like Exact/Prefix.
+fn matches(m: &RouteMatch, req: &RequestAttrs<'_>, regexes: &RegexMap) -> bool {
     let path_ok = match &m.path {
         PathMatch::Exact(p) => req.path == p,
         PathMatch::Prefix(p) => {
@@ -94,6 +136,9 @@ fn matches(m: &RouteMatch, req: &RequestAttrs<'_>) -> bool {
                 || (req.path.starts_with(p.as_str())
                     && req.path.as_bytes().get(p.len()) == Some(&b'/'))
         }
+        // A pattern missing from the map could not be compiled (see `compile_regexes`); the
+        // data plane treats it as a no-match instead of panicking on a request.
+        PathMatch::Regex(p) => regexes.get(p).is_some_and(|re| re.is_match(req.path)),
     };
     path_ok
         && m.method
@@ -230,8 +275,9 @@ mod tests {
     #[test]
     fn most_specific_listener_hostname_wins_on_a_shared_port() {
         let c = config();
+        let (re, _) = compile_regexes(&c);
         let hit = c
-            .match_port(443, &req("/", &[]))
+            .match_port_with(443, &req("/", &[]), &re)
             .expect("a listener matches");
         assert_eq!(hit.listener.id, "infra/gw/exact");
         assert_eq!(hit.rule.route, "apps/exact");
@@ -241,7 +287,7 @@ mod tests {
             ..req("/", &[])
         };
         assert_eq!(
-            c.match_port(443, &other)
+            c.match_port_with(443, &other, &re)
                 .expect("wildcard matches")
                 .listener
                 .id,
@@ -253,7 +299,7 @@ mod tests {
             ..req("/", &[])
         };
         assert_eq!(
-            c.match_port(443, &unrelated)
+            c.match_port_with(443, &unrelated, &re)
                 .expect("hostname-less listener catches the rest")
                 .listener
                 .id,
@@ -263,7 +309,9 @@ mod tests {
 
     #[test]
     fn a_port_with_no_listener_matches_nothing() {
-        assert!(config().match_port(8080, &req("/", &[])).is_none());
+        let c = config();
+        let (re, _) = compile_regexes(&c);
+        assert!(c.match_port_with(8080, &req("/", &[]), &re).is_none());
     }
 
     #[test]
@@ -284,7 +332,8 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
-        let first = c.match_port(
+        let (re, _) = compile_regexes(&c);
+        let first = c.match_port_with(
             80,
             &RequestAttrs {
                 host: "any.test",
@@ -293,9 +342,10 @@ mod tests {
                 headers: &[],
                 query: &[],
             },
+            &re,
         );
         assert_eq!(first.expect("first is reachable").rule.route, "apps/first");
-        let second = c.match_port(
+        let second = c.match_port_with(
             80,
             &RequestAttrs {
                 host: "any.test",
@@ -304,6 +354,7 @@ mod tests {
                 headers: &[],
                 query: &[],
             },
+            &re,
         );
         assert_eq!(
             second.expect("second is reachable").rule.route,
@@ -324,8 +375,9 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
+        let (re, _) = compile_regexes(&c);
         let at = |p: &str| {
-            c.match_port(
+            c.match_port_with(
                 80,
                 &RequestAttrs {
                     host: "any.test",
@@ -334,6 +386,7 @@ mod tests {
                     headers: &[],
                     query: &[],
                 },
+                &re,
             )
             .map(|h| h.rule.route.clone())
         };
@@ -365,8 +418,9 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
+        let (re, _) = compile_regexes(&c);
         let at = |headers: &[(String, String)]| {
-            c.match_port(
+            c.match_port_with(
                 80,
                 &RequestAttrs {
                     host: "any.test",
@@ -375,6 +429,7 @@ mod tests {
                     headers,
                     query: &[],
                 },
+                &re,
             )
             .map(|h| h.rule.route.clone())
         };
@@ -404,8 +459,9 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
+        let (re, _) = compile_regexes(&c);
         let miss = |host: &str, path: &str| {
-            c.match_port(
+            c.match_port_with(
                 80,
                 &RequestAttrs {
                     host,
@@ -414,6 +470,7 @@ mod tests {
                     headers: &[],
                     query: &[],
                 },
+                &re,
             )
             .is_none()
         };
@@ -441,6 +498,7 @@ mod tests {
             listeners,
             clusters: BTreeMap::new(),
         };
+        let (re, _) = compile_regexes(&c);
         let post = RequestAttrs {
             host: "any.test",
             path: "/",
@@ -449,7 +507,7 @@ mod tests {
             query: &[("v".to_string(), "2".to_string())],
         };
         assert_eq!(
-            c.match_port(80, &post).unwrap().rule.route,
+            c.match_port_with(80, &post, &re).unwrap().rule.route,
             "apps/post",
             "method compares case-insensitively"
         );
@@ -457,7 +515,10 @@ mod tests {
             method: "GET",
             ..post.clone()
         };
-        assert_eq!(c.match_port(80, &get).unwrap().rule.route, "apps/any");
+        assert_eq!(
+            c.match_port_with(80, &get, &re).unwrap().rule.route,
+            "apps/any"
+        );
     }
 
     #[test]
@@ -496,12 +557,153 @@ mod tests {
         assert!(c.tls_for(80, None).is_none());
     }
 
+    #[test]
+    fn regex_match_hits_and_misses_against_the_raw_path() {
+        let mut rx = m("/static");
+        rx.path = PathMatch::Regex("^/api/v[0-9]+/".to_string());
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            None,
+            vec![rule("apps/regex", rx), rule("apps/static", m("/static"))],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let (regexes, _) = compile_regexes(&c);
+        let at = |p: &str| {
+            c.match_port_with(
+                80,
+                &RequestAttrs {
+                    host: "any.test",
+                    path: p,
+                    method: "GET",
+                    headers: &[],
+                    query: &[],
+                },
+                &regexes,
+            )
+            .map(|h| h.rule.route.clone())
+        };
+        assert_eq!(at("/api/v1/x").as_deref(), Some("apps/regex"));
+        assert_eq!(at("/api/v42/").as_deref(), Some("apps/regex"));
+        assert_eq!(
+            at("/api/vx/1").as_deref(),
+            None,
+            "the pattern does not match, so nothing else catches it"
+        );
+        assert_eq!(at("/static/x").as_deref(), Some("apps/static"));
+        assert_eq!(
+            at("/api%2Fv1/x").as_deref(),
+            None,
+            "matching runs on the raw path, no percent-decoding"
+        );
+    }
+
+    #[test]
+    fn regex_loses_to_exact_and_prefix_no_matter_the_pattern_length() {
+        let mut rx_long = m("/");
+        rx_long.path = PathMatch::Regex("^/api/v[0-9]+/very/long/pattern".to_string());
+        let mut rx_short = m("/");
+        rx_short.path = PathMatch::Regex("^/api".to_string());
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            None,
+            vec![
+                rule("apps/regex-long", rx_long),
+                rule("apps/regex-short", rx_short),
+                rule("apps/prefix", m("/api")),
+                rule("apps/exact", {
+                    let mut e = m("/");
+                    e.path = PathMatch::Exact("/api/v1".to_string());
+                    e
+                }),
+            ],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let (regexes, _) = compile_regexes(&c);
+        let hit = c
+            .match_port_with(
+                80,
+                &RequestAttrs {
+                    host: "any.test",
+                    path: "/api/v1",
+                    method: "GET",
+                    headers: &[],
+                    query: &[],
+                },
+                &regexes,
+            )
+            .expect("several entries match");
+        assert_eq!(
+            hit.rule.route, "apps/exact",
+            "Exact wins even though both regex patterns also match"
+        );
+        // Without the exact rule, the prefix beats both regexes.
+        let mut trimmed = c.clone();
+        trimmed.ports.get_mut(&80).unwrap().retain(|e| e.rule != 3);
+        let hit = trimmed
+            .match_port_with(
+                80,
+                &RequestAttrs {
+                    host: "any.test",
+                    path: "/api/v1",
+                    method: "GET",
+                    headers: &[],
+                    query: &[],
+                },
+                &regexes,
+            )
+            .expect("prefix and regexes match");
+        assert_eq!(hit.rule.route, "apps/prefix");
+    }
+
+    #[test]
+    fn compile_regexes_walks_the_port_tables_and_dedupes() {
+        let mut rx = m("/");
+        rx.path = PathMatch::Regex("^/dup".to_string());
+        let mut bad = m("/");
+        bad.path = PathMatch::Regex("[unclosed".to_string());
+        let listeners = vec![listener(
+            "infra/gw/http",
+            80,
+            None,
+            vec![
+                rule("apps/a", rx.clone()),
+                rule("apps/b", rx),
+                rule("apps/c", bad.clone()),
+                rule("apps/d", bad),
+            ],
+        )];
+        let c = Config {
+            ports: index(&listeners),
+            listeners,
+            clusters: BTreeMap::new(),
+        };
+        let (regexes, skipped) = compile_regexes(&c);
+        assert_eq!(regexes.len(), 1, "identical patterns share one entry");
+        assert!(regexes.contains_key("^/dup"));
+        assert_eq!(
+            skipped,
+            vec!["[unclosed".to_string()],
+            "the uncompilable pattern is named once, deduped like the map"
+        );
+    }
+
     proptest::proptest! {
         #[test]
         fn matching_never_panics(host in "[a-z0-9.*-]{0,24}", path in "[a-zA-Z0-9/._%-]{0,40}", method in "[A-Z]{0,7}") {
             let c = config();
+            let (re, _) = compile_regexes(&c);
             for port in [80u16, 443] {
-                let _ = c.match_port(port, &RequestAttrs { host: &host, path: &path, method: &method, headers: &[], query: &[] });
+                let _ = c.match_port_with(port, &RequestAttrs { host: &host, path: &path, method: &method, headers: &[], query: &[] }, &re);
                 let _ = c.tls_for(port, Some(&host));
             }
         }
@@ -514,8 +716,9 @@ mod tests {
             query in proptest::collection::vec(("[a-z-]{1,8}", "[a-zA-Z0-9]{0,8}"), 0..=3),
         ) {
             let c = config();
+            let (re, _) = compile_regexes(&c);
             for port in [80u16, 443] {
-                let _ = c.match_port(port, &RequestAttrs { host: &host, path: &path, method: "GET", headers: &headers, query: &query });
+                let _ = c.match_port_with(port, &RequestAttrs { host: &host, path: &path, method: "GET", headers: &headers, query: &query }, &re);
             }
         }
     }

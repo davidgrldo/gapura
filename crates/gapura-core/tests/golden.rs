@@ -147,9 +147,10 @@ fn gateway_class_advertises_supported_features() {
         &vec![
             "Gateway".to_string(),
             "HTTPRoute".to_string(),
+            "PathMatchRegularExpression".to_string(),
             "ReferenceGrant".to_string()
         ],
-        "the GATEWAY-HTTP core feature set, sorted as the CRD requires"
+        "the GATEWAY-HTTP core feature set plus regex path matching, sorted as the CRD requires"
     );
 }
 
@@ -654,6 +655,29 @@ fn precedence() {
         ]
     );
     insta::assert_yaml_snapshot!("precedence", t);
+}
+
+#[test]
+fn regex_path() {
+    let t = run("regex-path");
+    let parents = route_parents(&t, "apps", "mixed");
+    assert_eq!(
+        cond(&parents[0].conditions, "Accepted"),
+        (ConditionStatus::True, "Accepted")
+    );
+    let l = &t.config.listeners[0];
+    assert_eq!(
+        l.rules[0].matches[0].path,
+        PathMatch::Regex("^/api/.*".into())
+    );
+    let entries = &t.config.ports[&l.port];
+    let order: Vec<usize> = entries.iter().map(|e| e.rule).collect();
+    assert_eq!(
+        order,
+        vec![2, 1, 0],
+        "Exact beats PathPrefix beats RegularExpression, reversing the spec order"
+    );
+    insta::assert_yaml_snapshot!("regex-path", t);
 }
 
 #[test]

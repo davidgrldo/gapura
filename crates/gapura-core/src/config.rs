@@ -92,6 +92,9 @@ pub enum PathMatch {
     Exact(String),
     /// Normalized without trailing slash, except `/` itself.
     Prefix(String),
+    /// Pattern string as written in the HTTPRoute; compiled into a side map by the data plane
+    /// (see `matcher::compile_regexes`), so this stays plain serializable data.
+    Regex(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

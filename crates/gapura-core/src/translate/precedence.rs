@@ -1,6 +1,7 @@
 //! Gateway API match precedence, used to sort each port's match table once after translation.
 //! Order: hostname specificity (exact > wildcard, more labels first) > path Exact > longer PathPrefix >
-//! has method > more header matches > more query matches > older route > namespace/name > rule index >
+//! longer RegularExpression pattern (the least specific path type) > has method > more header matches >
+//! more query matches > older route > namespace/name > rule index >
 //! listener id. The last key only decides between two Gateways that attached the same route to the
 //! same port, where nothing in the request can tell them apart; it keeps the order stable instead of
 //! leaving it to hash or iteration order.
@@ -26,8 +27,10 @@ type Key = (
 
 fn key(hostname_: Option<&str>, matcher: &RouteMatch, rule: &RouteRule, listener_id: &str) -> Key {
     let (path_kind, path_len) = match &matcher.path {
-        PathMatch::Exact(p) => (1u8, p.len()),
-        PathMatch::Prefix(p) => (0u8, p.len()),
+        PathMatch::Exact(p) => (2u8, p.len()),
+        PathMatch::Prefix(p) => (1u8, p.len()),
+        // Gateway API precedence: a regex is the least specific path match type.
+        PathMatch::Regex(p) => (0u8, p.len()),
     };
     (
         Reverse(hostname::specificity(hostname_)),
@@ -217,6 +220,65 @@ mod tests {
                 "-:z/headers",
                 "-:a/older-same",
                 "-:z/prefix-short",
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_beats_prefix_beats_regex_with_length_ties_inside_regex() {
+        let rules = vec![
+            rule(
+                "z/regex-long",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Regex("^/a/.*$".into()),
+                0,
+                false,
+            ),
+            rule(
+                "z/regex-short",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Regex("^/a$".into()),
+                0,
+                false,
+            ),
+            rule(
+                "z/prefix-long",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Prefix("/a/b/c".into()),
+                0,
+                false,
+            ),
+            rule(
+                "z/prefix-short",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Prefix("/a".into()),
+                0,
+                false,
+            ),
+            rule(
+                "z/exact",
+                "2026-01-01T00:00:00Z",
+                PathMatch::Exact("/a".into()),
+                0,
+                false,
+            ),
+        ];
+        let mut entries = entries_for(&rules);
+        let listeners = one_listener(rules.clone());
+        sort_port_table(&mut entries, &listeners);
+        let order: Vec<&str> = entries
+            .iter()
+            .map(|e| rules[e.rule].route.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "z/exact",
+                "z/prefix-long",
+                "z/prefix-short",
+                // A regex is the least specific path type no matter how long its pattern is.
+                "z/regex-long",
+                "z/regex-short",
             ]
         );
     }
