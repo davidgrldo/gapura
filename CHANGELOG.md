@@ -17,6 +17,14 @@ means what it usually does, moving from one version below to a later one. Releas
   red while a package is private, the tripwire for every release after that.
 - The release workflow now publishes a GitHub Release from the tag: the CHANGELOG section for
   the version as notes, the conformance report attached as an asset.
+- The chart's NOTES now cover NodePort installs: they print the exact `curl`, NodePort included,
+  because a Gateway's published address never carries a port and that is the trap every NodePort
+  install hits.
+- k3s gets a first-class seat: a `k3s` workflow runs `hack/k3s-deploy.sh` — build, import into a
+  k3d cluster with traefik deliberately left on, NodePort install, one request through the
+  gateway — on every PR and push to main. The README quickstart documents the stock-k3s case
+  (traefik holds 80/443 through ServiceLB, so the default LoadBalancer Service hangs rather than
+  fails) with the NodePort install for it.
 
 ## 0.1.0 — 2026-09-11
 

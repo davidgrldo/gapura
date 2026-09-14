@@ -14,6 +14,19 @@ Gapura {{ .Chart.AppVersion }} installed as {{ include "gapura.fullname" . }} in
 
 3. Read its status:
      kubectl get gateway main -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}{"\n"}'
+{{- if and (eq .Values.service.type "NodePort") (.Values.service.nodePorts).http }}
+{{- $addr := "NODE_IP" }}
+{{- with .Values.publishAddresses }}
+{{- $addr = index . 0 }}
+{{- end }}
+
+4. A NodePort install publishes an address that carries no port, so a request has to add the
+   NodePort to it by hand — the address in Gateway status is never enough on this install:
+     curl -H 'Host: echo.example' "http://{{ $addr }}:{{ (.Values.service.nodePorts).http }}/echo?msg=it-works"
+{{- if not .Values.publishAddresses }}
+   NODE_IP is any node's address, e.g.: kubectl get nodes -o wide
+{{- end }}
+{{- end }}
 
 Metrics, health and the routing table live on the admin port ({{ .Values.ports.admin }}) of the
 ClusterIP Service {{ include "gapura.fullname" . }}-admin. They are deliberately kept off the

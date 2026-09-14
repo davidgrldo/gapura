@@ -1,0 +1,34 @@
+name: k3s
+# The k3s leg: same chart, same image, different cluster reality. kind is vanilla Kubernetes with
+# no LoadBalancer implementation at all; k3s -- via k3d, traefik deliberately left on -- is where
+# a lot of Gateway API gateways actually run, and it exercises what stock k3s does: ServiceLB,
+# traefik holding host 80/443 so the chart's default LoadBalancer Service can never bind, and the
+# NodePort install the README documents for k3s. Runs hack/k3s-deploy.sh end to end, so the
+# documented k3s path cannot rot silently.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: k3s-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  k3d:
+    if: github.repository == 'davidgrldo/gapura'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.1.4
+      # k3d is not preinstalled on the runner image; kubectl and docker are. Pinned like helm:
+      # a cluster bring-up tool drifting under a leg named after a distro is noise, not signal.
+      - name: Install k3d
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/k3d-io/k3d/v5.8.3/install.sh" | TAG=v5.8.3 bash
+          k3d version
+      - run: ./hack/k3s-deploy.sh
