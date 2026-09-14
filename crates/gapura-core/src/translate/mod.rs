@@ -50,8 +50,12 @@ fn addresses_for(settings: &Settings, r#ref: &crate::snapshot::ObjectRef) -> Vec
 
 /// An address per Gateway, part 1: the destination port must tell two Gateways apart when
 /// nothing else does (the `HTTPRouteMultipleGateways` case — two routes matching `PathPrefix /`
-/// with no hostname on two Gateways sharing a port). The first listener in translation order
-/// keeps its declared port; a later listener moves to the next free **bound** port of its
+/// with no hostname on two Gateways sharing a port). Only a Gateway the operator gave **its own
+/// address** (`--gateway-address`) is remapped: that override is the declaration that this
+/// Gateway is reachable at its own destination, so its listener must have a destination port of
+/// its own too. Every other Gateway keeps sharing the shared address's port exactly as before —
+/// the suite's many single-address tests depend on that. The first listener in translation
+/// order keeps its declared port; a later listener moves to the next free **bound** port of its
 /// protocol when one of its table entries has *equal hostname specificity* to an entry of an
 /// earlier listener on the same port **from a different route** — both catch-alls, the same
 /// exact name, or wildcards over the same parent — because precedence cannot decide between
@@ -75,10 +79,14 @@ fn remap_colliding_ports(
     listeners: &mut [ListenerConfig],
     tables: &[Vec<MatchEntry>],
     settings: &Settings,
+    overridden: &[bool],
 ) {
     let declared: Vec<u16> = listeners.iter().map(|l| l.port).collect();
     let mut taken: BTreeSet<u16> = declared.iter().copied().collect();
     for i in 0..listeners.len() {
+        if !overridden[i] {
+            continue;
+        }
         let conflict = (0..i).any(|j| {
             declared[j] == declared[i]
                 && tables[i].iter().any(|a| {
@@ -150,6 +158,9 @@ fn assemble(
     status: &mut Vec<StatusPatch>,
 ) -> Config {
     let mut listeners_cfg = Vec::new();
+    // Whether each programmed listener's Gateway carries a `--gateway-address` override: only
+    // those Gateways are individually addressable, so only they may be remapped.
+    let mut overridden = Vec::new();
     let mut tables: Vec<Vec<MatchEntry>> = Vec::new();
     let mut used = BTreeSet::new();
     for gw in gateways {
@@ -186,6 +197,11 @@ fn assemble(
                     used.insert(mirror.cluster.clone());
                 }
             }
+            overridden.push(
+                settings
+                    .gateway_address_overrides
+                    .contains_key(&format!("{}/{}", gw.r#ref.namespace, gw.r#ref.name)),
+            );
             tables.push(std::mem::take(&mut l.table));
             listeners_cfg.push(ListenerConfig {
                 id: format!("{}/{}/{}", gw.r#ref.namespace, gw.r#ref.name, l.name),
@@ -253,7 +269,7 @@ fn assemble(
             listeners: listener_status,
         });
     }
-    remap_colliding_ports(&mut listeners_cfg, &tables, settings);
+    remap_colliding_ports(&mut listeners_cfg, &tables, settings, &overridden);
     // One table per port over every programmed listener: the data plane matches on the port the
     // request arrived on, not on a single listener chosen up front.
     let mut ports: BTreeMap<u16, Vec<PortEntry>> = BTreeMap::new();
@@ -337,6 +353,15 @@ mod remap_tests {
         }
     }
 
+    /// Settings whose one Gateway (`ns/gw`) carries its own address: the declaration that
+    /// makes the remap eligible.
+    fn overridden_settings(bound_http: &[u16]) -> Settings {
+        let mut s = settings(bound_http);
+        s.gateway_address_overrides
+            .insert("ns/gw".to_string(), vec!["203.0.113.9".to_string()]);
+        s
+    }
+
     #[test]
     fn two_routes_that_both_match_everything_split_by_port() {
         // The HTTPRouteMultipleGateways shape: two catch-all routes on two Gateways sharing a
@@ -344,7 +369,13 @@ mod remap_tests {
         // destination port per Gateway, and the operator bound room for one.
         let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
         let tables = vec![table(&[None]), table(&[None])];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000]),
+            &overridden,
+        );
         assert_eq!(ls[0].port, 80, "first in order keeps its declared port");
         assert_eq!(
             ls[1].port, 10000,
@@ -360,7 +391,13 @@ mod remap_tests {
             listener(80, "apps/c"),
         ];
         let tables = vec![table(&[None]), table(&[None]), table(&[None])];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000, 10001]));
+        let overridden = vec![true, true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000, 10001]),
+            &overridden,
+        );
         assert_eq!(
             ls.iter().map(|l| l.port).collect::<Vec<_>>(),
             vec![80, 10000, 10001]
@@ -373,7 +410,21 @@ mod remap_tests {
         // table exactly as before this feature existed.
         let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
         let tables = vec![table(&[None]), table(&[None])];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80]), &overridden);
+        assert!(ls.iter().all(|l| l.port == 80));
+    }
+
+    #[test]
+    fn a_gateway_without_its_own_address_is_never_remapped() {
+        // The override IS the declaration of individual addressability. Without it a Gateway
+        // expects to be reachable on the shared address's port, exactly as before this feature
+        // existed — even when a free bound port is sitting right there. (The conformance
+        // suite's many single-address tests depend on this.)
+        let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
+        let tables = vec![table(&[None]), table(&[None])];
+        let overridden = vec![false, false];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]), &overridden);
         assert!(ls.iter().all(|l| l.port == 80));
     }
 
@@ -387,7 +438,13 @@ mod remap_tests {
             table(&[Some("a.gw.test")]),
             table(&[Some("a.gw.test"), Some("*.gw.test")]),
         ];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[443, 8443]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[443, 8443]),
+            &overridden,
+        );
         assert!(ls.iter().all(|l| l.port == 443));
     }
 
@@ -397,7 +454,13 @@ mod remap_tests {
         // for every request; sharing one port is a working setup (the e2e pins it).
         let mut ls = vec![listener(80, "apps/echo"), listener(80, "apps/second")];
         let tables = vec![table(&[None]), table(&[Some("second.test")])];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000]),
+            &overridden,
+        );
         assert!(ls.iter().all(|l| l.port == 80));
         // Disjoint exact names too.
         let mut ls = vec![listener(80, "apps/first"), listener(80, "apps/second")];
@@ -405,7 +468,13 @@ mod remap_tests {
             table(&[Some("first.example.com")]),
             table(&[Some("second.example.com")]),
         ];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000]),
+            &overridden,
+        );
         assert!(ls.iter().all(|l| l.port == 80));
     }
 
@@ -416,7 +485,13 @@ mod remap_tests {
             table(&[Some("app.example.com")]),
             table(&[Some("APP.example.com")]),
         ];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000]),
+            &overridden,
+        );
         assert_eq!(ls[1].port, 10000, "hostnames are case-insensitive");
 
         let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
@@ -424,7 +499,13 @@ mod remap_tests {
             table(&[Some("*.example.com")]),
             table(&[Some("*.example.com")]),
         ];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        let overridden = vec![true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000]),
+            &overridden,
+        );
         assert_eq!(ls[1].port, 10000);
     }
 
@@ -436,7 +517,13 @@ mod remap_tests {
             listener(10000, "apps/c"),
         ];
         let tables = vec![table(&[None]), table(&[None]), table(&[None])];
-        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        let overridden = vec![true, true, true];
+        remap_colliding_ports(
+            &mut ls,
+            &tables,
+            &overridden_settings(&[80, 10000]),
+            &overridden,
+        );
         assert_eq!(
             ls.iter().map(|l| l.port).collect::<Vec<_>>(),
             vec![80, 80, 10000],

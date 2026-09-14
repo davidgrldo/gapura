@@ -27,8 +27,9 @@ leaving it to name order. Closing it took an address per Gateway:
 
 - `--gateway-address namespace/name=ip-or-host` (repeatable) publishes per-Gateway status
   addresses; a Gateway without an override keeps the global `--publish-address` list.
-- The translator maps a listener whose table would tie with another Gateway's onto the next free
-  **bound** port of its protocol — the proxy binds exactly the `--listen-http`/`--listen-https`
+- The translator maps the listener of a Gateway that carries an override — the declaration that
+  it is individually addressable — onto the next free **bound** port of its protocol when its
+  table would tie with another Gateway's — the proxy binds exactly the `--listen-http`/`--listen-https`
   sockets at startup, so an operator who wants addressable Gateways binds a second port (the
   chart's `extraListenHttp`) and points a Service at it. The allocation is deterministic
   (sorted snapshot order), so the Service mapping is stable. Listeners whose requests precedence

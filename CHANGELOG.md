@@ -9,8 +9,9 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - An address per Gateway: `--gateway-address namespace/name=ip-or-host` (repeatable) publishes
-  per-Gateway status addresses instead of one shared list, and the translator remaps a listener
-  that would tie with another Gateway onto the next free bound port of its protocol — the proxy
+  per-Gateway status addresses instead of one shared list, and the translator remaps the listener of a Gateway that carries such an override —
+  the declaration that it is individually addressable — onto the next free bound port of its
+  protocol whenever it would tie with another Gateway — the proxy
   only ever binds the `--listen-http`/`--listen-https` sockets, so a deployment that wants
   addressable Gateways binds a second port (chart value `extraListenHttp`) and points a Service
   at it. The allocation is deterministic, so the Service mapping is stable. Listeners whose
