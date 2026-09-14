@@ -7,7 +7,7 @@
 
 The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
-Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes 36 of 37 core tests plus the one extended test it claims; the report and the reason for the one remaining failure are in [conformance/](conformance/).
+Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes 36 of 37 core tests plus the four extended tests it claims; the report and the reason for the one remaining failure are in [conformance/](conformance/).
 
 - Release notes, and what changes for operators on upgrade: [CHANGELOG.md](CHANGELOG.md)
 - Contributing, security policy, and code of conduct: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
@@ -30,9 +30,8 @@ Gateway API core, served out of one binary with no database and no separate cont
   and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
   config swap so in-flight requests finish on the config they started with.
 
-Deliberately not here yet, each with its own issue: 307 and 308 redirects
-([#7](https://github.com/davidgrldo/gapura/issues/7)), and an address per Gateway
-([#8](https://github.com/davidgrldo/gapura/issues/8)). That last one is why a single conformance
+Deliberately not here yet, with its own issue: an address per Gateway
+([#8](https://github.com/davidgrldo/gapura/issues/8)). That one is why a single conformance
 test fails, and [conformance/](conformance/) explains it.
 
 ## The name
