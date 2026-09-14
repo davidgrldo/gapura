@@ -77,7 +77,13 @@ impl Runtime {
                 }
             }
         }
-        let regexes = compile_regexes(&config);
+        let (regexes, skipped) = compile_regexes(&config);
+        for pattern in &skipped {
+            tracing::warn!(
+                pattern = %pattern,
+                "path match regex does not compile, it matches nothing; translate should have rejected it"
+            );
+        }
         Self {
             config,
             generation,
