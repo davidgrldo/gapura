@@ -6,6 +6,10 @@ image:
   repository: ghcr.io/davidgrldo/gapura
   # Defaults to the chart appVersion.
   tag: ""
+  # Pin the image by digest instead: takes precedence over tag, so the release runs byte-for-byte
+  # the image CI pushed. Use the manifest-list digest (RELEASING 5.1 shows how to read it), not a
+  # single-platform one, or only that platform's nodes can pull.
+  digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -46,6 +50,10 @@ service:
   # Empty means the cluster default.
   loadBalancerClass: ""
   loadBalancerIP: ""
+  # Local preserves the client's source address; a multi-node cluster then answers the NodePort
+  # only on nodes running a gateway replica, which is the honest default for a proxy that logs
+  # and routes on that address. Cluster spreads it to every node at the cost of an extra hop and
+  # a source address the backend cannot trust.
   externalTrafficPolicy: Local
   ipFamilyPolicy: SingleStack
   # Only used when type is NodePort.
