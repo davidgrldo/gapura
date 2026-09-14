@@ -218,8 +218,3 @@ available behind the same interface the credential store uses.
 Kubernetes.** Rejected as a starting point, because it pays the largest cost, the
 channel, before anything has shown it is needed. It is the shape the step above
 takes if the measurement ever arrives.
-
-## Open questions
-
-- What the console does when the identity provider is unreachable. Refusing every
-  login is correct and also means an outage there closes the console entirely.
