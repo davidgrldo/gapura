@@ -1028,18 +1028,26 @@ fn two_gateways_share_a_port_and_both_are_reachable() {
 }
 
 #[test]
-fn two_identical_listeners_order_by_listener_id() {
-    let t = run("two-gateways-same-hostname");
-    let port80 = &t.config.ports[&80];
-    assert_eq!(port80.len(), 2);
-    // Nothing in a request can tell these apart, so the order must at least be stable. Here the
-    // route names already decide it (they sort before the listener id in the key); the listener id
-    // is what breaks the tie when even the route is the same, which
-    // `precedence::the_listener_id_breaks_a_tie_between_two_gateways` covers.
-    // `HTTPRouteMultipleGateways` fails for exactly this ambiguity; see conformance/README.md.
-    let first = &t.config.listeners[port80[0].listener];
-    let second = &t.config.listeners[port80[1].listener];
-    assert_eq!(first.id, "infra/alpha/http");
-    assert_eq!(second.id, "infra/beta/http");
+fn two_identical_listeners_are_split_by_bind_port() {
+    // The deployment bound a second port (the chart's extraListenHttp), so the translator can
+    // give each addressable Gateway its own destination port: alpha keeps its declared 80,
+    // beta moves to the free bound port, and each published address reaches exactly its own
+    // Gateway — the shape that failed HTTPRouteMultipleGateways.
+    let settings = Settings {
+        http_ports: vec![80, 10000],
+        ..settings()
+    };
+    let t = translate(&load("two-gateways-same-hostname"), &settings);
+    let by_id = |id: &str| {
+        t.config
+            .listeners
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap_or_else(|| panic!("{id} is programmed"))
+    };
+    assert_eq!(by_id("infra/alpha/http").port, 80);
+    assert_eq!(by_id("infra/beta/http").port, 10000);
+    assert_eq!(t.config.ports[&80].len(), 1, "only alpha serves port 80");
+    assert_eq!(t.config.ports[&10000].len(), 1, "only beta serves its port");
     insta::assert_yaml_snapshot!("two-gateways-same-hostname", t);
 }

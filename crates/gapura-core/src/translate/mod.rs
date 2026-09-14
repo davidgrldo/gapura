@@ -37,6 +37,92 @@ pub struct Translation {
     pub status: Vec<StatusPatch>,
 }
 
+/// Addresses of one Gateway: its per-Gateway override when it has one, the global publish list
+/// otherwise.
+fn addresses_for(settings: &Settings, r#ref: &crate::snapshot::ObjectRef) -> Vec<String> {
+    let key = format!("{}/{}", r#ref.namespace, r#ref.name);
+    settings
+        .gateway_address_overrides
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| settings.gateway_addresses.clone())
+}
+
+/// An address per Gateway, part 1: the destination port must tell two Gateways apart when
+/// nothing else does (the `HTTPRouteMultipleGateways` case — two routes matching `PathPrefix /`
+/// with no hostname on two Gateways sharing a port). The first listener in translation order
+/// keeps its declared port; a later listener moves to the next free **bound** port of its
+/// protocol when one of its table entries has *equal hostname specificity* to an entry of an
+/// earlier listener on the same port **from a different route** — both catch-alls, the same
+/// exact name, or wildcards over the same parent — because precedence cannot decide between
+/// those, so one of the two routes is unreachable through this port no matter what. The proxy
+/// binds exactly the `--listen-http`/`--listen-https` sockets at startup, so a remap target
+/// must come from that set; an operator who wants addressable Gateways binds a second port
+/// (e.g. `--listen-http 0.0.0.0:10000`) and maps a Service to it. With no free bound port the
+/// listener keeps sharing the table — the pre-existing behavior. An equal-class pair from the
+/// *same* route is unobservable (either way the same rule serves) and always shares — one route
+/// attached to both an exact and a wildcard listener of one Gateway is the SNI-cert case. A
+/// pair where one side is strictly more specific (`second.test` against a catch-all,
+/// `a.example.com` against `*.example.com`) also shares: precedence always resolves it the
+/// same way. Listeners on distinct ports are untouched, so existing charts keep working
+/// verbatim. The port a parentRef declares is matched in the route-attach step, before this
+/// runs, so a remap never breaks attachment.
+///
+/// The allocation is deterministic (translation order is the sorted snapshot order, the pools
+/// are sorted), which is what lets a deployment map a Service port to the remapped target port
+/// by hand.
+fn remap_colliding_ports(
+    listeners: &mut [ListenerConfig],
+    tables: &[Vec<MatchEntry>],
+    settings: &Settings,
+) {
+    let declared: Vec<u16> = listeners.iter().map(|l| l.port).collect();
+    let mut taken: BTreeSet<u16> = declared.iter().copied().collect();
+    for i in 0..listeners.len() {
+        let conflict = (0..i).any(|j| {
+            declared[j] == declared[i]
+                && tables[i].iter().any(|a| {
+                    tables[j].iter().any(|b| {
+                        hostname_class(a.hostname.as_deref())
+                            == hostname_class(b.hostname.as_deref())
+                            && listeners[i].rules[a.rule].route != listeners[j].rules[b.rule].route
+                    })
+                })
+        });
+        if conflict {
+            let pool = match listeners[i].protocol {
+                crate::config::Protocol::Http => &settings.http_ports,
+                crate::config::Protocol::Https => &settings.https_ports,
+            };
+            let target = pool.iter().copied().find(|p| !taken.contains(p));
+            if let Some(p) = target {
+                listeners[i].port = p;
+                taken.insert(p);
+            }
+        }
+    }
+}
+
+/// The specificity class of one table entry's hostname: entries in the same class can claim the
+/// same request and only a tie-break could tell them apart, so they count as a conflict.
+/// Lowercased: hostnames are case-insensitive.
+#[derive(Debug, PartialEq, Eq)]
+enum HostnameClass {
+    CatchAll,
+    Exact(String),
+    Wildcard(String),
+}
+
+fn hostname_class(hostname: Option<&str>) -> HostnameClass {
+    match hostname {
+        None => HostnameClass::CatchAll,
+        Some(h) => match h.to_ascii_lowercase().strip_prefix("*.") {
+            Some(parent) => HostnameClass::Wildcard(parent.to_string()),
+            None => HostnameClass::Exact(h.to_ascii_lowercase()),
+        },
+    }
+}
+
 pub fn translate(snap: &Snapshot, settings: &Settings) -> Translation {
     let mut status = Vec::new();
     let classes = gateway_class::accept(snap, settings, &mut status);
@@ -162,11 +248,12 @@ fn assemble(
         status.push(StatusPatch::Gateway {
             namespace: gw.r#ref.namespace.clone(),
             name: gw.r#ref.name.clone(),
-            addresses: settings.gateway_addresses.clone(),
+            addresses: addresses_for(settings, &gw.r#ref),
             conditions: vec![accepted, programmed],
             listeners: listener_status,
         });
     }
+    remap_colliding_ports(&mut listeners_cfg, &tables, settings);
     // One table per port over every programmed listener: the data plane matches on the port the
     // request arrived on, not on a single listener chosen up front.
     let mut ports: BTreeMap<u16, Vec<PortEntry>> = BTreeMap::new();
@@ -193,5 +280,192 @@ fn assemble(
         listeners: listeners_cfg,
         ports,
         clusters,
+    }
+}
+
+#[cfg(test)]
+mod remap_tests {
+    use super::*;
+    use crate::config::{PathMatch, RouteMatch, RouteRule};
+    use crate::snapshot::Settings;
+
+    fn listener(port: u16, route: &str) -> ListenerConfig {
+        ListenerConfig {
+            id: format!("ns/gw/{port}"),
+            port,
+            protocol: crate::config::Protocol::Http,
+            hostname: None,
+            tls: None,
+            rules: vec![RouteRule {
+                route: route.to_string(),
+                rule_index: 0,
+                creation_timestamp: "2026-09-10T00:00:00Z".into(),
+                matches: vec![RouteMatch {
+                    path: PathMatch::Prefix("/".into()),
+                    headers: vec![],
+                    query: vec![],
+                    method: None,
+                }],
+                filters: Default::default(),
+                backends: vec![],
+                timeouts: Default::default(),
+            }],
+        }
+    }
+
+    fn entry(hostname: Option<&str>) -> MatchEntry {
+        MatchEntry {
+            hostname: hostname.map(str::to_string),
+            matcher: RouteMatch {
+                path: PathMatch::Prefix("/".into()),
+                headers: vec![],
+                query: vec![],
+                method: None,
+            },
+            rule: 0,
+        }
+    }
+
+    fn table(hostnames: &[Option<&str>]) -> Vec<MatchEntry> {
+        hostnames.iter().map(|h| entry(*h)).collect()
+    }
+
+    fn settings(bound_http: &[u16]) -> Settings {
+        Settings {
+            http_ports: bound_http.to_vec(),
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn two_routes_that_both_match_everything_split_by_port() {
+        // The HTTPRouteMultipleGateways shape: two catch-all routes on two Gateways sharing a
+        // port. Precedence would tie them to one route; the address per Gateway needs a
+        // destination port per Gateway, and the operator bound room for one.
+        let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
+        let tables = vec![table(&[None]), table(&[None])];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        assert_eq!(ls[0].port, 80, "first in order keeps its declared port");
+        assert_eq!(
+            ls[1].port, 10000,
+            "the equally-specific listener moves to the free bound port"
+        );
+    }
+
+    #[test]
+    fn three_way_collisions_chain_the_free_bound_ports() {
+        let mut ls = vec![
+            listener(80, "apps/a"),
+            listener(80, "apps/b"),
+            listener(80, "apps/c"),
+        ];
+        let tables = vec![table(&[None]), table(&[None]), table(&[None])];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000, 10001]));
+        assert_eq!(
+            ls.iter().map(|l| l.port).collect::<Vec<_>>(),
+            vec![80, 10000, 10001]
+        );
+    }
+
+    #[test]
+    fn no_free_bound_port_keeps_the_old_shared_behavior() {
+        // One bound port: there is nothing to remap onto, so the listeners keep sharing the
+        // table exactly as before this feature existed.
+        let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
+        let tables = vec![table(&[None]), table(&[None])];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80]));
+        assert!(ls.iter().all(|l| l.port == 80));
+    }
+
+    #[test]
+    fn equal_specificity_for_the_same_route_keeps_sharing() {
+        // One route attached to both an exact and a wildcard listener of one Gateway — the SNI
+        // certificate shape. Whichever listener wins the tie, the same rule serves, so there is
+        // nothing an address per Gateway could disambiguate.
+        let mut ls = vec![listener(443, "apps/all"), listener(443, "apps/all")];
+        let tables = vec![
+            table(&[Some("a.gw.test")]),
+            table(&[Some("a.gw.test"), Some("*.gw.test")]),
+        ];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[443, 8443]));
+        assert!(ls.iter().all(|l| l.port == 443));
+    }
+
+    #[test]
+    fn strictly_more_specific_hostnames_keep_sharing_the_port() {
+        // A catch-all and a route scoped to second.test are resolved by precedence the same way
+        // for every request; sharing one port is a working setup (the e2e pins it).
+        let mut ls = vec![listener(80, "apps/echo"), listener(80, "apps/second")];
+        let tables = vec![table(&[None]), table(&[Some("second.test")])];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        assert!(ls.iter().all(|l| l.port == 80));
+        // Disjoint exact names too.
+        let mut ls = vec![listener(80, "apps/first"), listener(80, "apps/second")];
+        let tables = vec![
+            table(&[Some("first.example.com")]),
+            table(&[Some("second.example.com")]),
+        ];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        assert!(ls.iter().all(|l| l.port == 80));
+    }
+
+    #[test]
+    fn equal_exact_names_on_different_routes_conflict() {
+        let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
+        let tables = vec![
+            table(&[Some("app.example.com")]),
+            table(&[Some("APP.example.com")]),
+        ];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        assert_eq!(ls[1].port, 10000, "hostnames are case-insensitive");
+
+        let mut ls = vec![listener(80, "apps/a"), listener(80, "apps/b")];
+        let tables = vec![
+            table(&[Some("*.example.com")]),
+            table(&[Some("*.example.com")]),
+        ];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        assert_eq!(ls[1].port, 10000);
+    }
+
+    #[test]
+    fn a_remapped_port_never_lands_on_another_declared_port() {
+        let mut ls = vec![
+            listener(80, "apps/a"),
+            listener(80, "apps/b"),
+            listener(10000, "apps/c"),
+        ];
+        let tables = vec![table(&[None]), table(&[None]), table(&[None])];
+        remap_colliding_ports(&mut ls, &tables, &settings(&[80, 10000]));
+        assert_eq!(
+            ls.iter().map(|l| l.port).collect::<Vec<_>>(),
+            vec![80, 80, 10000],
+            "10000 is taken by a declared listener and the pool has nothing else, so b shares"
+        );
+    }
+
+    #[test]
+    fn hostname_classes() {
+        use HostnameClass::{CatchAll, Exact, Wildcard};
+        assert_eq!(hostname_class(None), CatchAll);
+        assert_eq!(hostname_class(Some("A.com")), Exact("a.com".into()));
+        assert_eq!(
+            hostname_class(Some("*.Example.com")),
+            Wildcard("example.com".into())
+        );
+        assert_eq!(
+            hostname_class(Some("*.Example.com")),
+            hostname_class(Some("*.example.com"))
+        );
+        assert_ne!(
+            hostname_class(Some("a.com")),
+            hostname_class(Some("*.a.com"))
+        );
+        assert_ne!(hostname_class(Some("a.com")), hostname_class(Some("b.com")));
+        assert_ne!(
+            hostname_class(Some("*.a.com")),
+            hostname_class(Some("*.b.com"))
+        );
+        assert_ne!(hostname_class(None), hostname_class(Some("x.com")));
     }
 }

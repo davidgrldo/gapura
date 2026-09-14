@@ -12,6 +12,17 @@ service:
     https: 30443
 publishService: false
 publishAddresses: ["127.0.0.1"]
+# An address per Gateway, so two Gateways whose routes overlap are tellable apart by
+# destination address. The conformance suite's HTTPRouteMultipleGateways creates
+# gateway-conformance-infra/{same-namespace,all-namespaces}, both with an HTTP listener on
+# port 80. Translation order is sorted by namespace/name, so all-namespaces keeps 80 and
+# same-namespace is remapped onto the extra bound port (the proxy only binds what the listen
+# flags declare, hence extraListenHttp) — which is what the second Service
+# (hack/kind-second-service.yaml, nodePort 30081 via the 127.0.0.2 extraPortMapping in
+# hack/kind-config.yaml) targets. The override must therefore name the REMAPPED Gateway.
+extraListenHttp: [10000]
+gatewayAddresses:
+  gateway-conformance-infra/same-namespace: ["127.0.0.2"]
 threads: 2
 podDisruptionBudget:
   enabled: false
