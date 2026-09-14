@@ -38,9 +38,8 @@ that runs it is a deployment in `--kubernetes` mode. There is no combination of
 the two to arbitrate: the data plane still reads from exactly one source.
 
 What Postgres holds is authorisation and an audit trail. It does not hold
-routing configuration, and for now it does not hold consumers either. It does not
-hold passwords: the console federates to an identity provider the organisation
-already runs, so a person is a subject claim we recognise, not a row we secure.
+routing configuration, and for now it does not hold consumers either. It holds
+passwords too, for the second of the two ways in described below.
 
 Consumers and their credentials are configuration, and stay where the rest of the
 configuration is: a CRD under Kubernetes, a YAML document under `--config-dir`.
@@ -165,9 +164,31 @@ nothing to enforce -- the control plane simply declines to write outside it.
 Reading needs no grant of its own, because holding any assignment in a namespace
 is what lets somebody see it.
 
-Because identity is federated, there is no first account to log in as. The first
-superuser comes from naming an identity provider group in configuration, which
-also means losing the database does not lock anybody out permanently.
+## How people get in
+
+Two ways, and the second exists because of what the first cannot do.
+
+**Through an identity provider the organisation already runs.** This is the way
+almost everybody arrives. A person is a subject claim we recognise rather than a
+row we have to keep safe, group membership decides the roles, and multi-factor
+authentication is the provider's problem rather than ours.
+
+**Through an account held here.** This is how a deployment starts, since naming a
+provider group cannot help before anybody has logged in, and it is how somebody
+gets in when the provider cannot be reached. It is also the whole answer for a
+deployment small enough to have no provider at all.
+
+The second way is what makes this record store password hashes after all, and
+that has to be said plainly rather than buried: argon2id, failed attempts
+rate-limited and then locked out, and resets performed by a superuser instead of
+by mail we would otherwise have to send. It is the weaker of the two paths --
+there is no second factor on it unless we build one -- so it is kept deliberately
+narrow. Nobody signs themselves up; a superuser creates the account or it does
+not exist.
+
+The audit trail records which way a session arrived. A local sign-in while the
+provider is unreachable is the case this path was added for, and it should be
+legible as exactly that rather than as an ordinary login.
 
 ## Alternatives
 
