@@ -320,6 +320,7 @@ for arch in arm64 amd64; do
   disk_report "starting linux/${arch}"
   docker buildx build --builder "$BUILDER" --platform "linux/${arch}" \
     --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true,registry.insecure=true" \
+    --provenance=mode=max --sbom=true \
     --metadata-file "$WORK/metadata-${arch}.json" --progress plain . &
   build_pid=$!
   watchdog "$build_pid" &
@@ -361,6 +362,14 @@ docker buildx imagetools inspect "${IMAGE}:${VERSION}" --raw \
 cat "$WORK/arches"
 diff <(printf 'linux/amd64\nlinux/arm64\n') "$WORK/arches" \
   || { echo "manifest list is not exactly linux/amd64 + linux/arm64" >&2; exit 1; }
+
+echo "==> the manifest list still carries its attestations"
+# release.yml builds with provenance=mode=max and an SBOM per platform; the join above must carry
+# them into the list instead of dropping everything that is not a runnable platform. At least one
+# unknown/unknown entry per architecture.
+docker buildx imagetools inspect "${IMAGE}:${VERSION}" --raw \
+  | jq -e '[.manifests[] | select(.platform.os == "unknown")] | length >= 2' >/dev/null \
+  || { echo "attestations lost from the manifest list: provenance/SBOM did not survive the join" >&2; exit 1; }
 
 echo "==> package and push the chart (the workflow's \`chart\` job)"
 ./hack/chart-render.sh
