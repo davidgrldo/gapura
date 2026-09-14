@@ -55,7 +55,7 @@ meant to be pasted in order and end with a request that goes through the gateway
 <!-- REMOVE WHEN PUBLIC: delete this blockquote and the collapsed block under it once v0.1.0 is tagged and both ghcr.io/davidgrldo packages, gapura and charts/gapura, are public. -->
 > **Step 2 does not work yet.** Nothing is published to `ghcr.io/davidgrldo`, so the `helm install`
 > in step 2 fails. Install from a checkout instead: `./hack/kind-deploy.sh` does all of it on a
-> local kind cluster. Steps 1, 3 and 4 work as written.
+> local kind cluster, and `./hack/k3s-deploy.sh` on a k3d (k3s) one. Steps 1, 3 and 4 work as written.
 
 <details>
 <summary>What has to happen before it works, and how to install against another cluster</summary>
@@ -69,12 +69,15 @@ package pulls fine for the maintainer while 401ing for everyone else. The tag al
 [docs/RELEASING.md](docs/RELEASING.md) section 5.3 is the procedure. The `home` and `sources` URLs
 in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same repository and are
 equally unpublished. Until both are done, install from a checkout instead:
-`./hack/kind-deploy.sh` does all of this on a local kind cluster, and against any other cluster
-build the image, push it somewhere your nodes can read, and replace step 2 with
+`./hack/kind-deploy.sh` does all of this on a local kind cluster (or `./hack/k3s-deploy.sh` on a
+k3d one), and against any other cluster build the image, push it somewhere your nodes can read,
+and replace step 2 with
 `helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set
 image.repository=<your-registry>/gapura --set image.tag=0.1.0`, adding the no-LoadBalancer flags
 step 2 lists if your cluster needs them. Without those two `image.*` values the chart points at
-the same unpublished registry and the pods sit in `ImagePullBackOff`. Steps 1, 3 and 4 are
+the same unpublished registry and the pods sit in `ImagePullBackOff`. On single-node k3s there is
+also no registry needed at all: `docker save` the image and `sudo k3s ctr -n k8s.io images import`
+the tar, which lands it in the very containerd kubelet reads. Steps 1, 3 and 4 are
 unchanged.
 
 </details>
@@ -147,6 +150,33 @@ command above: the tunnel is what gives the `LoadBalancer` Service a reachable a
 which is exactly what step 4 expects.
 
 </details>
+
+**Stock k3s is the third case, and the commonest.** It *does* have a LoadBalancer implementation
+(klipper ServiceLB), but k3s ships traefik, and traefik already holds host ports 80 and 443 through
+it. A second `LoadBalancer` Service on those ports can never bind: nothing errors, the Service
+stays `<pending>` and the first command above does not fail, it hangs on `--wait` until Helm's
+timeout. Publish a NodePort and the node's address instead:
+
+```bash
+NODE=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].value}')
+helm install gapura oci://ghcr.io/davidgrldo/charts/gapura --version 0.1.0 \
+  --namespace gapura-system --create-namespace --wait \
+  --set service.type=NodePort --set service.nodePorts.http=30080 --set service.nodePorts.https=30443 \
+  --set publishService=false --set "publishAddresses={${NODE}}"
+```
+
+The published address carries no port, so step 4 needs the NodePort in its URL by hand -- the same
+trap the details block above explains -- and the port is one the node already listens on, no host
+port mapping required:
+
+```bash
+GW=$(kubectl -n gapura-demo get gateway main -o jsonpath='{.status.addresses[0].value}')
+curl -sS -H 'Host: echo.example' "http://${GW}:30080/echo?msg=it-works"
+```
+
+Traefik keeps running untouched: it is an ingress of its own kind, so it neither competes with
+Gapura nor notices it. Against a local k3d cluster, `./hack/k3s-deploy.sh` does all of the above in
+one go, and it is also the CI leg that keeps this path working.
 
 **3. A Gateway, a route, and something to route to.** The echo backend is the one
 [deploy/kind/fixture.yaml](deploy/kind/fixture.yaml) uses:
