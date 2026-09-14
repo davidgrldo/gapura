@@ -27,9 +27,10 @@ another Gateway onto the next free bound port, so two Gateways whose routes over
 distinct destinations. `partial` was never a way out: it covers tests that were **skipped**, or a
 run that needed steps the suite did not expect, never a test that failed.
 
-The extended section records the one extended feature claimed, `HTTPRouteRequestMirror`, passing
-1 of 1: a fire-and-forget, headers-only, plaintext-only copy with a bounded in-flight count, never
-able to delay or fail the request it shadows.
+The extended section records the four extended features claimed, all passing:
+`HTTPRouteRequestMirror` — a fire-and-forget, headers-only, plaintext-only copy with a bounded
+in-flight count, never able to delay or fail the request it shadows — and the redirect status
+codes 303, 307 and 308.
 
 ## Reproduce
 
@@ -42,6 +43,6 @@ git clone https://github.com/davidgrldo/gapura.git && cd gapura && git checkout 
 mapped to the chart's NodePorts), installs the Gateway API standard channel v1.6.2, builds the
 image and loads it into the cluster, installs `charts/gapura` with
 `charts/gapura/tests/values-kind.yaml`, then runs the upstream suite from a v1.6.2 checkout with
-`--supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRouteRequestMirror,PathMatchRegularExpression
+`--supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteRequestMirror,PathMatchRegularExpression
 --conformance-profiles=GATEWAY-HTTP`, no
 `--skip-tests` and no `--exempt-features`. Requires docker, kind, kubectl, helm and Go 1.26.

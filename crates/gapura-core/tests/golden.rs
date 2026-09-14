@@ -147,11 +147,14 @@ fn gateway_class_advertises_supported_features() {
         &vec![
             "Gateway".to_string(),
             "HTTPRoute".to_string(),
+            "HTTPRoute303RedirectStatusCode".to_string(),
+            "HTTPRoute307RedirectStatusCode".to_string(),
+            "HTTPRoute308RedirectStatusCode".to_string(),
             "HTTPRouteRequestMirror".to_string(),
             "PathMatchRegularExpression".to_string(),
             "ReferenceGrant".to_string()
         ],
-        "the GATEWAY-HTTP core feature set plus regex path matching and request mirroring, sorted as the CRD requires"
+        "the GATEWAY-HTTP core feature set plus regex matching, mirroring and the full redirect status enum, sorted as the CRD requires"
     );
 }
 

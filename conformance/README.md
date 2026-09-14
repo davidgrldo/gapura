@@ -6,19 +6,20 @@
 
 Profile GATEWAY-HTTP against Gateway API v1.6.2. Features claimed, and advertised in
 `GatewayClass.status.supportedFeatures`: core `Gateway`, `HTTPRoute`,
-`PathMatchRegularExpression`, `ReferenceGrant`, and the extended `HTTPRouteRequestMirror`. The
-regex claim leaves the counts below untouched: v1.6.2's standard channel carries no core regex
-path-match cases to unlock, so the feature is claimed for the channels and versions that gate on
-it, not for what this run measures. The mirror claim is what extended runs are for: it adds the
-one extended test that gates on it, and the report now carries an extended section.
+`PathMatchRegularExpression`, `ReferenceGrant`, plus the extended `HTTPRouteRequestMirror` and
+the redirect status codes `HTTPRoute303/307/308RedirectStatusCode`. The regex claim leaves the
+counts below untouched: v1.6.2's standard channel carries no core regex path-match cases to
+unlock, so the feature is claimed for the channels and versions that gate on it, not for what
+this run measures. The extended claims are what extended runs are for: each adds exactly the one
+test that gates on it, and the report's extended section keeps the score.
 
 ## Result
 
-37 of 37 core tests pass, 0 fail, 0 are skipped; the extended section is 1 of 1, the
-RequestMirror test. The report result is `success`, and the folder is submittable upstream with
-the next release run.
+37 of 37 core tests pass, 0 fail, 0 are skipped; the extended section is 4 of 4 — RequestMirror
+and the 303/307/308 redirect codes. The report result is `success`, and the folder is submittable
+upstream with the next release run.
 
-The one failure this profile carried for a long time was architectural, not a bug:
+The one core failure this profile carried for a long time was architectural, not a bug:
 `HTTPRouteMultipleGateways` attaches two routes that both match `PathPrefix /` with no hostname to
 two different Gateways and expects different backends from the same address. One Deployment with one
 published address cannot distinguish those two requests, whatever the precedence rules say; the
@@ -80,5 +81,5 @@ to the second Gateway's), installs the Gateway API standard channel v1.6.2, buil
 and loads it into the cluster, installs `charts/gapura` with `charts/gapura/tests/values-kind.yaml`
 (which binds the extra port and overrides the one Gateway's address), applies the second Gateway's
 Service (`hack/kind-second-service.yaml`), then runs the upstream suite from a v1.6.2 checkout with
-`--supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRouteRequestMirror,PathMatchRegularExpression
+`--supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteRequestMirror,PathMatchRegularExpression
 --conformance-profiles=GATEWAY-HTTP`. Requires docker, kind, kubectl, helm and Go 1.26.
