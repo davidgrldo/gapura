@@ -38,7 +38,25 @@ kubectl wait --for=condition=Established --timeout=60s \
   crd/backendtlspolicies.gateway.networking.k8s.io
 
 docker build -t "$IMAGE" .
-k3d image import "$IMAGE" --cluster "$CLUSTER"
+
+# k3d image import has a long-standing race: the tools node writes the tar to the image volume and
+# ctr inside the node reads it, and when the read loses the race ctr answers
+# "no such file or directory" -- while k3d exits 0 and prints "Successfully imported" anyway.
+# So: import in direct mode (docker cp into the node, no image volume), then verify the image is
+# really in the node's containerd, and only believe it when it is. A lost image must fail here,
+# not three minutes later as "Available: 0/2" at helm --wait.
+imported() {
+  docker exec "k3d-${CLUSTER}-server-0" \
+    ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images ls 2>/dev/null \
+    | grep -qF "$IMAGE"
+}
+for attempt in 1 2 3; do
+  k3d image import "$IMAGE" --cluster "$CLUSTER" --mode direct >/dev/null 2>&1 || true
+  imported && break
+  echo "image import attempt $attempt did not land in the node; retrying" >&2
+  sleep 2
+done
+imported || { echo "image $IMAGE never reached the node's containerd" >&2; exit 1; }
 
 helm upgrade --install gapura charts/gapura \
   --namespace "$NS" --create-namespace \
