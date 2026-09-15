@@ -70,6 +70,16 @@ pub struct MatchEntry {
     pub rule: usize,
 }
 
+/// A per-rule request limit, from the backend Service's `gapura.dev/rate-limit` annotation
+/// ("20/min"; seconds, minutes or hours). Enforced by the data plane per replica and keyed by
+/// client IP: with N replicas the effective allowance is N x limit, which is the honest shape
+/// for a gateway with no database, and `gapura.dev/rate-limit-by: ip` is the only keying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimit {
+    pub limit: u32,
+    pub window_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteRule {
     /// `namespace/name` of the HTTPRoute.
@@ -81,6 +91,10 @@ pub struct RouteRule {
     pub filters: Filters,
     pub backends: Vec<WeightedBackend>,
     pub timeouts: Timeouts,
+    /// None means unlimited. Carried per rule so the data plane can enforce at the point the
+    /// rule matched, before any upstream work is done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -222,6 +236,7 @@ mod tests {
                         weight: 1,
                     }],
                     timeouts: Timeouts::default(),
+                    rate_limit: None,
                 }],
             }],
             ports: BTreeMap::from([(

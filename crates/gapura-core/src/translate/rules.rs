@@ -3,17 +3,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::RateLimit;
 use crate::config::{
     Cluster, Filters, HeaderOps, KvMatch, Mirror, PathMatch, PathRewrite, Redirect, Rewrite,
     RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 use crate::duration;
 use crate::input::{
-    HeaderModifier, HttpRoute, HttpRouteFilter, HttpRouteMatch, PathModifier, RequestRedirect,
-    UrlRewrite,
+    HeaderModifier, HttpBackendRef, HttpRoute, HttpRouteFilter, HttpRouteMatch, PathModifier,
+    RequestRedirect, UrlRewrite,
 };
 use crate::snapshot::{ObjectRef, Snapshot};
 use crate::status::{reasons, types, Condition, ConditionStatus};
+
+/// Service annotations the translator reads for per-rule request limits.
+pub(crate) const RATE_LIMIT_ANNOTATION: &str = "gapura.dev/rate-limit";
+pub(crate) const RATE_LIMIT_BY_ANNOTATION: &str = "gapura.dev/rate-limit-by";
+
 use crate::translate::backends;
 
 /// Why a whole route is rejected. Always reported with reason `UnsupportedValue`.
@@ -108,6 +114,7 @@ pub(crate) fn compile(
             filters,
             backends,
             timeouts,
+            rate_limit: rate_limit_of(snap, &rref.namespace, &r.backend_refs),
         });
     }
     let resolved_refs = match first_ref_error {
@@ -837,5 +844,80 @@ spec:
             })
         );
         assert!(c.rules[0].filters.redirect.is_none());
+    }
+}
+
+/// The request limit a rule's backend Service asks for, from `gapura.dev/rate-limit` ("20/min";
+/// seconds, minutes or hours). The first backend Service carrying the annotation wins, in
+/// backendRef order -- a rule with several annotated backends is a config mistake, and one
+/// answer beats several. `gapura.dev/rate-limit-by` accepts only `ip`, the client address after
+/// the trusted-proxy walk; any other value disables the pair with a warning rather than
+/// silently keying by something unreviewed.
+fn rate_limit_of(snap: &Snapshot, route_ns: &str, refs: &[HttpBackendRef]) -> Option<RateLimit> {
+    for b in refs {
+        let ns = b.namespace.as_deref().unwrap_or(route_ns);
+        let Some(svc) = snap.services.get(&ObjectRef::new(ns, &b.name)) else {
+            continue;
+        };
+        let Some(value) = svc.metadata.annotations.get(RATE_LIMIT_ANNOTATION) else {
+            continue;
+        };
+        // An unsupported by-key or an unparseable value disables the pair: the route keeps
+        // serving, unlimited. core has no logging -- the translator's failure channel is
+        // conditions, and a mispriced limit is not a routing failure -- so this is silent
+        // here and stated plainly in the docs.
+        if let Some(by) = svc.metadata.annotations.get(RATE_LIMIT_BY_ANNOTATION) {
+            if by != "ip" {
+                return None;
+            }
+        }
+        return parse_rate_limit(value);
+    }
+    None
+}
+
+fn parse_rate_limit(value: &str) -> Option<RateLimit> {
+    let (count, unit) = value.split_once('/')?;
+    let limit = count.trim().parse::<u32>().ok().filter(|l| *l > 0)?;
+    let window_ms = match unit.trim() {
+        "s" => 1_000,
+        "min" => 60_000,
+        "h" => 3_600_000,
+        _ => return None,
+    };
+    Some(RateLimit { limit, window_ms })
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn units_parse_and_zero_or_garbage_do_not() {
+        assert_eq!(
+            parse_rate_limit("20/min"),
+            Some(RateLimit {
+                limit: 20,
+                window_ms: 60_000
+            })
+        );
+        assert_eq!(
+            parse_rate_limit("1/s"),
+            Some(RateLimit {
+                limit: 1,
+                window_ms: 1_000
+            })
+        );
+        assert_eq!(
+            parse_rate_limit("5/h"),
+            Some(RateLimit {
+                limit: 5,
+                window_ms: 3_600_000
+            })
+        );
+        assert_eq!(parse_rate_limit("0/min"), None);
+        assert_eq!(parse_rate_limit("20"), None);
+        assert_eq!(parse_rate_limit("soon"), None);
+        assert_eq!(parse_rate_limit("20/fortnight"), None);
     }
 }
