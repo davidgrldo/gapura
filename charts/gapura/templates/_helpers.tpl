@@ -36,17 +36,17 @@ app.kubernetes.io/component: gateway
 {{- end -}}
 
 {{- define "gapura.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create -}}
-{{- default (include "gapura.fullname" .) .Values.serviceAccount.name -}}
+{{- if (.Values.serviceAccount).create -}}
+{{- default (include "gapura.fullname" .) (.Values.serviceAccount).name -}}
 {{- else -}}
-{{- default "default" .Values.serviceAccount.name -}}
+{{- default "default" (.Values.serviceAccount).name -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "gapura.image" -}}
-{{- if .Values.image.digest -}}
-{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- if (.Values.image).digest -}}
+{{- printf "%s@%s" (.Values.image).repository (.Values.image).digest -}}
 {{- else -}}
-{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
+{{- printf "%s:%s" (.Values.image).repository (default .Chart.AppVersion (.Values.image).tag) -}}
 {{- end -}}
 {{- end -}}

@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
+  installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
+  so a section introduced after the installed version (like `tests` or `metrics`) arrives as an
+  explicit null, and the templates' bare `.Values.section.field` access died on a nil pointer.
+  Every multi-level access now uses the chart's parenthesized nil-safe form, reading a null
+  section as off: the gated resource renders absent instead of materializing silently, which is
+  the safe direction for an upgrade. Pinned by the `reuse-null` render case, which nulls both
+  crashers and must equal the default render minus the smoke test.
 - Schema-rejected objects are counted, not only logged: `gapura_objects_rejected_total{kind}`
   rises beside the existing WARN (#29). The failure class an operator could previously catch only
   by reading logs — a backend Service whose objects are dropped keeps resolving while the proxy

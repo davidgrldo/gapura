@@ -1,4 +1,4 @@
-{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if ((.Values.metrics).serviceMonitor).enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -6,7 +6,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "gapura.labels" . | nindent 4 }}
-    {{- with .Values.metrics.serviceMonitor.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+    {{- with ((.Values.metrics).serviceMonitor).labels }}{{- toYaml . | nindent 4 }}{{- end }}
 spec:
   selector:
     matchLabels:
@@ -18,8 +18,8 @@ spec:
   endpoints:
   - port: admin
     path: /metrics
-    interval: {{ .Values.metrics.serviceMonitor.interval }}
-    {{- with .Values.metrics.serviceMonitor.scrapeTimeout }}
+    interval: {{ ((.Values.metrics).serviceMonitor).interval }}
+    {{- with ((.Values.metrics).serviceMonitor).scrapeTimeout }}
     scrapeTimeout: {{ . }}
     {{- end }}
 {{- end }}
