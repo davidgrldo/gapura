@@ -50,6 +50,9 @@ pub struct GapuraProxy {
     pub store: Arc<Store>,
     /// Networks whose `X-Forwarded-For` the access log believes. Empty means none.
     pub trusted_proxies: Vec<client::Cidr>,
+    /// Header names (e.g. CF-Connecting-IP) believed for the client address when no
+    /// X-Forwarded-For chain exists and the peer is a trusted proxy (`--trusted-client-header`).
+    pub trusted_client_headers: Vec<String>,
     /// Whether the access log carries the request's query string (`--access-log-query`).
     pub access_log_query: bool,
 }
@@ -648,8 +651,20 @@ impl ProxyHttp for GapuraProxy {
 
         let upstream = ctx.upstream.map(|a| a.to_string());
         let forwarded_for = header_str(session.req_header(), "x-forwarded-for").map(str::to_string);
+        // First configured single-IP header present on the request, in flag order; the client_ip
+        // walk decides whether it may be believed.
+        let named = self
+            .trusted_client_headers
+            .iter()
+            .find_map(|name| header_str(session.req_header(), name.as_str()));
         let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|a| {
-            client::client_ip(a.ip(), forwarded_for.as_deref(), &self.trusted_proxies).to_string()
+            client::client_ip(
+                a.ip(),
+                forwarded_for.as_deref(),
+                &self.trusted_proxies,
+                named,
+            )
+            .to_string()
         });
         let user_agent = header_str(session.req_header(), "user-agent").map(str::to_string);
         // Read off the raw URI, not the extracted path: extraction strips the query, and this

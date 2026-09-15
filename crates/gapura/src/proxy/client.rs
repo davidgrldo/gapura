@@ -61,13 +61,26 @@ fn same_prefix(a: u128, b: u128, bits: u32, width: u32) -> bool {
 /// chain from the right, the first address no trusted proxy vouches for is the client. Anything a
 /// caller wrote itself sits further left than that and is never reached. With no trusted network
 /// configured the header is ignored entirely, which is the behaviour to keep by default.
-pub fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &[Cidr]) -> IpAddr {
+///
+/// `named` is the value of a configured single-IP header such as `CF-Connecting-IP` or
+/// `X-Real-IP`, read by the caller from the request. It is consulted only when no XFF chain is
+/// present at all -- the shape of a CDN whose tunnel names the client nowhere else -- and the
+/// same rule guards it: the peer must be trusted for the header to be believed, since any caller
+/// can write these headers too. When a chain exists it keeps its precedence, including the
+/// all-trusted chain that resolves to its own first address. An unparseable value is ignored,
+/// the way an unparseable XFF hop is skipped.
+pub fn client_ip(
+    peer: IpAddr,
+    forwarded_for: Option<&str>,
+    trusted: &[Cidr],
+    named: Option<&str>,
+) -> IpAddr {
     let trusts = |ip: IpAddr| trusted.iter().any(|net| net.contains(ip));
     if !trusts(peer) {
         return peer;
     }
     let Some(chain) = forwarded_for else {
-        return peer;
+        return named_header_ip(named).unwrap_or(peer);
     };
     // Right to left, so `leftmost` ends up holding the far end of the chain.
     let mut leftmost = None;
@@ -80,7 +93,12 @@ pub fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &[Cidr]) ->
         }
         leftmost = Some(ip);
     }
-    leftmost.unwrap_or(peer)
+    // Every hop was trusted, so the chain names no client this deployment can believe.
+    leftmost.unwrap_or_else(|| named_header_ip(named).unwrap_or(peer))
+}
+
+fn named_header_ip(named: Option<&str>) -> Option<IpAddr> {
+    named?.trim().parse::<IpAddr>().ok()
 }
 
 #[cfg(test)]
@@ -97,14 +115,19 @@ mod tests {
     #[test]
     fn without_a_trusted_network_the_peer_is_the_client() {
         // The safe default: no configuration means the header is never believed.
-        let got = client_ip(ip("10.0.0.7"), Some("1.2.3.4"), &[]);
+        let got = client_ip(ip("10.0.0.7"), Some("1.2.3.4"), &[], None);
         assert_eq!(got, ip("10.0.0.7"));
     }
 
     #[test]
     fn a_peer_we_do_not_trust_cannot_name_the_client() {
         // Anyone may send this header. Only a proxy we trust is allowed to be believed.
-        let got = client_ip(ip("203.0.113.9"), Some("1.2.3.4"), &nets(&["10.0.0.0/8"]));
+        let got = client_ip(
+            ip("203.0.113.9"),
+            Some("1.2.3.4"),
+            &nets(&["10.0.0.0/8"]),
+            None,
+        );
         assert_eq!(got, ip("203.0.113.9"));
     }
 
@@ -114,6 +137,7 @@ mod tests {
             ip("10.0.0.253"),
             Some("198.51.100.5, 10.0.0.110"),
             &nets(&["10.0.0.0/8"]),
+            None,
         );
         assert_eq!(got, ip("198.51.100.5"));
     }
@@ -125,6 +149,7 @@ mod tests {
             ip("10.0.0.253"),
             Some("1.2.3.4, 198.51.100.5"),
             &nets(&["10.0.0.0/8"]),
+            None,
         );
         assert_eq!(got, ip("198.51.100.5"));
     }
@@ -135,13 +160,60 @@ mod tests {
             ip("10.0.0.253"),
             Some("10.0.0.4, 10.0.0.110"),
             &nets(&["10.0.0.0/8"]),
+            None,
         );
         assert_eq!(got, ip("10.0.0.4"));
     }
 
     #[test]
+    fn a_named_header_is_believed_when_the_peer_is_trusted_and_no_xff_exists() {
+        // The CDN-tunnel shape: X-Forwarded-For absent, CF-Connecting-IP carries the visitor.
+        let got = client_ip(
+            ip("10.0.0.253"),
+            None,
+            &nets(&["10.0.0.0/8"]),
+            Some("198.51.100.7"),
+        );
+        assert_eq!(got, ip("198.51.100.7"));
+    }
+
+    #[test]
+    fn a_named_header_never_overrides_a_chain_that_names_a_client() {
+        let got = client_ip(
+            ip("10.0.0.253"),
+            Some("198.51.100.5, 10.0.0.110"),
+            &nets(&["10.0.0.0/8"]),
+            Some("203.0.113.1"),
+        );
+        assert_eq!(got, ip("198.51.100.5"));
+    }
+
+    #[test]
+    fn a_named_header_from_a_peer_we_do_not_trust_is_ignored() {
+        // Same rule as the chain: anyone may write the header, only a trusted peer is believed.
+        let got = client_ip(
+            ip("203.0.113.9"),
+            None,
+            &nets(&["10.0.0.0/8"]),
+            Some("198.51.100.7"),
+        );
+        assert_eq!(got, ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn an_unparseable_named_header_is_ignored() {
+        let got = client_ip(
+            ip("10.0.0.253"),
+            None,
+            &nets(&["10.0.0.0/8"]),
+            Some("not-an-ip"),
+        );
+        assert_eq!(got, ip("10.0.0.253"));
+    }
+
+    #[test]
     fn a_trusted_peer_that_forwarded_nothing_is_itself_the_client() {
-        let got = client_ip(ip("10.0.0.253"), None, &nets(&["10.0.0.0/8"]));
+        let got = client_ip(ip("10.0.0.253"), None, &nets(&["10.0.0.0/8"]), None);
         assert_eq!(got, ip("10.0.0.253"));
     }
 
