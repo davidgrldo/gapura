@@ -118,6 +118,11 @@ means what it usually does, moving from one version below to a later one. Releas
 - RELEASING gains section 8, the post-public listings (Gateway API implementations page,
   upstream report submission once the profile allows it, Artifact Hub, README badge), and 5.3
   now points at the quickstart workflow as the standing private-package detector.
+- The access log can carry the query string. Off by default (`--access-log-query`, chart value
+  `accessLog.query`): query strings carry tokens and secrets and an access log is written to be
+  read. With it on, the line gains a `query` field naming the exact request — the `path` field
+  never carries it — so a parameterized endpoint's log line is finally correlatable to the
+  request that produced it.
 
 ## 0.1.0 — 2026-09-11
 
