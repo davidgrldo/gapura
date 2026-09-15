@@ -26,6 +26,10 @@ helm upgrade --install gapura charts/gapura \
 kubectl -n "$NS" rollout restart deploy/gapura
 kubectl -n "$NS" rollout status deploy/gapura --timeout=3m
 
+# The second address the conformance suite needs: nodePort 30081 -> the remapped bind port of
+# the second Gateway colliding on 80 (see hack/kind-second-service.yaml).
+kubectl apply -f hack/kind-second-service.yaml
+
 # The conformance suite brings its own Gateways on port 80; a second one from this fixture would
 # compete for the same address, so conformance.sh sets FIXTURE=0 and gets the chart only.
 if [ "${FIXTURE:-1}" = 1 ]; then

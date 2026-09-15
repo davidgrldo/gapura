@@ -8,6 +8,19 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An address per Gateway: `--gateway-address namespace/name=ip-or-host` (repeatable) publishes
+  per-Gateway status addresses instead of one shared list, and the translator remaps the listener of a Gateway that carries such an override —
+  the declaration that it is individually addressable — onto the next free bound port of its
+  protocol whenever it would tie with another Gateway — the proxy
+  only ever binds the `--listen-http`/`--listen-https` sockets, so a deployment that wants
+  addressable Gateways binds a second port (chart value `extraListenHttp`) and points a Service
+  at it. The allocation is deterministic, so the Service mapping is stable. Listeners whose
+  requests precedence can already tell apart — disjoint or strictly-more-specific hostnames, or
+  one route attached to both — keep sharing the port, and with a single bound port nothing
+  changes at all. This is what the `HTTPRouteMultipleGateways` conformance test needed: the
+  GATEWAY-HTTP profile now passes 37 of 37 core plus 1 of 1 extended, the chart's `gatewayAddresses`
+  value carries the per-Gateway addresses, and `hack/conformance.sh` runs with an empty
+  `EXPECTED_FAILURES` — any failure fails the run.
 - `RequestRedirect` accepts the full statusCode enum the CRD defines: 301, 302 (the default),
   303, 307 and 308. The response was already status-plus-Location with nothing rewritten —
   method and body preservation on 307/308 is the client's obligation, and the server's duty is

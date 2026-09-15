@@ -117,6 +117,7 @@ mod tests {
             listeners: vec![ListenerConfig {
                 id: "infra/main/http".into(),
                 port: 80,
+                client_port: None,
                 protocol: Protocol::Https,
                 hostname: None,
                 tls: Some(TlsBundle {

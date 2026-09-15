@@ -41,6 +41,13 @@ pub struct Args {
     #[arg(long = "publish-address")]
     pub publish_addresses: Vec<String>,
 
+    /// Addresses published in one Gateway's status, as `namespace/name=ip-or-host`. Repeatable;
+    /// a Gateway with an override does not get the global `--publish-address` list. This is
+    /// what makes two Gateways whose routes overlap tellable apart: give each its own address
+    /// (its own Service), and pair it with the bind-port remap of the colliding listener.
+    #[arg(long = "gateway-address", value_name = "NAMESPACE/NAME=ADDRESS")]
+    pub gateway_addresses: Vec<String>,
+
     /// Network allowed to set `X-Forwarded-For`, as a CIDR or a bare address. Repeatable.
     /// Without this the header is ignored and the access log records the peer, which is the
     /// proxy itself wherever one sits in front.
@@ -158,13 +165,32 @@ impl Args {
         }
     }
 
-    pub fn settings(&self) -> Settings {
-        Settings {
+    pub fn settings(&self) -> Result<Settings, String> {
+        let mut overrides = std::collections::BTreeMap::new();
+        for entry in &self.gateway_addresses {
+            let (ref_, address) = entry.split_once('=').ok_or_else(|| {
+                format!("--gateway-address must be namespace/name=address, got {entry:?}")
+            })?;
+            let (namespace, name) = ref_.split_once('/').ok_or_else(|| {
+                format!("--gateway-address must be namespace/name=address, got {entry:?}")
+            })?;
+            if namespace.is_empty() || name.is_empty() || address.is_empty() {
+                return Err(format!(
+                    "--gateway-address must be namespace/name=address, got {entry:?}"
+                ));
+            }
+            overrides
+                .entry(format!("{namespace}/{name}"))
+                .or_insert_with(Vec::new)
+                .push(address.to_string());
+        }
+        Ok(Settings {
             controller_name: self.controller_name.clone(),
             http_ports: ports_of(&self.listen_http),
             https_ports: ports_of(&self.listen_https),
             gateway_addresses: self.publish_addresses.clone(),
-        }
+            gateway_address_overrides: overrides,
+        })
     }
 }
 
@@ -183,10 +209,58 @@ mod tests {
     #[test]
     fn default_ports_are_split_per_protocol() {
         let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x"]);
-        let settings = args.settings();
+        let settings = args.settings().expect("valid settings");
         assert_eq!(settings.http_ports, vec![80]);
         assert_eq!(settings.https_ports, vec![443]);
         assert_eq!(settings.controller_name, "gapura.dev/controller");
+        assert!(settings.gateway_address_overrides.is_empty());
+    }
+
+    #[test]
+    fn gateway_addresses_group_per_gateway() {
+        let args = Args::parse_from([
+            "gapura",
+            "--config-dir",
+            "/tmp/x",
+            "--gateway-address=infra/a=127.0.0.1",
+            "--gateway-address=infra/a=lb.example.com",
+            "--gateway-address=infra/b=127.0.0.2",
+        ]);
+        let s = args.settings().expect("valid settings");
+        assert_eq!(
+            s.gateway_address_overrides
+                .get("infra/a")
+                .map(Vec::as_slice),
+            Some(["127.0.0.1".to_string(), "lb.example.com".to_string()].as_slice())
+        );
+        assert_eq!(
+            s.gateway_address_overrides
+                .get("infra/b")
+                .map(Vec::as_slice),
+            Some(["127.0.0.2".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn malformed_gateway_addresses_are_rejected() {
+        for bad in [
+            "infra/a",          // no =address
+            "infra=127.0.0.1",  // no namespace/name on the left
+            "=127.0.0.1",       // empty ref
+            "infra/=127.0.0.1", // empty name
+            "infra/a=",         // empty address
+        ] {
+            let args = Args::parse_from([
+                "gapura",
+                "--config-dir",
+                "/tmp/x",
+                format!("--gateway-address={bad}").as_str(),
+            ]);
+            assert!(
+                args.settings().is_err(),
+                "{bad:?} must be rejected by settings()"
+            );
+        }
     }
 
     #[test]
@@ -204,7 +278,7 @@ mod tests {
             "--listen-https",
             "0.0.0.0:8443",
         ]);
-        let settings = args.settings();
+        let settings = args.settings().expect("valid settings");
         assert_eq!(settings.http_ports, vec![80, 8080]);
         assert_eq!(settings.https_ports, vec![8443]);
     }

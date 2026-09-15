@@ -1,0 +1,27 @@
+# The second address for the conformance run: nodePort 30081 (reached from the host via the
+# 127.0.0.2 extraPortMapping in kind-config.yaml) lands on targetPort 10000 — the extra bound
+# port the chart opens via extraListenHttp (values-kind.yaml), which the translator maps the
+# second Gateway's colliding listener onto (sorted order: all-namespaces keeps 80,
+# same-namespace takes 10000). The chart's own Service keeps serving the first Gateway on
+# named targetPort http. Applied by hack/kind-deploy.sh; not part of the chart because a
+# second colliding Gateway is a property of this conformance profile, not of every deployment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gapura-second-gateway
+  namespace: gapura-system
+  labels:
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+  ports:
+  - name: http-second-gateway
+    port: 80
+    targetPort: 10000
+    nodePort: 30081
+    protocol: TCP

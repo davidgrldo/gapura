@@ -43,6 +43,18 @@ ports:
 # `admin` watches only the admin thread.
 livenessPort: http
 
+# Additional plain-HTTP sockets each replica binds at startup, besides ports.http. These are
+# the pool the translator remaps colliding listeners onto (an address per Gateway): when two
+# Gateways' routes would tie on one port, the later one moves to a free bound port, so give
+# every colliding Gateway a port here and a Service (or LoadBalancer address) pointing at it.
+# HTTPS equivalent: extraListenHttps. Empty keeps a single-socket deployment.
+extraListenHttp: []
+extraListenHttps: []
+# Per-Gateway status addresses, keyed `namespace/name`, as a list of IPs or hostnames. A
+# Gateway named here gets exactly these in `status.addresses`; every other Gateway keeps
+# publishAddresses. Pair with extraListenHttp so each address reaches its own Gateway.
+gatewayAddresses: {}
+
 service:
   type: LoadBalancer
   annotations: {}
