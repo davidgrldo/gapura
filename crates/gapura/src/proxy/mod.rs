@@ -7,6 +7,7 @@
 
 pub mod attrs;
 pub mod client;
+pub mod rate_limit;
 pub mod select;
 pub mod tls;
 
@@ -50,6 +51,8 @@ pub struct GapuraProxy {
     pub store: Arc<Store>,
     /// Networks whose `X-Forwarded-For` the access log believes. Empty means none.
     pub trusted_proxies: Vec<client::Cidr>,
+    /// Per-replica request limits, shared by every worker thread.
+    pub limiter: rate_limit::RateLimiter,
     /// Whether the access log carries the request's query string (`--access-log-query`).
     pub access_log_query: bool,
 }
@@ -187,6 +190,28 @@ fn apply_header_ops(target: &mut impl HeaderTarget, ops: &HeaderOps) -> Result<(
 }
 
 /// A locally generated error response: plain text, request id, never any internal detail.
+/// The rate-limit answer: like `write_local`, plus the three headers a throttled client reads.
+async fn write_429(
+    session: &mut Session,
+    limit: u32,
+    retry_after_secs: u64,
+    request_id: &str,
+) -> Result<()> {
+    let body = "429 too many requests\n";
+    let mut resp = ResponseHeader::build(429u16, Some(6))?;
+    resp.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+    resp.insert_header("Content-Length", body.len().to_string())?;
+    resp.insert_header("Cache-Control", "no-store")?;
+    resp.insert_header("Retry-After", retry_after_secs.to_string())?;
+    resp.insert_header("X-RateLimit-Limit", limit.to_string())?;
+    resp.insert_header("X-RateLimit-Remaining", "0")?;
+    resp.insert_header("X-Request-Id", request_id.to_string())?;
+    session.write_response_header(Box::new(resp), false).await?;
+    session
+        .write_response_body(Some(Bytes::from(body)), true)
+        .await
+}
+
 async fn write_local(session: &mut Session, code: u16, request_id: &str) -> Result<()> {
     let body = format!("{code} {}\n", reason_phrase(code));
     let mut resp = ResponseHeader::build(code, Some(4))?;
@@ -198,6 +223,15 @@ async fn write_local(session: &mut Session, code: u16, request_id: &str) -> Resu
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await
+}
+
+/// The client address after the trusted-proxy walk, the same answer the access log records:
+/// one computation so limiting and logging can never disagree about who the client is.
+fn effective_client_ip(session: &Session, trusted: &[client::Cidr]) -> Option<std::net::IpAddr> {
+    session.client_addr().and_then(|a| a.as_inet()).map(|a| {
+        let forwarded_for = header_str(session.req_header(), "x-forwarded-for");
+        client::client_ip(a.ip(), forwarded_for, trusted)
+    })
 }
 
 fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
@@ -380,6 +414,31 @@ impl ProxyHttp for GapuraProxy {
                 matched,
                 cluster,
             } => {
+                // The rule's limit, if its backend Service asked for one, is enforced here:
+                // after the match (the route is known), before any upstream work (the limit
+                // must not cost the backend anything). Same client answer the access log
+                // records, so a limited request names the same client a served one would.
+                let rt = ctx.runtime.as_ref().expect("set above");
+                if let Some(rl) = &rt.config.listeners[listener].rules[rule].rate_limit {
+                    let route = rt.config.listeners[listener].rules[rule].route.clone();
+                    if let Some(ip) = effective_client_ip(session, &self.trusted_proxies) {
+                        if let rate_limit::Outcome::Limited {
+                            limit,
+                            retry_after_secs,
+                        } = self.limiter.check(&route, ip, rl)
+                        {
+                            METRICS
+                                .rate_limited_total
+                                .with_label_values(&[&route])
+                                .inc();
+                            ctx.listener = Some(listener);
+                            ctx.rule = Some(rule);
+                            ctx.local_status = Some(429);
+                            write_429(session, limit, retry_after_secs, &ctx.request_id).await?;
+                            return Ok(true);
+                        }
+                    }
+                }
                 ctx.listener = Some(listener);
                 ctx.rule = Some(rule);
                 ctx.matched = Some(matched);
