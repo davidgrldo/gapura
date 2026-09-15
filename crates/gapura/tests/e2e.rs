@@ -959,6 +959,71 @@ async fn the_query_string_is_logged_only_when_asked_for() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_named_client_header_is_believed_behind_a_trusted_proxy() {
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead),
+        &[
+            "--trusted-proxy",
+            "127.0.0.0/8",
+            "--trusted-client-header",
+            "CF-Connecting-IP",
+        ],
+    )
+    .await;
+    // No X-Forwarded-For at all -- the CDN-tunnel shape -- only the named header.
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x"))
+        .header("CF-Connecting-IP", "198.51.100.7")
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert_eq!(
+        line["client_ip"], "198.51.100.7",
+        "trusted peer, no chain: the named header is the only place the client is named"
+    );
+
+    // A chain that names a client still wins over the header.
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x"))
+        .header("CF-Connecting-IP", "203.0.113.1")
+        .header("X-Forwarded-For", "198.51.100.5")
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert_eq!(
+        line["client_ip"], "198.51.100.5",
+        "a chain that names a client keeps its precedence: {line}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_client_header_from_an_untrusted_peer_is_ignored() {
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead),
+        &["--trusted-client-header", "CF-Connecting-IP"],
+    )
+    .await;
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x"))
+        .header("CF-Connecting-IP", "198.51.100.7")
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert_eq!(
+        line["client_ip"], "127.0.0.1",
+        "no trusted network, so the header is not believed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_untrusted_caller_cannot_name_itself_in_the_access_log() {
     let (gw, c) = setup().await;
     let r = c

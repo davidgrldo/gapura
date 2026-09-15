@@ -54,6 +54,13 @@ pub struct Args {
     #[arg(long = "trusted-proxy", value_name = "CIDR")]
     pub trusted_proxies: Vec<crate::proxy::client::Cidr>,
 
+    /// A request header naming the client by a single IP, e.g. CF-Connecting-IP or X-Real-IP.
+    /// Believed only when the peer is a --trusted-proxy and the request carries no
+    /// X-Forwarded-For chain: the shape of a CDN tunnel that names the client nowhere else.
+    /// Repeatable; the first header present on a request wins.
+    #[arg(long = "trusted-client-header", value_name = "NAME")]
+    pub trusted_client_headers: Vec<String>,
+
     /// Include the request's query string in the access log. Off by default: query strings carry
     /// tokens and other secrets, and an access log is written to be read. With it on, a log line
     /// names the exact request, not just its path.
@@ -458,5 +465,22 @@ mod trusted_proxy_tests {
         assert!(!args.access_log_query);
         let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x", "--access-log-query"]);
         assert!(args.access_log_query);
+    }
+
+    #[test]
+    fn trusted_client_headers_are_parsed_and_repeatable() {
+        let args = Args::parse_from([
+            "gapura",
+            "--config-dir",
+            "/tmp/x",
+            "--trusted-client-header",
+            "CF-Connecting-IP",
+            "--trusted-client-header",
+            "X-Real-IP",
+        ]);
+        assert_eq!(
+            args.trusted_client_headers,
+            ["CF-Connecting-IP", "X-Real-IP"]
+        );
     }
 }

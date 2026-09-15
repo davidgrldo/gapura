@@ -86,6 +86,13 @@ publishService: true
 # write this header, and every network listed here is one whose word is taken for it.
 trustedProxies: []
 
+# Request headers naming the client by a single IP (the flag is --trusted-client-header), e.g.
+# CF-Connecting-IP behind a Cloudflare tunnel or X-Real-IP behind nginx. Believed only when the
+# peer is a trustedProxies network and the request carries no X-Forwarded-For chain -- the shape
+# of a CDN tunnel that names the client nowhere else. Order matters: the first header present on
+# a request wins.
+trustedClientHeaders: []
+
 # Include the request's query string in the access log (the flag is --access-log-query). Off by
 # default: query strings carry tokens and other secrets, and an access log is written to be
 # read. Turn it on when a log line has to name the exact request, not just its path -- the field
