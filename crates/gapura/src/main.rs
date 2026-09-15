@@ -112,6 +112,7 @@ fn main() {
         proxy::GapuraProxy {
             store: store.clone(),
             trusted_proxies: args.trusted_proxies.clone(),
+            limiter: Default::default(),
             access_log_query: args.access_log_query,
         },
     );

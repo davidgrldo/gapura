@@ -182,6 +182,8 @@ spec:
     backendRefs: [{{ name: empty, port: 80 }}]
   - matches: [{{ path: {{ type: PathPrefix, value: /retry }} }}]
     backendRefs: [{{ name: flaky, port: 80 }}]
+  - matches: [{{ path: {{ type: PathPrefix, value: /limited }} }}]
+    backendRefs: [{{ name: limited, port: 80 }}]
   - matches: [{{ path: {{ type: RegularExpression, value: "^/v\\d+/info" }} }}]
     backendRefs: [{{ name: echo, port: 80 }}]
   - matches: [{{ path: {{ type: PathPrefix, value: /mirror }} }}]
@@ -244,6 +246,21 @@ spec: {{ ports: [{{ name: http, port: 80 }}] }}
 apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
 metadata: {{ name: shadow-1, namespace: apps, labels: {{ kubernetes.io/service-name: shadow }} }}
+addressType: IPv4
+endpoints: [{{ addresses: ["{up_ip}"], conditions: {{ ready: true }} }}]
+ports: [{{ name: http, port: {up_port} }}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: limited
+  namespace: apps
+  annotations: {{ gapura.dev/rate-limit: "3/min" }}
+spec: {{ ports: [{{ name: http, port: 80 }}] }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {{ name: limited-1, namespace: apps, labels: {{ kubernetes.io/service-name: limited }} }}
 addressType: IPv4
 endpoints: [{{ addresses: ["{up_ip}"], conditions: {{ ready: true }} }}]
 ports: [{{ name: http, port: {up_port} }}]
@@ -786,6 +803,57 @@ async fn access_log_records_a_client_that_went_away() {
         "an abort is not answered, so there is no status to log: {line}"
     );
     drop(sock);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
+    let (gw, c) = setup().await;
+    // Eight rapid requests against a 3/min limit: at most one window boundary can fall inside
+    // the loop, so at most 3 + 3 can be served and a 429 is guaranteed within the eight.
+    let mut limited = None;
+    for _ in 0..8 {
+        let r = c
+            .get(url(&gw, "echo.test", "/limited"))
+            .send()
+            .await
+            .unwrap();
+        if r.status() == 429 {
+            limited = Some(r);
+            break;
+        }
+    }
+    let r = limited.expect("8 rapid requests against a 3/min limit must trip within two buckets");
+    assert_eq!(r.headers()["x-ratelimit-limit"], "3");
+    assert_eq!(r.headers()["x-ratelimit-remaining"], "0");
+    let retry: u64 = r.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (1..=60).contains(&retry),
+        "the rest of this minute's window: {retry}"
+    );
+    assert!(r.headers().contains_key("x-request-id"));
+    // The rejection is a fact of the route, so it is counted where the traffic is.
+    let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(metrics.contains("gapura_rate_limited_total"), "{metrics}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlimited_route_is_untouched_by_a_neighbors_limit() {
+    let (gw, c) = setup().await;
+    // The limit lives on the rule whose backend carries the annotation; /api/x backs onto the
+    // unannotated echo service and must keep answering.
+    for _ in 0..5 {
+        let r = c.get(url(&gw, "echo.test", "/api/x")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "no annotation, no limit");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -15,6 +15,7 @@ use serde::Serialize;
 pub struct Metrics {
     /// labels: route (`ns/name` or `-`), code
     pub requests_total: IntCounterVec,
+    pub rate_limited_total: IntCounterVec,
     /// labels: route
     pub request_duration_seconds: HistogramVec,
     /// labels: cluster, kind (`connect`, `timeout`, `read`, `other`)
@@ -92,6 +93,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
         "gapura_watch_disconnects_total",
         "Watch streams that failed and were restarted",
         &["kind"]
+    )
+    .expect("metric registered once"),
+    rate_limited_total: register_int_counter_vec!(
+        "gapura_rate_limited_total",
+        "Requests rejected by a per-rule rate limit, by route.",
+        &["route"]
     )
     .expect("metric registered once"),
     status_writes_total: register_int_counter_vec!(

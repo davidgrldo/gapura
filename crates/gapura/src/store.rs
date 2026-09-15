@@ -344,6 +344,7 @@ mod tests {
             filters: Default::default(),
             backends: vec![],
             timeouts: Timeouts::default(),
+            rate_limit: None,
         }];
         let rt = Runtime::new(
             Config {
