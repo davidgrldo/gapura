@@ -58,7 +58,7 @@ fn main() {
     }
 
     let store = Arc::new(store::Store::empty());
-    let settings = args.settings();
+    let settings = args.settings().expect("valid settings");
     if let Some(dir) = &args.config_dir {
         match source::file::apply(dir, &settings, &store) {
             Ok(summary) => tracing::info!(?summary, dir = %dir.display(), "config loaded"),

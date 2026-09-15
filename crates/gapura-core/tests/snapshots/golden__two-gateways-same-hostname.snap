@@ -38,7 +38,8 @@ config:
             request_ms: ~
             backend_request_ms: ~
     - id: infra/beta/http
-      port: 80
+      port: 10000
+      client_port: 80
       protocol: Http
       hostname: ~
       tls: ~
@@ -81,6 +82,7 @@ config:
           query: []
           method: ~
         rule: 0
+    10000:
       - listener: 1
         hostname: ~
         matcher:
@@ -161,7 +163,7 @@ status:
     namespace: infra
     name: beta
     addresses:
-      - 10.0.0.1
+      - 203.0.113.9
     conditions:
       - type: Accepted
         status: "True"
