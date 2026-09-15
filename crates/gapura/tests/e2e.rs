@@ -305,6 +305,20 @@ async fn setup() -> (Gateway, reqwest::Client) {
     (gw, c)
 }
 
+/// True once the admin's /debug/config holds at least one listener: the same store the proxy
+/// routes from, so a "yes" means the first config swap already happened.
+async fn ready_to_serve(admin: u16) -> bool {
+    let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/debug/config")).await else {
+        return false;
+    };
+    let Ok(v) = r.json::<serde_json::Value>().await else {
+        return false;
+    };
+    v.get("listeners")
+        .and_then(|l| l.as_array())
+        .is_some_and(|l| !l.is_empty())
+}
+
 /// Start the binary on ports chosen here, rendering the config once the http port is known.
 ///
 /// `free_port` drops its listener before the child binds, so another test binary running in
@@ -369,9 +383,16 @@ async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> G
                 break;
             }
             if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-                // Pingora binds each service independently: /readyz only proves the admin listener
-                // and the loaded config, so also wait for the data-plane port to accept connections.
-                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                // Pingora binds each service independently: /readyz only proves the admin listener,
+                // and a TCP accept on the data port only proves its socket. Neither proves the
+                // first config swap reached the store the proxy routes from -- on a loaded runner
+                // the gap was observable as a 404 "no route" for the test's first request. The
+                // store is the same one /debug/config serves, so waiting for it to hold at least
+                // one listener is waiting for the proxy to have something to route with.
+                if r.status() == 200
+                    && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok()
+                    && ready_to_serve(admin).await
+                {
                     ready = true;
                     break;
                 }
@@ -767,7 +788,11 @@ async fn access_log_records_a_client_that_went_away() {
         .unwrap();
     sock.write_all(
         concat!(
-            "POST /api/abort HTTP/1.1\r\n",
+            // The path carries "slow" on purpose: the mock upstream sleeps 600 ms for it, so it
+            // cannot answer before the half-close below lands. Without that, which side ended
+            // the request was a race -- on a fast runner the 200 came back first and the line
+            // logged status 200 with client_abort, not the status 0 this test asserts.
+            "POST /api/slow-abort HTTP/1.1\r\n",
             "Host: echo.test\r\n",
             "X-Request-Id: log-abort\r\n",
             "Content-Length: 32\r\n",
