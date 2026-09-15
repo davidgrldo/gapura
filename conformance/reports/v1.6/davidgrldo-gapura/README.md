@@ -2,19 +2,13 @@
 
 Gapura is a Kubernetes Gateway API gateway built on Pingora. One binary, no database: each replica
 watches the API server, translates Gateway API resources into a routing table, and serves traffic
-from it. Source and issues: <!-- markdown-link-check-disable --> https://github.com/davidgrldo/gapura <!-- markdown-link-check-enable -->
+from it. Source and issues: https://github.com/davidgrldo/gapura
 
 ## Table of contents
 
 | API channel | Implementation version | Mode | Report |
 |-------------|------------------------|------|--------|
-| standard | <!-- markdown-link-check-disable --> [v0.1.0](https://github.com/davidgrldo/gapura/releases/tag/v0.1.0) <!-- markdown-link-check-enable --> | default | [v0.1.0 report](./standard-v0.1.0-default-report.yaml) |
-
-<!-- REMOVE WHEN PUBLIC: delete this paragraph, and the markdown-link-check-disable/enable comments above, once github.com/davidgrldo/gapura is public and v0.1.0 is tagged. -->
-No GitHub URL here resolves yet: neither link above, nor the clone URL under Reproduce below. The
-repository has not been published and no `v0.1.0` tag exists. Both arrive with the first release,
-and every URL here is written in its final form so that this folder can be copied upstream
-unchanged.
+| standard | [v0.1.0](https://github.com/davidgrldo/gapura/releases/tag/v0.1.0) | default | [v0.1.0 report](./standard-v0.1.0-default-report.yaml) |
 
 ## Submission
 

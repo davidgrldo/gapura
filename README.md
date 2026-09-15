@@ -57,36 +57,6 @@ in a rust that is both the language and the colour of temple brick.
 You need a cluster (Kubernetes 1.29 or newer), `kubectl`, and Helm 3.8 or newer. Steps 1 to 4 are
 meant to be pasted in order and end with a request that goes through the gateway to a backend.
 
-<!-- REMOVE WHEN PUBLIC: delete this blockquote and the collapsed block under it once v0.1.0 is tagged and both ghcr.io/davidgrldo packages, gapura and charts/gapura, are public. -->
-> **Step 2 does not work yet.** Nothing is published to `ghcr.io/davidgrldo`, so the `helm install`
-> in step 2 fails. Install from a checkout instead: `./hack/kind-deploy.sh` does all of it on a
-> local kind cluster, and `./hack/k3s-deploy.sh` on a k3d (k3s) one. Steps 1, 3 and 4 work as written.
-
-<details>
-<summary>What has to happen before it works, and how to install against another cluster</summary>
-
-Nothing has been published to `ghcr.io/davidgrldo`, so
-`helm install ... oci://ghcr.io/...` fails, and two separate things have to happen before it
-works. The `v0.1.0` tag has to be pushed, which is what builds and publishes the image and the
-chart. Then both GHCR packages -- `gapura` and `charts/gapura` -- have to be made public by hand:
-a new package defaults to private, GitHub documents no API for changing that, and a private
-package pulls fine for the maintainer while 401ing for everyone else. The tag alone is not enough;
-[docs/RELEASING.md](docs/RELEASING.md) section 5.3 is the procedure. The `home` and `sources` URLs
-in [charts/gapura/Chart.yaml](charts/gapura/Chart.yaml) point at the same repository and are
-equally unpublished. Until both are done, install from a checkout instead:
-`./hack/kind-deploy.sh` does all of this on a local kind cluster (or `./hack/k3s-deploy.sh` on a
-k3d one), and against any other cluster build the image, push it somewhere your nodes can read,
-and replace step 2 with
-`helm install gapura ./charts/gapura --namespace gapura-system --create-namespace --wait --set
-image.repository=<your-registry>/gapura --set image.tag=0.1.0`, adding the no-LoadBalancer flags
-step 2 lists if your cluster needs them. Without those two `image.*` values the chart points at
-the same unpublished registry and the pods sit in `ImagePullBackOff`. On single-node k3s there is
-also no registry needed at all: `docker save` the image and `sudo k3s ctr -n k8s.io images import`
-the tar, which lands it in the very containerd kubelet reads. Steps 1, 3 and 4 are
-unchanged.
-
-</details>
-
 No cluster? kind will do. It has no LoadBalancer, so give the node a host port that reaches the
 NodePort step 2 will ask for:
 
