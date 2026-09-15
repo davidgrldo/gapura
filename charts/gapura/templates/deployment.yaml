@@ -90,6 +90,9 @@ spec:
         {{- range .Values.trustedProxies }}
         - --trusted-proxy={{ . }}
         {{- end }}
+        {{- if .Values.accessLog.query }}
+        - --access-log-query
+        {{- end }}
         {{- if .Values.readOnly }}
         - --no-status
         {{- end }}

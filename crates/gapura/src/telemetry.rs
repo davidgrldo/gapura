@@ -188,6 +188,11 @@ pub struct AccessLog<'a> {
     pub method: &'a str,
     pub host: &'a str,
     pub path: &'a str,
+    /// The query string, without the leading `?`. Absent unless the deployment asked for it with
+    /// `--access-log-query`: query strings carry tokens and other secrets, and an access log is
+    /// written to be read. With it on, a log line names the exact request, not just its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<&'a str>,
     pub status: u16,
     pub bytes: usize,
     pub duration_ms: u64,
@@ -280,6 +285,7 @@ mod tests {
             method: "GET",
             host: "h",
             path: "/",
+            query: None,
             status: 200,
             bytes: 3,
             duration_ms: 4,
@@ -298,6 +304,17 @@ mod tests {
         assert_eq!(v["route"], "apps/echo");
         assert_eq!(v["mirrored"], false);
         assert!(v["client_ip"].is_null());
+        assert!(
+            v.get("query").is_none(),
+            "the query field is absent, not null, when the deployment did not ask for it"
+        );
+        let with_query = AccessLog {
+            query: Some("msg=it-works"),
+            ..entry
+        };
+        let w: serde_json::Value = serde_json::to_value(&with_query).unwrap();
+        assert_eq!(w["query"], "msg=it-works");
+        assert_eq!(w["path"], "/", "path never carries the query, query does");
     }
 
     #[test]
@@ -309,6 +326,7 @@ mod tests {
             method: "GET",
             host: "h",
             path: "/",
+            query: None,
             status: 0,
             bytes: 0,
             duration_ms: 5,

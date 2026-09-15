@@ -54,6 +54,12 @@ pub struct Args {
     #[arg(long = "trusted-proxy", value_name = "CIDR")]
     pub trusted_proxies: Vec<crate::proxy::client::Cidr>,
 
+    /// Include the request's query string in the access log. Off by default: query strings carry
+    /// tokens and other secrets, and an access log is written to be read. With it on, a log line
+    /// names the exact request, not just its path.
+    #[arg(long = "access-log-query")]
+    pub access_log_query: bool,
+
     /// Log level filter, e.g. `info` or `gapura=debug`.
     #[arg(long, default_value = "info")]
     pub log_level: String,
@@ -444,5 +450,13 @@ mod trusted_proxy_tests {
     fn no_trusted_proxy_flag_means_an_empty_list() {
         let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x"]);
         assert!(args.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    fn access_log_query_is_off_unless_asked_for() {
+        let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x"]);
+        assert!(!args.access_log_query);
+        let args = Args::parse_from(["gapura", "--config-dir", "/tmp/x", "--access-log-query"]);
+        assert!(args.access_log_query);
     }
 }
