@@ -35,6 +35,7 @@ pub struct Metrics {
     pub leader: IntGauge,
     /// labels: kind
     pub discovery_missing: IntGaugeVec,
+    pub objects_rejected_total: IntCounterVec,
     /// labels: route, result (`sent`, `error`, `timeout`, `overflow`)
     pub mirror_requests_total: IntCounterVec,
 }
@@ -107,6 +108,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
     discovery_missing: register_int_gauge_vec!(
         "gapura_discovery_missing",
         "1 while an optional kind is not served by the API server",
+        &["kind"]
+    )
+    .expect("metric registered once"),
+    objects_rejected_total: register_int_counter_vec!(
+        "gapura_objects_rejected_total",
+        "Objects the translator input schema rejected, by kind",
         &["kind"]
     )
     .expect("metric registered once"),

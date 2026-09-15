@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Schema-rejected objects are counted, not only logged: `gapura_objects_rejected_total{kind}`
+  rises beside the existing WARN (#29). The failure class an operator could previously catch only
+  by reading logs — a backend Service whose objects are dropped keeps resolving while the proxy
+  has no upstream — is now coverable by one alert rule: the gateway is dropping objects it
+  watches. The counter counts rejection events, so an object that stays invalid across updates
+  keeps it rising.
 - An EndpointSlice whose `ports` is null, or holds null entries, loads instead of being dropped.
   Both shapes are written by kube-proxy/kubelet in the ordinary course of events (#19), and the
   strict sequence type rejected the whole object — a Service whose only slice had that shape
