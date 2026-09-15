@@ -255,6 +255,34 @@ data: { tls.crt: Zm9v, tls.key: YmFy }
         );
     }
 
+    /// The exact shape from the live cluster in #19: kube-proxy/kubelet can leave `ports` null
+    /// or carry null entries. Both are ordinary objects and must load, not be dropped.
+    #[test]
+    fn endpointslice_with_null_ports_loads() {
+        let s = Snapshot::from_yaml_docs(
+            "apiVersion: discovery.k8s.io/v1\nkind: EndpointSlice\nmetadata:\n  { name: whoami-nd8nh, namespace: default, labels: { kubernetes.io/service-name: whoami } }\naddressType: IPv4\nendpoints:\n- { addresses: [10.42.0.14], conditions: { ready: true } }\nports: null\n",
+        )
+        .unwrap();
+        let slice = &s.endpoint_slices[&ObjectRef::new("default", "whoami-nd8nh")];
+        assert!(slice.ports.is_empty(), "null ports read as no ports");
+        assert_eq!(
+            slice.endpoints[0].addresses,
+            ["10.42.0.14"],
+            "the endpoints themselves must survive"
+        );
+    }
+
+    #[test]
+    fn endpointslice_with_null_port_entries_skips_only_those() {
+        let s = Snapshot::from_yaml_docs(
+            "apiVersion: discovery.k8s.io/v1\nkind: EndpointSlice\nmetadata:\n  { name: whoami-nd8nh, namespace: default, labels: { kubernetes.io/service-name: whoami } }\naddressType: IPv4\nendpoints:\n- { addresses: [10.42.0.14] }\nports:\n- null\n- { name: http, port: 80, protocol: TCP }\n",
+        )
+        .unwrap();
+        let slice = &s.endpoint_slices[&ObjectRef::new("default", "whoami-nd8nh")];
+        assert_eq!(slice.ports.len(), 1, "the null entry is skipped, not fatal");
+        assert_eq!(slice.ports[0].port, Some(80));
+    }
+
     #[test]
     fn rejects_unknown_kind() {
         let err = Snapshot::from_yaml_docs("kind: Pod\nmetadata: { name: x }\n").unwrap_err();
