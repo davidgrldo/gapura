@@ -58,6 +58,22 @@ impl AdminApp {
                     ),
                 }
             }
+            "/debug/status" => {
+                // The patches from the last reload: what a Kubernetes cluster would be showing as
+                // conditions on Gateways and HTTPRoutes, and the only place the reason a route
+                // did not come up is reachable from when there is no API server. Conditions
+                // carry reasons and messages, never key material, so unlike /debug/config there
+                // is nothing here to redact.
+                let runtime = self.store.load_full();
+                match serde_json::to_vec_pretty(&runtime.status) {
+                    Ok(json) => respond(StatusCode::OK, "application/json", json),
+                    Err(e) => respond(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "text/plain",
+                        format!("serialize failed: {e}\n").into_bytes(),
+                    ),
+                }
+            }
             "/debug/config" => {
                 let runtime = self.store.load_full();
                 // Never expose key material, even on the admin port: the port is a deployment
@@ -104,6 +120,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn debug_status_serves_the_patches_of_the_last_reload() {
+        // The shape a reader expects: the patches as they stand, kind-tagged, one entry per
+        // object -- a rejection reason arrives as a condition exactly the way the API server
+        // would have shown it.
+        let patch: gapura_core::status::StatusPatch = serde_json::from_value(serde_json::json!({
+            "kind": "Gateway",
+            "namespace": "infra",
+            "name": "main",
+            "addresses": [],
+            "conditions": [],
+            "listeners": []
+        }))
+        .unwrap();
+        let store = Arc::new(Store::empty());
+        store.swap(Config::default(), vec![patch]);
+        let app = AdminApp { store };
+        let r = app.handle("/debug/status");
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/json");
+        let body: serde_json::Value = serde_json::from_slice(r.body()).unwrap();
+        assert_eq!(body[0]["kind"], "Gateway", "{body}");
+        assert_eq!(body[0]["name"], "main", "{body}");
+        // Empty before the first swap: the honest answer, not an error.
+        let fresh = AdminApp {
+            store: Arc::new(Store::empty()),
+        };
+        assert_eq!(fresh.handle("/debug/status").status(), StatusCode::OK);
+    }
+
+    #[test]
     fn readyz_flips_after_first_swap_and_debug_config_dumps_json() {
         let store = Arc::new(Store::empty());
         let app = AdminApp {
@@ -113,23 +159,26 @@ mod tests {
         let not_ready = app.handle("/readyz");
         assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(String::from_utf8_lossy(not_ready.body()).starts_with("not ready"));
-        store.swap(Config {
-            listeners: vec![ListenerConfig {
-                id: "infra/main/http".into(),
-                port: 80,
-                client_port: None,
-                protocol: Protocol::Https,
-                hostname: None,
-                tls: Some(TlsBundle {
-                    secret: "infra/tls".into(),
-                    cert_pem: "CERT".into(),
-                    key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n".into(),
-                }),
-                rules: vec![],
-            }],
-            ports: Default::default(),
-            clusters: Default::default(),
-        });
+        store.swap(
+            Config {
+                listeners: vec![ListenerConfig {
+                    id: "infra/main/http".into(),
+                    port: 80,
+                    client_port: None,
+                    protocol: Protocol::Https,
+                    hostname: None,
+                    tls: Some(TlsBundle {
+                        secret: "infra/tls".into(),
+                        cert_pem: "CERT".into(),
+                        key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n".into(),
+                    }),
+                    rules: vec![],
+                }],
+                ports: Default::default(),
+                clusters: Default::default(),
+            },
+            Vec::new(),
+        );
         let ready = app.handle("/readyz");
         assert_eq!(ready.status(), StatusCode::OK);
         let body = String::from_utf8_lossy(ready.body()).into_owned();

@@ -52,9 +52,9 @@ pub fn apply(dir: &Path, settings: &Settings, store: &Store) -> anyhow::Result<S
             return Err(e);
         }
     };
-    for patch in &translation.status {
-        tracing::debug!(?patch, "status computed (file mode: not applied)");
-    }
+    // No API server here to write conditions to: the patches ride with the swap and are served
+    // from the admin port at /debug/status, where an operator can still reach the reason a
+    // route did not come up instead of raising the log level to find it.
     let summary = Summary {
         listeners: translation.config.listeners.len(),
         rules: translation
@@ -66,7 +66,7 @@ pub fn apply(dir: &Path, settings: &Settings, store: &Store) -> anyhow::Result<S
         clusters: translation.config.clusters.len(),
         status_patches: translation.status.len(),
     };
-    store.swap(translation.config);
+    store.swap(translation.config, translation.status.clone());
     METRICS
         .config_reloads_total
         .with_label_values(&["success"])
