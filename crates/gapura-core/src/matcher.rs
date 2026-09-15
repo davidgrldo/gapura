@@ -179,6 +179,7 @@ mod tests {
                 weight: 1,
             }],
             timeouts: Timeouts::default(),
+            rate_limit: None,
         }
     }
 
