@@ -138,6 +138,10 @@ impl State {
                 true
             }
             Err(e) => {
+                crate::telemetry::METRICS
+                    .objects_rejected_total
+                    .with_label_values(&[kind])
+                    .inc();
                 tracing::warn!(
                     kind,
                     object = %r,
@@ -191,9 +195,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::telemetry::METRICS;
 
     fn gateway(name: &str) -> Value {
         json!({ "kind": "Gateway", "metadata": { "name": name, "namespace": "infra" }, "spec": { "gatewayClassName": "gapura", "listeners": [] } })
+    }
+
+    /// A schema-invalid EndpointSlice: `ports` is neither a sequence nor null-tolerable.
+    fn bad_slice(name: &str) -> Value {
+        json!({ "kind": "EndpointSlice", "metadata": { "name": name, "namespace": "default" }, "addressType": "IPv4", "ports": 42 })
+    }
+
+    #[test]
+    fn a_rejected_object_increments_the_rejected_counter() {
+        let before = METRICS
+            .objects_rejected_total
+            .with_label_values(&["EndpointSlice"])
+            .get();
+        let mut s = State::new(None);
+        s.apply(upsert(
+            "EndpointSlice",
+            "default",
+            "bad",
+            Some(bad_slice("bad")),
+            false,
+        ));
+        assert!(
+            METRICS
+                .objects_rejected_total
+                .with_label_values(&["EndpointSlice"])
+                .get()
+                > before,
+            "the WARN now has a counter beside it"
+        );
     }
 
     fn upsert(
