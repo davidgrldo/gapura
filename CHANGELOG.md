@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An EndpointSlice whose `ports` is null, or holds null entries, loads instead of being dropped.
+  Both shapes are written by kube-proxy/kubelet in the ordinary course of events (#19), and the
+  strict sequence type rejected the whole object — a Service whose only slice had that shape
+  silently lost its endpoints from the routing table, with just a WARN to say why. Null now reads
+  as no ports and null entries are skipped (they carry nothing to match on); the endpoints
+  themselves were never the problem. A backend whose cluster ends up with no endpoints either
+  way was, and is, answered with 503 `no ready endpoints` — a named case in the access log.
 - An address per Gateway: `--gateway-address namespace/name=ip-or-host` (repeatable) publishes
   per-Gateway status addresses instead of one shared list, and the translator remaps the listener of a Gateway that carries such an override —
   the declaration that it is individually addressable — onto the next free bound port of its
