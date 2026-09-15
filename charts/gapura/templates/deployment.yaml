@@ -90,6 +90,9 @@ spec:
         {{- range .Values.trustedProxies }}
         - --trusted-proxy={{ . }}
         {{- end }}
+        {{- range .Values.trustedClientHeaders }}
+        - --trusted-client-header={{ . }}
+        {{- end }}
         {{- if .Values.accessLog.query }}
         - --access-log-query
         {{- end }}
