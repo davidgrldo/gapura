@@ -15,6 +15,6 @@ spec:
   selector: {{- include "gapura.selectorLabels" . | nindent 4 }}
   ports:
   - name: admin
-    port: {{ .Values.ports.admin }}
+    port: {{ (.Values.ports).admin }}
     targetPort: admin
     protocol: TCP
