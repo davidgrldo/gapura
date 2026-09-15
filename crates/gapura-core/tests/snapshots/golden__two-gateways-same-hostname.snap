@@ -1,5 +1,6 @@
 ---
 source: crates/gapura-core/tests/golden.rs
+assertion_line: 1071
 expression: t
 ---
 config:
@@ -190,7 +191,7 @@ status:
           - type: Programmed
             status: "True"
             reason: Programmed
-            message: Listener is programmed
+            message: "Listener is programmed on port 10000: declared port 80 is shared and this Gateway is individually addressed, so its Service must target port 10000"
             observedGeneration: 1
           - type: ResolvedRefs
             status: "True"
