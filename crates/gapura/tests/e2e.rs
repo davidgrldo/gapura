@@ -831,7 +831,7 @@ async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
         .parse()
         .unwrap();
     assert!(
-        retry >= 1 && retry <= 60,
+        (1..=60).contains(&retry),
         "the rest of this minute's window: {retry}"
     );
     assert!(r.headers().contains_key("x-request-id"));
