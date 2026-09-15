@@ -182,6 +182,8 @@ spec:
     backendRefs: [{{ name: empty, port: 80 }}]
   - matches: [{{ path: {{ type: PathPrefix, value: /retry }} }}]
     backendRefs: [{{ name: flaky, port: 80 }}]
+  - matches: [{{ path: {{ type: PathPrefix, value: /limited }} }}]
+    backendRefs: [{{ name: limited, port: 80 }}]
   - matches: [{{ path: {{ type: RegularExpression, value: "^/v\\d+/info" }} }}]
     backendRefs: [{{ name: echo, port: 80 }}]
   - matches: [{{ path: {{ type: PathPrefix, value: /mirror }} }}]
@@ -250,6 +252,21 @@ ports: [{{ name: http, port: {up_port} }}]
 ---
 apiVersion: v1
 kind: Service
+metadata:
+  name: limited
+  namespace: apps
+  annotations: {{ gapura.dev/rate-limit: "3/min" }}
+spec: {{ ports: [{{ name: http, port: 80 }}] }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {{ name: limited-1, namespace: apps, labels: {{ kubernetes.io/service-name: limited }} }}
+addressType: IPv4
+endpoints: [{{ addresses: ["{up_ip}"], conditions: {{ ready: true }} }}]
+ports: [{{ name: http, port: {up_port} }}]
+---
+apiVersion: v1
+kind: Service
 metadata: {{ name: shadow-down, namespace: apps }}
 spec: {{ ports: [{{ name: http, port: 80 }}] }}
 ---
@@ -303,6 +320,20 @@ async fn setup() -> (Gateway, reqwest::Client) {
     let gw = start_gateway(|http| config(http, upstream, dead)).await;
     let c = client(&gw);
     (gw, c)
+}
+
+/// True once the admin's /debug/config holds at least one listener: the same store the proxy
+/// routes from, so a "yes" means the first config swap already happened.
+async fn ready_to_serve(admin: u16) -> bool {
+    let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/debug/config")).await else {
+        return false;
+    };
+    let Ok(v) = r.json::<serde_json::Value>().await else {
+        return false;
+    };
+    v.get("listeners")
+        .and_then(|l| l.as_array())
+        .is_some_and(|l| !l.is_empty())
 }
 
 /// Start the binary on ports chosen here, rendering the config once the http port is known.
@@ -369,9 +400,16 @@ async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> G
                 break;
             }
             if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-                // Pingora binds each service independently: /readyz only proves the admin listener
-                // and the loaded config, so also wait for the data-plane port to accept connections.
-                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                // Pingora binds each service independently: /readyz only proves the admin listener,
+                // and a TCP accept on the data port only proves its socket. Neither proves the
+                // first config swap reached the store the proxy routes from -- on a loaded runner
+                // the gap was observable as a 404 "no route" for the test's first request. The
+                // store is the same one /debug/config serves, so waiting for it to hold at least
+                // one listener is waiting for the proxy to have something to route with.
+                if r.status() == 200
+                    && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok()
+                    && ready_to_serve(admin).await
+                {
                     ready = true;
                     break;
                 }
@@ -767,7 +805,11 @@ async fn access_log_records_a_client_that_went_away() {
         .unwrap();
     sock.write_all(
         concat!(
-            "POST /api/abort HTTP/1.1\r\n",
+            // The path carries "slow" on purpose: the mock upstream sleeps 600 ms for it, so it
+            // cannot answer before the half-close below lands. Without that, which side ended
+            // the request was a race -- on a fast runner the 200 came back first and the line
+            // logged status 200 with client_abort, not the status 0 this test asserts.
+            "POST /api/slow-abort HTTP/1.1\r\n",
             "Host: echo.test\r\n",
             "X-Request-Id: log-abort\r\n",
             "Content-Length: 32\r\n",
@@ -789,6 +831,57 @@ async fn access_log_records_a_client_that_went_away() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
+    let (gw, c) = setup().await;
+    // Eight rapid requests against a 3/min limit: at most one window boundary can fall inside
+    // the loop, so at most 3 + 3 can be served and a 429 is guaranteed within the eight.
+    let mut limited = None;
+    for _ in 0..8 {
+        let r = c
+            .get(url(&gw, "echo.test", "/limited"))
+            .send()
+            .await
+            .unwrap();
+        if r.status() == 429 {
+            limited = Some(r);
+            break;
+        }
+    }
+    let r = limited.expect("8 rapid requests against a 3/min limit must trip within two buckets");
+    assert_eq!(r.headers()["x-ratelimit-limit"], "3");
+    assert_eq!(r.headers()["x-ratelimit-remaining"], "0");
+    let retry: u64 = r.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (1..=60).contains(&retry),
+        "the rest of this minute's window: {retry}"
+    );
+    assert!(r.headers().contains_key("x-request-id"));
+    // The rejection is a fact of the route, so it is counted where the traffic is.
+    let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(metrics.contains("gapura_rate_limited_total"), "{metrics}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlimited_route_is_untouched_by_a_neighbors_limit() {
+    let (gw, c) = setup().await;
+    // The limit lives on the rule whose backend carries the annotation; /api/x backs onto the
+    // unannotated echo service and must keep answering.
+    for _ in 0..5 {
+        let r = c.get(url(&gw, "echo.test", "/api/x")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "no annotation, no limit");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
     let gw = start_gateway_with(
@@ -807,6 +900,27 @@ async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
     assert_eq!(
         line["client_ip"], "198.51.100.5",
         "the connection came from a trusted network, so its header names the client"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_status_serves_the_computed_patches() {
+    let (gw, _c) = setup().await;
+    let v: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{}/debug/status", gw.admin))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let arr = v.as_array().unwrap();
+    assert!(
+        !arr.is_empty(),
+        "file mode has no API server: this is the only place the conditions live: {v}"
+    );
+    assert!(
+        arr.iter()
+            .any(|p| p["kind"] == "Gateway" || p["kind"] == "HTTPRoute"),
+        "the config fixture has a Gateway and routes, so both carry conditions: {v}"
     );
 }
 

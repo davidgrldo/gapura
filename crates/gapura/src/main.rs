@@ -113,6 +113,7 @@ fn main() {
             store: store.clone(),
             trusted_proxies: args.trusted_proxies.clone(),
             trusted_client_headers: args.trusted_client_headers.clone(),
+            limiter: Default::default(),
             access_log_query: args.access_log_query,
         },
     );

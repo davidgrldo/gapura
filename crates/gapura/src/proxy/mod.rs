@@ -7,6 +7,7 @@
 
 pub mod attrs;
 pub mod client;
+pub mod rate_limit;
 pub mod select;
 pub mod tls;
 
@@ -53,6 +54,8 @@ pub struct GapuraProxy {
     /// Header names (e.g. CF-Connecting-IP) believed for the client address when no
     /// X-Forwarded-For chain exists and the peer is a trusted proxy (`--trusted-client-header`).
     pub trusted_client_headers: Vec<String>,
+    /// Per-replica request limits, shared by every worker thread.
+    pub limiter: rate_limit::RateLimiter,
     /// Whether the access log carries the request's query string (`--access-log-query`).
     pub access_log_query: bool,
 }
@@ -190,6 +193,28 @@ fn apply_header_ops(target: &mut impl HeaderTarget, ops: &HeaderOps) -> Result<(
 }
 
 /// A locally generated error response: plain text, request id, never any internal detail.
+/// The rate-limit answer: like `write_local`, plus the three headers a throttled client reads.
+async fn write_429(
+    session: &mut Session,
+    limit: u32,
+    retry_after_secs: u64,
+    request_id: &str,
+) -> Result<()> {
+    let body = "429 too many requests\n";
+    let mut resp = ResponseHeader::build(429u16, Some(6))?;
+    resp.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+    resp.insert_header("Content-Length", body.len().to_string())?;
+    resp.insert_header("Cache-Control", "no-store")?;
+    resp.insert_header("Retry-After", retry_after_secs.to_string())?;
+    resp.insert_header("X-RateLimit-Limit", limit.to_string())?;
+    resp.insert_header("X-RateLimit-Remaining", "0")?;
+    resp.insert_header("X-Request-Id", request_id.to_string())?;
+    session.write_response_header(Box::new(resp), false).await?;
+    session
+        .write_response_body(Some(Bytes::from(body)), true)
+        .await
+}
+
 async fn write_local(session: &mut Session, code: u16, request_id: &str) -> Result<()> {
     let body = format!("{code} {}\n", reason_phrase(code));
     let mut resp = ResponseHeader::build(code, Some(4))?;
@@ -201,6 +226,25 @@ async fn write_local(session: &mut Session, code: u16, request_id: &str) -> Resu
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await
+}
+
+/// The client address after the trusted-proxy walk, the same answer the access log records:
+/// one computation so limiting and logging can never disagree about who the client is.
+/// `trusted_client_headers` names the single-IP headers (e.g. CF-Connecting-IP) consulted when
+/// no XFF chain exists; the walk decides whether any of it may be believed.
+fn effective_client_ip(
+    session: &Session,
+    trusted: &[client::Cidr],
+    trusted_client_headers: &[String],
+) -> Option<std::net::IpAddr> {
+    session.client_addr().and_then(|a| a.as_inet()).map(|a| {
+        let forwarded_for = header_str(session.req_header(), "x-forwarded-for");
+        // First configured single-IP header present on the request, in flag order.
+        let named = trusted_client_headers
+            .iter()
+            .find_map(|name| header_str(session.req_header(), name.as_str()));
+        client::client_ip(a.ip(), forwarded_for, trusted, named)
+    })
 }
 
 fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
@@ -383,6 +427,35 @@ impl ProxyHttp for GapuraProxy {
                 matched,
                 cluster,
             } => {
+                // The rule's limit, if its backend Service asked for one, is enforced here:
+                // after the match (the route is known), before any upstream work (the limit
+                // must not cost the backend anything). Same client answer the access log
+                // records, so a limited request names the same client a served one would.
+                let rt = ctx.runtime.as_ref().expect("set above");
+                if let Some(rl) = &rt.config.listeners[listener].rules[rule].rate_limit {
+                    let route = rt.config.listeners[listener].rules[rule].route.clone();
+                    if let Some(ip) = effective_client_ip(
+                        session,
+                        &self.trusted_proxies,
+                        &self.trusted_client_headers,
+                    ) {
+                        if let rate_limit::Outcome::Limited {
+                            limit,
+                            retry_after_secs,
+                        } = self.limiter.check(&route, ip, rl)
+                        {
+                            METRICS
+                                .rate_limited_total
+                                .with_label_values(&[&route])
+                                .inc();
+                            ctx.listener = Some(listener);
+                            ctx.rule = Some(rule);
+                            ctx.local_status = Some(429);
+                            write_429(session, limit, retry_after_secs, &ctx.request_id).await?;
+                            return Ok(true);
+                        }
+                    }
+                }
                 ctx.listener = Some(listener);
                 ctx.rule = Some(rule);
                 ctx.matched = Some(matched);
@@ -650,22 +723,9 @@ impl ProxyHttp for GapuraProxy {
             .observe(ctx.started.elapsed().as_secs_f64());
 
         let upstream = ctx.upstream.map(|a| a.to_string());
-        let forwarded_for = header_str(session.req_header(), "x-forwarded-for").map(str::to_string);
-        // First configured single-IP header present on the request, in flag order; the client_ip
-        // walk decides whether it may be believed.
-        let named = self
-            .trusted_client_headers
-            .iter()
-            .find_map(|name| header_str(session.req_header(), name.as_str()));
-        let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|a| {
-            client::client_ip(
-                a.ip(),
-                forwarded_for.as_deref(),
-                &self.trusted_proxies,
-                named,
-            )
-            .to_string()
-        });
+        let client_ip =
+            effective_client_ip(session, &self.trusted_proxies, &self.trusted_client_headers)
+                .map(|ip| ip.to_string());
         let user_agent = header_str(session.req_header(), "user-agent").map(str::to_string);
         // Read off the raw URI, not the extracted path: extraction strips the query, and this
         // field is the one place the deployment may ask to keep it.

@@ -100,6 +100,7 @@ mod tests {
             filters: Filters::default(),
             backends: vec![],
             timeouts: Timeouts::default(),
+            rate_limit: None,
         }
     }
 

@@ -273,6 +273,14 @@ TLS to backends: attach a `BackendTLSPolicy` (CA from a ConfigMap `ca.crt`, or
 `wellKnownCACertificates: System`) to a Service, or annotate the Service with
 `gapura.dev/backend-tls: insecure` to encrypt without verification.
 
+Per-route request limits come from the backend Service too: `gapura.dev/rate-limit: "20/min"`
+(supported units `s`, `min`, `h`) caps each client's requests per rule at `limit` per window,
+answered past the cap with `429`, `Retry-After`, `X-RateLimit-Limit` and
+`X-RateLimit-Remaining: 0`. `gapura.dev/rate-limit-by: ip` is the only keying (the default;
+any other value disables the pair), the counter is per replica — with N replicas the effective
+allowance is N × the limit, the honest shape for a gateway with no database — and rejections are
+counted in `gapura_rate_limited_total{route}`.
+
 `gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The Kubernetes controller lives in the `gapura` binary, packaged by the Dockerfile and the chart in [charts/gapura](charts/gapura).
 
 License: Apache-2.0.
