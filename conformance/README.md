@@ -67,9 +67,6 @@ run the suite on CI instead.
 
 ## Reproduce
 
-<!-- REMOVE WHEN PUBLIC: delete this paragraph once github.com/davidgrldo/gapura is public and v0.1.0 is tagged. -->
-The clone URL below does not resolve yet: the repository is published with the first release.
-
 ```bash
 git clone https://github.com/davidgrldo/gapura.git && cd gapura
 ./hack/conformance.sh
