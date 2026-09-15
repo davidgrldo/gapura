@@ -1,0 +1,6 @@
+# Regression: `helm upgrade --reuse-values` from a chart version that predates a values section
+# delivers that section as an explicit null. Every guarded .Values access must read that as off:
+# the smoke test and the whole metrics stack (ServiceMonitor, PrometheusRule, dashboard) render
+# absent, and nothing else changes against the default render.
+tests: null
+metrics: null
