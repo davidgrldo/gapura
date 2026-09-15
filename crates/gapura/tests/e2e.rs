@@ -811,6 +811,27 @@ async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn debug_status_serves_the_computed_patches() {
+    let (gw, _c) = setup().await;
+    let v: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{}/debug/status", gw.admin))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let arr = v.as_array().unwrap();
+    assert!(
+        !arr.is_empty(),
+        "file mode has no API server: this is the only place the conditions live: {v}"
+    );
+    assert!(
+        arr.iter()
+            .any(|p| p["kind"] == "Gateway" || p["kind"] == "HTTPRoute"),
+        "the config fixture has a Gateway and routes, so both carry conditions: {v}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_query_string_is_logged_only_when_asked_for() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
     let gw = start_gateway_with(|http| config(http, upstream, dead), &["--access-log-query"]).await;
