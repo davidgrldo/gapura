@@ -332,7 +332,9 @@ impl KubeSource {
                     let listeners = t.config.listeners.len();
                     let rules: usize = t.config.listeners.iter().map(|l| l.rules.len()).sum();
                     let clusters = t.config.clusters.len();
-                    self.store.swap(t.config);
+                    // The patches go both places: the Lease holder writes them to the API server, and the swap
+                    // keeps them for /debug/status, which is all file mode ever had.
+                    self.store.swap(t.config, t.status.clone());
                     METRICS
                         .config_reloads_total
                         .with_label_values(&["success"])

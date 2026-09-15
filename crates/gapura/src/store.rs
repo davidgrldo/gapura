@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
 use gapura_core::matcher::{compile_regexes, RegexMap};
+use gapura_core::status::StatusPatch;
 use gapura_core::Config;
 use pingora::tls::pkey::{PKey, Private};
 use pingora::tls::x509::X509;
@@ -23,6 +24,10 @@ pub struct ParsedCert {
 pub struct Runtime {
     pub config: Config,
     pub generation: u64,
+    /// The status patches this generation's translation produced -- what a Kubernetes cluster
+    /// would show as conditions, kept so the admin port can serve them where no API server
+    /// exists to hold them (file mode; see /debug/status).
+    pub status: Vec<StatusPatch>,
     rr: HashMap<String, AtomicUsize>,
     certs: HashMap<String, Arc<ParsedCert>>,
     /// Upstream CA bundles by cluster key, for `PeerOptions::ca`.
@@ -33,7 +38,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(config: Config, generation: u64) -> Self {
+    pub fn new(config: Config, generation: u64, status: Vec<StatusPatch>) -> Self {
         let rr = config
             .clusters
             .keys()
@@ -87,6 +92,7 @@ impl Runtime {
         Self {
             config,
             generation,
+            status,
             rr,
             certs,
             upstream_cas,
@@ -143,7 +149,7 @@ pub struct Store {
 impl Store {
     pub fn empty() -> Self {
         Self {
-            current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0)),
+            current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0, Vec::new())),
             ready: AtomicBool::new(false),
             generation: AtomicU64::new(0),
         }
@@ -160,10 +166,10 @@ impl Store {
 
     /// Install a new Config. Marks the store ready.
     /// Call from a single writer (the config source); concurrent swaps could publish generations out of order.
-    pub fn swap(&self, config: Config) {
+    pub fn swap(&self, config: Config, status: Vec<StatusPatch>) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.current
-            .store(Arc::new(Runtime::new(config, generation)));
+            .store(Arc::new(Runtime::new(config, generation, status)));
         self.ready.store(true, Ordering::Release);
         METRICS.config_last_reload_timestamp_seconds.set(now_secs());
     }
@@ -213,6 +219,7 @@ mod tests {
                 clusters,
             },
             1,
+            Vec::new(),
         );
         assert_eq!(rt.next_index("apps/echo:80"), Some(0));
         assert_eq!(rt.next_index("apps/echo:80"), Some(1));
@@ -224,10 +231,10 @@ mod tests {
         let store = Store::empty();
         assert!(!store.is_ready());
         assert_eq!(store.load().generation, 0);
-        store.swap(Config::default());
+        store.swap(Config::default(), Vec::new());
         assert!(store.is_ready());
         assert_eq!(store.load().generation, 1);
-        store.swap(Config::default());
+        store.swap(Config::default(), Vec::new());
         assert_eq!(store.load_full().generation, 2);
     }
 
@@ -255,6 +262,7 @@ mod tests {
                 clusters: BTreeMap::new(),
             },
             1,
+            Vec::new(),
         );
         assert!(rt.cert("infra/bad").is_none());
         let parsed = rt.cert("infra/good").expect("parsed");
@@ -283,6 +291,7 @@ mod tests {
                 clusters: BTreeMap::new(),
             },
             1,
+            Vec::new(),
         );
         let after = METRICS
             .tls_cert_parse_errors_total
@@ -318,6 +327,7 @@ mod tests {
                 clusters: BTreeMap::new(),
             },
             1,
+            Vec::new(),
         );
         let parsed = rt.cert("infra/chain").expect("parsed");
         assert_eq!(parsed.chain.len(), 1);
@@ -369,6 +379,7 @@ mod tests {
                 clusters: BTreeMap::new(),
             },
             1,
+            Vec::new(),
         );
         assert!(
             rt.regexes().contains_key("^/api/v[0-9]+/"),
@@ -417,7 +428,7 @@ mod tests {
                 }),
             },
         );
-        let rt = Runtime::new(config, 1);
+        let rt = Runtime::new(config, 1, Vec::new());
         assert_eq!(rt.upstream_ca("apps/good:443").map(|c| c.len()), Some(1));
         assert!(
             rt.upstream_ca("apps/bad:443").is_none(),
