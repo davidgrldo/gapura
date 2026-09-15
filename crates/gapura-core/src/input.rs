@@ -343,6 +343,18 @@ pub enum IntOrString {
     Str(String),
 }
 
+/// Kubernetes writers can leave a sequence field null or put null entries inside it —
+/// EndpointSlice `ports` does both in the wild (#19). Null reads as absent, null entries are
+/// skipped: they carry nothing to match on, so skipping equals them not being there.
+fn nullable_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let items: Option<Vec<Option<T>>> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(items.unwrap_or_default().into_iter().flatten().collect())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EndpointSlice {
@@ -350,6 +362,7 @@ pub struct EndpointSlice {
     /// `IPv4`, `IPv6`, or `FQDN`.
     pub address_type: Option<String>,
     pub endpoints: Vec<SliceEndpoint>,
+    #[serde(default, deserialize_with = "nullable_seq")]
     pub ports: Vec<SlicePort>,
 }
 
