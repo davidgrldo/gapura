@@ -107,6 +107,50 @@ pub fn translate(snap: &Snapshot, settings: &Settings) -> Translation {
     Translation { config, status }
 }
 
+/// A remap is invisible in the config alone: the listener serves on a port it did not declare,
+/// and the operator's Service must point at the new one. Say so on the listener's Programmed
+/// condition -- the surface `kubectl describe gateway` and /debug/status already read -- so
+/// pairing a Service with a remapped Gateway is a lookup, not a re-derivation of the sort order
+/// behind the allocation.
+fn note_remapped_ports(listeners: &[ListenerConfig], status: &mut [StatusPatch]) {
+    use crate::status::types;
+
+    for l in listeners.iter().filter(|l| l.client_port.is_some()) {
+        // The id is "namespace/name/listener".
+        let mut parts = l.id.splitn(3, '/');
+        let (Some(namespace), Some(name), Some(listener)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let effective = l.port;
+        let declared = l.client_port.unwrap_or(effective);
+        let gateway_listeners = status.iter_mut().find_map(|p| match p {
+            StatusPatch::Gateway {
+                namespace: ns,
+                name: n,
+                listeners,
+                ..
+            } if ns == namespace && n == name => Some(listeners),
+            _ => None,
+        });
+        let Some(listener_status) =
+            gateway_listeners.and_then(|ls| ls.iter_mut().find(|s| s.name == listener))
+        else {
+            continue;
+        };
+        for c in &mut listener_status.conditions {
+            if c.type_ == types::PROGRAMMED && c.status == ConditionStatus::True {
+                c.message = format!(
+                    "Listener is programmed on port {effective}: declared port {declared} is \
+                     shared and this Gateway is individually addressed, so its Service must \
+                     target port {effective}"
+                );
+            }
+        }
+    }
+}
+
 /// Turn listener builds into `ListenerConfig`s (programmed ones only) and Gateway status patches.
 /// Clusters not referenced by any programmed rule are dropped.
 fn assemble(
@@ -229,6 +273,7 @@ fn assemble(
         });
     }
     remap_overridden_listeners(&mut listeners_cfg, settings, &overridden);
+    note_remapped_ports(&listeners_cfg, status);
     // One table per port over every programmed listener: the data plane matches on the port the
     // request arrived on, not on a single listener chosen up front.
     let mut ports: BTreeMap<u16, Vec<PortEntry>> = BTreeMap::new();
@@ -373,5 +418,53 @@ mod remap_tests {
         };
         remap_overridden_listeners(&mut ls, &s, &overridden);
         assert_eq!(ls[0].port, 8443, "the https pool, not the http one");
+    }
+
+    #[test]
+    fn a_remapped_listener_names_its_port_on_the_programmed_condition() {
+        use crate::status::{Condition, ConditionStatus, ListenerStatus, StatusPatch};
+
+        let remapped = ListenerConfig {
+            id: "infra/later/http".into(),
+            port: 10000,
+            client_port: Some(80),
+            ..listener(80, "x")
+        };
+        let untouched = ListenerConfig {
+            id: "infra/first/http".into(),
+            ..listener(80, "y")
+        };
+        let status = vec![StatusPatch::Gateway {
+            namespace: "infra".into(),
+            name: "later".into(),
+            addresses: vec![],
+            conditions: vec![],
+            listeners: vec![ListenerStatus {
+                name: "http".into(),
+                supported_kinds: vec![],
+                attached_routes: 0,
+                conditions: vec![Condition::new(
+                    crate::status::types::PROGRAMMED,
+                    ConditionStatus::True,
+                    "Programmed",
+                    "Listener is programmed",
+                    None,
+                )],
+            }],
+        }];
+        let mut status = status;
+        note_remapped_ports(&[remapped, untouched], &mut status);
+        let StatusPatch::Gateway { listeners, .. } = &status[0] else {
+            panic!("the fixture builds one Gateway patch")
+        };
+        let message = &listeners[0].conditions[0].message;
+        assert!(
+            message.contains("port 10000") && message.contains("declared port 80"),
+            "the effective port and the declared one, where the operator reads: {message}"
+        );
+        assert!(
+            !message.contains("Service must target port 80 "),
+            "the Service is pointed at the effective port, not the declared one"
+        );
     }
 }
