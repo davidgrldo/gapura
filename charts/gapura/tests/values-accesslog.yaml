@@ -1,0 +1,5 @@
+# The access log carries the query string: the flag --access-log-query reaches the container.
+# Everything else stock, so the golden also proves the flag renders next to trustedProxies'
+# absence and readOnly's absence without disturbing them.
+accessLog:
+  query: true

@@ -811,6 +811,40 @@ async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_query_string_is_logged_only_when_asked_for() {
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(|http| config(http, upstream, dead), &["--access-log-query"]).await;
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x?msg=it-works&page=2"))
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert_eq!(
+        line["query"], "msg=it-works&page=2",
+        "the deployment asked, so the line names the exact request: {line}"
+    );
+    assert_eq!(
+        line["path"], "/api/x",
+        "the path never carries the query: {line}"
+    );
+
+    // Without the flag the field is absent -- not null, absent -- so the default keeps
+    // tokens out of the log without every consumer having to know about it.
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(|http| config(http, upstream, dead), &[]).await;
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x?msg=secret-token"))
+        .send()
+        .await
+        .unwrap();
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let line = gw.access_log(&rid).await;
+    assert!(line.get("query").is_none(), "no flag, no query: {line}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_untrusted_caller_cannot_name_itself_in_the_access_log() {
     let (gw, c) = setup().await;
     let r = c

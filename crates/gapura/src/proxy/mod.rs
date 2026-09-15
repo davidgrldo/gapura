@@ -50,6 +50,8 @@ pub struct GapuraProxy {
     pub store: Arc<Store>,
     /// Networks whose `X-Forwarded-For` the access log believes. Empty means none.
     pub trusted_proxies: Vec<client::Cidr>,
+    /// Whether the access log carries the request's query string (`--access-log-query`).
+    pub access_log_query: bool,
 }
 
 /// Per-request state. Indices point into `runtime.config`; holding the Arc keeps that
@@ -650,6 +652,12 @@ impl ProxyHttp for GapuraProxy {
             client::client_ip(a.ip(), forwarded_for.as_deref(), &self.trusted_proxies).to_string()
         });
         let user_agent = header_str(session.req_header(), "user-agent").map(str::to_string);
+        // Read off the raw URI, not the extracted path: extraction strips the query, and this
+        // field is the one place the deployment may ask to keep it.
+        let query = self
+            .access_log_query
+            .then(|| session.req_header().uri.query())
+            .flatten();
         let (host, path, method) = match &ctx.extracted {
             Some(ex) => (ex.host.as_str(), ex.path.as_str(), ex.method.as_str()),
             None => (
@@ -665,6 +673,7 @@ impl ProxyHttp for GapuraProxy {
             method,
             host,
             path,
+            query,
             status,
             bytes: session.body_bytes_sent(),
             duration_ms: ctx.started.elapsed().as_millis() as u64,
