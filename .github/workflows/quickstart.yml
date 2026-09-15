@@ -16,7 +16,11 @@ on:
   workflow_run:
     workflows: [release]
     types: [completed]
-permissions: {}
+permissions:
+  # contents: read is what actions/checkout needs on a private repository. Nothing more: no
+  # packages scope, no registry login anywhere — helm pulls the chart anonymously and the kind
+  # node pulls the image anonymously, which is the whole point of this job.
+  contents: read
 concurrency:
   group: quickstart
   cancel-in-progress: true
