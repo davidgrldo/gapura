@@ -1,0 +1,5 @@
+# Trusted client headers: the flags reach the container next to the trusted-proxy list, in
+# order. Stock otherwise, so the golden also proves the empty trustedProxies list renders no
+# --trusted-proxy flag while the named headers still render theirs.
+trustedProxies: ["10.42.0.0/16"]
+trustedClientHeaders: ["CF-Connecting-IP", "X-Real-IP"]
