@@ -1,4 +1,4 @@
-{{- if .Values.tests.smoke.enabled }}
+{{- if ((.Values.tests).smoke).enabled }}
 # `helm test` fixture: one throwaway Gateway, HTTPRoute and echo backend, plus a curl pod that
 # proves a request routes through the data plane of this release. Everything here is a hook
 # (`helm.sh/hook: test`), so none of it exists at install time; `helm test` creates it, waits for
@@ -24,10 +24,10 @@ metadata:
     helm.sh/hook: test
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  gatewayClassName: {{ .Values.gatewayClass.name }}
+  gatewayClassName: {{ (.Values.gatewayClass).name }}
   listeners:
   - name: http
-    port: {{ .Values.ports.http }}
+    port: {{ (.Values.ports).http }}
     protocol: HTTP
     allowedRoutes: { namespaces: { from: Same } }
 ---
@@ -125,7 +125,7 @@ spec:
     args:
     - |
       set -eu
-      url="http://{{ $fullname }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.http }}/echo?msg=helm-smoke"
+      url="http://{{ $fullname }}.{{ .Release.Namespace }}.svc:{{ (.Values.ports).http }}/echo?msg=helm-smoke"
       out=""
       for i in $(seq 30); do
         if out=$(curl -sS --fail-with-body --max-time 5 -H 'Host: {{ $hostname }}' "$url"); then

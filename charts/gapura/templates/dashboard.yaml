@@ -1,4 +1,4 @@
-{{- if .Values.metrics.dashboard.enabled }}
+{{- if ((.Values.metrics).dashboard).enabled }}
 {{- $json := .Files.Get "dashboards/gapura-overview.json" }}
 {{- if not $json }}
 {{- fail "metrics.dashboard.enabled is true but charts/gapura/dashboards/gapura-overview.json is missing" }}
@@ -10,7 +10,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "gapura.labels" . | nindent 4 }}
-    {{ .Values.metrics.dashboard.label }}: {{ .Values.metrics.dashboard.labelValue | quote }}
+    {{ ((.Values.metrics).dashboard).label }}: {{ ((.Values.metrics).dashboard).labelValue | quote }}
 data:
   gapura-overview.json: |
 {{ $json | indent 4 }}

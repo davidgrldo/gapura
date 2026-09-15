@@ -1,11 +1,11 @@
 {{- if not (has .Values.privilegedPorts (list "capability" "sysctl" "none")) }}
 {{- fail (printf "privilegedPorts must be capability, sysctl or none, got %q" .Values.privilegedPorts) }}
 {{- end }}
-{{- if and (eq .Values.privilegedPorts "none") (or (lt (int .Values.ports.http) 1024) (lt (int .Values.ports.https) 1024)) }}
+{{- if and (eq .Values.privilegedPorts "none") (or (lt (int (.Values.ports).http) 1024) (lt (int (.Values.ports).https) 1024)) }}
 {{- fail "privilegedPorts: none cannot bind a port below 1024: raise ports.http/ports.https or pick capability or sysctl" }}
 {{- end }}
-{{- if ne 3 (len (uniq (list (int .Values.ports.http) (int .Values.ports.https) (int .Values.ports.admin)))) }}
-{{- fail (printf "ports.http, ports.https and ports.admin must all differ, got http=%d https=%d admin=%d: two services sharing a port both bind it (SO_REUSEPORT) and the kernel splits traffic between them" (int .Values.ports.http) (int .Values.ports.https) (int .Values.ports.admin)) }}
+{{- if ne 3 (len (uniq (list (int (.Values.ports).http) (int (.Values.ports).https) (int (.Values.ports).admin)))) }}
+{{- fail (printf "ports.http, ports.https and ports.admin must all differ, got http=%d https=%d admin=%d: two services sharing a port both bind it (SO_REUSEPORT) and the kernel splits traffic between them" (int (.Values.ports).http) (int (.Values.ports).https) (int (.Values.ports).admin)) }}
 {{- end }}
 {{- if not (has .Values.livenessPort (list "http" "admin")) }}
 {{- fail (printf "livenessPort must be http or admin, got %q" .Values.livenessPort) }}
@@ -23,8 +23,8 @@ spec:
     rollingUpdate:
       # Never take a replica down before its replacement is ready: a pod needs up to
       # terminationGracePeriodSeconds to drain, which is a long time to run short.
-      maxUnavailable: {{ .Values.updateStrategy.maxUnavailable }}
-      maxSurge: {{ .Values.updateStrategy.maxSurge }}
+      maxUnavailable: {{ (.Values.updateStrategy).maxUnavailable }}
+      maxSurge: {{ (.Values.updateStrategy).maxSurge }}
   selector:
     matchLabels: {{- include "gapura.selectorLabels" . | nindent 6 }}
   template:
@@ -58,18 +58,18 @@ spec:
       containers:
       - name: gapura
         image: {{ include "gapura.image" . }}
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        imagePullPolicy: {{ (.Values.image).pullPolicy }}
         args:
         - --kubernetes
-        - --listen-http=0.0.0.0:{{ .Values.ports.http }}
+        - --listen-http=0.0.0.0:{{ (.Values.ports).http }}
         {{- range .Values.extraListenHttp }}
         - --listen-http=0.0.0.0:{{ . }}
         {{- end }}
-        - --listen-https=0.0.0.0:{{ .Values.ports.https }}
+        - --listen-https=0.0.0.0:{{ (.Values.ports).https }}
         {{- range .Values.extraListenHttps }}
         - --listen-https=0.0.0.0:{{ . }}
         {{- end }}
-        - --admin=0.0.0.0:{{ .Values.ports.admin }}
+        - --admin=0.0.0.0:{{ (.Values.ports).admin }}
         - --controller-name={{ .Values.controllerName }}
         - --log-level={{ .Values.logLevel }}
         - --lease-name={{ include "gapura.fullname" . }}-leader
@@ -105,9 +105,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
         ports:
-        - { name: http, containerPort: {{ .Values.ports.http }}, protocol: TCP }
-        - { name: https, containerPort: {{ .Values.ports.https }}, protocol: TCP }
-        - { name: admin, containerPort: {{ .Values.ports.admin }}, protocol: TCP }
+        - { name: http, containerPort: {{ (.Values.ports).http }}, protocol: TCP }
+        - { name: https, containerPort: {{ (.Values.ports).https }}, protocol: TCP }
+        - { name: admin, containerPort: {{ (.Values.ports).admin }}, protocol: TCP }
         readinessProbe:
           httpGet: { path: /readyz, port: admin }
           periodSeconds: 5
