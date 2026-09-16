@@ -21,9 +21,15 @@ pub fn router_with(state: AppState) -> Router {
 /// cookie, no signature, a bad signature, an expired session — collapses to `None`;
 /// the caller turns that into a uniform 401 rather than leaking which case it was.
 fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Session> {
-    let cookies = headers.get("cookie")?.to_str().ok()?;
-    let value = cookies
-        .split(';')
+    // Every `cookie` field, not just the first: HTTP/2 lets a client or an intermediary
+    // split the cookies across several of them (RFC 9113 section 8.2.3) and hyper leaves
+    // them as it found them, so a session that landed in the second field would otherwise
+    // be invisible and the caller refused while holding a valid one.
+    let value = headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|field| field.to_str().ok())
+        .flat_map(|field| field.split(';'))
         .filter_map(|c| c.trim().strip_prefix(crate::login::COOKIE_NAME))
         .filter_map(|rest| rest.strip_prefix('='))
         .next()?;
@@ -32,6 +38,80 @@ fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Sessi
         .ok()?
         .as_secs();
     crate::session::decode(value, key, now).ok()
+}
+
+#[cfg(test)]
+mod session_cookie_tests {
+    use super::*;
+    use crate::session::{encode, Session};
+
+    const KEY: &[u8] = b"test key";
+
+    /// A `gapura_session` cookie this key accepts, expiring far enough out that no test
+    /// here is ever racing the clock.
+    fn a_valid_session_cookie() -> String {
+        let session = Session {
+            subject: "alice".into(),
+            groups: vec!["team-a".into()],
+            expires_at: u64::MAX,
+        };
+        format!("{}={}", crate::login::COOKIE_NAME, encode(&session, KEY))
+    }
+
+    /// Headers carrying one `cookie` field per element. They are appended rather than
+    /// inserted, because inserting would replace the previous field and the whole point of
+    /// these tests is a request that arrives with more than one of them.
+    fn headers_with(cookie_fields: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for field in cookie_fields {
+            headers.append("cookie", field.parse().expect("a valid header value"));
+        }
+        headers
+    }
+
+    #[test]
+    fn a_session_in_the_first_of_two_cookie_fields_is_found() {
+        let ours = a_valid_session_cookie();
+        let headers = headers_with(&[ours.as_str(), "theme=dark"]);
+        assert_eq!(
+            session_from(&headers, KEY).map(|s| s.subject),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn a_session_in_the_second_of_two_cookie_fields_is_found() {
+        // HTTP/2 lets a client or an intermediary split the cookies over several `cookie`
+        // fields (RFC 9113 section 8.2.3) and hyper hands them over as it found them, so
+        // reading only the first field turned a perfectly valid session into a 401.
+        let ours = a_valid_session_cookie();
+        let headers = headers_with(&["theme=dark", ours.as_str()]);
+        assert_eq!(
+            session_from(&headers, KEY).map(|s| s.subject),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn a_session_among_several_cookies_on_one_line_is_found() {
+        let line = format!("theme=dark; {}; tz=UTC", a_valid_session_cookie());
+        let headers = headers_with(&[line.as_str()]);
+        assert_eq!(
+            session_from(&headers, KEY).map(|s| s.subject),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn no_cookie_header_at_all_is_no_session() {
+        assert!(session_from(&headers_with(&[]), KEY).is_none());
+    }
+
+    #[test]
+    fn a_cookie_header_holding_nothing_of_ours_is_no_session() {
+        let headers = headers_with(&["theme=dark; tz=UTC"]);
+        assert!(session_from(&headers, KEY).is_none());
+    }
 }
 
 async fn routes(
