@@ -13,6 +13,7 @@ pub fn router_with(state: AppState) -> Router {
         .route("/auth/login", get(crate::login::begin))
         .route("/auth/callback", get(crate::login::callback))
         .route("/api/routes", get(routes))
+        .route("/api/overview", get(overview))
         .with_state(state)
 }
 
@@ -140,6 +141,36 @@ async fn routes(
     Ok(Json(only_visible(rows, &visible)))
 }
 
+/// `/api/overview`'s body: which gapura this is and what it is doing. `listeners` is empty
+/// exactly when `reachable` is false, never the other way around — the landing page has one
+/// boolean to check before it draws either the list or the "could not be reached" message.
+#[derive(serde::Serialize)]
+struct Overview {
+    reachable: bool,
+    listeners: Vec<crate::served::ServedListener>,
+}
+
+async fn overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Overview>, StatusCode> {
+    session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
+    // Same rule as `/api/routes`: a gateway that cannot be reached is not a failed request,
+    // it is the answer. Collapsing the error to `None` here, rather than propagating it,
+    // is what keeps this handler from turning "the gateway is down" into a 5xx for a page
+    // whose whole job is to say that in words instead.
+    let served = state
+        .admin
+        .served()
+        .await
+        .map_err(|e| tracing::warn!(error = %e, "reading the gateway's admin port failed"))
+        .ok();
+    Ok(Json(Overview {
+        reachable: served.is_some(),
+        listeners: served.map(|s| s.listeners).unwrap_or_default(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,95 +281,145 @@ mod scope_tests {
     }
 }
 
+// Shared by `route_endpoint_tests` and `overview_tests`: both drive full HTTP requests
+// through `router_with` against the same two stubbed backends, so the request plumbing and
+// the fixtures live once here rather than once per endpoint.
+#[cfg(test)]
+use crate::kube_source::tests::stub_api;
+#[cfg(test)]
+use crate::served::tests::stub_admin;
+#[cfg(test)]
+use crate::session::{encode, Session};
+#[cfg(test)]
+use axum::body::Body;
+#[cfg(test)]
+use axum::http::Request;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use tower::ServiceExt;
+
+#[cfg(test)]
+const KEY: &[u8] = b"test key";
+
+/// What the API-server stub answers with, and what the parser is tested against: four
+/// routes in `apps` and two in `shop`, so a caller granted only `apps` has both rows to
+/// be given and rows to be kept from.
+#[cfg(test)]
+const FIXTURE: &str = include_str!("../tests/fixtures/httproutes.json");
+
+/// Nothing is listening here, and nothing is meant to be.
+#[cfg(test)]
+fn nothing_listening() -> String {
+    "http://127.0.0.1:1".to_string()
+}
+
+/// A state that reads its two sides from the given base URLs, granting team-a the apps
+/// namespace and nothing else.
+#[cfg(test)]
+fn state_reading(api_server: String, gateway_admin: String) -> AppState {
+    AppState {
+        mapping: Arc::new(
+            [("team-a".to_string(), vec!["apps".to_string()])]
+                .into_iter()
+                .collect(),
+        ),
+        session_key: Arc::new(KEY.to_vec()),
+        source: Arc::new(crate::kube_source::Source::new(api_server)),
+        admin: Arc::new(crate::served::Admin::new(gateway_admin)),
+        controller_name: Arc::new("gapura.dev/controller".to_string()),
+        oidc: Arc::new(tests::test_oidc()),
+        pending: crate::login::PendingLogins::default(),
+        session_lifetime: std::time::Duration::from_secs(3600),
+    }
+}
+
+/// An admin port serving a gateway that is up and serving nothing, which leaves the
+/// served side answerable without any test depending on what it answers.
+#[cfg(test)]
+async fn stub_empty_gateway() -> String {
+    stub_admin(serde_json::json!({ "listeners": [] })).await
+}
+
+#[cfg(test)]
+fn signed_in_as(groups: &[&str]) -> String {
+    let session = Session {
+        subject: "alice".into(),
+        groups: groups.iter().map(|s| s.to_string()).collect(),
+        expires_at: u64::MAX,
+    };
+    format!("gapura_session={}", encode(&session, KEY))
+}
+
+/// The `id` of every row in a response body, which must be an array of rows.
+#[cfg(test)]
+fn ids(body: &str) -> Vec<String> {
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("an array of rows: {e}: {body}"));
+    rows.into_iter()
+        .map(|r| r["id"].as_str().expect("every row has an id").to_string())
+        .collect()
+}
+
+/// `GET /api/routes`: the status it answered with, and the ids of the rows it carried.
+/// Anything but an OK carries no rows at all, so there is nothing there to parse.
+#[cfg(test)]
+async fn get_routes(state: &AppState, cookie: Option<&str>) -> (StatusCode, Vec<String>) {
+    let mut request = Request::builder().uri("/api/routes");
+    if let Some(c) = cookie {
+        request = request.header("cookie", c);
+    }
+    let response = router_with(state.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    let ids = if status == StatusCode::OK {
+        ids(&body)
+    } else {
+        Vec::new()
+    };
+    (status, ids)
+}
+
+/// `GET <path>`, parsed as JSON: same shape as `get_routes`, generalised to any endpoint and
+/// to a body that is not a list of rows — `/api/overview` answers with an object. A response
+/// with no body (a 401 carries none) reads back as `Value::Null` rather than panicking, so a
+/// caller asserting only on the status never has to special-case it.
+#[cfg(test)]
+async fn get_json(
+    state: &AppState,
+    path: &str,
+    cookie: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::builder().uri(path);
+    if let Some(c) = cookie {
+        request = request.header("cookie", c);
+    }
+    let response = router_with(state.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("expected JSON: {e}: {}", String::from_utf8_lossy(&bytes)))
+    };
+    (status, body)
+}
+
 #[cfg(test)]
 mod route_endpoint_tests {
     use super::*;
-    use crate::kube_source::tests::stub_api;
-    use crate::served::tests::stub_admin;
-    use crate::session::{encode, Session};
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use std::sync::Arc;
-    use tower::ServiceExt;
-
-    const KEY: &[u8] = b"test key";
-
-    /// What the API-server stub answers with, and what the parser is tested against: four
-    /// routes in `apps` and two in `shop`, so a caller granted only `apps` has both rows to
-    /// be given and rows to be kept from.
-    const FIXTURE: &str = include_str!("../tests/fixtures/httproutes.json");
-
-    /// Nothing is listening here, and nothing is meant to be.
-    fn nothing_listening() -> String {
-        "http://127.0.0.1:1".to_string()
-    }
-
-    /// A state that reads its two sides from the given base URLs, granting team-a the apps
-    /// namespace and nothing else.
-    fn state_reading(api_server: String, gateway_admin: String) -> AppState {
-        AppState {
-            mapping: Arc::new(
-                [("team-a".to_string(), vec!["apps".to_string()])]
-                    .into_iter()
-                    .collect(),
-            ),
-            session_key: Arc::new(KEY.to_vec()),
-            source: Arc::new(crate::kube_source::Source::new(api_server)),
-            admin: Arc::new(crate::served::Admin::new(gateway_admin)),
-            controller_name: Arc::new("gapura.dev/controller".to_string()),
-            oidc: Arc::new(super::tests::test_oidc()),
-            pending: crate::login::PendingLogins::default(),
-            session_lifetime: std::time::Duration::from_secs(3600),
-        }
-    }
-
-    /// An admin port serving a gateway that is up and serving nothing, which leaves the
-    /// rows' served side answerable without any of these tests depending on its answer.
-    async fn stub_empty_gateway() -> String {
-        stub_admin(serde_json::json!({ "listeners": [] })).await
-    }
-
-    fn signed_in_as(groups: &[&str]) -> String {
-        let session = Session {
-            subject: "alice".into(),
-            groups: groups.iter().map(|s| s.to_string()).collect(),
-            expires_at: u64::MAX,
-        };
-        format!("gapura_session={}", encode(&session, KEY))
-    }
-
-    /// The `id` of every row in a response body, which must be an array of rows.
-    fn ids(body: &str) -> Vec<String> {
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(body).unwrap_or_else(|e| panic!("an array of rows: {e}: {body}"));
-        rows.into_iter()
-            .map(|r| r["id"].as_str().expect("every row has an id").to_string())
-            .collect()
-    }
-
-    /// `GET /api/routes`: the status it answered with, and the ids of the rows it carried.
-    /// Anything but an OK carries no rows at all, so there is nothing there to parse.
-    async fn get_routes(state: &AppState, cookie: Option<&str>) -> (StatusCode, Vec<String>) {
-        let mut request = Request::builder().uri("/api/routes");
-        if let Some(c) = cookie {
-            request = request.header("cookie", c);
-        }
-        let response = router_with(state.clone())
-            .oneshot(request.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body = String::from_utf8(bytes.to_vec()).unwrap();
-        let ids = if status == StatusCode::OK {
-            ids(&body)
-        } else {
-            Vec::new()
-        };
-        (status, ids)
-    }
 
     #[tokio::test]
     async fn without_a_session_it_is_refused() {
@@ -401,5 +482,57 @@ mod route_endpoint_tests {
         let state = state_reading(nothing_listening(), stub_empty_gateway().await);
         let (status, _) = get_routes(&state, Some(&signed_in_as(&["team-a"]))).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+}
+
+#[cfg(test)]
+mod overview_tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn overview_reports_what_the_gateway_is_serving() {
+        let state = state_reading(
+            stub_api(include_str!("../tests/fixtures/httproutes.json")).await,
+            stub_admin(serde_json::json!({
+                "listeners": [
+                    { "id": "infra/main/http",  "port": 80,  "rules": [] },
+                    { "id": "infra/main/https", "port": 443, "rules": [] }
+                ]
+            }))
+            .await,
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["listeners"].as_array().unwrap().len(), 2);
+        assert_eq!(body["listeners"][0]["id"], "infra/main/http");
+        assert_eq!(body["listeners"][0]["port"], 80);
+        assert_eq!(body["reachable"], true);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_gateway_is_reported_as_such_not_as_an_empty_one() {
+        // A console that draws "0 listeners" for a gateway it could not reach is lying with a
+        // number, which is worse than admitting it does not know.
+        let state = state_reading(
+            stub_api(include_str!("../tests/fixtures/httproutes.json")).await,
+            "http://127.0.0.1:1".to_string(),
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["reachable"], false);
+        assert!(body["listeners"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn overview_needs_a_session_like_everything_else() {
+        let state = state_reading(
+            stub_api(include_str!("../tests/fixtures/httproutes.json")).await,
+            stub_admin(serde_json::json!({ "listeners": [] })).await,
+        );
+        let (status, _) = get_json(&state, "/api/overview", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
