@@ -1,6 +1,7 @@
 //! The gapura control plane: serves the console and reads on its behalf.
 
 mod api;
+pub mod scope;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
