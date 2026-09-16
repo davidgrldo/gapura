@@ -1,5 +1,8 @@
-//! Serves the built console (`web/dist`, baked into the binary by `rust-embed`) as the axum
-//! fallback, and says so in words when nothing has been built yet.
+//! Serves the built console (`web/dist`) as the axum fallback, and says so in words when
+//! nothing has been built yet. `rust-embed` bakes `web/dist` into the binary in release
+//! builds; in debug builds it instead reads the files from disk at runtime, by design — that
+//! is what lets a console rebuilt after `cargo build` show up in development without
+//! recompiling the server.
 //!
 //! `resolve` is a pure function over a path string: it decides what a request *should* get
 //! before anything here touches the embed or axum. That split is what keeps the tests below
@@ -14,6 +17,11 @@ use rust_embed::RustEmbed;
 /// `npm run build`, this folder holds only `web/dist/.gitkeep` — `rust-embed` still compiles
 /// against it, and an embed with no `index.html` is a normal, expected state here rather
 /// than a build failure. The Dockerfile's Node stage is what actually populates it.
+///
+/// `.gitkeep` is embedded along with everything else, so `GET /.gitkeep` answers with an
+/// empty body. Excluding it would mean turning on `rust-embed`'s `include-exclude` feature,
+/// which pulls `globset` and its tree into a binary that holds cluster credentials — too
+/// much new dependency surface for one unreachable, zero-byte file nothing links to.
 #[derive(RustEmbed)]
 #[folder = "../../web/dist/"]
 struct Assets;
@@ -35,7 +43,14 @@ pub enum Resolved {
 /// left to routing order, because the danger this guards against is specifically a path
 /// *neither* of them has a route for — `/api/typo` — which is exactly the case that reaches
 /// this fallback in the first place.
+///
+/// Compared on an ASCII-lowercased copy because a client can send any case in the path, and
+/// `/API/routes` must be refused exactly like `/api/routes` rather than falling through to the
+/// document. This does not extend to percent-encoding (`/%61pi/typo`): axum hands the fallback
+/// the raw, already-decoded-where-axum-decodes path by design, and no legitimate client encodes
+/// an ASCII letter like `a` as `%61`, so there is no matching case to chase there.
 fn is_reserved(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
     path == "api" || path == "auth" || path.starts_with("api/") || path.starts_with("auth/")
 }
 
@@ -161,5 +176,21 @@ mod tests {
         // mistyped API path returns a cheerful HTML page and the bug hides for a day.
         assert_eq!(resolve("api/routes"), Resolved::NotFound);
         assert_eq!(resolve("auth/login"), Resolved::NotFound);
+        // A client can send any case in the path, and a mistyped or oddly-cased request to a
+        // server-owned prefix must 404 exactly like the lowercase form — otherwise the fallback
+        // hands back a cheerful HTML page and a caller expecting JSON gets a parse error.
+        assert_eq!(resolve("API/routes"), Resolved::NotFound);
+        assert_eq!(resolve("Api/typo"), Resolved::NotFound);
+        assert_eq!(resolve("AUTH/login"), Resolved::NotFound);
+    }
+
+    #[test]
+    fn routes_that_merely_start_with_the_reserved_letters_still_serve_the_document() {
+        // "/apiary" and "/authors" are legitimate SPA routes that happen to start with the
+        // same letters as the reserved prefixes. A prefix check must match on the whole
+        // segment, not a bare substring, or a lowercasing fix here could turn this into a
+        // sloppier match that swallows real routes.
+        assert_eq!(resolve("apiary"), Resolved::Index);
+        assert_eq!(resolve("authors"), Resolved::Index);
     }
 }

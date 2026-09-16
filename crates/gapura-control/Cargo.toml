@@ -28,8 +28,10 @@ mime_guess = "2"
 openidconnect = "4"
 rand = { workspace = true }
 reqwest = { workspace = true }
-# Bakes `web/dist` into the binary so the console ships as part of `gapura-control` rather
-# than as a second artifact an operator has to remember to copy alongside it.
+# Bakes `web/dist` into the binary in release builds so the console ships as part of
+# `gapura-control` rather than as a second artifact an operator has to remember to copy
+# alongside it; in debug builds it reads the files from disk at runtime instead, which is what
+# lets a console rebuilt after `cargo build` show up without recompiling the server.
 rust-embed = "8"
 serde = { workspace = true }
 serde_json = { workspace = true }
