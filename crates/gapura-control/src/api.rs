@@ -1,12 +1,11 @@
 //! The HTTP surface. Handlers stay thin: they resolve scope, call a reader, and serialise.
 
 use crate::rows::{self, Row};
-use crate::scope;
+use crate::scope::{self, Scope};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::{routing::get, Json, Router};
-use std::collections::BTreeSet;
 
 pub fn router_with(state: AppState) -> Router {
     Router::new()
@@ -138,7 +137,7 @@ async fn routes(
     let rows = rows::join(declared, served.as_ref());
     // Every row leaves through only_visible, so scoping is a property of this one path
     // rather than of whichever reader happens to have produced the rows.
-    Ok(Json(only_visible(rows, visible.as_ref())))
+    Ok(Json(only_visible(rows, &visible)))
 }
 
 #[cfg(test)]
@@ -194,11 +193,14 @@ mod tests {
     }
 }
 
-/// Drop every row outside the caller's namespaces. `None` means every namespace.
-pub fn only_visible(rows: Vec<Row>, visible: Option<&BTreeSet<String>>) -> Vec<Row> {
+/// Drop every row outside the caller's namespaces.
+pub fn only_visible(rows: Vec<Row>, visible: &Scope) -> Vec<Row> {
     match visible {
-        None => rows,
-        Some(allowed) => rows
+        // Handing back every row is the one branch that has to be spelled out, so that it
+        // is reached by a group actually granted `*` and never by a value that fell out of
+        // a default or a failure on the way here.
+        Scope::AllNamespaces => rows,
+        Scope::Only(allowed) => rows
             .into_iter()
             .filter(|r| allowed.contains(&r.namespace))
             .collect(),
@@ -209,6 +211,7 @@ pub fn only_visible(rows: Vec<Row>, visible: Option<&BTreeSet<String>>) -> Vec<R
 mod scope_tests {
     use super::*;
     use crate::rows::{ParentRow, State};
+    use std::collections::BTreeSet;
 
     fn row(id: &str) -> Row {
         Row {
@@ -228,8 +231,8 @@ mod scope_tests {
     #[test]
     fn a_namespace_outside_the_grant_is_not_returned_at_all() {
         let rows = vec![row("apps/checkout"), row("shop/catalog")];
-        let visible = BTreeSet::from(["apps".to_string()]);
-        let got = only_visible(rows, Some(&visible));
+        let visible = Scope::Only(BTreeSet::from(["apps".to_string()]));
+        let got = only_visible(rows, &visible);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "apps/checkout");
     }
@@ -237,13 +240,13 @@ mod scope_tests {
     #[test]
     fn granting_nothing_returns_nothing() {
         let rows = vec![row("apps/checkout")];
-        assert!(only_visible(rows, Some(&BTreeSet::new())).is_empty());
+        assert!(only_visible(rows, &Scope::Only(BTreeSet::new())).is_empty());
     }
 
     #[test]
     fn a_grant_over_every_namespace_returns_every_row() {
         let rows = vec![row("apps/checkout"), row("shop/catalog")];
-        assert_eq!(only_visible(rows, None).len(), 2);
+        assert_eq!(only_visible(rows, &Scope::AllNamespaces).len(), 2);
     }
 }
 
