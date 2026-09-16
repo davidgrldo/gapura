@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gapura-core", "crates/gapura"]
+members = ["crates/gapura-core", "crates/gapura", "crates/gapura-control"]
 
 [workspace.package]
 version = "0.1.0"
