@@ -255,7 +255,7 @@ kind: Service
 metadata:
   name: limited
   namespace: apps
-  annotations: {{ gapura.dev/rate-limit: "3/min" }}
+  annotations: {{ gapura.dev/rate-limit: "3/h" }}
 spec: {{ ports: [{{ name: http, port: 80 }}] }}
 ---
 apiVersion: discovery.k8s.io/v1
@@ -833,21 +833,24 @@ async fn access_log_records_a_client_that_went_away() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
     let (gw, c) = setup().await;
-    // Eight rapid requests against a 3/min limit: at most one window boundary can fall inside
-    // the loop, so at most 3 + 3 can be served and a 429 is guaranteed within the eight.
-    let mut limited = None;
-    for _ in 0..8 {
+    // The window is an hour, far longer than any run of this test: no schedule of requests can
+    // cross a bucket boundary inside it, so the fixed window is a plain counter here and the
+    // fourth request is 429 by construction (#57 — at 3/min a slow runner could spread the
+    // burst across two 60s windows and never trip it).
+    for i in 0..3 {
         let r = c
             .get(url(&gw, "echo.test", "/limited"))
             .send()
             .await
             .unwrap();
-        if r.status() == 429 {
-            limited = Some(r);
-            break;
-        }
+        assert_eq!(r.status(), 200, "request {i} is inside the allowance");
     }
-    let r = limited.expect("8 rapid requests against a 3/min limit must trip within two buckets");
+    let r = c
+        .get(url(&gw, "echo.test", "/limited"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429, "the request past the allowance");
     assert_eq!(r.headers()["x-ratelimit-limit"], "3");
     assert_eq!(r.headers()["x-ratelimit-remaining"], "0");
     let retry: u64 = r.headers()["retry-after"]
@@ -856,8 +859,8 @@ async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
         .parse()
         .unwrap();
     assert!(
-        (1..=60).contains(&retry),
-        "the rest of this minute's window: {retry}"
+        (1..=3600).contains(&retry),
+        "the rest of this hour's window: {retry}"
     );
     assert!(r.headers().contains_key("x-request-id"));
     // The rejection is a fact of the route, so it is counted where the traffic is.
