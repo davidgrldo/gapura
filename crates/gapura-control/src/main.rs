@@ -2,6 +2,7 @@
 
 mod api;
 pub mod scope;
+pub mod served;
 pub mod session;
 
 #[tokio::main]
