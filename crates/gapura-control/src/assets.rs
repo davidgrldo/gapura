@@ -96,13 +96,40 @@ pub fn fallback_page() -> String {
         .to_string()
 }
 
+// How long a browser may keep what it was just handed. The two answers differ for one
+// reason, and that reason is the whole of why `immutable` is safe: Vite puts a hash of the
+// contents into every bundle's *name* (`assets/index-c1TSk9KG.js`), so a given name can never
+// come to mean a different body, and a year of caching can never go stale. The document has
+// no hash in its name — it is the file that *names* the current hashes — which is exactly why
+// it has to be revalidated on every load. A browser allowed to keep it would go on asking for
+// the bundle hashes of the version it last saw; after an upgrade the new binary embeds none
+// of them, `serve_file` correctly 404s, and the console renders blank with nothing but a
+// script error to go on. Caching the document is therefore not a milder version of caching a
+// bundle, it is the opposite decision, and the test below pins both so neither can be changed
+// without the other.
+const CACHE_FOREVER: &str = "public, max-age=31536000, immutable";
+const REVALIDATE_ALWAYS: &str = "no-cache";
+
 /// A response carrying `body` as `text/html; charset=utf-8` — the one content type this
 /// module ever sets by hand, since both the fallback page and `index.html` are HTML and
 /// every other served path gets its type from `mime_guess` instead.
 fn html(body: impl Into<Body>) -> Response {
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, REVALIDATE_ALWAYS)
         .body(body.into())
+        .expect("a static header name and a body are always a valid response")
+}
+
+/// The response for an embedded file that was found. Split out from the embed lookup so that
+/// the headers it sets can be asserted directly, without needing a populated `web/dist` for
+/// the test to read a real asset out of.
+fn file_response(path: &str, body: Vec<u8>) -> Response {
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    Response::builder()
+        .header(header::CONTENT_TYPE, mime.as_ref())
+        .header(header::CACHE_CONTROL, CACHE_FOREVER)
+        .body(Body::from(body))
         .expect("a static header name and a body are always a valid response")
 }
 
@@ -115,13 +142,7 @@ fn serve_index() -> Response {
 
 fn serve_file(path: &str) -> Response {
     match Assets::get(path) {
-        Some(asset) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            Response::builder()
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .body(Body::from(asset.data.into_owned()))
-                .expect("a static header name and a body are always a valid response")
-        }
+        Some(asset) => file_response(path, asset.data.into_owned()),
         // `resolve` decided this path names a file without ever checking the embed, so a
         // stale index.html referencing a bundle from a previous build, or any other path
         // merely shaped like a file, lands here. Only a real 404 says the file is missing —
@@ -192,5 +213,25 @@ mod tests {
         // sloppier match that swallows real routes.
         assert_eq!(resolve("apiary"), Resolved::Index);
         assert_eq!(resolve("authors"), Resolved::Index);
+    }
+
+    #[test]
+    fn a_hashed_bundle_is_cached_forever_and_the_document_is_never_cached() {
+        // One decision with two halves, asserted together so that neither can be changed
+        // alone. `immutable` is safe only because the hash lives in the file *name*, and the
+        // document is the thing carrying those names — so a document a browser was allowed to
+        // keep would go on requesting bundle hashes that an upgraded binary no longer embeds,
+        // and the console would come up blank with only a script error to explain it.
+        let bundle = file_response("assets/index-c1TSk9KG.js", b"export {}".to_vec());
+        assert_eq!(
+            bundle.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+
+        let document = html("<!doctype html>");
+        assert_eq!(
+            document.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
     }
 }
