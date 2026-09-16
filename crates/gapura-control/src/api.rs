@@ -1,9 +1,45 @@
 //! The HTTP surface. Handlers stay thin: they resolve scope, call a reader, and serialise.
 
-use axum::{routing::get, Router};
+use crate::rows::Row;
+use crate::scope;
+use crate::state::AppState;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::{routing::get, Json, Router};
+use std::collections::BTreeSet;
 
-pub fn router() -> Router {
-    Router::new().route("/healthz", get(|| async { "ok\n" }))
+pub fn router_with(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { "ok\n" }))
+        .route("/api/routes", get(routes))
+        .with_state(state)
+}
+
+/// Pulls the signed session out of the `gapura_session` cookie. Any failure — no
+/// cookie, no signature, a bad signature, an expired session — collapses to `None`;
+/// the caller turns that into a uniform 401 rather than leaking which case it was.
+fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Session> {
+    let cookies = headers.get("cookie")?.to_str().ok()?;
+    let value = cookies
+        .split(';')
+        .filter_map(|c| c.trim().strip_prefix("gapura_session="))
+        .next()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    crate::session::decode(value, key, now).ok()
+}
+
+async fn routes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Row>>, StatusCode> {
+    let session = session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
+    let visible = scope::visible(&session.groups, &state.mapping);
+    // Readers are wired in a later task; an empty declared set keeps this honest until then.
+    let rows = crate::rows::join(Vec::new(), None);
+    Ok(Json(only_visible(rows, visible.as_ref())))
 }
 
 #[cfg(test)]
@@ -13,9 +49,16 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    fn state() -> AppState {
+        AppState {
+            mapping: std::sync::Arc::new(crate::scope::Mapping::new()),
+            session_key: std::sync::Arc::new(b"test key".to_vec()),
+        }
+    }
+
     #[tokio::test]
     async fn healthz_answers_ok() {
-        let response = router()
+        let response = router_with(state())
             .oneshot(
                 Request::builder()
                     .uri("/healthz")
@@ -28,17 +71,7 @@ mod tests {
     }
 }
 
-use crate::rows::Row;
-use std::collections::BTreeSet;
-
 /// Drop every row outside the caller's namespaces. `None` means every namespace.
-///
-/// Not yet reachable outside tests: `api` is a private module and no handler calls this
-/// until the next commit wires it into `/api/routes`. `allow` rather than `expect`
-/// because the test build already calls it from `scope_tests`, which would make an
-/// `expect` inconsistent between the plain and test compilations; remove this once
-/// `routes()` calls it too.
-#[allow(dead_code)]
 pub fn only_visible(rows: Vec<Row>, visible: Option<&BTreeSet<String>>) -> Vec<Row> {
     match visible {
         None => rows,
@@ -83,5 +116,71 @@ mod scope_tests {
     fn a_grant_over_every_namespace_returns_every_row() {
         let rows = vec![row("apps/checkout"), row("shop/catalog")];
         assert_eq!(only_visible(rows, None).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod route_endpoint_tests {
+    use super::*;
+    use crate::session::{encode, Session};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const KEY: &[u8] = b"test key";
+
+    fn state() -> crate::state::AppState {
+        crate::state::AppState {
+            mapping: std::sync::Arc::new(
+                [("team-a".to_string(), vec!["apps".to_string()])]
+                    .into_iter()
+                    .collect(),
+            ),
+            session_key: std::sync::Arc::new(KEY.to_vec()),
+        }
+    }
+
+    fn signed_in_as(groups: &[&str]) -> String {
+        let session = Session {
+            subject: "alice".into(),
+            groups: groups.iter().map(|s| s.to_string()).collect(),
+            expires_at: u64::MAX,
+        };
+        format!("gapura_session={}", encode(&session, KEY))
+    }
+
+    async fn get(cookie: Option<&str>) -> (StatusCode, String) {
+        let mut request = Request::builder().uri("/api/routes");
+        if let Some(c) = cookie {
+            request = request.header("cookie", c);
+        }
+        let response = router_with(state())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn without_a_session_it_is_refused() {
+        let (status, _) = get(None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_forged_cookie_is_refused() {
+        let (status, _) = get(Some("gapura_session=forged.nonsense")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_caller_gets_json() {
+        let (status, body) = get(Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with('['), "an array of rows, got {body}");
     }
 }
