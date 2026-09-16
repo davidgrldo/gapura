@@ -68,12 +68,12 @@ impl Admin {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{routing::get, Json, Router};
 
     /// A stand-in for a gateway's admin port, serving one canned /debug/config.
-    async fn stub(body: serde_json::Value) -> String {
+    pub(crate) async fn stub_admin(body: serde_json::Value) -> String {
         let app = Router::new().route(
             "/debug/config",
             get(move || {
@@ -89,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn rules_are_read_out_of_the_listeners() {
-        let base = stub(serde_json::json!({
+        let base = stub_admin(serde_json::json!({
             "listeners": [
                 { "id": "infra/main/http", "rules": [
                     { "route": "apps/checkout", "cluster": "apps/checkout:80" },
@@ -113,7 +113,7 @@ mod tests {
         // Flattening the listeners away leaves presence answerable only as "somewhere in
         // this config", which cannot tell a route serving on one Gateway from one that is
         // not serving on another.
-        let base = stub(serde_json::json!({
+        let base = stub_admin(serde_json::json!({
             "listeners": [
                 { "id": "infra/main/http", "rules": [
                     { "route": "apps/checkout", "cluster": "apps/checkout:80" }

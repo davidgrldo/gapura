@@ -636,7 +636,14 @@ mod against_a_stub_provider {
         AppState {
             mapping: Arc::new([("team-a".to_string(), vec!["apps".to_string()])].into()),
             session_key: Arc::new(SESSION_KEY.to_vec()),
-            rows: Arc::new(Vec::new()),
+            // Signing in reads neither source, so both readers point at nothing: these
+            // tests are about the way in, and one that needed a cluster to run would be
+            // testing something else.
+            source: Arc::new(crate::kube_source::Source::new(
+                "http://127.0.0.1:1".to_string(),
+            )),
+            admin: Arc::new(crate::served::Admin::new("http://127.0.0.1:1")),
+            controller_name: Arc::new("gapura.dev/controller".to_string()),
             oidc: Arc::new(
                 Oidc::new(
                     issuer,
@@ -801,7 +808,14 @@ mod against_a_stub_provider {
         // ever stopped agreeing, every sign-in would appear to work and nothing would.
         let provider = Arc::new(Provider::default());
         *provider.groups.lock().unwrap() = serde_json::json!(["team-a"]);
-        let state = state(&stub(provider.clone()).await);
+        // The API answers OK only when it can also read the cluster, so this one needs an
+        // API server to read. What is asserted is still about the cookie: a caller whose
+        // cookie was not accepted is turned away before either reader is consulted.
+        let mut state = state(&stub(provider.clone()).await);
+        state.source = Arc::new(crate::kube_source::Source::new(
+            crate::kube_source::tests::stub_api(include_str!("../tests/fixtures/httproutes.json"))
+                .await,
+        ));
 
         let (csrf, nonce) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some(nonce);
