@@ -98,6 +98,7 @@ mod scope_tests {
             state: State::Served,
             parents: vec![ParentRow {
                 gateway: "infra/main".to_string(),
+                section: None,
                 state: State::Served,
                 reason: None,
                 message: None,
@@ -158,6 +159,7 @@ mod route_endpoint_tests {
             state: crate::rows::State::Served,
             parents: vec![crate::rows::ParentRow {
                 gateway: "infra/main".to_string(),
+                section: None,
                 state: crate::rows::State::Served,
                 reason: None,
                 message: None,
