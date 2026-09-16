@@ -154,7 +154,7 @@ async fn overview(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Overview>, StatusCode> {
-    session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
+    let session = session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
     // Same rule as `/api/routes`: a gateway that cannot be reached is not a failed request,
     // it is the answer. Collapsing the error to `None` here, rather than propagating it,
     // is what keeps this handler from turning "the gateway is down" into a 5xx for a page
@@ -165,9 +165,48 @@ async fn overview(
         .await
         .map_err(|e| tracing::warn!(error = %e, "reading the gateway's admin port failed"))
         .ok();
+    let reachable = served.is_some();
+    let listeners = match served {
+        // Nothing was read, so there is nothing to filter either; `reachable: false` is
+        // already the whole story, and going on to ask the API server would only add a
+        // second way for this response to fail at telling it.
+        None => Vec::new(),
+        Some(s) => match scope::visible(&session.groups, &state.mapping) {
+            // A grant of every namespace already sees every route, so it can see every
+            // Gateway too — and it is the only caller who needs to notice a Gateway with
+            // no routes attached to it at all, which filtering would hide from everyone.
+            Scope::AllNamespaces => s.listeners,
+            visible @ Scope::Only(_) => {
+                let declared = state
+                    .source
+                    .routes(&state.controller_name)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "reading HTTPRoutes from the API server failed");
+                        StatusCode::BAD_GATEWAY
+                    })?;
+                // The served side is irrelevant here — only which Gateways the caller's
+                // visible routes name, never whether those Gateways are serving them —
+                // so `join` is given no served config to reason about.
+                let rows = only_visible(rows::join(declared, None), &visible);
+                let gateways: std::collections::BTreeSet<&str> = rows
+                    .iter()
+                    .flat_map(|row| row.parents.iter().map(|p| p.gateway.as_str()))
+                    .collect();
+                // A listener id is `namespace/gateway/listener` and a gateway is
+                // `namespace/gateway`, so the listener belongs to it exactly when the id
+                // starts with the gateway plus a slash. Without that trailing slash,
+                // `infra/main` would also match `infra/mainline`.
+                s.listeners
+                    .into_iter()
+                    .filter(|l| gateways.iter().any(|g| l.id.starts_with(&format!("{g}/"))))
+                    .collect()
+            }
+        },
+    };
     Ok(Json(Overview {
-        reachable: served.is_some(),
-        listeners: served.map(|s| s.listeners).unwrap_or_default(),
+        reachable,
+        listeners,
     }))
 }
 
@@ -534,5 +573,152 @@ mod overview_tests {
         );
         let (status, _) = get_json(&state, "/api/overview", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The ids of every listener in an `/api/overview` body, which must be an object
+    /// carrying a `listeners` array.
+    fn listener_ids(body: &serde_json::Value) -> Vec<String> {
+        body["listeners"]
+            .as_array()
+            .expect("an array of listeners")
+            .iter()
+            .map(|l| {
+                l["id"]
+                    .as_str()
+                    .expect("every listener has an id")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Like `state_reading`, but with a caller-supplied mapping — `state_reading` fixes
+    /// team-a to a grant of `apps` so every other test in this file stays scoped there,
+    /// but the wildcard-grant test below needs a group granted `*` instead.
+    fn state_reading_with_mapping(
+        mapping: crate::scope::Mapping,
+        api_server: String,
+        gateway_admin: String,
+    ) -> AppState {
+        AppState {
+            mapping: Arc::new(mapping),
+            session_key: Arc::new(KEY.to_vec()),
+            source: Arc::new(crate::kube_source::Source::new(api_server)),
+            admin: Arc::new(crate::served::Admin::new(gateway_admin)),
+            controller_name: Arc::new("gapura.dev/controller".to_string()),
+            oidc: Arc::new(tests::test_oidc()),
+            pending: crate::login::PendingLogins::default(),
+            session_lifetime: std::time::Duration::from_secs(3600),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gateway_only_someone_elses_routes_attach_to_is_not_shown() {
+        // The fixture's apps routes (checkout, billing, search, payments) all attach to
+        // infra/main; infra/edge is attached to only by shop/storefront, which a caller
+        // granted just `apps` cannot see. Filtering rows by namespace alone (the way
+        // `/api/routes` does) says nothing about infra/edge one way or the other — it is
+        // a Gateway, not a route — so a naive port of that filter would still leak it.
+        let state = state_reading(
+            stub_api(FIXTURE).await,
+            stub_admin(serde_json::json!({
+                "listeners": [
+                    { "id": "infra/main/http", "port": 80, "rules": [] },
+                    { "id": "infra/edge/http", "port": 8080, "rules": [] }
+                ]
+            }))
+            .await,
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = listener_ids(&body);
+        assert!(
+            ids.contains(&"infra/main/http".to_string()),
+            "a gateway the caller's own routes attach to must still be shown, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"infra/edge/http".to_string()),
+            "a gateway none of the caller's routes attach to must not be named, got {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_grant_sees_every_listener_including_an_orphaned_gateway() {
+        // Somebody granted every namespace can already see every route, so filtering
+        // listeners down would only hide the one thing they most need to notice: a
+        // Gateway with no routes attached to it at all.
+        let state = state_reading_with_mapping(
+            [("team-a".to_string(), vec!["*".to_string()])]
+                .into_iter()
+                .collect(),
+            stub_api(FIXTURE).await,
+            stub_admin(serde_json::json!({
+                "listeners": [
+                    { "id": "infra/main/http", "port": 80, "rules": [] },
+                    { "id": "orphan/gateway/http", "port": 9999, "rules": [] }
+                ]
+            }))
+            .await,
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = listener_ids(&body);
+        assert_eq!(ids.len(), 2, "got {ids:?}");
+        assert!(
+            ids.contains(&"orphan/gateway/http".to_string()),
+            "a wildcard grant must see a Gateway with no routes too, got {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_whose_routes_attach_to_no_gateway_sees_an_empty_list_but_reachable_true() {
+        // Knowing there is nothing is not the same as not knowing: this is the other side
+        // of `an_unreachable_gateway_is_reported_as_such_not_as_an_empty_one`, where an
+        // empty list means the gateway could not even be asked.
+        let state = state_reading_with_mapping(
+            [("team-a".to_string(), vec!["nonexistent".to_string()])]
+                .into_iter()
+                .collect(),
+            stub_api(FIXTURE).await,
+            stub_admin(serde_json::json!({
+                "listeners": [ { "id": "infra/main/http", "port": 80, "rules": [] } ]
+            }))
+            .await,
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["reachable"], true,
+            "the gateway answered; there is simply nothing this caller's routes reach"
+        );
+        assert!(listener_ids(&body).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_similarly_named_gateway_is_not_matched_by_string_prefix_alone() {
+        // "infra/main" is also a string-prefix of "infra/mainline" — matching listener
+        // ids with `starts_with(gateway)` instead of `starts_with("{gateway}/")` would
+        // leak an entirely different Gateway's listener into this caller's response.
+        let state = state_reading(
+            stub_api(FIXTURE).await,
+            stub_admin(serde_json::json!({
+                "listeners": [
+                    { "id": "infra/main/http", "port": 80, "rules": [] },
+                    { "id": "infra/mainline/http", "port": 81, "rules": [] }
+                ]
+            }))
+            .await,
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = listener_ids(&body);
+        assert!(ids.contains(&"infra/main/http".to_string()), "got {ids:?}");
+        assert!(
+            !ids.contains(&"infra/mainline/http".to_string()),
+            "infra/mainline must not be matched as a prefix of infra/main, got {ids:?}"
+        );
     }
 }
