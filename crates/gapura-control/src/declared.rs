@@ -25,6 +25,13 @@ pub struct DeclaredParent {
     /// Why, when this Gateway did not accept it.
     pub reason: Option<String>,
     pub message: Option<String>,
+    /// The `ResolvedRefs` condition: false when a reference the route names did not
+    /// resolve. It is a separate fact from acceptance, not a milder form of it — gapura
+    /// accepts such a route and installs its rules, which then answer with an error — so
+    /// it carries its own reason and message rather than sharing the acceptance's.
+    pub refs_resolved: bool,
+    pub refs_reason: Option<String>,
+    pub refs_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +120,15 @@ pub fn routes_from_list(json: &str, controller: &str) -> anyhow::Result<Vec<Decl
                     // state already says; every other case is one the console has to explain.
                     let unexplained =
                         accepted_condition.filter(|_| acceptance != Acceptance::Accepted);
+                    // Only an explicit `False` is the gateway reporting that a reference did
+                    // not resolve. An absent condition is an implementation that writes
+                    // fewer of them, and `Unknown` is one that has not finished looking:
+                    // neither is a complaint, and reading a complaint into silence would
+                    // flag healthy routes as broken.
+                    let failed_refs = p
+                        .conditions
+                        .iter()
+                        .find(|c| c.kind == "ResolvedRefs" && c.status == "False");
                     DeclaredParent {
                         // Gateway API omits the namespace when the Gateway sits beside the
                         // route, so the route's own is the only thing it can mean.
@@ -125,6 +141,9 @@ pub fn routes_from_list(json: &str, controller: &str) -> anyhow::Result<Vec<Decl
                         acceptance,
                         reason: unexplained.and_then(|c| c.reason.clone()),
                         message: unexplained.and_then(|c| c.message.clone()),
+                        refs_resolved: failed_refs.is_none(),
+                        refs_reason: failed_refs.and_then(|c| c.reason.clone()),
+                        refs_message: failed_refs.and_then(|c| c.message.clone()),
                     }
                 })
                 .collect();
@@ -162,7 +181,7 @@ mod tests {
     #[test]
     fn every_route_in_the_list_is_read() {
         let got = routes_from_list(LIST, CONTROLLER).unwrap();
-        assert_eq!(got.len(), 5);
+        assert_eq!(got.len(), 6);
         assert_eq!(got[0].id, "apps/checkout");
         assert_eq!(got[2].namespace, "shop");
     }
@@ -289,5 +308,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(only_parent(&got, "apps/local").gateway, "apps/main");
+    }
+
+    #[test]
+    fn a_route_whose_refs_did_not_resolve_says_so_with_its_own_reason() {
+        // The commonest way a route fails, and the condition it is reported on. `Accepted`
+        // is still True — gapura installs the rule regardless — so nothing in the
+        // acceptance explains it, and the two conditions have to be kept apart.
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
+        let payments = only_parent(&got, "apps/payments");
+        assert_eq!(payments.acceptance, Acceptance::Accepted);
+        assert!(!payments.refs_resolved);
+        assert_eq!(payments.refs_reason.as_deref(), Some("BackendNotFound"));
+        assert_eq!(
+            payments.refs_message.as_deref(),
+            Some("backendRef apps/ledger not found")
+        );
+        assert_eq!(
+            payments.reason, None,
+            "the acceptance explains nothing here and must not borrow the refs' words"
+        );
+    }
+
+    #[test]
+    fn a_route_whose_refs_resolved_carries_no_refs_reason() {
+        // `ResolvedRefs=True` says only that references resolved, which `refs_resolved`
+        // already says; repeating it as a reason would put a sentence on screen beside a
+        // route that has nothing wrong with it.
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
+        let checkout = only_parent(&got, "apps/checkout");
+        assert!(checkout.refs_resolved);
+        assert_eq!(checkout.refs_reason, None);
+        assert_eq!(checkout.refs_message, None);
+    }
+
+    #[test]
+    fn a_route_with_no_resolved_refs_condition_is_read_as_resolved() {
+        // Absence of a complaint is not a complaint. This fixture route carries only
+        // `Accepted`, as an implementation that writes fewer conditions would leave it.
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
+        assert!(only_parent(&got, "shop/catalog").refs_resolved);
+    }
+
+    #[test]
+    fn resolved_refs_still_reading_unknown_is_read_as_resolved() {
+        // Only an explicit `False` is the gateway reporting that a reference did not
+        // resolve. `Unknown` is it still looking, and folding the two together would call
+        // every route broken for as long as its reconcile takes.
+        let got = routes_from_list(
+            r#"{"items":[{"metadata":{"name":"slow","namespace":"apps"},
+                "status":{"parents":[{"parentRef":{"name":"main","namespace":"infra"},
+                  "controllerName":"gapura.dev/controller","conditions":[
+                  {"type":"Accepted","status":"True","reason":"Accepted","message":"ok"},
+                  {"type":"ResolvedRefs","status":"Unknown","reason":"Pending",
+                   "message":"still resolving"}]}]}}]}"#,
+            CONTROLLER,
+        )
+        .unwrap();
+        let slow = only_parent(&got, "apps/slow");
+        assert!(slow.refs_resolved);
+        assert_eq!(slow.refs_reason, None);
     }
 }
