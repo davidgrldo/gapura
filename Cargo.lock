@@ -1077,6 +1077,7 @@ dependencies = [
  "base64",
  "clap",
  "hmac",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
