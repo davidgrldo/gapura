@@ -2,6 +2,7 @@
 
 mod api;
 pub mod scope;
+pub mod session;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
