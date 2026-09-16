@@ -1,5 +1,6 @@
 <script>
   import { get } from '../lib/api.js'
+  import Failure from '../lib/Failure.svelte'
   import State from '../lib/State.svelte'
 
   // `/api/routes` answers with a bare array of rows, already sorted by id on the server, so
@@ -85,7 +86,7 @@
     </ul>
   {/if}
 {:catch error}
-  <p class="notice">Could not load the routes: {error.message}</p>
+  <Failure {error} what="the routes" />
 {/await}
 
 <!-- Why an attachment is in the state it is in. The server attaches this to the parent
@@ -190,13 +191,5 @@
 
   .muted {
     color: #55606b;
-  }
-
-  .notice {
-    background: #fdf3da;
-    border: 1px solid #e5c569;
-    border-radius: 0.375rem;
-    padding: 0.75rem 1rem;
-    max-width: 44rem;
   }
 </style>

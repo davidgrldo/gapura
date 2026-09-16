@@ -1,5 +1,6 @@
 <script>
   import { get } from '../lib/api.js'
+  import Failure from '../lib/Failure.svelte'
 
   // Fetched once on mount and awaited in the markup. `{#await}` is the whole of the loading
   // and error handling this screen needs, which is why there is no state variable here to
@@ -73,7 +74,7 @@
     </table>
   {/if}
 {:catch error}
-  <p class="notice">Could not load the overview: {error.message}</p>
+  <Failure {error} what="the overview" />
 {/await}
 
 <style>
