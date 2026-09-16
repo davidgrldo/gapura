@@ -23,8 +23,10 @@ pub struct DeclaredRoute {
     pub message: Option<String>,
 }
 
-/// Parse a Kubernetes list response into the fields the console shows.
-pub fn routes_from_list(json: &str) -> anyhow::Result<Vec<DeclaredRoute>> {
+/// Parse a Kubernetes list response into the fields the console shows. `controller` is the
+/// GatewayClass controllerName whose verdict to read: a route may be attached to several
+/// controllers, and only the one we are the console for can say why *we* are not serving it.
+pub fn routes_from_list(json: &str, controller: &str) -> anyhow::Result<Vec<DeclaredRoute>> {
     #[derive(Deserialize)]
     struct List {
         items: Vec<Item>,
@@ -47,6 +49,8 @@ pub fn routes_from_list(json: &str) -> anyhow::Result<Vec<DeclaredRoute>> {
     }
     #[derive(Deserialize)]
     struct Parent {
+        #[serde(rename = "controllerName")]
+        controller_name: Option<String>,
         #[serde(default)]
         conditions: Vec<Condition>,
     }
@@ -68,6 +72,7 @@ pub fn routes_from_list(json: &str) -> anyhow::Result<Vec<DeclaredRoute>> {
                 .status
                 .iter()
                 .flat_map(|s| s.parents.iter())
+                .filter(|p| p.controller_name.as_deref() == Some(controller))
                 .flat_map(|p| p.conditions.iter())
                 .find(|c| c.kind == "Accepted");
             let acceptance = match accepted_condition.map(|c| c.status.as_str()) {
@@ -96,18 +101,20 @@ mod tests {
     use super::*;
 
     const LIST: &str = include_str!("../tests/fixtures/httproutes.json");
+    /// The default of gapura's own `--controller-name` flag.
+    const CONTROLLER: &str = "gapura.dev/controller";
 
     #[test]
     fn every_route_in_the_list_is_read() {
-        let got = routes_from_list(LIST).unwrap();
-        assert_eq!(got.len(), 3);
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
+        assert_eq!(got.len(), 4);
         assert_eq!(got[0].id, "apps/checkout");
         assert_eq!(got[2].namespace, "shop");
     }
 
     #[test]
     fn a_refused_route_carries_the_reason_it_was_refused() {
-        let got = routes_from_list(LIST).unwrap();
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
         let billing = got.iter().find(|r| r.id == "apps/billing").unwrap();
         assert_eq!(billing.acceptance, Acceptance::Refused);
         assert_eq!(billing.reason.as_deref(), Some("UnsupportedValue"));
@@ -119,7 +126,7 @@ mod tests {
 
     #[test]
     fn an_accepted_route_carries_no_reason() {
-        let got = routes_from_list(LIST).unwrap();
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
         let checkout = got.iter().find(|r| r.id == "apps/checkout").unwrap();
         assert_eq!(checkout.acceptance, Acceptance::Accepted);
         assert_eq!(checkout.reason, None);
@@ -129,9 +136,11 @@ mod tests {
     fn a_route_with_no_status_yet_is_pending_not_refused() {
         // A resource the controller has not reached. Unknown is not the same as refused,
         // and the console must be able to tell them apart.
-        let got =
-            routes_from_list(r#"{"items":[{"metadata":{"name":"fresh","namespace":"apps"}}]}"#)
-                .unwrap();
+        let got = routes_from_list(
+            r#"{"items":[{"metadata":{"name":"fresh","namespace":"apps"}}]}"#,
+            CONTROLLER,
+        )
+        .unwrap();
         assert_eq!(got[0].acceptance, Acceptance::Pending);
         assert_eq!(got[0].reason, None);
     }
@@ -142,12 +151,40 @@ mod tests {
         // while undecided is the only thing the console can show.
         let got = routes_from_list(
             r#"{"items":[{"metadata":{"name":"slow","namespace":"apps"},
-                "status":{"parents":[{"conditions":[
+                "status":{"parents":[{"controllerName":"gapura.dev/controller","conditions":[
                   {"type":"Accepted","status":"Unknown","reason":"Pending",
                    "message":"waiting for the backend to resolve"}]}]}}]}"#,
+            CONTROLLER,
         )
         .unwrap();
         assert_eq!(got[0].acceptance, Acceptance::Pending);
         assert_eq!(got[0].reason.as_deref(), Some("Pending"));
+    }
+
+    #[test]
+    fn another_controllers_verdict_is_not_read_as_this_ones() {
+        // A route attached to both ingress-nginx and gapura. nginx accepted it and gapura
+        // refused it; reporting nginx's yes would draw the route as accepted-but-absent and
+        // hide the refusal that actually explains why gapura is not serving it.
+        let got = routes_from_list(LIST, CONTROLLER).unwrap();
+        let storefront = got.iter().find(|r| r.id == "shop/storefront").unwrap();
+        assert_eq!(storefront.acceptance, Acceptance::Refused);
+        assert_eq!(storefront.reason.as_deref(), Some("UnsupportedValue"));
+    }
+
+    #[test]
+    fn a_route_no_parent_attributes_to_this_controller_is_pending() {
+        // gapura has not claimed this route, so it has no verdict to report on it. Reading
+        // the other controller's yes would promise the console can explain a route it is
+        // not even responsible for.
+        let got = routes_from_list(
+            r#"{"items":[{"metadata":{"name":"theirs","namespace":"apps"},
+                "status":{"parents":[{"controllerName":"k8s.io/ingress-nginx","conditions":[
+                  {"type":"Accepted","status":"True","reason":"Accepted","message":"ok"}]}]}}]}"#,
+            CONTROLLER,
+        )
+        .unwrap();
+        assert_eq!(got[0].acceptance, Acceptance::Pending);
+        assert_eq!(got[0].reason, None);
     }
 }
