@@ -6,3 +6,4 @@ _check/
 # Kept on disk because they are how this project was built, untracked because they are
 # working material rather than something a user of the gateway needs.
 docs/superpowers/
+docs/adr/
