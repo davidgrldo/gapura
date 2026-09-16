@@ -16,6 +16,9 @@ axum = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
 hmac = "0.12"
+# Named only to select the API version `kube` compiles against; nothing here refers to it.
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
 # Default features are the reqwest + rustls client this workspace already uses; no
 # native-tls, so nothing drags OpenSSL in behind the gateway's back.
 openidconnect = "4"
