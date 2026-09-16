@@ -81,14 +81,14 @@ fn client_from(mut config: Config) -> anyhow::Result<Client> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{routing::get, Router};
 
     /// A stand-in for the API server, answering the list request with the same fixture the
     /// parser is tested against. It is mounted at the one path the client is expected to
     /// ask for, so a reader that went looking somewhere else fails here rather than passing.
-    async fn stub_api(body: &'static str) -> String {
+    pub(crate) async fn stub_api(body: &'static str) -> String {
         let app = Router::new().route(
             "/apis/gateway.networking.k8s.io/v1/httproutes",
             get(move || async move { body }),

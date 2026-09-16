@@ -74,8 +74,9 @@ async fn main() -> anyhow::Result<()> {
     let state = state::AppState {
         mapping: Arc::new(args.mapping()),
         session_key: Arc::new(session_key()?),
-        // The readers that populate this are later work; an empty Vec is the safe stand-in.
-        rows: Arc::new(Vec::new()),
+        source: Arc::new(kube_source::Source::from_environment().await?),
+        admin: Arc::new(served::Admin::new(&args.gateway_admin)),
+        controller_name: Arc::new(args.controller_name.clone()),
         oidc: Arc::new(login::Oidc::new(
             &args.oidc_issuer,
             &args.oidc_client_id,
