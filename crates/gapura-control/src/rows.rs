@@ -26,6 +26,9 @@ pub enum State {
 pub struct ParentRow {
     /// The Gateway attached to, as `namespace/name`.
     pub gateway: String,
+    /// The listener named by `sectionName`, when the attachment named one. Two attachments
+    /// to the same Gateway are only tellable apart by this.
+    pub section: Option<String>,
     pub state: State,
     /// Why, when this Gateway did not accept it. It belongs here rather than on the row:
     /// a route refused on two Gateways for two causes has no single reason, and picking
@@ -111,6 +114,7 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
                     };
                     ParentRow {
                         gateway: parent.gateway,
+                        section: parent.section,
                         state,
                         reason: parent.reason,
                         message: parent.message,
@@ -457,6 +461,37 @@ mod tests {
         assert_eq!(rows[0].parents[0].state, State::Missing);
         assert_eq!(rows[1].id, "apps/search");
         assert_eq!(rows[1].parents[0].state, State::Missing);
+    }
+
+    #[test]
+    fn two_attachments_to_the_same_gateway_are_tellable_apart_by_section() {
+        // A route may name the same Gateway twice, once per listener, and the two
+        // attachments can legitimately disagree: served on the listener that carries the
+        // route, missing on the one that does not. Without `section` on `ParentRow` these
+        // two parents are identical, and a reader of a `Mixed` row has no way to tell which
+        // verdict belongs to which listener — the exact confusion #47 removed one level up.
+        let mut http = parent("infra/main", Acceptance::Accepted, None);
+        http.section = Some("http".to_string());
+        let mut https = parent("infra/main", Acceptance::Accepted, None);
+        https.section = Some("https".to_string());
+        let rows = join(
+            vec![on_gateways("apps/checkout", vec![http, https])],
+            Some(&listeners(&[("infra/main/http", &["apps/checkout"])])),
+        );
+        assert_eq!(rows[0].state, State::Mixed);
+        assert_eq!(rows[0].parents.len(), 2);
+        let served = rows[0]
+            .parents
+            .iter()
+            .find(|p| p.section.as_deref() == Some("http"))
+            .expect("the http attachment");
+        assert_eq!(served.state, State::Served);
+        let missing = rows[0]
+            .parents
+            .iter()
+            .find(|p| p.section.as_deref() == Some("https"))
+            .expect("the https attachment");
+        assert_eq!(missing.state, State::Missing);
     }
 
     #[test]
