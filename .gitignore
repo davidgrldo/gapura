@@ -2,6 +2,12 @@ target/
 _check/
 .DS_Store
 
+# The console's build output: the image builds it, so only the directory itself (kept present
+# by .gitkeep, for the embed to compile against on a fresh clone) belongs in the repository.
+web/dist/*
+!web/dist/.gitkeep
+web/node_modules/
+
 # Development notes: implementation plans, the design spec, and competitor research.
 # Kept on disk because they are how this project was built, untracked because they are
 # working material rather than something a user of the gateway needs.

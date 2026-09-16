@@ -14,6 +14,11 @@ pub fn router_with(state: AppState) -> Router {
         .route("/auth/callback", get(crate::login::callback))
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
+        // Explicit routes above always win a match first, so this only ever runs for a path
+        // none of them recognise. It still refuses `/api` and `/auth` itself, so a route
+        // that is merely missing — a typo, not yet built — 404s instead of resolving to the
+        // console's document.
+        .fallback(crate::assets::fallback)
         .with_state(state)
 }
 
@@ -295,6 +300,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_api_path_never_falls_back_to_the_console() {
+        // `/api/nonexistent` has no route of its own. The danger is the single-page-app
+        // fallback answering for it anyway: a client would see 200 and non-JSON instead of a
+        // 404, and a typo'd API path would hide as a silent bug instead of failing loudly.
+        let response = router_with(state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            !content_type.contains("html"),
+            "an unmatched API path must not come back as HTML, got content-type {content_type}"
+        );
     }
 }
 
