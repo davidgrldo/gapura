@@ -64,7 +64,15 @@
                 <span class="muted">(clients dial {listener.client_port})</span>
               {/if}
             </td>
-            <td>{listener.protocol || '—'}</td>
+            <!-- Upper-cased here rather than at the source. `gapura_core::config::Protocol`
+                 is a plain derived enum with no `rename_all`, so `/debug/config` spells these
+                 `Http` and `Https`, while the Gateway API — and therefore `kubectl get
+                 gateway`, which is what an operator has open next to this — spells them `HTTP`
+                 and `HTTPS`. A console whose whole purpose is to sit beside what Kubernetes
+                 was told has to use Kubernetes' spelling. Fixing it in the enum's serde
+                 instead would change the admin JSON contract, which is a separate decision
+                 with other consumers. -->
+            <td>{listener.protocol ? listener.protocol.toUpperCase() : '—'}</td>
             <!-- A listener with no hostname takes any host, which is a real setting rather
                  than missing information, so it is spelled out instead of left blank. -->
             <td>{listener.hostname ?? 'any host'}</td>

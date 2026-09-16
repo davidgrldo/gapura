@@ -30,10 +30,18 @@ COPY web/src ./src
 RUN npm run build
 
 FROM rust:1-bookworm AS builder
-# The same C toolchain the data plane's image installs. The workspace pins openssl/vendored
-# and flate2/zlib-ng through pingora, and cargo resolves the whole workspace even when asked
-# for one package, so the builder must be able to compile them rather than depend on this
-# package's own dependency graph happening not to reach that far.
+# The same C toolchain the data plane's image installs, kept in step with it on purpose.
+# Whether this package needs any of it is genuinely not known. `cargo build -p gapura-control`
+# compiles only that package's graph — resolving the whole workspace is not the same as
+# compiling it, so the workspace's openssl/vendored and flate2/zlib-ng pins are no argument
+# for this layer — and `cargo tree -p gapura-control -e normal,build` reaches no openssl-sys,
+# openssl-src, aws-lc-sys or libz-*. The one crate in that graph that builds native code is
+# `ring`, which carries its own pre-generated assembly and wants only the C compiler already
+# in the base image.
+#
+# The layer stays anyway, because nobody has ever built this image: dropping a dependency on
+# an untested Dockerfile trades a small, cached cost for a failure no one here can price. The
+# first real image build is what earns the right to remove it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake perl pkg-config \
  && rm -rf /var/lib/apt/lists/*
