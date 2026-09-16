@@ -1,17 +1,33 @@
 {"items": [
   {"metadata": {"name": "checkout", "namespace": "apps"},
-   "status": {"parents": [{"controllerName": "gapura.dev/controller", "conditions": [
-     {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]}]}},
+   "status": {"parents": [
+     {"parentRef": {"name": "main", "namespace": "infra"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]}]}},
   {"metadata": {"name": "billing", "namespace": "apps"},
-   "status": {"parents": [{"controllerName": "gapura.dev/controller", "conditions": [
-     {"type": "Accepted", "status": "False", "reason": "UnsupportedValue", "message": "filter type ExtensionRef is not supported"}]}]}},
+   "status": {"parents": [
+     {"parentRef": {"name": "main", "namespace": "infra"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "False", "reason": "UnsupportedValue", "message": "filter type ExtensionRef is not supported"}]}]}},
   {"metadata": {"name": "catalog", "namespace": "shop"},
-   "status": {"parents": [{"controllerName": "gapura.dev/controller", "conditions": [
-     {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]}]}},
+   "status": {"parents": [
+     {"parentRef": {"name": "main", "namespace": "infra", "sectionName": "http"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]}]}},
   {"metadata": {"name": "storefront", "namespace": "shop"},
    "status": {"parents": [
-     {"controllerName": "k8s.io/ingress-nginx", "conditions": [
+     {"parentRef": {"name": "edge", "namespace": "infra"},
+      "controllerName": "k8s.io/ingress-nginx", "conditions": [
        {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]},
-     {"controllerName": "gapura.dev/controller", "conditions": [
-       {"type": "Accepted", "status": "False", "reason": "UnsupportedValue", "message": "filter type ExtensionRef is not supported"}]}]}}
+     {"parentRef": {"name": "main", "namespace": "infra"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "False", "reason": "UnsupportedValue", "message": "filter type ExtensionRef is not supported"}]}]}},
+  {"metadata": {"name": "search", "namespace": "apps"},
+   "status": {"parents": [
+     {"parentRef": {"name": "main", "namespace": "infra"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]},
+     {"parentRef": {"name": "second", "namespace": "infra"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "False", "reason": "NoMatchingListenerHostname", "message": "no listener on Gateway infra/second accepts hostname search.internal"}]}]}}
 ]}
