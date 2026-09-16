@@ -3,7 +3,8 @@
    "status": {"parents": [
      {"parentRef": {"name": "main", "namespace": "infra"},
       "controllerName": "gapura.dev/controller", "conditions": [
-       {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]}]}},
+       {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"},
+       {"type": "ResolvedRefs", "status": "True", "reason": "ResolvedRefs", "message": "All references resolved"}]}]}},
   {"metadata": {"name": "billing", "namespace": "apps"},
    "status": {"parents": [
      {"parentRef": {"name": "main", "namespace": "infra"},
@@ -29,5 +30,11 @@
        {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"}]},
      {"parentRef": {"name": "second", "namespace": "infra"},
       "controllerName": "gapura.dev/controller", "conditions": [
-       {"type": "Accepted", "status": "False", "reason": "NoMatchingListenerHostname", "message": "no listener on Gateway infra/second accepts hostname search.internal"}]}]}}
+       {"type": "Accepted", "status": "False", "reason": "NoMatchingListenerHostname", "message": "no listener on Gateway infra/second accepts hostname search.internal"}]}]}},
+  {"metadata": {"name": "payments", "namespace": "apps"},
+   "status": {"parents": [
+     {"parentRef": {"name": "main", "namespace": "infra"},
+      "controllerName": "gapura.dev/controller", "conditions": [
+       {"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Route is accepted"},
+       {"type": "ResolvedRefs", "status": "False", "reason": "BackendNotFound", "message": "backendRef apps/ledger not found"}]}]}}
 ]}
