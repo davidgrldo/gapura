@@ -2,6 +2,7 @@
 
 mod api;
 pub mod declared;
+pub mod rows;
 pub mod scope;
 pub mod served;
 pub mod session;
