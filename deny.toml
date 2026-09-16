@@ -21,6 +21,13 @@ ignore = [
     # metrics (TextEncoder over the default registry) and never parses protobuf from any source,
     # so the vulnerable path is unreachable. Revisit when pingora bumps prometheus.
     { id = "RUSTSEC-2024-0437", reason = "we encode metrics, we never parse protobuf input" },
+    # The Marvin attack recovers an RSA *private* key from the timing of operations that use one.
+    # rsa 0.9 reaches us only through openidconnect, and gapura-control is an OIDC client: it
+    # verifies ID token signatures with the provider's public key (rsa::RsaPublicKey::verify) and
+    # never holds a private key of its own, so there is no secret for the sidechannel to leak.
+    # openidconnect's own RSA signing path, CoreRsaPrivateSigningKey, needs a PEM we never supply.
+    # Revisit if this crate ever signs anything with RSA, or if rsa ships a constant-time release.
+    { id = "RUSTSEC-2023-0071", reason = "we verify with public keys and hold no RSA private key" },
 ]
 
 [licenses]

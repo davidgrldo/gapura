@@ -1,13 +1,17 @@
 //! The gapura control plane: serves the console and reads on its behalf.
 
 mod api;
+mod cli;
 pub mod declared;
+pub mod kube_source;
+pub mod login;
 pub mod rows;
 pub mod scope;
 pub mod served;
 pub mod session;
 pub mod state;
 
+use clap::Parser;
 use rand::RngCore;
 use std::sync::Arc;
 
@@ -55,14 +59,36 @@ fn session_key() -> anyhow::Result<Vec<u8>> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().json().init();
+    let args = cli::Args::parse();
+    // A mismatch between this and the gateway's --controller-name makes every route read as
+    // pending, with nothing on the screen explaining why. Saying it here turns that into a
+    // line someone can compare rather than a silence they have to deduce.
+    tracing::info!(
+        controller_name = %args.controller_name,
+        gateway_admin = %args.gateway_admin,
+        grants = args.grants.len(),
+        oidc_issuer = %args.oidc_issuer,
+        oidc_groups_claim = %args.oidc_groups_claim,
+        "gapura-control starting"
+    );
     let state = state::AppState {
-        // No groups are mapped yet: readers, and the config that populates this, are
-        // later work. An empty mapping grants nothing, which is the safe default.
-        mapping: Arc::new(scope::Mapping::new()),
+        mapping: Arc::new(args.mapping()),
         session_key: Arc::new(session_key()?),
-        rows: Arc::new(Vec::new()),
+        source: Arc::new(kube_source::Source::from_environment().await?),
+        admin: Arc::new(served::Admin::new(&args.gateway_admin)),
+        controller_name: Arc::new(args.controller_name.clone()),
+        oidc: Arc::new(login::Oidc::new(
+            &args.oidc_issuer,
+            &args.oidc_client_id,
+            &args.oidc_client_secret,
+            &args.oidc_redirect_url,
+            &args.oidc_groups_claim,
+            &args.oidc_scopes,
+        )?),
+        pending: login::PendingLogins::default(),
+        session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
     };
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "gapura-control listening");
     axum::serve(listener, api::router_with(state)).await?;
     Ok(())
