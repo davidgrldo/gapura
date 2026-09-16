@@ -3,6 +3,7 @@
 mod api;
 mod cli;
 pub mod declared;
+pub mod login;
 pub mod rows;
 pub mod scope;
 pub mod served;
@@ -65,6 +66,8 @@ async fn main() -> anyhow::Result<()> {
         controller_name = %args.controller_name,
         gateway_admin = %args.gateway_admin,
         grants = args.grants.len(),
+        oidc_issuer = %args.oidc_issuer,
+        oidc_groups_claim = %args.oidc_groups_claim,
         "gapura-control starting"
     );
     let state = state::AppState {
@@ -72,6 +75,16 @@ async fn main() -> anyhow::Result<()> {
         session_key: Arc::new(session_key()?),
         // The readers that populate this are later work; an empty Vec is the safe stand-in.
         rows: Arc::new(Vec::new()),
+        oidc: Arc::new(login::Oidc::new(
+            &args.oidc_issuer,
+            &args.oidc_client_id,
+            &args.oidc_client_secret,
+            &args.oidc_redirect_url,
+            &args.oidc_groups_claim,
+            &args.oidc_scopes,
+        )?),
+        pending: login::PendingLogins::default(),
+        session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
     };
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "gapura-control listening");

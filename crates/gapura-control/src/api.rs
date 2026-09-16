@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 pub fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        .route("/auth/login", get(crate::login::begin))
+        .route("/auth/callback", get(crate::login::callback))
         .route("/api/routes", get(routes))
         .with_state(state)
 }
@@ -22,7 +24,8 @@ fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Sessi
     let cookies = headers.get("cookie")?.to_str().ok()?;
     let value = cookies
         .split(';')
-        .filter_map(|c| c.trim().strip_prefix("gapura_session="))
+        .filter_map(|c| c.trim().strip_prefix(crate::login::COOKIE_NAME))
+        .filter_map(|rest| rest.strip_prefix('='))
         .next()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -52,11 +55,28 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    /// An identity provider nobody is going to contact. These tests are about the API
+    /// surface; nothing here reaches the network, the URLs only have to parse.
+    pub fn test_oidc() -> crate::login::Oidc {
+        crate::login::Oidc::new(
+            "https://id.example.test",
+            "console",
+            "not a real secret",
+            "https://console.example.test/auth/callback",
+            "groups",
+            &[],
+        )
+        .expect("literal URLs parse")
+    }
+
     fn state() -> AppState {
         AppState {
             mapping: std::sync::Arc::new(crate::scope::Mapping::new()),
             session_key: std::sync::Arc::new(b"test key".to_vec()),
             rows: std::sync::Arc::new(Vec::new()),
+            oidc: std::sync::Arc::new(test_oidc()),
+            pending: crate::login::PendingLogins::default(),
+            session_lifetime: std::time::Duration::from_secs(3600),
         }
     }
 
@@ -149,6 +169,9 @@ mod route_endpoint_tests {
             // One row on each side of the grant above, so a handler that forgot to filter
             // would hand the caller the shop row it must never see.
             rows: std::sync::Arc::new(vec![row("apps/checkout"), row("shop/catalog")]),
+            oidc: std::sync::Arc::new(super::tests::test_oidc()),
+            pending: crate::login::PendingLogins::default(),
+            session_lifetime: std::time::Duration::from_secs(3600),
         }
     }
 
