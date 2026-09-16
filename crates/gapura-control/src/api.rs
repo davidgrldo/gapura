@@ -141,13 +141,48 @@ async fn routes(
     Ok(Json(only_visible(rows, &visible)))
 }
 
+/// A listener as `/api/overview` sends it: id, port, protocol, hostname — exactly the
+/// fields the overview screen draws. Deliberately its own type rather than
+/// `#[serde(skip_serializing)]` on `ServedListener::rules`: `ServedListener` is shared
+/// with `rows::join`, which genuinely needs `rules` to decide whether a route is being
+/// served, and a skip attribute lives on the type, not on this one response, so it would
+/// silently starve any other future serialiser of `ServedListener` of data it might
+/// actually want. Excluding `rules` here instead means the omission belongs to the one
+/// handler that made the choice.
+///
+/// A shared Gateway is the normal case — `infra/main` serves routes from every team — so
+/// a listener's `rules` names every route it is serving, not just the caller's own. The
+/// overview screen never reads `rules` at all, so leaving the field out here, rather than
+/// filtering it down to routes the caller is granted, means there is no filter left to
+/// later get wrong: an absent field cannot leak.
+#[derive(serde::Serialize)]
+struct OverviewListener {
+    id: String,
+    port: u16,
+    client_port: Option<u16>,
+    protocol: String,
+    hostname: Option<String>,
+}
+
+impl From<crate::served::ServedListener> for OverviewListener {
+    fn from(l: crate::served::ServedListener) -> Self {
+        Self {
+            id: l.id,
+            port: l.port,
+            client_port: l.client_port,
+            protocol: l.protocol,
+            hostname: l.hostname,
+        }
+    }
+}
+
 /// `/api/overview`'s body: which gapura this is and what it is doing. `listeners` is empty
 /// exactly when `reachable` is false, never the other way around — the landing page has one
 /// boolean to check before it draws either the list or the "could not be reached" message.
 #[derive(serde::Serialize)]
 struct Overview {
     reachable: bool,
-    listeners: Vec<crate::served::ServedListener>,
+    listeners: Vec<OverviewListener>,
 }
 
 async fn overview(
@@ -206,7 +241,7 @@ async fn overview(
     };
     Ok(Json(Overview {
         reachable,
-        listeners,
+        listeners: listeners.into_iter().map(OverviewListener::from).collect(),
     }))
 }
 
@@ -720,5 +755,80 @@ mod overview_tests {
             !ids.contains(&"infra/mainline/http".to_string()),
             "infra/mainline must not be matched as a prefix of infra/main, got {ids:?}"
         );
+    }
+
+    /// The raw `/api/overview` response body, as bytes turned into text — not parsed into
+    /// a `Value` first. A leak that landed in some field this module's helpers do not
+    /// happen to inspect would still show up in the text a client actually receives, and a
+    /// test that only ever looked at named fields could pass while that leak sat right
+    /// next to them.
+    async fn overview_body_text(state: &AppState, cookie: &str) -> (StatusCode, String) {
+        let request = Request::builder()
+            .uri("/api/overview")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap();
+        let response = router_with(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_listeners_rules_do_not_name_a_route_the_caller_cannot_see() {
+        // The previous commit stopped a Gateway from being named at all when none of the
+        // caller's routes attach to it. This is the same leak one level down: infra/main is
+        // legitimately shown to team-a, because apps/checkout attaches to it, but infra/main
+        // is a shared Gateway — the normal case — and its listener also carries the rule for
+        // shop/secret-payments, a route from a team team-a was never granted. Serialising
+        // `rules` straight off the gateway's /debug/config said so to anyone who asked.
+        let state = state_reading(
+            stub_api(FIXTURE).await,
+            stub_admin(serde_json::json!({
+                "listeners": [
+                    { "id": "infra/main/http", "port": 80, "rules": [
+                        { "route": "apps/checkout", "cluster": "apps/checkout:80" },
+                        { "route": "shop/secret-payments", "cluster": "shop/secret-payments:80" }
+                    ] }
+                ]
+            }))
+            .await,
+        );
+        let (status, body_text) = overview_body_text(&state, &signed_in_as(&["team-a"])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body_text.contains("shop/secret-payments"),
+            "a caller granted only apps must never see another team's route id, got {body_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_rules_still_leaves_the_shared_listener_itself_visible() {
+        // The fix is to stop sending `rules`, not to stop sending the listener: the caller's
+        // own route still attaches to infra/main, so the overview screen must still be able
+        // to draw it — id and port are the fields it actually renders.
+        let state = state_reading(
+            stub_api(FIXTURE).await,
+            stub_admin(serde_json::json!({
+                "listeners": [
+                    { "id": "infra/main/http", "port": 80, "rules": [
+                        { "route": "apps/checkout", "cluster": "apps/checkout:80" },
+                        { "route": "shop/secret-payments", "cluster": "shop/secret-payments:80" }
+                    ] }
+                ]
+            }))
+            .await,
+        );
+        let (status, body) =
+            get_json(&state, "/api/overview", Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = listener_ids(&body);
+        assert!(
+            ids.contains(&"infra/main/http".to_string()),
+            "removing rules must not remove the listener too, got {ids:?}"
+        );
+        assert_eq!(body["listeners"][0]["port"], 80);
     }
 }
