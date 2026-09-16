@@ -30,13 +30,6 @@ Gateway API core, served out of one binary with no database and no separate cont
   and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
   config swap so in-flight requests finish on the config they started with.
 
-Every item from the original "deliberately not here yet" list has shipped since: regular-expression
-path matching ([#5](https://github.com/davidgrldo/gapura/issues/5)), `RequestMirror`
-([#6](https://github.com/davidgrldo/gapura/issues/6)), 307 and 308 redirects
-([#7](https://github.com/davidgrldo/gapura/issues/7)), and an address per Gateway
-([#8](https://github.com/davidgrldo/gapura/issues/8)) — the last one the reason the conformance
-profile now passes in full, which [conformance/](conformance/) tells the story of.
-
 ## The name
 
 A *gapura* is the gate of a Javanese or Balinese temple. The one the mark is
