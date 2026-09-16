@@ -3,6 +3,7 @@
 mod api;
 mod cli;
 pub mod declared;
+pub mod kube_source;
 pub mod login;
 pub mod rows;
 pub mod scope;

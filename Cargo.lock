@@ -1300,6 +1300,8 @@ dependencies = [
  "chrono",
  "clap",
  "hmac",
+ "k8s-openapi",
+ "kube",
  "openidconnect",
  "rand 0.9.5",
  "reqwest",
