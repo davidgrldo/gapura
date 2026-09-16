@@ -19,7 +19,10 @@ pub enum State {
     /// rule the gateway is serving cannot reach a backend. Presence in the served config
     /// does not redeem this: the route answers, with an error, on every request.
     Unresolved,
-    /// The gateway could not be reached, so the served side is unknown.
+    /// Declared, accepted, and its references resolved — but the gateway could not be
+    /// reached, so whether it is actually serving the route is unknown. Nothing else
+    /// carries this state: everything short of that question is decided by Kubernetes
+    /// alone, and an unreachable gateway does not unknow it.
     Unknown,
     /// The Gateways this route attaches to do not agree; `parents` says who said what.
     Mixed,
@@ -102,37 +105,37 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
             let parents: Vec<ParentRow> = parents
                 .into_iter()
                 .map(|parent| {
-                    // Order matters here. An unreachable gateway wins over everything else
-                    // (we truly don't know). A parent with no verdict comes next, because
-                    // until that Gateway has spoken its presence in the served config is
-                    // evidence of nothing either way. A refused parent must never fall
-                    // through to the presence check, because the Gateway already explained
-                    // why it is absent — that is not the same fault as an accepted route
-                    // going missing.
-                    //
-                    // Unresolved references sit after the refusal and before the presence
-                    // check. After, because a refused route was never installed and its
-                    // dangling reference is a fault in a rule that does not exist. Before,
-                    // because gapura installs an accepted route's rules whether or not its
-                    // references resolved: such a route is in the served config and answers
-                    // every request with `500 no valid backend`, so presence is not the
-                    // question being asked and answering `served` buries the fault.
-                    let state = match (served, parent.acceptance) {
-                        (None, _) => State::Unknown,
-                        (_, Acceptance::Pending) => State::Pending,
-                        (_, Acceptance::Refused) => State::Refused,
-                        (_, Acceptance::Accepted) if !parent.refs_resolved => State::Unresolved,
-                        (Some(s), Acceptance::Accepted) if is_served_by(s, &parent, &id) => {
+                    // Order matters here, and only the fourth arm ever looks at the served
+                    // side. `Unknown` means one specific thing — we cannot tell whether this
+                    // route is being served — and that question only makes sense once a
+                    // route has been accepted and its references have resolved; everything
+                    // above it is decided by Kubernetes alone, and an unreachable gateway
+                    // does not unknow any of it. A parent with no verdict is still unruled.
+                    // A refused parent is still refused, with the reason the Gateway already
+                    // gave — that verdict was written before the gateway went dark, so the
+                    // outage does not retract it. A parent whose references did not resolve
+                    // still has a missing backend, because that fact came from the Service
+                    // list, not from the gateway, and an outage on one side does not make a
+                    // Service reappear on the other. Only once acceptance and reference
+                    // resolution are both settled does "is it actually being served" become
+                    // the open question, and only then can not reaching the gateway leave it
+                    // open rather than answered.
+                    let state = match (parent.acceptance, served) {
+                        (Acceptance::Pending, _) => State::Pending,
+                        (Acceptance::Refused, _) => State::Refused,
+                        (Acceptance::Accepted, _) if !parent.refs_resolved => State::Unresolved,
+                        (Acceptance::Accepted, None) => State::Unknown,
+                        (Acceptance::Accepted, Some(s)) if is_served_by(s, &parent, &id) => {
                             State::Served
                         }
-                        (Some(_), Acceptance::Accepted) => State::Missing,
+                        (Acceptance::Accepted, Some(_)) => State::Missing,
                     };
                     // Which condition explains the parent, rather than which one the state
                     // was read from: an accepted route with a dangling reference is
-                    // explained by `ResolvedRefs` even while the gateway is unreachable and
-                    // the state therefore reads `Unknown`. Reporting the acceptance instead
-                    // would put `Accepted / Route is accepted` beside a broken route, which
-                    // is true, useless, and reads as reassurance.
+                    // explained by `ResolvedRefs`, matching the `Unresolved` state that
+                    // condition now always produces, gateway reachable or not. Reporting the
+                    // acceptance instead would put `Accepted / Route is accepted` beside a
+                    // broken route, which is true, useless, and reads as reassurance.
                     let refs_explain =
                         parent.acceptance == Acceptance::Accepted && !parent.refs_resolved;
                     let (reason, message) = if refs_explain {
@@ -271,27 +274,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_gateway_makes_every_row_unknown_not_missing() {
+    fn an_unreachable_gateway_still_unknows_an_accepted_route_with_resolved_refs() {
+        // Unchanged. This is the one case `Unknown` exists for: the route was accepted,
+        // its references resolved, and the only open question left is whether the gateway
+        // is actually serving it — an answer only the gateway itself can give.
         let rows = join(
-            vec![
-                declared("apps/checkout", Acceptance::Accepted, None),
-                declared(
-                    "apps/billing",
-                    Acceptance::Refused,
-                    Some("UnsupportedValue"),
-                ),
-            ],
+            vec![declared("apps/checkout", Acceptance::Accepted, None)],
             None,
         );
-        assert!(rows.iter().all(|r| r.state == State::Unknown));
-        assert!(rows
-            .iter()
-            .flat_map(|r| &r.parents)
-            .all(|p| p.state == State::Unknown));
+        assert_eq!(rows[0].state, State::Unknown);
+        assert_eq!(rows[0].parents[0].state, State::Unknown);
     }
 
     #[test]
-    fn an_unreachable_gateway_still_reports_the_reason_it_already_knew() {
+    fn an_unreachable_gateway_still_refuses_a_refused_route_not_unknown() {
+        // The refusal is a verdict Kubernetes already wrote down; a gateway outage does
+        // not unwrite it. Reading it back as `Unknown` would bury a fault that is already
+        // fully explained behind the one thing that actually is unknown right now, which
+        // is whether the gateway is reachable.
         let rows = join(
             vec![declared(
                 "apps/billing",
@@ -300,6 +300,7 @@ mod tests {
             )],
             None,
         );
+        assert_eq!(rows[0].parents[0].state, State::Refused);
         assert_eq!(
             rows[0].parents[0].reason.as_deref(),
             Some("UnsupportedValue")
@@ -307,9 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_gateway_makes_every_parent_unknown_and_keeps_both_reasons() {
+    fn an_unreachable_gateway_still_refuses_every_parent_and_keeps_both_reasons() {
         // Not knowing what is served says nothing about what each Gateway already ruled,
-        // and those rulings are the only thing left to show while the gateway is down.
+        // and those rulings are the only thing left to show while the gateway is down —
+        // so the state should say exactly that, not `Unknown`.
         let rows = join(
             vec![on_gateways(
                 "apps/search",
@@ -324,8 +326,8 @@ mod tests {
             )],
             None,
         );
-        assert_eq!(rows[0].state, State::Unknown);
-        assert!(rows[0].parents.iter().all(|p| p.state == State::Unknown));
+        assert_eq!(rows[0].state, State::Refused);
+        assert!(rows[0].parents.iter().all(|p| p.state == State::Refused));
         assert_eq!(
             rows[0].parents[0].reason.as_deref(),
             Some("UnsupportedValue")
@@ -334,6 +336,19 @@ mod tests {
             rows[0].parents[1].reason.as_deref(),
             Some("NoMatchingListenerHostname")
         );
+    }
+
+    #[test]
+    fn an_unreachable_gateway_leaves_a_pending_route_pending_not_unknown() {
+        // Nobody has ruled on this route yet, and that is a fact Kubernetes already
+        // recorded by writing no verdict at all. A gateway outage supplies no new
+        // information about it, so it must not manufacture `Unknown` where the honest
+        // answer is still just "nobody has looked".
+        let rows = join(
+            vec![declared("apps/checkout", Acceptance::Pending, None)],
+            None,
+        );
+        assert_eq!(rows[0].parents[0].state, State::Pending);
     }
 
     #[test]
@@ -653,10 +668,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_gateway_is_unknown_and_still_says_the_refs_did_not_resolve() {
+    fn an_unreachable_gateway_still_reports_unresolved_refs_not_unknown() {
         // Only one side went dark. The unresolved reference was read from Kubernetes, not
-        // from the gateway, so it survives the outage — and while the served side is
-        // unknowable it is the only explanation anyone has for this route misbehaving.
+        // from the gateway, so it survives the outage untouched — an outage on the gateway
+        // side does not make the missing Service reappear, and it must not demote a fault
+        // Kubernetes already reported down to a mere "can't tell".
         let rows = join(
             vec![on_gateways(
                 "apps/payments",
@@ -667,7 +683,7 @@ mod tests {
             )],
             None,
         );
-        assert_eq!(rows[0].parents[0].state, State::Unknown);
+        assert_eq!(rows[0].parents[0].state, State::Unresolved);
         assert_eq!(
             rows[0].parents[0].reason.as_deref(),
             Some("BackendNotFound")
