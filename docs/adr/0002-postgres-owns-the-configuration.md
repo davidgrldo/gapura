@@ -26,8 +26,9 @@ store that exists only under Kubernetes cannot carry that.
 Postgres holds the configuration: services, routes, plugins and consumers, along
 with the roles and audit trail ADR 1 already put there.
 
-Data planes do not read it. `gapura-control` sends each of them the configuration
-over an authenticated channel, and each keeps the last it received on disk, so a
+Data planes do not read it. Each obtains the configuration from `gapura-control`
+over an authenticated channel -- [ADR 3](0003-the-data-plane-asks.md) settles which
+direction that goes -- and keeps the last it received on disk, so a
 gateway that loses the control plane keeps serving what it already has rather than
 waking up empty. Nothing in the request path opens a database connection, which is
 the part of "no database" worth defending.
