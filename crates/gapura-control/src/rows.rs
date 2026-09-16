@@ -174,6 +174,7 @@ mod tests {
         // user the gateway rejected their route when nobody has looked at it yet.
         let declared = crate::declared::routes_from_list(
             r#"{"items":[{"metadata":{"name":"fresh","namespace":"apps"}}]}"#,
+            "gapura.dev/controller",
         )
         .unwrap();
         let rows = join(declared, Some(&served(&[])));
