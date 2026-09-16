@@ -1,6 +1,6 @@
 //! Declared and served, joined into the rows the routes screen shows.
 
-use crate::declared::DeclaredRoute;
+use crate::declared::{Acceptance, DeclaredRoute};
 use crate::served::Served;
 use serde::Serialize;
 
@@ -11,6 +11,8 @@ pub enum State {
     Served,
     /// Declared and refused. `reason` says why.
     Refused,
+    /// Declared, and the gateway has not ruled on it yet. Not a fault: nobody has looked.
+    Pending,
     /// Declared and accepted, but absent from what the gateway serves.
     Missing,
     /// The gateway could not be reached, so the served side is unknown.
@@ -34,15 +36,20 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
     declared
         .into_iter()
         .map(|route| {
-            // Order matters here: an unreachable gateway must win over everything else
-            // (we truly don't know), and a refused route must never fall through to the
-            // presence check below it, because the gateway already explained why it is
-            // absent — that is not the same fault as an accepted route going missing.
-            let state = match served {
-                None => State::Unknown,
-                Some(_) if !route.accepted => State::Refused,
-                Some(s) if s.rules.iter().any(|r| r.route == route.id) => State::Served,
-                Some(_) => State::Missing,
+            // Order matters here. An unreachable gateway wins over everything else (we
+            // truly don't know). A route with no verdict comes next, because until the
+            // gateway has spoken its presence in the served config is evidence of nothing
+            // either way. A refused route must never fall through to the presence check,
+            // because the gateway already explained why it is absent — that is not the
+            // same fault as an accepted route going missing.
+            let state = match (served, route.acceptance) {
+                (None, _) => State::Unknown,
+                (_, Acceptance::Pending) => State::Pending,
+                (_, Acceptance::Refused) => State::Refused,
+                (Some(s), Acceptance::Accepted) if s.rules.iter().any(|r| r.route == route.id) => {
+                    State::Served
+                }
+                (Some(_), Acceptance::Accepted) => State::Missing,
             };
             Row {
                 id: route.id,
@@ -60,11 +67,11 @@ mod tests {
     use super::*;
     use crate::served::ServedRule;
 
-    fn declared(id: &str, accepted: bool, reason: Option<&str>) -> DeclaredRoute {
+    fn declared(id: &str, acceptance: Acceptance, reason: Option<&str>) -> DeclaredRoute {
         DeclaredRoute {
             id: id.to_string(),
             namespace: id.split('/').next().unwrap().to_string(),
-            accepted,
+            acceptance,
             reason: reason.map(str::to_string),
             message: reason.map(|r| format!("{r} happened")),
         }
@@ -84,7 +91,7 @@ mod tests {
     #[test]
     fn accepted_and_present_is_served() {
         let rows = join(
-            vec![declared("apps/checkout", true, None)],
+            vec![declared("apps/checkout", Acceptance::Accepted, None)],
             Some(&served(&["apps/checkout"])),
         );
         assert_eq!(rows[0].state, State::Served);
@@ -93,7 +100,11 @@ mod tests {
     #[test]
     fn refused_keeps_the_reason_and_is_never_called_missing() {
         let rows = join(
-            vec![declared("apps/billing", false, Some("UnsupportedValue"))],
+            vec![declared(
+                "apps/billing",
+                Acceptance::Refused,
+                Some("UnsupportedValue"),
+            )],
             Some(&served(&[])),
         );
         assert_eq!(rows[0].state, State::Refused);
@@ -105,7 +116,7 @@ mod tests {
         // The gateway said yes and is not serving it. Nothing explains this, which is
         // exactly why it must not be quietly rendered as served.
         let rows = join(
-            vec![declared("apps/checkout", true, None)],
+            vec![declared("apps/checkout", Acceptance::Accepted, None)],
             Some(&served(&[])),
         );
         assert_eq!(rows[0].state, State::Missing);
@@ -115,8 +126,12 @@ mod tests {
     fn an_unreachable_gateway_makes_every_row_unknown_not_missing() {
         let rows = join(
             vec![
-                declared("apps/checkout", true, None),
-                declared("apps/billing", false, Some("UnsupportedValue")),
+                declared("apps/checkout", Acceptance::Accepted, None),
+                declared(
+                    "apps/billing",
+                    Acceptance::Refused,
+                    Some("UnsupportedValue"),
+                ),
             ],
             None,
         );
@@ -126,7 +141,11 @@ mod tests {
     #[test]
     fn an_unreachable_gateway_still_reports_the_reason_it_already_knew() {
         let rows = join(
-            vec![declared("apps/billing", false, Some("UnsupportedValue"))],
+            vec![declared(
+                "apps/billing",
+                Acceptance::Refused,
+                Some("UnsupportedValue"),
+            )],
             None,
         );
         assert_eq!(rows[0].reason.as_deref(), Some("UnsupportedValue"));
@@ -136,8 +155,8 @@ mod tests {
     fn rows_come_back_in_a_stable_order() {
         let rows = join(
             vec![
-                declared("shop/catalog", true, None),
-                declared("apps/checkout", true, None),
+                declared("shop/catalog", Acceptance::Accepted, None),
+                declared("apps/checkout", Acceptance::Accepted, None),
             ],
             Some(&served(&["shop/catalog", "apps/checkout"])),
         );
@@ -145,5 +164,31 @@ mod tests {
             rows[0].id, "apps/checkout",
             "sorted, so the screen does not shuffle between polls"
         );
+    }
+
+    #[test]
+    fn a_route_nobody_has_reconciled_yet_is_pending_not_refused() {
+        // Straight from the parsed resource, because the distinction this proves was the
+        // one the parse layer already made and the join then threw away: an HTTPRoute with
+        // no `.status` has had no verdict written, and calling that a refusal tells the
+        // user the gateway rejected their route when nobody has looked at it yet.
+        let declared = crate::declared::routes_from_list(
+            r#"{"items":[{"metadata":{"name":"fresh","namespace":"apps"}}]}"#,
+        )
+        .unwrap();
+        let rows = join(declared, Some(&served(&[])));
+        assert_eq!(rows[0].state, State::Pending);
+        assert_eq!(rows[0].reason, None);
+    }
+
+    #[test]
+    fn a_pending_route_that_happens_to_be_served_is_still_pending() {
+        // Presence in the served config is not a verdict: the gateway may be serving an
+        // older generation of this route while the current one waits to be reconciled.
+        let rows = join(
+            vec![declared("apps/checkout", Acceptance::Pending, None)],
+            Some(&served(&["apps/checkout"])),
+        );
+        assert_eq!(rows[0].state, State::Pending);
     }
 }
