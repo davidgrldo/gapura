@@ -18,9 +18,17 @@ pub struct ServedRule {
     pub cluster: Option<String>,
 }
 
+/// One listener of a gateway's routing config, with the rules it is serving.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ServedListener {
+    /// `namespace/gateway/listener`, so a rule can be attributed to the Gateway serving it.
+    pub id: String,
+    pub rules: Vec<ServedRule>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Served {
-    pub rules: Vec<ServedRule>,
+    pub listeners: Vec<ServedListener>,
 }
 
 pub struct Admin {
@@ -43,11 +51,7 @@ impl Admin {
     pub async fn served(&self) -> anyhow::Result<Served> {
         #[derive(Deserialize)]
         struct Config {
-            listeners: Vec<Listener>,
-        }
-        #[derive(Deserialize)]
-        struct Listener {
-            rules: Vec<ServedRule>,
+            listeners: Vec<ServedListener>,
         }
         let config: Config = self
             .http
@@ -58,7 +62,7 @@ impl Admin {
             .json()
             .await?;
         Ok(Served {
-            rules: config.listeners.into_iter().flat_map(|l| l.rules).collect(),
+            listeners: config.listeners,
         })
     }
 }
@@ -87,7 +91,7 @@ mod tests {
     async fn rules_are_read_out_of_the_listeners() {
         let base = stub(serde_json::json!({
             "listeners": [
-                { "rules": [
+                { "id": "infra/main/http", "rules": [
                     { "route": "apps/checkout", "cluster": "apps/checkout:80" },
                     { "route": "apps/billing", "cluster": null }
                 ] }
@@ -97,9 +101,37 @@ mod tests {
 
         let got = Admin::new(base).served().await.unwrap();
 
-        assert_eq!(got.rules.len(), 2);
-        assert_eq!(got.rules[0].route, "apps/checkout");
-        assert_eq!(got.rules[1].cluster, None);
+        assert_eq!(got.listeners[0].rules.len(), 2);
+        assert_eq!(got.listeners[0].rules[0].route, "apps/checkout");
+        assert_eq!(got.listeners[0].rules[1].cluster, None);
+    }
+
+    #[tokio::test]
+    async fn every_rule_stays_with_the_listener_that_serves_it() {
+        // Which listener a rule came from is the only thing that says which Gateway is
+        // serving the route, and a listener id names it: `namespace/gateway/listener`.
+        // Flattening the listeners away leaves presence answerable only as "somewhere in
+        // this config", which cannot tell a route serving on one Gateway from one that is
+        // not serving on another.
+        let base = stub(serde_json::json!({
+            "listeners": [
+                { "id": "infra/main/http", "rules": [
+                    { "route": "apps/checkout", "cluster": "apps/checkout:80" }
+                ] },
+                { "id": "infra/second/http", "rules": [
+                    { "route": "apps/billing", "cluster": null }
+                ] }
+            ]
+        }))
+        .await;
+
+        let got = Admin::new(base).served().await.unwrap();
+
+        assert_eq!(got.listeners.len(), 2);
+        assert_eq!(got.listeners[0].id, "infra/main/http");
+        assert_eq!(got.listeners[0].rules[0].route, "apps/checkout");
+        assert_eq!(got.listeners[1].id, "infra/second/http");
+        assert_eq!(got.listeners[1].rules[0].route, "apps/billing");
     }
 
     #[tokio::test]

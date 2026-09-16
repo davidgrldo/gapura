@@ -46,7 +46,12 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
                 (None, _) => State::Unknown,
                 (_, Acceptance::Pending) => State::Pending,
                 (_, Acceptance::Refused) => State::Refused,
-                (Some(s), Acceptance::Accepted) if s.rules.iter().any(|r| r.route == route.id) => {
+                (Some(s), Acceptance::Accepted)
+                    if s.listeners
+                        .iter()
+                        .flat_map(|l| &l.rules)
+                        .any(|r| r.route == route.id) =>
+                {
                     State::Served
                 }
                 (Some(_), Acceptance::Accepted) => State::Missing,
@@ -65,7 +70,7 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::served::ServedRule;
+    use crate::served::{ServedListener, ServedRule};
 
     fn declared(id: &str, acceptance: Acceptance, reason: Option<&str>) -> DeclaredRoute {
         DeclaredRoute {
@@ -78,13 +83,16 @@ mod tests {
     }
     fn served(ids: &[&str]) -> Served {
         Served {
-            rules: ids
-                .iter()
-                .map(|id| ServedRule {
-                    route: id.to_string(),
-                    cluster: None,
-                })
-                .collect(),
+            listeners: vec![ServedListener {
+                id: "infra/main/http".to_string(),
+                rules: ids
+                    .iter()
+                    .map(|id| ServedRule {
+                        route: id.to_string(),
+                        cluster: None,
+                    })
+                    .collect(),
+            }],
         }
     }
 
