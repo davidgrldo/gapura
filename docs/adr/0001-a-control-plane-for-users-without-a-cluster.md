@@ -1,6 +1,9 @@
 # 1. A control plane for users who have no cluster
 
-Status: Accepted -- 2026-09-14
+Status: Superseded by [2. Postgres owns the configuration](0002-postgres-owns-the-configuration.md) -- 2026-09-16
+
+Its identity and authorisation model still stands; only the question of where
+configuration lives was reopened.
 
 ## Context
 
