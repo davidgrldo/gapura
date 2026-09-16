@@ -37,9 +37,12 @@ async fn routes(
 ) -> Result<Json<Vec<Row>>, StatusCode> {
     let session = session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
     let visible = scope::visible(&session.groups, &state.mapping);
-    // Readers are wired in a later task; an empty declared set keeps this honest until then.
-    let rows = crate::rows::join(Vec::new(), None);
-    Ok(Json(only_visible(rows, visible.as_ref())))
+    // Every row leaves through only_visible, so scoping is a property of this one path
+    // rather than of whichever reader happens to have produced the rows.
+    Ok(Json(only_visible(
+        state.rows.as_ref().clone(),
+        visible.as_ref(),
+    )))
 }
 
 #[cfg(test)]
@@ -53,6 +56,7 @@ mod tests {
         AppState {
             mapping: std::sync::Arc::new(crate::scope::Mapping::new()),
             session_key: std::sync::Arc::new(b"test key".to_vec()),
+            rows: std::sync::Arc::new(Vec::new()),
         }
     }
 
@@ -137,7 +141,29 @@ mod route_endpoint_tests {
                     .collect(),
             ),
             session_key: std::sync::Arc::new(KEY.to_vec()),
+            // One row on each side of the grant above, so a handler that forgot to filter
+            // would hand the caller the shop row it must never see.
+            rows: std::sync::Arc::new(vec![row("apps/checkout"), row("shop/catalog")]),
         }
+    }
+
+    fn row(id: &str) -> Row {
+        Row {
+            id: id.to_string(),
+            namespace: id.split('/').next().unwrap().to_string(),
+            state: crate::rows::State::Served,
+            reason: None,
+            message: None,
+        }
+    }
+
+    /// The `id` of every row in a response body, which must be an array of rows.
+    fn ids(body: &str) -> Vec<String> {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(body).unwrap_or_else(|e| panic!("an array of rows: {e}: {body}"));
+        rows.into_iter()
+            .map(|r| r["id"].as_str().expect("every row has an id").to_string())
+            .collect()
     }
 
     fn signed_in_as(groups: &[&str]) -> String {
@@ -181,6 +207,24 @@ mod route_endpoint_tests {
     async fn a_signed_in_caller_gets_json() {
         let (status, body) = get(Some(&signed_in_as(&["team-a"]))).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.starts_with('['), "an array of rows, got {body}");
+        assert_eq!(ids(&body), ["apps/checkout"]);
+    }
+
+    #[tokio::test]
+    async fn a_row_outside_the_callers_namespaces_never_reaches_them() {
+        // The filtering invariant, asserted over the path a request actually takes rather
+        // than over only_visible in isolation: team-a is granted apps and nothing else, so
+        // the shop row must not appear in the body however the handler is rearranged.
+        let (status, body) = get(Some(&signed_in_as(&["team-a"]))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = ids(&body);
+        assert!(
+            ids.contains(&"apps/checkout".to_string()),
+            "the caller's own namespace must still be served, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"shop/catalog".to_string()),
+            "a row outside the grant leaked to the caller, got {ids:?}"
+        );
     }
 }
