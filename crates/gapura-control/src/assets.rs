@@ -16,7 +16,7 @@ use rust_embed::RustEmbed;
 /// The console's built assets. On a fresh clone, and in every `cargo build` that never ran
 /// `npm run build`, this folder holds only `web/dist/.gitkeep` — `rust-embed` still compiles
 /// against it, and an embed with no `index.html` is a normal, expected state here rather
-/// than a build failure. The Dockerfile's Node stage is what actually populates it.
+/// than a build failure. `Dockerfile.control`'s Node stage is what actually populates it.
 ///
 /// `.gitkeep` is embedded along with everything else, so `GET /.gitkeep` answers with an
 /// empty body. Excluding it would mean turning on `rust-embed`'s `include-exclude` feature,

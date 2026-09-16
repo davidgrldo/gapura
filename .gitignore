@@ -2,8 +2,9 @@ target/
 _check/
 .DS_Store
 
-# The console's build output: the image builds it, so only the directory itself (kept present
-# by .gitkeep, for the embed to compile against on a fresh clone) belongs in the repository.
+# The console's build output: Dockerfile.control builds it, so only the directory itself (kept
+# present by .gitkeep, for the embed to compile against on a fresh clone) belongs in the
+# repository. web/node_modules is likewise reproducible from the committed package-lock.json.
 web/dist/*
 !web/dist/.gitkeep
 web/node_modules/
