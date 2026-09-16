@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         // later work. An empty mapping grants nothing, which is the safe default.
         mapping: Arc::new(scope::Mapping::new()),
         session_key: Arc::new(session_key()),
+        rows: Arc::new(Vec::new()),
     };
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!(addr = %listener.local_addr()?, "gapura-control listening");
