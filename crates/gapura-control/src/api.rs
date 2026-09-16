@@ -89,15 +89,19 @@ pub fn only_visible(rows: Vec<Row>, visible: Option<&BTreeSet<String>>) -> Vec<R
 #[cfg(test)]
 mod scope_tests {
     use super::*;
-    use crate::rows::State;
+    use crate::rows::{ParentRow, State};
 
     fn row(id: &str) -> Row {
         Row {
             id: id.to_string(),
             namespace: id.split('/').next().unwrap().to_string(),
             state: State::Served,
-            reason: None,
-            message: None,
+            parents: vec![ParentRow {
+                gateway: "infra/main".to_string(),
+                state: State::Served,
+                reason: None,
+                message: None,
+            }],
         }
     }
 
@@ -152,8 +156,12 @@ mod route_endpoint_tests {
             id: id.to_string(),
             namespace: id.split('/').next().unwrap().to_string(),
             state: crate::rows::State::Served,
-            reason: None,
-            message: None,
+            parents: vec![crate::rows::ParentRow {
+                gateway: "infra/main".to_string(),
+                state: crate::rows::State::Served,
+                reason: None,
+                message: None,
+            }],
         }
     }
 
