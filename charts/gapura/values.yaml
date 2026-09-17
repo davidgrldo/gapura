@@ -213,6 +213,10 @@ console:
     issuer: ""
     clientId: ""
     redirectUrl: ""
+    # The claim carrying the caller's groups, and the provider decides its shape: keycloak,
+    # okta and friends send `groups` as a list; a provider whose user carries exactly one
+    # identity (dex static users) may send a bare string -- read as one group. `email` is the
+    # workable claim for dex's static logins, which send no groups at all.
     groupsClaim: groups
     scopes: []
     # Name of an existing Secret holding the client secret...
