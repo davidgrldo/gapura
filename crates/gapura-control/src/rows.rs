@@ -3,6 +3,7 @@
 use crate::declared::{Acceptance, DeclaredParent, DeclaredRoute};
 use crate::served::Served;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,23 +71,62 @@ fn summarise(parents: &[ParentRow]) -> State {
     }
 }
 
-/// Whether this Gateway is serving the route, judged only against the listeners that
-/// belong to it. A rule under some other Gateway's listener is another attachment being
-/// served, and counting it would report a route as up on a Gateway that never took it.
-fn is_served_by(served: &Served, parent: &DeclaredParent, route: &str) -> bool {
-    served
-        .listeners
-        .iter()
-        .filter(|listener| match &parent.section {
+/// The served rules indexed for the question `join` asks once per attachment: is this route
+/// carried by a listener that belongs to this Gateway? Two maps built in one pass, so the
+/// answer is a lookup rather than a scan of every rule under every listener per route --
+/// which was O(declared x rules) with a string compare inside, and grew with the cluster.
+struct ServedIndex<'a> {
+    /// Listener id -> the routes it carries.
+    by_listener: HashMap<&'a str, std::collections::HashSet<&'a str>>,
+    /// Gateway id (the listener id up to its last `/`) -> every route any of its listeners
+    /// carries. The trailing slash in the key construction keeps `infra/main` off
+    /// `infra/mainline`, exactly as the prefix match it replaces did.
+    by_gateway: HashMap<&'a str, std::collections::HashSet<&'a str>>,
+}
+
+impl<'a> ServedIndex<'a> {
+    fn build(served: &'a Served) -> Self {
+        let mut by_listener: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        let mut by_gateway: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        for listener in &served.listeners {
+            let gateway = listener.id.rsplit_once('/').map(|(g, _)| g).unwrap_or("");
+            for rule in &listener.rules {
+                by_listener
+                    .entry(listener.id.as_str())
+                    .or_default()
+                    .insert(rule.route.as_str());
+                by_gateway
+                    .entry(gateway)
+                    .or_default()
+                    .insert(rule.route.as_str());
+            }
+        }
+        Self {
+            by_listener,
+            by_gateway,
+        }
+    }
+
+    /// Whether this Gateway is serving the route, judged only against the listeners that
+    /// belong to it. A rule under some other Gateway's listener is another attachment being
+    /// served, and counting it would report a route as up on a Gateway that never took it.
+    fn serves(&self, parent: &DeclaredParent, route: &str) -> bool {
+        match &parent.section {
             // The route asked for one listener by name, so only that listener can serve
             // this attachment: a sibling listener carrying the route serves some other
             // attachment, and the one that was asked for is still empty.
-            Some(section) => listener.id == format!("{}/{}", parent.gateway, section),
-            // Attaching to the whole Gateway asks every listener of it to take the route.
-            // The trailing slash is what keeps `infra/main` off `infra/mainline`.
-            None => listener.id.starts_with(&format!("{}/", parent.gateway)),
-        })
-        .any(|listener| listener.rules.iter().any(|r| r.route == route))
+            Some(section) => {
+                let listener_id = format!("{}/{}", parent.gateway, section);
+                self.by_listener
+                    .get(listener_id.as_str())
+                    .is_some_and(|routes| routes.contains(route))
+            }
+            None => self
+                .by_gateway
+                .get(parent.gateway.as_str())
+                .is_some_and(|routes| routes.contains(route)),
+        }
+    }
 }
 
 /// `served` is `None` when the gateway could not be reached.
@@ -94,6 +134,7 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
     // Sorted by id so the screen renders the same order every poll instead of
     // shuffling rows whenever Kubernetes returns the list in a different order.
     declared.sort_by(|a, b| a.id.cmp(&b.id));
+    let index = served.map(ServedIndex::build);
     declared
         .into_iter()
         .map(|route| {
@@ -120,12 +161,12 @@ pub fn join(mut declared: Vec<DeclaredRoute>, served: Option<&Served>) -> Vec<Ro
                     // resolution are both settled does "is it actually being served" become
                     // the open question, and only then can not reaching the gateway leave it
                     // open rather than answered.
-                    let state = match (parent.acceptance, served) {
+                    let state = match (parent.acceptance, index.as_ref()) {
                         (Acceptance::Pending, _) => State::Pending,
                         (Acceptance::Refused, _) => State::Refused,
                         (Acceptance::Accepted, _) if !parent.refs_resolved => State::Unresolved,
                         (Acceptance::Accepted, None) => State::Unknown,
-                        (Acceptance::Accepted, Some(s)) if is_served_by(s, &parent, &id) => {
+                        (Acceptance::Accepted, Some(index)) if index.serves(&parent, &id) => {
                             State::Served
                         }
                         (Acceptance::Accepted, Some(_)) => State::Missing,

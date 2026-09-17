@@ -756,7 +756,7 @@ mod against_a_stub_provider {
     fn state(issuer: &str) -> AppState {
         AppState {
             mapping: Arc::new([("team-a".to_string(), vec!["apps".to_string()])].into()),
-            session_key: Arc::new(SESSION_KEY.to_vec()),
+            session_key: Arc::from(SESSION_KEY.to_vec()),
             // Signing in reads neither source, so both readers point at nothing: these
             // tests are about the way in, and one that needed a cluster to run would be
             // testing something else.

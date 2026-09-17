@@ -15,7 +15,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
-hmac = "0.12"
+hmac = { workspace = true }
 # Named only to select the API version `kube` compiles against; nothing here refers to it.
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
@@ -35,7 +35,7 @@ reqwest = { workspace = true }
 rust-embed = "8"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -44,4 +44,4 @@ tracing-subscriber = { workspace = true }
 # Only the stub identity provider needs this, to stamp an ID token with an expiry.
 # `openidconnect` already pulls it in, so it costs the build nothing new.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-tower = "0.5"
+tower = { workspace = true }

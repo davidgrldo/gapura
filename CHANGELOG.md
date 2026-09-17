@@ -26,6 +26,14 @@ means what it usually does, moving from one version below to a later one. Releas
   the expanded attachment row — so a phone with no hover and a keyboard-only reader both get
   the sentence that explains the colour grouping. `check.mjs` fails if the detail ever moves
   back into an attribute.
+- gapura-control housekeeping (#49): the served-rules lookup is an index instead of a scan of
+  every rule per route; session expiry means `>=`; `session::Invalid` implements `Display`/`Error`
+  so it propagates; the session key may be base64 (the shape secret managers hand out) and the
+  key logic lives beside the sessions it signs; `AppState.session_key` is `Arc<[u8]>`;
+  `--log-level` sets the tracing filter instead of compile time; `hmac`/`sha2`/`tower` come from
+  the workspace; the crate is a library with a thin binary, so `pub` means something and
+  integration tests can reach the modules. Left as-is deliberately: `ServedRule.cluster`, whose
+  surfacing is a product decision about the API shape, not hygiene.
 - `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
   installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
   so a section introduced after the installed version (like `tests` or `metrics`) arrives as an
