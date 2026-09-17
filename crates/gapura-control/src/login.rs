@@ -302,6 +302,66 @@ pub fn set_cookie(value: &str, lifetime: Duration) -> String {
     )
 }
 
+/// Whether the origin this sign-in arrived on can keep a `Secure` cookie at all.
+///
+/// The listener serves plain HTTP -- TLS is an ingress's job -- so the scheme is what the proxy
+/// in front says it was (`X-Forwarded-Proto`, leftmost of the chain), and without a proxy the
+/// answer is plain HTTP by construction. Browsers treat loopback origins as trustworthy and
+/// keep `Secure` cookies over `http://localhost`, so a port-forward at a loopback address works;
+/// a LAN address, a NodePort, or any other plaintext origin silently drops the cookie, which is
+/// the one failure this exists to name out loud.
+pub fn origin_can_keep_secure_cookie(headers: &header::HeaderMap) -> bool {
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_else(|| "http".to_string());
+    if proto == "https" {
+        return true;
+    }
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // An IPv6 literal keeps its brackets: `[::1]:8080` -> `[::1]`.
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// What the callback answers on an origin no browser will keep the session cookie on. The
+/// sign-in itself completed -- the provider verified the user -- so the page says that, and
+/// says why no session came out of it, instead of a redirect that fails one request later
+/// and looks like the blank-page loop this replaced.
+fn refused_page() -> Response {
+    let body = "<!DOCTYPE html>\
+<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Signed in, session not stored</title>\
+<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:4rem auto;padding:0 1rem}\
+code{background:#f3f4f6;padding:0 .3rem}</style></head>\
+<body><h1>Signed in — session not stored</h1>\
+<p>The identity provider verified you, but this console was reached over plain HTTP on an
+address a browser does not trust with a <code>Secure</code> session cookie, so the cookie was
+not issued: it would have been silently dropped, and every request after the redirect would
+have asked you to sign in again.</p>\
+<p>Serve the console over HTTPS, or reach it at <code>localhost</code> (for example
+<code>kubectl port-forward</code> on the loopback address), where browsers keep
+<code>Secure</code> cookies over plain HTTP.</p>\
+</body></html>";
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(body))
+        .expect("static page")
+}
+
 fn now_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -348,6 +408,7 @@ pub struct Callback {
 pub async fn callback(
     State(state): State<AppState>,
     Query(query): Query<Callback>,
+    headers: header::HeaderMap,
 ) -> Result<Response, StatusCode> {
     // Only the provider's error code is logged, never its description: the description is
     // free text from another system and the query string it arrived in also holds a code.
@@ -395,6 +456,17 @@ pub async fn callback(
         })?;
 
     let subject = claims.subject().to_string();
+    // The origin decides whether the sign-in can end in a session at all: a Secure cookie
+    // over plaintext non-localhost is a request the browser will silently refuse, and this
+    // is the one place the server already knows -- before the redirect that would fail one
+    // request later (#60). The sign-in itself completed; the page says so.
+    if !origin_can_keep_secure_cookie(&headers) {
+        tracing::warn!(
+            host = ?headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+            "sign-in completed but the origin cannot keep a Secure cookie; refusing to issue one"
+        );
+        return Ok(refused_page());
+    }
     let as_json = serde_json::to_value(claims).map_err(|error| {
         tracing::error!(%error, "verified claims would not serialise");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -661,8 +733,22 @@ mod against_a_stub_provider {
     }
 
     async fn get_from(state: &AppState, uri: &str) -> axum::response::Response {
+        get_from_with(state, uri, &[("x-forwarded-proto", "https")]).await
+    }
+
+    /// The header pairs a request arrives with. The default says https the way a TLS ingress
+    /// in front of the console would; tests of the plaintext refusal pass their own.
+    async fn get_from_with(
+        state: &AppState,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
         crate::api::router_with(state.clone())
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap()
     }
@@ -838,5 +924,103 @@ mod against_a_stub_provider {
             StatusCode::OK,
             "the API did not accept its own cookie"
         );
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_lan_callback_is_refused_with_an_explanation_not_a_doomed_redirect() {
+        // #60: over plain HTTP on a non-loopback origin, a Secure cookie is dropped by the
+        // browser. The callback used to redirect anyway and the session vanished one request
+        // later; it now answers with a page that says the sign-in completed.
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        let (csrf, nonce) = begin_a_login(&state).await;
+        *provider.nonce.lock().unwrap() = Some(nonce);
+
+        let response = get_from_with(
+            &state,
+            &format!("/auth/callback?code=a-code&state={csrf}"),
+            &[("host", "192.168.1.47:30080")],
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("Signed in \u{2014} session not stored"),
+            "the page says the sign-in itself completed: {body}"
+        );
+        assert!(
+            body.contains("HTTPS"),
+            "and what would work instead: {body}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod secure_origin_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn map(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn a_proxy_saying_https_keeps_the_cookie() {
+        assert!(origin_can_keep_secure_cookie(&map(&[(
+            "x-forwarded-proto",
+            "https"
+        )])));
+        // A chain of proxies: the first hop's answer is the origin's.
+        assert!(origin_can_keep_secure_cookie(&map(&[(
+            "x-forwarded-proto",
+            "https, http"
+        )])));
+    }
+
+    #[test]
+    fn loopback_is_trusted_over_plain_http() {
+        for host in [
+            "localhost:8080",
+            "127.0.0.1:19090",
+            "[::1]:8080",
+            "localhost",
+        ] {
+            assert!(
+                origin_can_keep_secure_cookie(&map(&[("host", host)])),
+                "{host}: browsers keep Secure cookies on loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plaintext_lan_origin_is_refused() {
+        for host in [
+            "192.168.1.47:30080",
+            "console.davdev.my.id",
+            "10.43.5.2:8080",
+        ] {
+            assert!(
+                !origin_can_keep_secure_cookie(&map(&[("host", host)])),
+                "{host}: the cookie would be silently dropped"
+            );
+        }
+        // The forwarded host wins over the direct one when a proxy names both.
+        assert!(!origin_can_keep_secure_cookie(&map(&[
+            ("host", "127.0.0.1:8080"),
+            ("x-forwarded-host", "console.example:443"),
+            ("x-forwarded-proto", "http")
+        ])));
     }
 }
