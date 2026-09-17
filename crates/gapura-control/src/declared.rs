@@ -44,6 +44,25 @@ pub struct DeclaredRoute {
     pub parents: Vec<DeclaredParent>,
 }
 
+/// The next page's token, when a list response says there is one. Kubernetes paginates list
+/// responses; a `continue` token means the list was cut short and the rest follows on request
+/// carrying it. Empty string counts as none.
+pub fn continue_token(json: &str) -> anyhow::Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct List {
+        #[serde(default)]
+        metadata: Metadata,
+    }
+    #[derive(Deserialize, Default)]
+    struct Metadata {
+        #[serde(rename = "continue", default)]
+        continue_: String,
+    }
+    let parsed: List = serde_json::from_str(json)?;
+    let token = parsed.metadata.continue_;
+    Ok(if token.is_empty() { None } else { Some(token) })
+}
+
 /// Parse a Kubernetes list response into the fields the console shows. `controller` is the
 /// GatewayClass controllerName whose verdict to read: a route may be attached to several
 /// controllers, and only the one we are the console for can say why *we* are not serving it.

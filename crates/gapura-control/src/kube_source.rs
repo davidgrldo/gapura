@@ -4,7 +4,7 @@
 //! what lets the parsing be tested against fixtures with no cluster anywhere in sight, and
 //! leaves this thin enough to be tested against a stub.
 
-use crate::declared::{routes_from_list, DeclaredRoute};
+use crate::declared::{continue_token, routes_from_list, DeclaredRoute};
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind, ListParams};
 use kube::core::Request;
 use kube::{Client, Config, Resource};
@@ -59,13 +59,27 @@ impl Source {
         // Every namespace, because the console scopes what it shows by the caller's grants,
         // which it cannot do over a list it never asked for.
         let path = DynamicObject::url_path(&resource, None);
-        // One request, and whatever that request returns. A cluster holding more routes
-        // than the API server will put in one response is truncated here, and paginating
-        // quietly would turn that into a short list nobody can tell is short. #48 is where
-        // it gets fixed; until then the limitation stays where it can be seen.
-        let list = Request::new(path).list(&ListParams::default())?;
-        let json = client.request_text(list).await?;
-        routes_from_list(&json, controller)
+        // The API server paginates: a response carrying a `continue` token was cut short,
+        // and stopping there would hide routes that exist and are being served -- the
+        // confusion this crate exists to remove. Follow the tokens to the end. The bound
+        // exists for a server that keeps handing back the same token: an honest cluster
+        // runs out of pages, and an endless one is an error, not an unbounded loop.
+        let mut routes = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..100 {
+            let params = match &token {
+                Some(t) => ListParams::default().continue_token(t),
+                None => ListParams::default(),
+            };
+            let list = Request::new(path.clone()).list(&params)?;
+            let json = client.request_text(list).await?;
+            routes.extend(routes_from_list(&json, controller)?);
+            token = continue_token(&json)?;
+            if token.is_none() {
+                return Ok(routes);
+            }
+        }
+        anyhow::bail!("the API server never stopped paginating the route list")
     }
 }
 
@@ -108,6 +122,51 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(!got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_that_spans_pages_is_read_to_the_end() {
+        // #48: past the API server's chunk size the list carries a continue token; the
+        // console must follow it, or routes that exist simply vanish from the screen.
+        let page1 = r#"{
+            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRouteList",
+            "metadata": { "continue": "page-2" },
+            "items": [
+                { "metadata": { "name": "first", "namespace": "apps" } }
+            ]
+        }"#;
+        let page2 = r#"{
+            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRouteList",
+            "metadata": {},
+            "items": [
+                { "metadata": { "name": "second", "namespace": "infra" } }
+            ]
+        }"#;
+        let app = Router::new().route(
+            "/apis/gateway.networking.k8s.io/v1/httproutes",
+            get(
+                move |axum::extract::RawQuery(q): axum::extract::RawQuery| async move {
+                    match q.as_deref() {
+                        Some(query) if query.contains("continue=") => page2,
+                        _ => page1,
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let got = Source::new(format!("http://{addr}"))
+            .routes("gapura.dev/controller")
+            .await
+            .unwrap();
+        let ids: Vec<&str> = got.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["apps/first", "infra/second"],
+            "the second page is part of the answer, not a silent truncation"
+        );
     }
 
     #[tokio::test]
