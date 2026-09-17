@@ -1,6 +1,6 @@
 //! What a gateway is actually serving, read from its admin port.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 // A gateway that is unreachable must become an error quickly rather than a hang. One whose
@@ -11,18 +11,33 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One route as the data plane resolved it. Only the fields the console shows.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ServedRule {
     /// `namespace/name` of the route this rule came from.
     pub route: String,
     pub cluster: Option<String>,
 }
 
-/// One listener of a gateway's routing config, with the rules it is serving.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// One listener of a gateway's routing config, with the rules it is serving. Mirrors the
+/// fields of `gapura-core`'s `ListenerConfig` that the overview screen shows; the rest (TLS
+/// material, the port-precedence table) never leaves the admin port, and serde drops whatever
+/// it does not name here without complaint.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ServedListener {
     /// `namespace/gateway/listener`, so a rule can be attributed to the Gateway serving it.
     pub id: String,
+    pub port: u16,
+    /// The port a client dials, when a Service maps it onto a different bound port. Absent
+    /// when they are the same, so the screen shows one number unless there really are two.
+    #[serde(default)]
+    pub client_port: Option<u16>,
+    /// Defaulted, unlike `id`, `port` and `rules`: it is display-only here (nothing in this
+    /// crate parses it), so a response that omits it should not turn a reachable gateway into
+    /// an unreachable one over a field nobody acts on.
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
     pub rules: Vec<ServedRule>,
 }
 
@@ -91,7 +106,7 @@ pub(crate) mod tests {
     async fn rules_are_read_out_of_the_listeners() {
         let base = stub_admin(serde_json::json!({
             "listeners": [
-                { "id": "infra/main/http", "rules": [
+                { "id": "infra/main/http", "port": 80, "rules": [
                     { "route": "apps/checkout", "cluster": "apps/checkout:80" },
                     { "route": "apps/billing", "cluster": null }
                 ] }
@@ -115,10 +130,10 @@ pub(crate) mod tests {
         // not serving on another.
         let base = stub_admin(serde_json::json!({
             "listeners": [
-                { "id": "infra/main/http", "rules": [
+                { "id": "infra/main/http", "port": 80, "rules": [
                     { "route": "apps/checkout", "cluster": "apps/checkout:80" }
                 ] },
-                { "id": "infra/second/http", "rules": [
+                { "id": "infra/second/http", "port": 8080, "rules": [
                     { "route": "apps/billing", "cluster": null }
                 ] }
             ]

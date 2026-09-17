@@ -224,6 +224,13 @@ mod tests {
                 .iter()
                 .map(|(id, routes)| ServedListener {
                     id: id.to_string(),
+                    // Irrelevant to what these tests claim: they are about which rules stay
+                    // attributed to which listener, never about a listener's own port or
+                    // protocol.
+                    port: 0,
+                    client_port: None,
+                    protocol: String::new(),
+                    hostname: None,
                     rules: routes
                         .iter()
                         .map(|route| ServedRule {

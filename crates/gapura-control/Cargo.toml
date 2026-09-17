@@ -19,11 +19,20 @@ hmac = "0.12"
 # Named only to select the API version `kube` compiles against; nothing here refers to it.
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+# The console's content-type header for whatever `rust-embed` hands back; kept separate from
+# rust-embed's own "mime-guess" feature so the mapping from path to MIME type is one explicit
+# call in `assets.rs` rather than a cargo feature flag elsewhere.
+mime_guess = "2"
 # Default features are the reqwest + rustls client this workspace already uses; no
 # native-tls, so nothing drags OpenSSL in behind the gateway's back.
 openidconnect = "4"
 rand = { workspace = true }
 reqwest = { workspace = true }
+# Bakes `web/dist` into the binary in release builds so the console ships as part of
+# `gapura-control` rather than as a second artifact an operator has to remember to copy
+# alongside it; in debug builds it reads the files from disk at runtime instead, which is what
+# lets a console rebuilt after `cargo build` show up without recompiling the server.
+rust-embed = "8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"

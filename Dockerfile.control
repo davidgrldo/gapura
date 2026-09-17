@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+# The control plane: the console's backend, and the only image that carries the console.
+#
+# It is a separate file rather than extra stages on `Dockerfile` because that image builds
+# `-p gapura`, the data plane that faces the internet, and never compiles this package at
+# all. Giving it a Node stage and a pile of browser assets would widen the attack surface of
+# the one process taking untrusted traffic, for a payload it does not serve; appending stages
+# would also make the last one the default build target, so a bare `docker build .` in CI
+# would silently start producing this image instead of the gateway.
+#
+# Three stages: Node builds the console, the Rust builder bakes it into the binary, and
+# distroless runs the result.
+
+FROM node:22-alpine AS web
+WORKDIR /web
+# The manifest and lockfile alone first, so the dependency install is a layer that survives
+# every edit to the app's own source. `npm ci` rather than `npm install` because it installs
+# exactly what the lockfile pins and fails outright when the lockfile and package.json
+# disagree — an image must not quietly resolve a different dependency tree than the one that
+# was committed and reviewed.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+# Named explicitly rather than `COPY web/ ./`: a developer's `web/node_modules` would land on
+# top of what `npm ci` just installed, and those packages hold compiled binaries built for
+# whoever ran the install — on a macOS workstation they cannot execute in this container at
+# all, and the failure would surface as an incomprehensible build error inside Vite.
+COPY web/index.html web/vite.config.js ./
+COPY web/public ./public
+COPY web/src ./src
+RUN npm run build
+
+FROM rust:1-bookworm AS builder
+# The same C toolchain the data plane's image installs, kept in step with it on purpose.
+# Whether this package needs any of it is genuinely not known. `cargo build -p gapura-control`
+# compiles only that package's graph — resolving the whole workspace is not the same as
+# compiling it, so the workspace's openssl/vendored and flate2/zlib-ng pins are no argument
+# for this layer — and `cargo tree -p gapura-control -e normal,build` reaches no openssl-sys,
+# openssl-src, aws-lc-sys or libz-*. The one crate in that graph that builds native code is
+# `ring`, which carries its own pre-generated assembly and wants only the C compiler already
+# in the base image.
+#
+# The layer stays anyway, because nobody has ever built this image: dropping a dependency on
+# an untested Dockerfile trades a small, cached cost for a failure no one here can price. The
+# first real image build is what earns the right to remove it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends cmake perl pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+# Before the build, and this ordering is the entire reason the Node stage exists. `rust-embed`
+# bakes `web/dist` into the binary at compile time in release builds, so assets copied in
+# after `cargo build` would never reach it: the image would ship the "the console has not been
+# built" page while containing a perfectly good build of the console.
+COPY --from=web /web/dist ./web/dist
+# Cache mounts keep the dependency build across image rebuilds; the binary is copied out of
+# the cache because a cache mount is not part of the layer. `--help` rather than the data
+# plane's `--version`, because this package's clap command declares no version — the point of
+# running it here is only to catch a binary that compiled but cannot start.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p gapura-control \
+ && cp /src/target/release/gapura-control /usr/local/bin/gapura-control \
+ && /usr/local/bin/gapura-control --help > /dev/null
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /usr/local/bin/gapura-control /usr/local/bin/gapura-control
+USER 65532:65532
+# What `--listen` defaults to in crates/gapura-control/src/cli.rs. The data plane's 80, 443
+# and 9090 are deliberately absent: this process serves a console to operators over one port
+# and carries no proxy listeners at all.
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/gapura-control"]

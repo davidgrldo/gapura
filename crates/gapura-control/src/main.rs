@@ -1,6 +1,7 @@
 //! The gapura control plane: serves the console and reads on its behalf.
 
 mod api;
+mod assets;
 mod cli;
 pub mod declared;
 pub mod kube_source;

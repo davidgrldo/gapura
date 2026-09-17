@@ -9,3 +9,8 @@ bench
 conformance
 *.md
 !README.md
+# Dockerfile.control's Node stage installs from the lockfile and builds the console itself, so
+# a workstation's copies of both are dead weight in the build context — and node_modules holds
+# binaries compiled for whoever ran the install, which cannot execute in the image.
+web/node_modules
+web/dist
