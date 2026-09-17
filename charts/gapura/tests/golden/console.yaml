@@ -362,7 +362,8 @@ spec:
             memory: 32Mi
         securityContext:
           allowPrivilegeEscalation: false
-          capabilities: { drop: ["ALL"] }
+          capabilities:
+            drop: ["ALL"]
 ---
 # Source: gapura/templates/deployment.yaml
 apiVersion: apps/v1
