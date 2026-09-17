@@ -35,9 +35,28 @@ use std::time::{Duration, Instant};
 /// The cookie a session travels in. `api` reads it back out under the same name.
 pub const COOKIE_NAME: &str = "gapura_session";
 
-/// Where a browser lands once it is signed in. The console is one page; there is nothing
-/// finer to return to yet.
+/// Where a browser lands once it is signed in, when it did not arrive from anywhere finer.
 const AFTER_LOGIN: &str = "/";
+
+/// Whether `path` is safe to redirect a signed-in browser to.
+///
+/// The value has survived a round trip through the identity provider inside the login state
+/// and is about to be fed to `Redirect::to`, so anything but a same-origin path is an open
+/// redirect. One leading `/` and a path after it; in particular `//evil.example` is
+/// protocol-relative and `\`-prefixed paths dodge a naive `starts_with('/')` check on some
+/// browsers. Validated when accepted and again when used: the second check is not paranoia,
+/// it is what keeps the rule true even if the storage ever changes shape.
+fn safe_return_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    let Some('/') = chars.next() else {
+        return false;
+    };
+    match chars.next() {
+        Some('/') | Some('\\') => false,
+        Some(c) if c.is_control() => false,
+        _ => path.len() <= 2048 && !path.chars().any(char::is_control),
+    }
+}
 
 /// How long a browser has to come back from the identity provider: long enough for a
 /// password and a second factor, short enough that abandoned logins do not pile up.
@@ -166,6 +185,9 @@ pub struct Pending {
     state: String,
     verifier: String,
     nonce: String,
+    /// The local path to return the reader to, validated when accepted and revalidated
+    /// before it becomes a redirect target.
+    return_to: Option<String>,
     /// When this was minted, so a browser that never came back can be thrown away.
     started: Instant,
 }
@@ -175,11 +197,12 @@ pub struct Pending {
 pub struct UnknownState;
 
 impl Pending {
-    pub fn new(state: &str, verifier: &str, nonce: &str) -> Self {
+    pub fn new(state: &str, verifier: &str, nonce: &str, return_to: Option<String>) -> Self {
         Self {
             state: state.to_string(),
             verifier: verifier.to_string(),
             nonce: nonce.to_string(),
+            return_to,
             started: Instant::now(),
         }
     }
@@ -370,7 +393,10 @@ fn now_seconds() -> u64 {
 }
 
 /// `GET /auth/login`: send the browser to the identity provider.
-pub async fn begin(State(state): State<AppState>) -> Result<Response, StatusCode> {
+pub async fn begin(
+    State(state): State<AppState>,
+    Query(query): Query<Begin>,
+) -> Result<Response, StatusCode> {
     let client = state.oidc.client().await.map_err(|error| {
         tracing::warn!(%error, "cannot reach the identity provider to begin a sign-in");
         StatusCode::BAD_GATEWAY
@@ -387,12 +413,30 @@ pub async fn begin(State(state): State<AppState>) -> Result<Response, StatusCode
         .add_scopes(state.oidc.scopes.iter().cloned())
         .set_pkce_challenge(challenge)
         .url();
+    // Where the reader was when the session ran out, carried through the provider inside
+    // this process's own pending-login state rather than in anything the provider controls.
+    // Anything that is not a local path falls back to the overview; the check runs again at
+    // the callback, which is the point a value is about to become a redirect target.
+    let return_to = query
+        .return_to
+        .as_deref()
+        .filter(|p| safe_return_path(p))
+        .map(str::to_string);
     state.pending.remember(Pending::new(
         csrf.secret(),
         verifier.secret(),
         nonce.secret(),
+        return_to,
     ));
     Ok(Redirect::to(url.as_str()).into_response())
+}
+
+/// What `/auth/login` accepts: the screen to come back to, when the reader was sent here by
+/// a 401 mid-task rather than arriving at the console fresh.
+#[derive(Deserialize)]
+pub struct Begin {
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 /// What the identity provider puts in the query string when it sends the browser back.
@@ -492,7 +536,12 @@ pub async fn callback(
         ),
         state.session_lifetime,
     );
-    let mut response = Redirect::to(AFTER_LOGIN).into_response();
+    let destination = pending
+        .return_to
+        .as_deref()
+        .filter(|p| safe_return_path(p))
+        .unwrap_or(AFTER_LOGIN);
+    let mut response = Redirect::to(destination).into_response();
     let value = header::HeaderValue::from_str(&cookie).map_err(|_| {
         tracing::error!("a session cookie would not fit in a header");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -509,13 +558,13 @@ mod tests {
     fn a_callback_without_the_state_we_issued_is_refused() {
         // Cross-site request forgery on the callback: an attacker sends the victim to our
         // callback with the attacker's code. Only a state we minted and stored is acceptable.
-        let pending = Pending::new("the-state", "the-verifier", "the-nonce");
+        let pending = Pending::new("the-state", "the-verifier", "the-nonce", None);
         assert!(pending.check_state("a-different-state").is_err());
     }
 
     #[test]
     fn a_callback_with_the_state_we_issued_is_accepted() {
-        let pending = Pending::new("the-state", "the-verifier", "the-nonce");
+        let pending = Pending::new("the-state", "the-verifier", "the-nonce", None);
         assert!(pending.check_state("the-state").is_ok());
     }
 
@@ -523,7 +572,7 @@ mod tests {
     fn state_comparison_does_not_short_circuit_on_length() {
         // Not timing-critical the way a signature is, but a same-length wrong value and a
         // different-length wrong value must both simply fail.
-        let pending = Pending::new("abcdef", "v", "n");
+        let pending = Pending::new("abcdef", "v", "n", None);
         assert!(pending.check_state("abcdeX").is_err());
         assert!(pending.check_state("abc").is_err());
         assert!(pending.check_state("").is_err());
@@ -567,7 +616,7 @@ mod tests {
     #[test]
     fn a_login_nobody_ever_came_back_from_is_forgotten() {
         let logins = PendingLogins::default();
-        logins.remember(Pending::new("the-state", "v", "n"));
+        logins.remember(Pending::new("the-state", "v", "n", None));
         logins.forget_expired(Instant::now() + PENDING_LIFETIME + Duration::from_secs(1));
         assert!(logins.take("the-state").is_err());
     }
@@ -577,7 +626,7 @@ mod tests {
         // The authorization code it carries may only be redeemed once, so a replay of the
         // same callback must find nothing rather than start another exchange.
         let logins = PendingLogins::default();
-        logins.remember(Pending::new("the-state", "v", "n"));
+        logins.remember(Pending::new("the-state", "v", "n", None));
         assert!(logins.take("the-state").is_ok());
         assert!(logins.take("the-state").is_err());
     }
@@ -588,7 +637,7 @@ mod tests {
         // another entry. Expiry alone bounds that only at whatever rate a flood sustains.
         let logins = PendingLogins::default();
         for i in 0..MAX_PENDING + 100 {
-            logins.remember(Pending::new(&format!("state-{i}"), "v", "n"));
+            logins.remember(Pending::new(&format!("state-{i}"), "v", "n", None));
         }
         assert!(logins.len() <= MAX_PENDING, "got {}", logins.len());
     }
@@ -757,6 +806,25 @@ mod against_a_stub_provider {
         response.headers()["location"].to_str().unwrap().to_string()
     }
 
+    /// Sends a browser to a login URL of our choosing and reads back the state and nonce.
+    async fn begin_at(state: &AppState, uri: &str) -> (String, String) {
+        let response = get_from(state, uri).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "expected a redirect"
+        );
+        let url = openidconnect::url::Url::parse(&location(&response)).unwrap();
+        let query: HashMap<_, _> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        (
+            query.get("state").unwrap().clone(),
+            query.get("nonce").unwrap().clone(),
+        )
+    }
+
     /// Sends a browser to `/auth/login` and reads back the state and nonce the provider
     /// would have been handed, which is how the stub learns which nonce to echo.
     async fn begin_a_login(state: &AppState) -> (String, String) {
@@ -886,6 +954,35 @@ mod against_a_stub_provider {
         let response = get_from(&state, "/auth/callback?error=access_denied").await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn signing_back_in_returns_the_reader_to_where_they_were() {
+        // #61: sessions are short on purpose, so expiry mid-task is the normal case; the
+        // screen the reader was on travels through the flow and back.
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        let (csrf, nonce) = begin_at(&state, "/auth/login?return_to=/routes%3Ffilter%3Drefs").await;
+        *provider.nonce.lock().unwrap() = Some(nonce);
+        let signed_in = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        assert_eq!(signed_in.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            location(&signed_in),
+            "/routes?filter=refs",
+            "back to the screen, query and all"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_return_to_that_is_not_a_local_path_lands_on_the_overview() {
+        // The value survived a round trip through the identity provider; anything that is
+        // not a same-origin path is an open redirect, and the overview is the fallback.
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        let (csrf, nonce) = begin_at(&state, "/auth/login?return_to=//evil.example").await;
+        *provider.nonce.lock().unwrap() = Some(nonce);
+        let signed_in = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        assert_eq!(location(&signed_in), "/", "protocol-relative is refused");
     }
 
     #[tokio::test]
@@ -1022,5 +1119,32 @@ mod secure_origin_tests {
             ("x-forwarded-host", "console.example:443"),
             ("x-forwarded-proto", "http")
         ])));
+    }
+}
+
+#[cfg(test)]
+mod safe_return_path_tests {
+    use super::safe_return_path;
+
+    #[test]
+    fn local_paths_are_accepted() {
+        assert!(safe_return_path("/"));
+        assert!(safe_return_path("/routes"));
+        assert!(safe_return_path("/routes?filter=refs&x=1#parents"));
+        assert!(safe_return_path("/routes/gapura-demo%2Fecho"));
+    }
+
+    #[test]
+    fn anything_that_names_another_origin_is_not() {
+        // Protocol-relative is the one a naive starts-with('/') check lets through.
+        assert!(!safe_return_path("//evil.example"));
+        assert!(!safe_return_path("//evil.example/innocent"));
+        // Absolute schemes, scheme-relative backslashes, and bare relative paths.
+        assert!(!safe_return_path("https://evil.example"));
+        assert!(!safe_return_path("/\\\\evil.example"));
+        assert!(!safe_return_path("routes"));
+        assert!(!safe_return_path(""));
+        // Control characters never belong in a redirect target.
+        assert!(!safe_return_path("/routes\r\nSet-Cookie: x=1"));
     }
 }
