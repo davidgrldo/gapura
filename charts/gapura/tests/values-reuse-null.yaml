@@ -4,3 +4,4 @@
 # absent, and nothing else changes against the default render.
 tests: null
 metrics: null
+console: null

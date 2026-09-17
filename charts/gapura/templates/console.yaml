@@ -1,4 +1,8 @@
-{{- if .Values.console.enabled }}
+{{- if ((.Values.console).enabled) }}
+{{- $port := int (((.Values.console).service).port | default 8080) }}
+{{- if and (ne .Values.privilegedPorts "capability") (ne .Values.privilegedPorts "sysctl") (lt $port 1024) }}
+{{- fail (printf "console.service.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $port) }}
+{{- end }}
 {{- $fullname := include "gapura.fullname" . }}
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
@@ -14,7 +18,7 @@ metadata:
   labels:
     {{- include "gapura.labels" . | nindent 4 }}
     app.kubernetes.io/component: console
-{{- if .Values.console.rbac.create }}
+{{- if ((.Values.console).rbac.create) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -57,17 +61,17 @@ metadata:
     {{- include "gapura.labels" . | nindent 4 }}
     app.kubernetes.io/component: console
 spec:
-  type: {{ .Values.console.service.type }}
+  type: {{ ((.Values.console).service.type) }}
   selector:
     app.kubernetes.io/name: {{ include "gapura.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: console
   ports:
   - name: http
-    port: {{ .Values.console.service.port }}
+    port: {{ ((.Values.console).service.port) }}
     targetPort: http
-    {{- if and (eq .Values.console.service.type "NodePort") (.Values.console.service.nodePort) }}
-    nodePort: {{ .Values.console.service.nodePort }}
+    {{- if and (eq ((.Values.console).service.type) "NodePort") (((.Values.console).service.nodePort)) }}
+    nodePort: {{ ((.Values.console).service.nodePort) }}
     {{- end }}
 ---
 apiVersion: apps/v1
@@ -79,11 +83,11 @@ metadata:
     {{- include "gapura.labels" . | nindent 4 }}
     app.kubernetes.io/component: console
 spec:
-  {{- if not .Values.console.updateStrategy }}
+  {{- if not ((.Values.console).updateStrategy) }}
   strategy:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   {{- end }}
-  replicas: {{ .Values.console.replicaCount }}
+  replicas: {{ ((.Values.console).replicaCount) }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "gapura.name" . }}
@@ -101,46 +105,55 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         seccompProfile: { type: RuntimeDefault }
+        {{- if and (eq .Values.privilegedPorts "sysctl") (lt $port 1024) }}
+        sysctls:
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+        {{- end }}
       containers:
       - name: control
         image: {{ include "gapura.consoleImage" . }}
-        imagePullPolicy: {{ .Values.console.image.pullPolicy }}
+        imagePullPolicy: {{ ((.Values.console).image.pullPolicy) }}
         args:
-        - --listen=0.0.0.0:{{ .Values.console.service.port }}
+        - --listen=0.0.0.0:{{ ((.Values.console).service.port) }}
         - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ .Values.ports.admin }}
         - --controller-name={{ .Values.controllerName }}
-        - --session-lifetime-seconds={{ .Values.console.sessionLifetimeSeconds }}
-        - --log-level={{ .Values.console.logLevel }}
-        {{- range .Values.console.grants }}
+        - --session-lifetime-seconds={{ ((.Values.console).sessionLifetimeSeconds) }}
+        - --log-level={{ ((.Values.console).logLevel) }}
+        {{- range ((.Values.console).grants) }}
         - --grant={{ . }}
         {{- end }}
-        - --oidc-issuer={{ .Values.console.oidc.issuer }}
-        - --oidc-client-id={{ .Values.console.oidc.clientId }}
-        - --oidc-redirect-url={{ .Values.console.oidc.redirectUrl }}
-        - --oidc-groups-claim={{ .Values.console.oidc.groupsClaim }}
-        {{- range .Values.console.oidc.scopes }}
+        - --oidc-issuer={{ ((.Values.console).oidc.issuer) }}
+        - --oidc-client-id={{ ((.Values.console).oidc.clientId) }}
+        - --oidc-redirect-url={{ ((.Values.console).oidc.redirectUrl) }}
+        - --oidc-groups-claim={{ ((.Values.console).oidc.groupsClaim) }}
+        {{- range ((.Values.console).oidc.scopes) }}
         - --oidc-scope={{ . }}
         {{- end }}
         env:
         - name: GAPURA_SESSION_KEY
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.console.sessionKey.existingSecret }}
-              key: {{ .Values.console.sessionKey.key }}
+              name: {{ ((.Values.console).sessionKey.existingSecret) }}
+              key: {{ ((.Values.console).sessionKey.key) }}
         - name: GAPURA_OIDC_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.console.oidc.existingSecret }}
-              key: {{ .Values.console.oidc.clientSecretKey }}
+              name: {{ ((.Values.console).oidc.existingSecret) }}
+              key: {{ ((.Values.console).oidc.clientSecretKey) }}
         ports:
         - name: http
-          containerPort: {{ .Values.console.service.port }}
+          containerPort: {{ ((.Values.console).service.port) }}
         livenessProbe:
           httpGet: { path: /healthz, port: http }
         readinessProbe:
           httpGet: { path: /healthz, port: http }
-        resources: {{- toYaml .Values.console.resources | nindent 10 }}
+        resources: {{- toYaml ((.Values.console).resources) | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
-          capabilities: { drop: ["ALL"] }
+          capabilities:
+            drop: ["ALL"]
+            {{- if and (eq .Values.privilegedPorts "capability") (lt $port 1024) }}
+            add: ["NET_BIND_SERVICE"]
+            {{- end }}
 {{- end }}
