@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console refuses to issue a session it knows the browser will drop (#60): a sign-in that
+  completes over plain HTTP on a non-loopback origin now answers with a page saying the sign-in
+  worked and the session could not be stored -- HTTPS or `localhost` -- instead of a redirect
+  that loses the session one request later. Loopback origins keep working (browsers trust them
+  with `Secure` cookies), and a proxy's `X-Forwarded-Proto`/`X-Forwarded-Host` are honoured.
 - `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
   installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
   so a section introduced after the installed version (like `tests` or `metrics`) arrives as an
