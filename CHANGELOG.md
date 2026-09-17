@@ -17,6 +17,10 @@ means what it usually does, moving from one version below to a later one. Releas
   one API-server page used to render a silently short list — routes that exist and are served
   simply off the screen. `continue` tokens are followed (bounded, so a server that never stops
   paginating is an error, not a loop).
+- Signing back in returns the reader to where they were (#61): the screen a 401 interrupted
+  travels through the OIDC round trip in the login state and becomes the redirect target. The
+  path is validated as strictly local when accepted and again when used — `//evil.example`,
+  absolute schemes, and control characters fall back to the overview rather than redirecting.
 - `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
   installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
   so a section introduced after the installed version (like `tests` or `metrics`) arrives as an

@@ -6,8 +6,16 @@
 // the right answer is a sign-in.
 
 // Where the server begins the OpenID Connect authorization-code flow. Named once so that a
-// screen can never invent a slightly different path and quietly get the 404 fallback.
+// screen can never invent a slightly different path and quietly get the 404 fallback. The
+// query carries the screen the reader was on, so a session that ran out mid-task returns
+// them there instead of to the overview (#61); the server decides what is safe to honour.
 const LOGIN = '/auth/login'
+
+function loginUrl() {
+  return LOGIN + '?return_to=' + encodeURIComponent(
+    window.location.pathname + window.location.search + window.location.hash
+  )
+}
 
 // Records that this tab has already been sent to the sign-in flow once for a 401, so that a
 // second 401 can be read as "signing in did not help" instead of being answered by signing in
@@ -83,7 +91,7 @@ export class SessionNotSticking extends Error {
  */
 export function retrySignIn() {
   rememberSentToSignIn()
-  window.location.replace(LOGIN)
+  window.location.replace(loginUrl())
 }
 
 /**
@@ -113,7 +121,7 @@ export async function get(path) {
     // `replace` rather than `assign` so the expired page does not stay in the history: a
     // reader who presses Back after signing in would otherwise land on the page that just
     // bounced them and be bounced again.
-    window.location.replace(LOGIN)
+    window.location.replace(loginUrl())
     // Leaving the browser is not instantaneous, and the caller is waiting on this promise.
     // Never settling leaves the screen exactly as the reader left it until the new document
     // arrives, instead of flashing a parse error against a body that was never JSON.
