@@ -17,13 +17,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Two images, same treatment: the data plane and the console each build per arch,
+        # push by digest, carry provenance and an SBOM, and are joined below. Two images is
+        # a decision recorded in #63 -- the data plane faces the internet and does not carry
+        # browser assets, and the console carries them and nothing else.
         include:
-          - platform: linux/amd64
+          - component: gateway
+            platform: linux/amd64
             runner: ubuntu-latest
             arch: amd64
-          - platform: linux/arm64
+            image: ghcr.io/${{ github.repository }}
+            file: Dockerfile
+          - component: gateway
+            platform: linux/arm64
             runner: ubuntu-24.04-arm
             arch: arm64
+            image: ghcr.io/${{ github.repository }}
+            file: Dockerfile
+          - component: control
+            platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+            image: ghcr.io/${{ github.repository }}-control
+            file: Dockerfile.control
+          - component: control
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            image: ghcr.io/${{ github.repository }}-control
+            file: Dockerfile.control
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -37,9 +59,10 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           # Push by digest; the tags are attached by the merge job below.
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           # Attestations ride along free with push-by-digest, and a project with no edition to
           # buy should not need one to verify what it runs: provenance mode=max carries the
           # source repo, commit and builder identity, and the SBOM is the dependency list a
@@ -47,8 +70,8 @@ jobs:
           # ci.yml image job stays without them.
           provenance: mode=max
           sbom: true
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.arch }}
       # Job-level `outputs` are not merged across matrix legs: each leg records the whole map from
       # its own context, so one arch's digest always comes back empty. Hand the digests over as
       # per-leg artifacts instead, the way Docker's own multi-platform guide does.
@@ -57,14 +80,20 @@ jobs:
           echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
       - uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.arch }}
+          name: digest-${{ matrix.component }}-${{ matrix.arch }}
           path: /tmp/digests/${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 1
 
   image:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [gateway, control]
     runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}${{ matrix.component == 'control' && '-control' || '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -83,7 +112,9 @@ jobs:
             type=sha,format=long
       - uses: actions/download-artifact@v7
         with:
-          pattern: digest-*
+          # Scoped to this component's legs only: the gateway and the console are separate
+          # images, and a bare digest-* here would join four legs into two mixed manifests.
+          pattern: digest-${{ matrix.component }}-*
           merge-multiple: true
           path: /tmp/digests
       - name: Join the per-arch digests into one manifest list

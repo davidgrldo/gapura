@@ -34,6 +34,13 @@ means what it usually does, moving from one version below to a later one. Releas
   the workspace; the crate is a library with a thin binary, so `pub` means something and
   integration tests can reach the modules. Left as-is deliberately: `ServedRule.cluster`, whose
   surfacing is a product decision about the API shape, not hygiene.
+- The console can run on a cluster (#63): releases build and publish a second image,
+  `ghcr.io/davidgrldo/gapura-control`, with the same per-arch push-by-digest join, provenance
+  and SBOM as the data plane; the chart grows a `console` section -- its own Deployment,
+  Service, ServiceAccount and read-only ClusterRole over HTTPRoutes -- off by default, because
+  it needs an identity provider before it does anything. Two images stays the answer: the data
+  plane faces the internet and does not carry browser assets. RELEASING 5.3 now counts three
+  packages to make public.
 - `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
   installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
   so a section introduced after the installed version (like `tests` or `metrics`) arrives as an
