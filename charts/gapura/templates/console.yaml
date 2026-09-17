@@ -1,0 +1,146 @@
+{{- if .Values.console.enabled }}
+{{- $fullname := include "gapura.fullname" . }}
+# The console: gapura-control, its own workload. Deliberately a separate Deployment,
+# ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
+# terminates OIDC, the data plane faces the internet, and neither should carry the other's
+# powers. Off by default -- it needs an identity provider configured before it does
+# anything, and an install that silently starts a pod nobody can log into is worse than one
+# that waits to be asked.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-control
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+{{- if .Values.console.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-control
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+rules:
+  # What kube_source reads: HTTPRoutes across every namespace, because the console scopes
+  # what it shows by the caller's grants, not by the API server's. The data plane's role is
+  # broader (watches ten kinds and writes status); this one reads exactly one.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-control
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-control
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-control
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-control
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  type: {{ .Values.console.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "gapura.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: console
+  ports:
+  - name: http
+    port: {{ .Values.console.service.port }}
+    targetPort: http
+    {{- if and (eq .Values.console.service.type "NodePort") (.Values.console.service.nodePort) }}
+    nodePort: {{ .Values.console.service.nodePort }}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-control
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  {{- if not .Values.console.updateStrategy }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  {{- end }}
+  replicas: {{ .Values.console.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gapura.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: console
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gapura.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: console
+    spec:
+      serviceAccountName: {{ $fullname }}-control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+      - name: control
+        image: {{ include "gapura.consoleImage" . }}
+        imagePullPolicy: {{ .Values.console.image.pullPolicy }}
+        args:
+        - --listen=0.0.0.0:{{ .Values.console.service.port }}
+        - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ .Values.ports.admin }}
+        - --controller-name={{ .Values.controllerName }}
+        - --session-lifetime-seconds={{ .Values.console.sessionLifetimeSeconds }}
+        - --log-level={{ .Values.console.logLevel }}
+        {{- range .Values.console.grants }}
+        - --grant={{ . }}
+        {{- end }}
+        - --oidc-issuer={{ .Values.console.oidc.issuer }}
+        - --oidc-client-id={{ .Values.console.oidc.clientId }}
+        - --oidc-redirect-url={{ .Values.console.oidc.redirectUrl }}
+        - --oidc-groups-claim={{ .Values.console.oidc.groupsClaim }}
+        {{- range .Values.console.oidc.scopes }}
+        - --oidc-scope={{ . }}
+        {{- end }}
+        env:
+        - name: GAPURA_SESSION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.console.sessionKey.existingSecret }}
+              key: {{ .Values.console.sessionKey.key }}
+        - name: GAPURA_OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.console.oidc.existingSecret }}
+              key: {{ .Values.console.oidc.clientSecretKey }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.console.service.port }}
+        livenessProbe:
+          httpGet: { path: /healthz, port: http }
+        readinessProbe:
+          httpGet: { path: /healthz, port: http }
+        resources: {{- toYaml .Values.console.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+{{- end }}

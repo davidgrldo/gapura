@@ -178,3 +178,55 @@ metrics:
 tests:
   smoke:
     enabled: true
+
+# The console (gapura-control): reads the cluster and serves the web UI to signed-in
+# operators. Off by default -- it needs an identity provider before it does anything, and an
+# install that silently starts a pod nobody can log into is worse than one that waits to be
+# asked. When enabled it is its own Deployment with its own ServiceAccount and read-only
+# ClusterRole: it holds credentials the internet-facing data plane must never have.
+console:
+  enabled: false
+  image:
+    repository: ghcr.io/davidgrldo/gapura-control
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  rbac:
+    create: true
+  service:
+    type: ClusterIP
+    port: 8080
+    nodePort: null
+  # `group=namespace` grants, e.g. ["platform=platform", "sre=*"]. The console shows a
+  # namespace's routes to the groups granted it; the mapping is enforced server-side.
+  grants: []
+  # Seconds a sign-in lasts. Short by design: nothing is stored, so a session cannot be
+  # revoked before it expires.
+  sessionLifetimeSeconds: 3600
+  logLevel: info
+  # The OIDC provider that signs console users in. All four of issuer/clientId/redirectUrl
+  # and the two secret references are required when console.enabled -- the chart renders
+  # them verbatim; helm fails an enabled console that names no provider, which is the
+  # honest failure next to a pod that starts and signs nobody in.
+  oidc:
+    issuer: ""
+    clientId: ""
+    redirectUrl: ""
+    groupsClaim: groups
+    scopes: []
+    # Name of an existing Secret holding the client secret...
+    existingSecret: ""
+    clientSecretKey: client-secret
+  # Name of an existing Secret holding the session-signing key (>= 32 bytes, base64
+  # accepted). Not created by the chart: a key generated at install time would rotate on
+  # every upgrade and sign every reader out of a console they were using.
+  sessionKey:
+    existingSecret: ""
+    key: session-key
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

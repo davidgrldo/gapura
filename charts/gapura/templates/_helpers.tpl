@@ -43,6 +43,14 @@ app.kubernetes.io/component: gateway
 {{- end -}}
 {{- end -}}
 
+{{- define "gapura.consoleImage" -}}
+{{- if .Values.console.image.digest -}}
+{{- printf "%s@%s" .Values.console.image.repository .Values.console.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.console.image.repository (default .Chart.AppVersion .Values.console.image.tag) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "gapura.image" -}}
 {{- if (.Values.image).digest -}}
 {{- printf "%s@%s" (.Values.image).repository (.Values.image).digest -}}

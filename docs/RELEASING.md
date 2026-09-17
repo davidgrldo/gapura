@@ -315,8 +315,9 @@ The `quickstart` workflow is the standing detector for this now: it pulls both p
 anonymously on every release and weekly, and goes red the moment either one is private. This
 section is the manual override and the diagnosis, not the thing that has to be remembered.
 
-**A new GHCR package is private.** The image and the chart are two separate packages, `gapura` and
-`charts/gapura`, and each defaults to private on first publish. Private packages pull perfectly for
+**A new GHCR package is private.** There are now three packages: the data-plane image `gapura`,
+the console image `gapura-control`, and the chart `charts/gapura` -- each defaults to private on
+first publish. Private packages pull perfectly for
 you, because you are authenticated, and fail for everyone else — so the install command in the
 README works on your machine and 401s for every reader. This is the most common way a first GHCR
 release is broken, and it is invisible from the maintainer's own terminal.
