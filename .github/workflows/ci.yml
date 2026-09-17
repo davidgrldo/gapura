@@ -68,3 +68,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker run --rm gapura:ci --version
+
+  console-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          # The console's backend is a separate image: the data plane above faces the internet
+          # and has no business carrying browser assets, and appending stages to its Dockerfile
+          # would make the last one the default target of a bare `docker build .`.
+          file: Dockerfile.control
+          push: false
+          load: true
+          tags: gapura-control:ci
+          # Its own scope, so the two images do not evict each other's layers from one cache.
+          cache-from: type=gha,scope=control
+          cache-to: type=gha,mode=max,scope=control
+      # `--help` rather than the data plane's `--version`: this package's clap command declares
+      # no version. Either way the point is to catch a binary that compiled but cannot start.
+      - run: docker run --rm gapura-control:ci --help
