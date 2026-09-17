@@ -13,6 +13,10 @@ means what it usually does, moving from one version below to a later one. Releas
   worked and the session could not be stored -- HTTPS or `localhost` -- instead of a redirect
   that loses the session one request later. Loopback origins keep working (browsers trust them
   with `Secure` cookies), and a proxy's `X-Forwarded-Proto`/`X-Forwarded-Host` are honoured.
+- The console follows list pagination to the end (#48): a cluster with more HTTPRoutes than
+  one API-server page used to render a silently short list — routes that exist and are served
+  simply off the screen. `continue` tokens are followed (bounded, so a server that never stops
+  paginating is an error, not a loop).
 - `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
   installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
   so a section introduced after the installed version (like `tests` or `metrics`) arrives as an
