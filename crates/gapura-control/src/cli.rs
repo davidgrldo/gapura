@@ -23,6 +23,11 @@ pub struct Args {
     #[arg(long = "grant", value_parser = parse_grant)]
     pub grants: Vec<(String, String)>,
 
+    /// Log level filter, e.g. `info` or `gapura_control=debug`. Fixed at compile time before
+    /// this existed, which meant a chatty dependency could not be quieted without a rebuild.
+    #[arg(long, default_value = "info")]
+    pub log_level: String,
+
     /// The OpenID Connect issuer, e.g. `https://id.example.com/realms/engineering`. Its
     /// discovery document is where every other endpoint is read from.
     #[arg(long)]

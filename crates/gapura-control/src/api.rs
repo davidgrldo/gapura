@@ -36,13 +36,26 @@ fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Sessi
         .filter_map(|field| field.to_str().ok())
         .flat_map(|field| field.split(';'))
         .filter_map(|c| c.trim().strip_prefix(crate::login::COOKIE_NAME))
-        .filter_map(|rest| rest.strip_prefix('='))
-        .next()?;
+        .find_map(|rest| rest.strip_prefix('='))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
     crate::session::decode(value, key, now).ok()
+}
+
+/// Drop every row outside the caller's namespaces.
+pub fn only_visible(rows: Vec<Row>, visible: &Scope) -> Vec<Row> {
+    match visible {
+        // Handing back every row is the one branch that has to be spelled out, so that it
+        // is reached by a group actually granted `*` and never by a value that fell out of
+        // a default or a failure on the way here.
+        Scope::AllNamespaces => rows,
+        Scope::Only(allowed) => rows
+            .into_iter()
+            .filter(|r| allowed.contains(&r.namespace))
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -276,7 +289,7 @@ mod tests {
     fn state() -> AppState {
         AppState {
             mapping: std::sync::Arc::new(crate::scope::Mapping::new()),
-            session_key: std::sync::Arc::new(b"test key".to_vec()),
+            session_key: std::sync::Arc::from(b"test key".to_vec()),
             source: std::sync::Arc::new(crate::kube_source::Source::new(
                 "http://127.0.0.1:1".to_string(),
             )),
@@ -326,20 +339,6 @@ mod tests {
             !content_type.contains("html"),
             "an unmatched API path must not come back as HTML, got content-type {content_type}"
         );
-    }
-}
-
-/// Drop every row outside the caller's namespaces.
-pub fn only_visible(rows: Vec<Row>, visible: &Scope) -> Vec<Row> {
-    match visible {
-        // Handing back every row is the one branch that has to be spelled out, so that it
-        // is reached by a group actually granted `*` and never by a value that fell out of
-        // a default or a failure on the way here.
-        Scope::AllNamespaces => rows,
-        Scope::Only(allowed) => rows
-            .into_iter()
-            .filter(|r| allowed.contains(&r.namespace))
-            .collect(),
     }
 }
 
@@ -429,7 +428,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
                 .into_iter()
                 .collect(),
         ),
-        session_key: Arc::new(KEY.to_vec()),
+        session_key: Arc::from(KEY.to_vec()),
         source: Arc::new(crate::kube_source::Source::new(api_server)),
         admin: Arc::new(crate::served::Admin::new(gateway_admin)),
         controller_name: Arc::new("gapura.dev/controller".to_string()),
@@ -667,7 +666,7 @@ mod overview_tests {
     ) -> AppState {
         AppState {
             mapping: Arc::new(mapping),
-            session_key: Arc::new(KEY.to_vec()),
+            session_key: Arc::from(KEY.to_vec()),
             source: Arc::new(crate::kube_source::Source::new(api_server)),
             admin: Arc::new(crate::served::Admin::new(gateway_admin)),
             controller_name: Arc::new("gapura.dev/controller".to_string()),

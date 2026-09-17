@@ -10,7 +10,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct AppState {
     pub mapping: Arc<Mapping>,
-    pub session_key: Arc<Vec<u8>>,
+    pub session_key: Arc<[u8]>,
     /// What the cluster was told to serve.
     pub source: Arc<Source>,
     /// What a gateway resolved out of it and is actually serving.
