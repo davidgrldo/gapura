@@ -299,16 +299,19 @@ fn forget_expired_in(logins: &mut HashMap<String, Pending>, now: Instant) {
 /// that are not strings are skipped rather than failing the whole list, because dropping
 /// one can only ever grant less.
 pub fn groups_from(claims: &serde_json::Value, claim: &str) -> Vec<String> {
-    claims
-        .get(claim)
-        .and_then(serde_json::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    match claims.get(claim) {
+        // The common shape: an array of group names.
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        // A single name as a bare string. Several providers emit exactly one group this way
+        // (Dex's static users carry no groups at all, so a claim like email is the natural
+        // identity -- and it is a scalar), and refusing it made a signed-in reader see an
+        // empty console with nothing anywhere saying why. One string is a one-element list.
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        _ => Vec::new(),
+    }
 }
 
 /// The `Set-Cookie` value carrying a freshly minted session.
@@ -594,9 +597,16 @@ mod tests {
     }
 
     #[test]
-    fn a_groups_claim_that_is_not_a_list_of_strings_yields_nothing() {
+    fn a_scalar_groups_claim_is_a_one_element_list() {
+        // Several providers emit exactly one group as a bare string -- Dex's static users
+        // carry no groups at all, so a claim like email is the natural identity, and it is a
+        // scalar. Refusing it made a signed-in reader see an empty console with nothing
+        // anywhere saying why; one string reads as one group.
         let claims = serde_json::json!({ "sub": "alice", "groups": "team-a" });
-        assert!(groups_from(&claims, "groups").is_empty());
+        assert_eq!(groups_from(&claims, "groups"), vec!["team-a".to_string()]);
+        // Values that are not strings still yield nothing, rather than half a group.
+        let claims = serde_json::json!({ "sub": "alice", "groups": ["team-a", 7, null] });
+        assert_eq!(groups_from(&claims, "groups"), vec!["team-a".to_string()]);
     }
 
     #[test]
