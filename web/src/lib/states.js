@@ -8,7 +8,8 @@
 // the other states where traffic is not being served correctly — and never with `pending`,
 // and its label says "Erroring" rather than repeating the word that caused the confusion.
 //
-// `detail` is the sentence behind the badge, shown on hover and read by screen readers. It is
+// `detail` is the sentence behind the badge: announced by screen readers as part of it, and
+// shown visibly in the expanded row on the Routes screen. It is
 // here rather than in either screen because both screens show the same badge and the
 // explanation of a state must not be allowed to drift between them.
 //

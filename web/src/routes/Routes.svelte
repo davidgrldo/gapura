@@ -1,4 +1,5 @@
 <script>
+  import { STATES } from '../lib/states.js'
   import { get } from '../lib/api.js'
   import Failure from '../lib/Failure.svelte'
   import State from '../lib/State.svelte'
@@ -94,6 +95,12 @@
      have no single reason between them — so it is rendered here, per attachment, and a
      parent that carries neither field simply renders nothing. -->
 {#snippet why(parent)}
+  <!-- The state's own sentence, visibly this time (#62): the badge announces it to screen
+       readers, the expanded row shows it to everyone, and a phone has no hover to lose. -->
+  <p class="means">
+    {STATES[parent.state]?.detail ??
+      'The server reported a state this page does not know; it may be newer than the page.'}
+  </p>
   {#if parent.reason || parent.message}
     <p class="why">
       {#if parent.reason}<code class="reason">{parent.reason}</code>{/if}
