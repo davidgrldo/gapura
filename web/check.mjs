@@ -92,3 +92,18 @@ console.log(
   `ok: the build produced a document that mounts the app, and the badge map covers the ` +
     `${reportable.length} states the server can report`,
 )
+
+// #62: the explanation must reach the document. A `title` attribute is not in the document --
+// it is not announced without configuration, has no touch or keyboard path, and everything
+// else in this file would keep passing if the sentence quietly moved back into one. This
+// reads the component source rather than the bundle because a minifier keeps attribute
+// strings and element text indistinguishably, while the source cannot lie about which it is.
+const stateComponent = readFileSync('src/lib/State.svelte', 'utf8')
+if (!/>\s*:?\s*\{shown\.detail\}\s*</.test(stateComponent)) {
+  throw new Error('State.svelte must render shown.detail as element text, not an attribute')
+}
+const routesScreen = readFileSync('src/routes/Routes.svelte', 'utf8')
+if (!/STATES\[parent\.state\]\.detail|STATES\[parent\.state\]\?\.detail/.test(routesScreen)) {
+  throw new Error('Routes.svelte must show the state sentence visibly in the expanded row')
+}
+

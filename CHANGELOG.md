@@ -21,6 +21,11 @@ means what it usually does, moving from one version below to a later one. Releas
   travels through the OIDC round trip in the login state and becomes the redirect target. The
   path is validated as strictly local when accepted and again when used — `//evil.example`,
   absolute schemes, and control characters fall back to the overview rather than redirecting.
+- A state badge's explanation is in the document, not in a `title` (#62): announced to screen
+  readers as part of the badge (visually hidden text, not an attribute), and shown visibly in
+  the expanded attachment row — so a phone with no hover and a keyboard-only reader both get
+  the sentence that explains the colour grouping. `check.mjs` fails if the detail ever moves
+  back into an attribute.
 - `helm upgrade --reuse-values` across chart versions no longer crashes on values sections the
   installed release never had (#24). Reuse-values replaces the new chart's defaults wholesale,
   so a section introduced after the installed version (like `tests` or `metrics`) arrives as an

@@ -15,9 +15,29 @@
   )
 </script>
 
-<span class="badge {shown.tone}" title={shown.detail}>{shown.label}</span>
+<!-- The explanation lives in the document, not in an attribute (#62): a `title` on an element
+     that already has text is only the accessible *description*, which not every screen reader
+     announces, there is no hover on a touch device, and no keyboard path to it. Rendered as
+     text visually hidden from sighted readers, it is announced without configuration; the
+     expanded row on the Routes screen shows the same sentence visibly. -->
+<span class="badge {shown.tone}">
+  {shown.label}<span class="sr-only">: {shown.detail}</span>
+</span>
 
 <style>
+  /* In the layout, not removed from it: a `display: none` sentence is not announced either. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   .badge {
     display: inline-block;
     padding: 0.1rem 0.5rem;
