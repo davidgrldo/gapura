@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A dispatch release publishes the version it was asked for (#72): the image tags gained a raw
+  entry carrying the dispatched version, so `0.1.0-rc.N` exists on both images and the chart's
+  appVersion default is a tag that can actually be pulled -- two installs in a row had met
+  `ImagePullBackOff` otherwise. On a tag push the raw tag duplicates the semver one, which the
+  manifest join applies idempotently.
 - The console refuses to issue a session it knows the browser will drop (#60): a sign-in that
   completes over plain HTTP on a non-loopback origin now answers with a page saying the sign-in
   worked and the session could not be stored -- HTTPS or `localhost` -- instead of a redirect
