@@ -8,6 +8,10 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The quickstart workflow verifies the console image too (#74): the same anonymous manifest
+  fetch RELEASING 5.3 documents, against the sha tag of the tag-push release under test. All
+  three published packages now have the same standing tripwire; versions before the console
+  image existed (0.1.0-rc.3) are skipped with a line, not failed.
 - The console's scopes and its groups claim are now connected where an operator reads (#73):
   the chart's scopes comment names the scope each provider needs for the claim (dex: `email`
   under the email scope), and NOTES warns at install time when the console is enabled with no

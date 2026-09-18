@@ -55,6 +55,27 @@ jobs:
           set -euo pipefail
           helm registry logout ghcr.io >/dev/null 2>&1 || true
           helm show chart oci://ghcr.io/davidgrldo/charts/gapura --version "$version"
+      # The console image is the third package a release publishes and the one this workflow
+      # never installs (the console is disabled by default and needs an IdP), so nothing else
+      # here would notice its visibility flip being forgotten. The honest check is the same
+      # anonymous manifest fetch RELEASING 5.3 documents, against the tag the release actually
+      # publishes for the version under test. It exists only from 0.1.0-rc.3 -- the first
+      # release after the console image joined the pipeline -- so older tags are skipped with
+      # a line saying so, not failed.
+      - name: Anonymous console image fetch (RELEASING 5.3)
+        run: |
+          set -euo pipefail
+          if [ "$(printf '%s\n0.1.0-rc.3\n' "$version" | sort -V | head -1)" != "0.1.0-rc.3" ]; then
+            echo "skipping: $version predates the console image (first published 0.1.0-rc.3)"
+            exit 0
+          fi
+          sha="sha-$(git rev-parse "v${version}")"
+          tok=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:davidgrldo/gapura-control:pull" | jq -r .token)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/davidgrldo/gapura-control/manifests/$sha")
+          echo "console image $sha -> $code"
+          [ "$code" = "200" ]
       - name: Kind cluster with a host port that reaches the NodePort
         run: |
           kind create cluster --config - <<'EOF'
