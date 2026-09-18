@@ -39,6 +39,19 @@ public Service:
      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gapura.fullname" . }}-admin {{ (.Values.ports).admin }}:{{ (.Values.ports).admin }}
      curl -s localhost:{{ (.Values.ports).admin }}/debug/config | head -20
 
+{{- if ((.Values.console).enabled) }}
+
+The console is enabled and served by {{ include "gapura.fullname" . }}-control on port
+{{ ((.Values.console).service).port }} -- sign-in requires the OIDC provider named in
+console.oidc.issuer and the two Secrets it points at.
+{{- if not (((.Values.console).oidc).scopes) }}
+   Check console.oidc.scopes before the first sign-in: a provider only puts a claim in the
+   ID token when the scope carrying it was asked for, and an absent claim is indistinguishable
+   from a reader granted nothing -- every sign-in would see an empty console with no error.
+   (dex: the email claim needs the email scope; keycloak realms may require their groups scope.)
+{{- end }}
+{{- end }}
+
 The GatewayClass {{ (.Values.gatewayClass).name }} is cluster-scoped. A second release of this chart
 in the same cluster needs its own gatewayClass.name and controllerName.
 

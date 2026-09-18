@@ -218,6 +218,11 @@ console:
     # identity (dex static users) may send a bare string -- read as one group. `email` is the
     # workable claim for dex's static logins, which send no groups at all.
     groupsClaim: groups
+    # The scopes to ask for beyond openid. The connection that matters: a provider only puts a
+    # claim in the ID token when the scope carrying it was requested, so whatever groupsClaim
+    # names has to arrive -- dex sends email only under the email scope (a first sign-in with
+    # scopes empty produced groups:0 and an empty console, with nothing saying why), keycloak
+    # realms can require their groups scope, and some providers attach it to profile.
     scopes: []
     # Name of an existing Secret holding the client secret...
     existingSecret: ""
