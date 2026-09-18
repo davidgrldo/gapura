@@ -8,6 +8,10 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's scopes and its groups claim are now connected where an operator reads (#73):
+  the chart's scopes comment names the scope each provider needs for the claim (dex: `email`
+  under the email scope), and NOTES warns at install time when the console is enabled with no
+  scopes -- the combination whose first sign-in sees an empty console with no error anywhere.
 - A dispatch release publishes the version it was asked for (#72): the image tags gained a raw
   entry carrying the dispatched version, so `0.1.0-rc.N` exists on both images and the chart's
   appVersion default is a tag that can actually be pulled -- two installs in a row had met
