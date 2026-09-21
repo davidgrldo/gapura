@@ -34,6 +34,8 @@ reqwest = { workspace = true }
 # alongside it; in debug builds it reads the files from disk at runtime instead, which is what
 # lets a console rebuilt after `cargo build` show up without recompiling the server.
 rust-embed = "8"
+deadpool-postgres = { workspace = true }
+gapura-core = { path = "../gapura-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
@@ -41,6 +43,9 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+tokio-postgres = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 # Only the stub identity provider needs this, to stamp an ID token with an expiry.

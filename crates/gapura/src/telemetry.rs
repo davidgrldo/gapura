@@ -23,6 +23,9 @@ pub struct Metrics {
     /// labels: result (`success`, `failure`)
     pub config_reloads_total: IntCounterVec,
     pub config_last_reload_timestamp_seconds: IntGauge,
+    /// 1 while the configuration being served came off disk and has not been confirmed with the
+    /// control plane since. The one number that says "this gateway is running blind".
+    pub config_from_cache: IntGauge,
     /// labels: secret (`ns/name`)
     pub tls_cert_parse_errors_total: IntCounterVec,
     /// labels: port
@@ -70,6 +73,11 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
     config_last_reload_timestamp_seconds: register_int_gauge!(
         "gapura_config_last_reload_timestamp_seconds",
         "Unix time of the last successful reload"
+    )
+    .expect("metric registered once"),
+    config_from_cache: register_int_gauge!(
+        "gapura_config_from_cache",
+        "1 while serving a configuration read from the disk cache and not since confirmed"
     )
     .expect("metric registered once"),
     tls_cert_parse_errors_total: register_int_counter_vec!(

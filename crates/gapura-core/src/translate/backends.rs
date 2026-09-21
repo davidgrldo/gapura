@@ -110,6 +110,8 @@ fn build_cluster(port_name: Option<&str>, svc: &ObjectRef, snap: &Snapshot) -> C
     Cluster {
         endpoints,
         tls: None,
+        // EndpointSlice already answered the question `resolve` asks.
+        resolve: None,
     }
 }
 

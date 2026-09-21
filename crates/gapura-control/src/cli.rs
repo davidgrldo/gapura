@@ -10,6 +10,23 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:8080")]
     pub listen: std::net::SocketAddr,
 
+    /// Postgres for the store ADR 2 made the owner of the configuration. Absent means the
+    /// control plane runs read-only over Kubernetes, which is the mode the console ships in
+    /// today; the configuration endpoint is simply not served.
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: Option<String>,
+
+    /// Where data planes fetch their configuration. Its own port and not `--listen`, because
+    /// that response carries the gateway's private keys: an operator publishing the console
+    /// through an ingress must not publish these with it.
+    #[arg(long, default_value = "0.0.0.0:8081", requires = "database_url")]
+    pub listen_config: std::net::SocketAddr,
+
+    /// The ports data planes bind for plain HTTP, which the compiled configuration has to name.
+    /// A flag because the store has no Gateway object yet; when it does, this moves there.
+    #[arg(long, value_delimiter = ',', default_value = "80")]
+    pub data_plane_http_ports: Vec<u16>,
+
     /// Base URL of a gapura admin port, e.g. `http://gapura.gapura-system:9090`.
     #[arg(long)]
     pub gateway_admin: String,
