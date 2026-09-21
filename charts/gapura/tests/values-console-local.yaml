@@ -1,0 +1,15 @@
+# The console in its IdP-less default: local users from values rendered into a Secret, the
+# users file mounted, no OIDC flag anywhere in the container args.
+console:
+  enabled: true
+  auth:
+    local:
+      users:
+        - email: admin@example.test
+          bcryptHash: "$2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z"
+          groups: ["admins"]
+        - email: viewer@example.test
+          bcryptHash: "$2b$10$zyxwvutsrqponmlkjihgO9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z"
+  grants: ["admins=*"]
+  sessionKey:
+    existingSecret: gapura-console-session

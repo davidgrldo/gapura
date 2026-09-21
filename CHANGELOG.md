@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console is IdP-less by default (#78): `--auth-mode local` (the chart's default) signs
+  users in from a mounted users file -- `users: [{email, bcrypt, groups}]`, rendered by the
+  chart into a Secret -- through a server-rendered form at /auth/login. No identity provider
+  anywhere until `console.auth.mode: oidc` is set, exactly the ArgoCD shape; a local mode with
+  zero users refuses to start. The form's CSRF is the OIDC flow's own single-use pending
+  state; `return_to` rides the same validated path; wrong password and unknown email answer
+  identically and cost the same bcrypt second, so the form cannot enumerate users; sessions,
+  grants and the whole API surface are untouched.
 - The quickstart workflow verifies the console image too (#74): the same anonymous manifest
   fetch RELEASING 5.3 documents, against the sha tag of the tag-push release under test. All
   three published packages now have the same standing tripwire; versions before the console

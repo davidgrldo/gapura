@@ -42,13 +42,18 @@ public Service:
 {{- if ((.Values.console).enabled) }}
 
 The console is enabled and served by {{ include "gapura.fullname" . }}-control on port
-{{ ((.Values.console).service).port }} -- sign-in requires the OIDC provider named in
-console.oidc.issuer and the two Secrets it points at.
+{{ ((.Values.console).service).port }}.
+{{- $mode := ((((.Values.console).auth).mode) | default "local") }}
+{{- if eq $mode "oidc" }}
+Sign-in is OIDC: the provider in console.oidc.issuer, plus its Secret.
 {{- if not (((.Values.console).oidc).scopes) }}
    Check console.oidc.scopes before the first sign-in: a provider only puts a claim in the
    ID token when the scope carrying it was asked for, and an absent claim is indistinguishable
    from a reader granted nothing -- every sign-in would see an empty console with no error.
    (dex: the email claim needs the email scope; keycloak realms may require their groups scope.)
+{{- end }}
+{{- else }}
+Sign-in is local: users from console.auth.local, no identity provider involved.
 {{- end }}
 {{- end }}
 

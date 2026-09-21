@@ -1,13 +1,16 @@
-# The console enabled: its own Deployment, Service, ServiceAccount and read-only ClusterRole
-# render beside the data plane, pointing at an identity provider and two existing Secrets.
+# The console enabled with OIDC sign-in: its own Deployment, Service, ServiceAccount and
+# read-only ClusterRole render beside the data plane, pointing at an identity provider and
+# two existing Secrets. The local-auth case lives in values-console-local.yaml.
 console:
   enabled: true
+  auth:
+    mode: oidc
   grants: ["platform=platform", "sre=*"]
   oidc:
     issuer: https://id.example.com/realms/engineering
     clientId: gapura-console
     redirectUrl: https://console.example.test/auth/callback
-    scopes: ["groups"]
+    scopes: ["email"]
     existingSecret: gapura-console-oidc
   sessionKey:
     existingSecret: gapura-console-session

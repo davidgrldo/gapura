@@ -28,12 +28,30 @@ async fn main() -> anyhow::Result<()> {
         oidc_groups_claim = %args.oidc_groups_claim,
         "gapura-control starting"
     );
+    // Auth mode resolves before anything OIDC is touched: local mode never builds a client,
+    // never requires an issuer, and a users file that names nobody stops the process here --
+    // the honest failure, not a console that starts and signs nobody in.
+    let (auth_mode, local_users) = match args.auth_mode.as_str() {
+        "local" => {
+            let path = args
+                .local_users_file
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--auth-mode local requires --local-users-file"))?;
+            let users = gapura_control::login::LocalUsers::load(path)?;
+            tracing::info!(users = users.len(), path, "local sign-in enabled");
+            (gapura_control::login::AuthMode::Local, users)
+        }
+        "oidc" => (gapura_control::login::AuthMode::Oidc, Default::default()),
+        other => anyhow::bail!("--auth-mode must be local or oidc, got {other:?}"),
+    };
     let state = gapura_control::state::AppState {
         mapping: Arc::new(args.mapping()),
         session_key: Arc::from(gapura_control::session::session_key()?),
         source: Arc::new(gapura_control::kube_source::Source::from_environment().await?),
         admin: Arc::new(gapura_control::served::Admin::new(&args.gateway_admin)),
         controller_name: Arc::new(args.controller_name.clone()),
+        auth_mode,
+        local_users,
         oidc: Arc::new(gapura_control::login::Oidc::new(
             &args.oidc_issuer,
             &args.oidc_client_id,

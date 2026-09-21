@@ -1,4 +1,43 @@
 {{- if ((.Values.console).enabled) }}
+{{- $mode := (((.Values.console).auth).mode) | default "local" }}
+{{- if not (has $mode (list "local" "oidc")) }}
+{{- fail (printf "console.auth.mode must be local or oidc, got %q" $mode) }}
+{{- end }}
+{{- $localUsers := (((.Values.console).auth).local).users | default list }}
+{{- if and (eq $mode "local") (not (((.Values.console).auth).local).existingSecret) (eq (len $localUsers) 0) }}
+{{- fail "console.auth.mode local with no console.auth.local.users: a console nobody can log into is the failure this catches" }}
+{{- end }}
+{{- $usersSecret := "" }}
+{{- if eq $mode "local" }}
+{{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" .)) }}
+{{- if not ((((.Values.console).auth).local).existingSecret) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $usersSecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+type: Opaque
+stringData:
+  users.yaml: |
+    users:
+{{- range $localUsers }}
+      - email: {{ .email }}
+        bcrypt: {{ .bcryptHash }}
+        groups:
+{{- if .groups }}
+{{- range .groups }}
+        - {{ . }}
+{{- end }}
+{{- else }}
+        []
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- $port := int (((.Values.console).service).port | default 8080) }}
 {{- if and (ne .Values.privilegedPorts "capability") (ne .Values.privilegedPorts "sysctl") (lt $port 1024) }}
 {{- fail (printf "console.service.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $port) }}
@@ -101,6 +140,11 @@ spec:
         app.kubernetes.io/component: console
     spec:
       serviceAccountName: {{ $fullname }}-control
+      {{- if eq $mode "local" }}
+      volumes:
+      - name: users
+        secret: { secretName: {{ $usersSecret }} }
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -115,7 +159,11 @@ spec:
         image: {{ include "gapura.consoleImage" . }}
         imagePullPolicy: {{ ((.Values.console).image.pullPolicy) }}
         args:
-        - --listen=0.0.0.0:{{ ((.Values.console).service.port) }}
+        - --listen=0.0.0.0:{{ ((.Values.console).service).port | default 8080 }}
+        - --auth-mode={{ $mode }}
+        {{- if eq $mode "local" }}
+        - --local-users-file=/etc/gapura-control/users.yaml
+        {{- end }}
         - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ .Values.ports.admin }}
         - --controller-name={{ .Values.controllerName }}
         - --session-lifetime-seconds={{ ((.Values.console).sessionLifetimeSeconds) }}
@@ -123,12 +171,14 @@ spec:
         {{- range ((.Values.console).grants) }}
         - --grant={{ . }}
         {{- end }}
-        - --oidc-issuer={{ ((.Values.console).oidc.issuer) }}
-        - --oidc-client-id={{ ((.Values.console).oidc.clientId) }}
-        - --oidc-redirect-url={{ ((.Values.console).oidc.redirectUrl) }}
-        - --oidc-groups-claim={{ ((.Values.console).oidc.groupsClaim) }}
-        {{- range ((.Values.console).oidc.scopes) }}
+        {{- if eq $mode "oidc" }}
+        - --oidc-issuer={{ ((.Values.console).oidc).issuer }}
+        - --oidc-client-id={{ ((.Values.console).oidc).clientId }}
+        - --oidc-redirect-url={{ ((.Values.console).oidc).redirectUrl }}
+        - --oidc-groups-claim={{ (((.Values.console).oidc).groupsClaim) | default "groups" }}
+        {{- range (((.Values.console).oidc).scopes) }}
         - --oidc-scope={{ . }}
+        {{- end }}
         {{- end }}
         env:
         - name: GAPURA_SESSION_KEY
@@ -136,11 +186,17 @@ spec:
             secretKeyRef:
               name: {{ ((.Values.console).sessionKey.existingSecret) }}
               key: {{ ((.Values.console).sessionKey.key) }}
+        {{- if eq $mode "oidc" }}
         - name: GAPURA_OIDC_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
               name: {{ ((.Values.console).oidc.existingSecret) }}
               key: {{ ((.Values.console).oidc.clientSecretKey) }}
+        {{- end }}
+        {{- if eq $mode "local" }}
+        volumeMounts:
+        - { name: users, mountPath: /etc/gapura-control, readOnly: true }
+        {{- end }}
         ports:
         - name: http
           containerPort: {{ ((.Values.console).service.port) }}

@@ -179,6 +179,83 @@ impl Oidc {
     }
 }
 
+/// How sign-in happens. Local is the default: an IdP-less console with users from a file,
+/// the ArgoCD shape. Oidc is everything this module was before local existed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuthMode {
+    Local,
+    Oidc,
+}
+
+/// One local user, from the mounted users file. `bcrypt` is a hash, never a password, so the
+/// file may live in a Secret the chart renders straight from values.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct LocalUser {
+    pub email: String,
+    pub bcrypt: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+}
+
+/// The users local mode authenticates against. Verification is bcrypt -- inherently
+/// rate-limited by its own cost -- and a wrong password and an unknown email answer the same
+/// way and at the same cost, so the form cannot be used to enumerate users.
+#[derive(Debug, Clone, Default)]
+pub struct LocalUsers {
+    users: Vec<LocalUser>,
+}
+
+const DUMMY_BCRYPT: &str = "$2b$10$7EqJtq98hPqEX7fNZaFWoOhi5B0G1S3kQvJ8mPZaXlGbTk3oOHCYu";
+
+impl LocalUsers {
+    /// Parse the users file, refusing an empty list: a console nobody can log into is worse
+    /// than one that does not start, because nothing on the screen explains it.
+    pub fn load(path: &str) -> anyhow::Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct File {
+            users: Vec<LocalUser>,
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let parsed: File = serde_yaml_ng::from_str(&raw)?;
+        anyhow::ensure!(
+            !parsed.users.is_empty(),
+            "{path} names no users: local mode refuses to start a console nobody can log into"
+        );
+        Ok(Self {
+            users: parsed.users,
+        })
+    }
+
+    /// How many users the file named, for the startup line and nothing else.
+    pub fn len(&self) -> usize {
+        self.users.len()
+    }
+
+    /// Never true: load refuses an empty file, so an empty user set cannot exist.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn is_empty(&self) -> bool {
+        self.users.is_empty()
+    }
+
+    /// The user's groups when the password matches; None when anything is wrong.
+    pub fn verify(&self, email: &str, password: &str) -> Option<Vec<String>> {
+        let hash = match self.users.iter().find(|u| u.email == email) {
+            Some(u) => u.bcrypt.as_str(),
+            // Verify against a dummy so an unknown email costs the same bcrypt second as a
+            // wrong password, and timing cannot enumerate the user list.
+            None => DUMMY_BCRYPT,
+        };
+        if bcrypt::verify(password, hash).unwrap_or(false) {
+            self.users
+                .iter()
+                .find(|u| u.email == email)
+                .map(|u| u.groups.clone())
+        } else {
+            None
+        }
+    }
+}
+
 /// One login in flight: what must be remembered between sending a browser to the provider
 /// and it coming back.
 pub struct Pending {
@@ -400,6 +477,9 @@ pub async fn begin(
     State(state): State<AppState>,
     Query(query): Query<Begin>,
 ) -> Result<Response, StatusCode> {
+    if state.auth_mode == AuthMode::Local {
+        return Ok(local_login_form(&state, query.return_to.as_deref()));
+    }
     let client = state.oidc.client().await.map_err(|error| {
         tracing::warn!(%error, "cannot reach the identity provider to begin a sign-in");
         StatusCode::BAD_GATEWAY
@@ -440,6 +520,116 @@ pub async fn begin(
 pub struct Begin {
     #[serde(default)]
     return_to: Option<String>,
+}
+
+/// The local sign-in form, server-rendered: no SPA route, no client bundle involved -- the
+/// same choice ArgoCD's login page makes, and the page works even when the assets do not.
+/// The pending-login state it carries is the OIDC flow's own CSRF machinery reused verbatim,
+/// and `return_to` rides the identical validated path, so a local sign-in lands the reader
+/// where the 401 found them exactly like an OIDC one does.
+fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    let login_state = hex(&bytes);
+    let return_to = return_to
+        .filter(|p| safe_return_path(p))
+        .map(str::to_string);
+    state.pending.remember(Pending::new(
+        &login_state,
+        "", // no verifier and no nonce in local mode: nothing exchanges with a provider
+        "",
+        return_to,
+    ));
+    let body = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in — gapura console</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:22rem;margin:8rem auto;padding:0 1rem}}
+input{{width:100%;padding:.55rem .7rem;margin:.3rem 0 1rem;box-sizing:border-box}}
+button{{width:100%;padding:.6rem;background:#14532d;color:#fff;border:0;border-radius:.4rem;font-size:1rem;cursor:pointer}}</style>
+</head><body><h1>gapura console</h1>
+<form method="post" action="/auth/login">
+<input type="hidden" name="state" value="{login_state}">
+<label>Email<input type="text" name="email" autocomplete="username" required></label>
+<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">Sign in</button>
+</form></body></html>"#
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(body))
+        .expect("static form")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `POST /auth/login` (local mode only): the form above lands here.
+#[derive(Deserialize)]
+pub struct LocalLogin {
+    state: String,
+    email: String,
+    password: String,
+}
+
+pub async fn login_local(
+    State(state): State<AppState>,
+    axum::Form(form): axum::Form<LocalLogin>,
+) -> Response {
+    // The pending state is single-use, exactly as in the OIDC callback: a replayed form
+    // finds nothing, and a form this process never issued is refused before any bcrypt
+    // work happens.
+    let Ok(pending) = state.pending.take(&form.state) else {
+        return refused_local("This sign-in form is no longer valid — open the console again.");
+    };
+    // Only the password's verdict is logged, never the email: the users file is small, but
+    // the habit is the same one the OIDC path keeps.
+    match state.local_users.verify(&form.email, &form.password) {
+        Some(groups) => {
+            tracing::info!(subject = %form.email, groups = groups.len(), "signed in");
+            let cookie = set_cookie(
+                &session::encode(
+                    &Session {
+                        subject: form.email.clone(),
+                        groups,
+                        expires_at: now_seconds() + state.session_lifetime.as_secs(),
+                    },
+                    &state.session_key,
+                ),
+                state.session_lifetime,
+            );
+            let destination = pending
+                .return_to
+                .as_deref()
+                .filter(|p| safe_return_path(p))
+                .unwrap_or(AFTER_LOGIN);
+            let mut response = Redirect::to(destination).into_response();
+            if let Ok(value) = header::HeaderValue::from_str(&cookie) {
+                response.headers_mut().insert(header::SET_COOKIE, value);
+            }
+            response
+        }
+        None => refused_local("That email and password do not match."),
+    }
+}
+
+fn refused_local(message: &str) -> Response {
+    let body = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Sign in failed</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:22rem;margin:8rem auto;padding:0 1rem}}</style>
+</head><body><h1>Not signed in</h1><p>{message}</p><p><a href="/auth/login">Try again</a></p></body></html>"#
+    );
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(body))
+        .expect("static page")
 }
 
 /// What the identity provider puts in the query string when it sends the browser back.
@@ -765,6 +955,8 @@ mod against_a_stub_provider {
 
     fn state(issuer: &str) -> AppState {
         AppState {
+            auth_mode: crate::login::AuthMode::Oidc,
+            local_users: Default::default(),
             mapping: Arc::new([("team-a".to_string(), vec!["apps".to_string()])].into()),
             session_key: Arc::from(SESSION_KEY.to_vec()),
             // Signing in reads neither source, so both readers point at nothing: these
@@ -1156,5 +1348,214 @@ mod safe_return_path_tests {
         assert!(!safe_return_path(""));
         // Control characters never belong in a redirect target.
         assert!(!safe_return_path("/routes\r\nSet-Cookie: x=1"));
+    }
+}
+
+#[cfg(test)]
+mod local_users_tests {
+    use super::*;
+
+    fn file(users: &str) -> LocalUsers {
+        let yaml = format!("users:\n{users}");
+        #[derive(serde::Deserialize)]
+        struct File {
+            users: Vec<LocalUser>,
+        }
+        LocalUsers {
+            users: serde_yaml_ng::from_str::<File>(&yaml).unwrap().users,
+        }
+    }
+
+    fn hash(pw: &str) -> String {
+        bcrypt::hash(pw, 4).unwrap()
+    }
+
+    #[test]
+    fn a_correct_password_yields_the_users_groups() {
+        let users = file(&format!(
+            "  - email: a@x\n    bcrypt: {}\n    groups: [team-a, team-b]\n",
+            hash("s3cret")
+        ));
+        assert_eq!(
+            users.verify("a@x", "s3cret"),
+            Some(vec!["team-a".into(), "team-b".into()])
+        );
+    }
+
+    #[test]
+    fn a_wrong_password_and_an_unknown_email_agree() {
+        let users = file(&format!(
+            "  - email: a@x\n    bcrypt: {}\n    groups: [g]\n",
+            hash("s3cret")
+        ));
+        assert_eq!(users.verify("a@x", "wrong"), None);
+        assert_eq!(users.verify("nobody@x", "s3cret"), None);
+        assert_eq!(users.verify("nobody@x", "wrong"), None);
+    }
+}
+
+#[cfg(test)]
+mod local_login_flow_tests {
+    use super::*;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn local_state(users_yaml: &str) -> AppState {
+        #[derive(serde::Deserialize)]
+        struct File {
+            users: Vec<LocalUser>,
+        }
+        AppState {
+            auth_mode: AuthMode::Local,
+            local_users: LocalUsers {
+                users: serde_yaml_ng::from_str::<File>(users_yaml).unwrap().users,
+            },
+            mapping: Arc::new([("team-a".to_string(), vec!["apps".to_string()])].into()),
+            session_key: Arc::from(b"0123456789abcdef0123456789abcdef".to_vec()),
+            source: Arc::new(crate::kube_source::Source::new(
+                "http://127.0.0.1:1".to_string(),
+            )),
+            admin: Arc::new(crate::served::Admin::new("http://127.0.0.1:1")),
+            controller_name: Arc::new("gapura.dev/controller".into()),
+            oidc: Arc::new(
+                Oidc::new(
+                    "http://127.0.0.1:1",
+                    "none",
+                    "none",
+                    "http://127.0.0.1:1/auth/callback",
+                    "groups",
+                    &[],
+                )
+                .expect("never used in local mode"),
+            ),
+            pending: PendingLogins::default(),
+            session_lifetime: std::time::Duration::from_secs(3600),
+        }
+    }
+
+    async fn get(state: &AppState, uri: &str) -> axum::response::Response {
+        crate::api::router_with(state.clone())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn post(state: &AppState, uri: &str, body: String) -> axum::response::Response {
+        crate::api::router_with(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn form_value(html: &str, name: &str) -> String {
+        let marker = format!(r#"name="{name}" value=""#);
+        let start = html.find(&marker).expect("field present") + marker.len();
+        let end = start + html[start..].find('"').expect("closing quote");
+        html[start..end].to_string()
+    }
+
+    #[tokio::test]
+    async fn a_local_user_signs_in_through_the_form_and_lands_where_they_were() {
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let mut state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        // The API answers OK only when it can also read the cluster, so the reader needs a
+        // stub behind it; what is asserted is still the sign-in and its cookie.
+        state.source = Arc::new(crate::kube_source::Source::new(
+            crate::kube_source::tests::stub_api(include_str!("../tests/fixtures/httproutes.json"))
+                .await,
+        ));
+
+        // GET /auth/login serves the form; its state is what makes the POST forge-proof.
+        let page = get(&state, "/auth/login?return_to=%2Froutes%3Ffilter%3Drefs").await;
+        assert_eq!(page.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+
+        // POST with the right password: cookie + return_to honoured.
+        let body = format!("state={login_state}&email=a%40x&password=s3cret");
+        let signed_in = post(&state, "/auth/login", body).await;
+        assert_eq!(signed_in.status(), StatusCode::SEE_OTHER);
+        assert_eq!(signed_in.headers()["location"], "/routes?filter=refs");
+        let cookie = signed_in.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // The API accepts its own cookie, and the reader is scoped by the user's groups.
+        let response = crate::api::router_with(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/routes")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the API did not accept its own cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_is_refused_without_a_cookie_and_the_state_is_spent() {
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        let page = get(&state, "/auth/login").await;
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+
+        let refused = post(
+            &state,
+            "/auth/login",
+            format!("state={login_state}&email=a%40x&password=wrong"),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert!(refused.headers().get(header::SET_COOKIE).is_none());
+
+        // Single use: replaying the same form, even with the right password, finds nothing.
+        let replay = post(
+            &state,
+            "/auth/login",
+            format!("state={login_state}&email=a%40x&password=s3cret"),
+        )
+        .await;
+        assert_eq!(
+            replay.status(),
+            StatusCode::UNAUTHORIZED,
+            "state is single-use"
+        );
     }
 }

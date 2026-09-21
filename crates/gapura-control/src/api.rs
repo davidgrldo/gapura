@@ -10,7 +10,10 @@ use axum::{routing::get, Json, Router};
 pub fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
-        .route("/auth/login", get(crate::login::begin))
+        .route(
+            "/auth/login",
+            get(crate::login::begin).post(crate::login::login_local),
+        )
         .route("/auth/callback", get(crate::login::callback))
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
@@ -288,6 +291,8 @@ mod tests {
     /// them, and a health check that needed a cluster to answer would not be one.
     fn state() -> AppState {
         AppState {
+            auth_mode: crate::login::AuthMode::Oidc,
+            local_users: Default::default(),
             mapping: std::sync::Arc::new(crate::scope::Mapping::new()),
             session_key: std::sync::Arc::from(b"test key".to_vec()),
             source: std::sync::Arc::new(crate::kube_source::Source::new(
@@ -423,6 +428,8 @@ fn nothing_listening() -> String {
 #[cfg(test)]
 fn state_reading(api_server: String, gateway_admin: String) -> AppState {
     AppState {
+        auth_mode: crate::login::AuthMode::Oidc,
+        local_users: Default::default(),
         mapping: Arc::new(
             [("team-a".to_string(), vec!["apps".to_string()])]
                 .into_iter()
@@ -665,6 +672,8 @@ mod overview_tests {
         gateway_admin: String,
     ) -> AppState {
         AppState {
+            auth_mode: crate::login::AuthMode::Oidc,
+            local_users: Default::default(),
             mapping: Arc::new(mapping),
             session_key: Arc::from(KEY.to_vec()),
             source: Arc::new(crate::kube_source::Source::new(api_server)),
