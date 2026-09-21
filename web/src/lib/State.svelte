@@ -53,26 +53,26 @@
      same are the same kind of bad, and seven distinguishable hues would undo that by making
      every state look like its own separate category. */
   .ok {
-    background: #e6f4ea;
-    border-color: #a8d5b5;
-    color: #14532d;
+    background: var(--ok-bg);
+    border-color: var(--ok-border);
+    color: var(--ok-text);
   }
 
   .bad {
-    background: #fdecea;
-    border-color: #efa8a2;
-    color: #7f1d1d;
+    background: var(--bad-bg);
+    border-color: var(--bad-border);
+    color: var(--bad-text);
   }
 
   .warn {
-    background: #fdf3da;
-    border-color: #e5c569;
-    color: #713f12;
+    background: var(--warn-bg);
+    border-color: var(--warn-border);
+    color: var(--warn-text);
   }
 
   .idle {
-    background: #edf0f2;
-    border-color: #c6ced6;
-    color: #374151;
+    background: var(--idle-bg);
+    border-color: var(--border-strong);
+    color: var(--idle-text);
   }
 </style>

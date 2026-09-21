@@ -60,6 +60,88 @@
 </main>
 
 <style>
+  /* Every colour, radius and surface the console uses, defined once here because App is the
+     only component each screen is mounted inside.
+
+     The chrome is almost colourless on purpose. On the Routes screen the badge tones ARE the
+     data — four colours carrying whether traffic is being served — so anything else that puts
+     colour on the page competes with the only colour that means something. The accent is
+     spent on links and the active tab and nowhere else.
+
+     ponytail: no web font. A font from a CDN is a request to a third party from a page showing
+     cluster state, and a bundled one is several hundred kilobytes inside a binary that ships
+     to a cluster. Air-gapped installs break on the first and everybody pays for the second. */
+  :global(:root) {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --raised: #f7f8f9;
+    --border: #e3e7eb;
+    --border-strong: #c6ced6;
+    --hover: #f5f7f9;
+
+    --text: #1b2127;
+    --text-muted: #55606b;
+
+    /* Interactive only. Not a brand colour: the console has no branding to do. */
+    --accent: #1f5fa8;
+    --accent-hover: #17497f;
+
+    --ok-bg: #e6f4ea;
+    --ok-border: #a8d5b5;
+    --ok-text: #14532d;
+
+    --bad-bg: #fdecea;
+    --bad-border: #efa8a2;
+    --bad-text: #7f1d1d;
+
+    --warn-bg: #fdf3da;
+    --warn-border: #e5c569;
+    --warn-text: #713f12;
+
+    --idle-bg: #edf0f2;
+    --idle-border: #c6ced6;
+    --idle-text: #374151;
+
+    --radius-xs: 4px;
+    --radius-md: 6px;
+    --radius-xl: 10px;
+  }
+
+  /* Follows the operating system rather than offering a switch: nobody opens a gateway console
+     to choose a theme, and a switch is state to store, sync and get wrong. */
+  @media (prefers-color-scheme: dark) {
+    :global(:root) {
+      --bg: #14161a;
+      --surface: #14161a;
+      --raised: #1b1e23;
+      --border: #2a2e35;
+      --border-strong: #3c424b;
+      --hover: #1e2228;
+
+      --text: #e8eaed;
+      --text-muted: #9aa3ad;
+
+      --accent: #6fa8dc;
+      --accent-hover: #8fbfe8;
+
+      --ok-bg: #10291a;
+      --ok-border: #24603a;
+      --ok-text: #86e0a4;
+
+      --bad-bg: #2d1414;
+      --bad-border: #6d2a2a;
+      --bad-text: #f3a6a0;
+
+      --warn-bg: #2b2110;
+      --warn-border: #6a5220;
+      --warn-text: #e8c073;
+
+      --idle-bg: #1f2126;
+      --idle-border: #3c4049;
+      --idle-text: #b6bdc6;
+    }
+  }
+
   :global(body) {
     margin: 0;
     font-family:
@@ -69,8 +151,8 @@
       sans-serif;
     font-size: 15px;
     line-height: 1.5;
-    color: #1b2127;
-    background: #ffffff;
+    color: var(--text);
+    background: var(--bg);
   }
 
   header {
@@ -78,7 +160,7 @@
     align-items: baseline;
     gap: 1.5rem;
     padding: 0.875rem 1.5rem;
-    border-bottom: 1px solid #e3e7eb;
+    border-bottom: 1px solid var(--border);
   }
 
   nav {
@@ -87,22 +169,24 @@
   }
 
   nav a {
-    color: #374151;
+    color: var(--text-muted);
     text-decoration: none;
     padding-bottom: 0.125rem;
     border-bottom: 2px solid transparent;
   }
 
   nav a:hover {
-    text-decoration: underline;
+    color: var(--text);
   }
 
   nav a[aria-current='page'] {
-    color: #1b2127;
+    color: var(--text);
     font-weight: 600;
-    border-bottom-color: #1b2127;
+    border-bottom-color: var(--accent);
   }
 
+  /* No card. The reader is scanning a list of routes, and a card's margin and border spend
+     space and a line on decoration that the table rows need for themselves. */
   main {
     padding: 1.5rem;
     max-width: 68rem;
