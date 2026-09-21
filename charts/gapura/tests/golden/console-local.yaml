@@ -22,6 +22,32 @@ spec:
       app.kubernetes.io/component: gateway
 ---
 # Source: gapura/templates/console.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gapura-control-users
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.1.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+    app.kubernetes.io/component: console
+type: Opaque
+stringData:
+  users.yaml: |
+    users:
+      - email: admin@example.test
+        bcrypt: $2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
+        groups:
+        - admins
+      - email: viewer@example.test
+        bcrypt: $2b$10$zyxwvutsrqponmlkjihgO9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
+        groups:
+        []
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
 # terminates OIDC, the data plane faces the internet, and neither should carry the other's
@@ -315,6 +341,9 @@ spec:
         app.kubernetes.io/component: console
     spec:
       serviceAccountName: gapura-control
+      volumes:
+      - name: users
+        secret: { secretName: gapura-control-users }
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -325,29 +354,21 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --listen=0.0.0.0:8080
-        - --auth-mode=oidc
+        - --auth-mode=local
+        - --local-users-file=/etc/gapura-control/users.yaml
         - --gateway-admin=http://gapura-admin.gapura-system.svc:9090
         - --controller-name=gapura.dev/controller
         - --session-lifetime-seconds=3600
         - --log-level=info
-        - --grant=platform=platform
-        - --grant=sre=*
-        - --oidc-issuer=https://id.example.com/realms/engineering
-        - --oidc-client-id=gapura-console
-        - --oidc-redirect-url=https://console.example.test/auth/callback
-        - --oidc-groups-claim=groups
-        - --oidc-scope=email
+        - --grant=admins=*
         env:
         - name: GAPURA_SESSION_KEY
           valueFrom:
             secretKeyRef:
               name: gapura-console-session
               key: session-key
-        - name: GAPURA_OIDC_CLIENT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: gapura-console-oidc
-              key: client-secret
+        volumeMounts:
+        - { name: users, mountPath: /etc/gapura-control, readOnly: true }
         ports:
         - name: http
           containerPort: 8080

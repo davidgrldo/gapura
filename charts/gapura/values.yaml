@@ -205,7 +205,19 @@ console:
   # revoked before it expires.
   sessionLifetimeSeconds: 3600
   logLevel: info
-  # The OIDC provider that signs console users in. All four of issuer/clientId/redirectUrl
+  # How sign-in works. `local` (default) is the IdP-less ArgoCD shape: users below, no
+  # identity provider anywhere, a server-rendered form at /auth/login. `oidc` uses the
+  # provider configured under console.oidc and ignores the users file.
+  auth:
+    mode: local
+    # Local users; bcrypt hashes only, never passwords (generate with
+    #   python3 -c "import bcrypt,sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(10)).decode())" 'password-anda'
+    # ). Groups feed the same grants as OIDC groups do. Rendered into a Secret mounted as
+    # the users file; give existingSecret to supply your own Secret with a `users.yaml` key.
+    local:
+      users: []
+      existingSecret: ""
+  # The OIDC provider that signs console users in (auth.mode: oidc). All four of issuer/clientId/redirectUrl
   # and the two secret references are required when console.enabled -- the chart renders
   # them verbatim; helm fails an enabled console that names no provider, which is the
   # honest failure next to a pod that starts and signs nobody in.

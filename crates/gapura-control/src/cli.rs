@@ -28,6 +28,19 @@ pub struct Args {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
+    /// How sign-in works: `local` (default -- users from --local-users-file, no identity
+    /// provider anywhere) or `oidc` (everything below this flag). An IdP-less default is the
+    /// ArgoCD shape: a first install works on its own, SSO arrives when there is one to add.
+    #[arg(long, default_value = "local")]
+    pub auth_mode: String,
+
+    /// A YAML file of local users for --auth-mode local, as
+    /// `users: [{email, bcrypt, groups}]` (bcrypt is the only password form accepted, the
+    /// same shape dex staticPasswords use). Required in local mode; zero users refuses to
+    /// start rather than serving a console nobody can log into.
+    #[arg(long, value_name = "PATH")]
+    pub local_users_file: Option<String>,
+
     /// The OpenID Connect issuer, e.g. `https://id.example.com/realms/engineering`. Its
     /// discovery document is where every other endpoint is read from.
     #[arg(long)]

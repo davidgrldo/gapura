@@ -1,7 +1,7 @@
 //! What handlers need: the readers, and the rule about who sees what.
 
 use crate::kube_source::Source;
-use crate::login::{Oidc, PendingLogins};
+use crate::login::{AuthMode, LocalUsers, Oidc, PendingLogins};
 use crate::scope::Mapping;
 use crate::served::Admin;
 use std::sync::Arc;
@@ -20,6 +20,9 @@ pub struct AppState {
     /// is one an operator changes without rebuilding anything.
     pub controller_name: Arc<String>,
     pub oidc: Arc<Oidc>,
+    /// How sign-in happens and, in local mode, the users it happens against.
+    pub auth_mode: AuthMode,
+    pub local_users: LocalUsers,
     /// Sign-ins sent to the identity provider and not yet heard back about.
     pub pending: PendingLogins,
     /// How long a session minted now stays valid, in the cookie and in its `Max-Age`.
