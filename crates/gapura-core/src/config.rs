@@ -4,7 +4,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+// `serde(default)` here and deliberately not on the types below. ADR 2 gives the data plane a
+// disk cache, so after an upgrade a new binary reads a configuration an older one wrote, and any
+// field added since would otherwise be a missing field that fails the whole load. At the top
+// level a missing field sensibly means "none of those". Inside an `Endpoint` it does not: an
+// address defaulting to the empty string is a silent hole where failing loudly is correct.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub listeners: Vec<ListenerConfig>,
     /// Match table per listen port, over every programmed listener on that port, sorted once by
@@ -267,5 +273,33 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    /// ADR 2 requires an old data plane to keep talking to a new control plane across a
+    /// rolling upgrade, and the configuration protocol carries `Config` itself. That promise
+    /// is either pinned here or discovered by an operator mid-upgrade.
+    #[test]
+    fn a_new_control_planes_extra_fields_do_not_break_an_old_data_plane() {
+        let cfg = Config::default();
+        let mut v = serde_json::to_value(&cfg).unwrap();
+        // What a newer control plane would add: a field this binary has never heard of.
+        v.as_object_mut()
+            .unwrap()
+            .insert("something_added_later".into(), serde_json::json!({"a": 1}));
+        v["listeners"] = serde_json::json!([]);
+        let back: Config = serde_json::from_value(v).expect("unknown fields must be ignored");
+        assert_eq!(back, cfg);
+    }
+
+    /// The other direction, which is easy to miss: ADR 2 gives the data plane a disk cache, so
+    /// after an upgrade a NEW binary reads a config an OLD one wrote. Every field a future
+    /// version adds has to be able to be absent, which is what `#[serde(default)]` on the
+    /// struct buys. If this fails, the cache stops loading across exactly one upgrade.
+    #[test]
+    fn a_config_written_by_an_older_binary_still_loads() {
+        let empty = serde_json::json!({});
+        let back: Config = serde_json::from_value(empty)
+            .expect("a Config missing every field must load as the default");
+        assert_eq!(back, Config::default());
     }
 }
