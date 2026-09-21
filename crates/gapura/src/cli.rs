@@ -16,7 +16,10 @@ pub struct Args {
     #[arg(
         long,
         value_name = "DIR",
-        required_unless_present = "kubernetes",
+        // Three sources now, exactly one of which a deployment picks. ADR 2 made that
+        // exclusivity the point: a deployment should have one answer to "where does this come
+        // from", so clap refuses the combinations rather than arbitrating them at runtime.
+        required_unless_present_any = ["kubernetes", "control_plane"],
         conflicts_with = "kubernetes"
     )]
     pub config_dir: Option<std::path::PathBuf>,
@@ -79,6 +82,29 @@ pub struct Args {
     /// Read Gateway API resources from the Kubernetes API server (in-cluster, or $KUBECONFIG).
     #[arg(long)]
     pub kubernetes: bool,
+
+    /// Base URL of a `gapura-control` configuration endpoint, e.g.
+    /// `https://gapura-control.gapura-system:8081`. The third configuration source, after
+    /// `--config-dir` and `--kubernetes`, and exclusive with both: ADR 2 has a deployment read
+    /// from exactly one place, so that "where does this come from" has one answer.
+    #[arg(long, conflicts_with_all = ["config_dir", "kubernetes"], requires = "control_plane_token_file")]
+    pub control_plane: Option<String>,
+
+    /// File holding the token this data plane authenticates with (ADR 4). A file rather than a
+    /// flag so it never reaches a process list, a shell history, or a crash dump of argv.
+    #[arg(long)]
+    pub control_plane_token_file: Option<std::path::PathBuf>,
+
+    /// Where the last configuration received is kept, so a gateway that loses the control plane
+    /// keeps serving what it has rather than waking up empty. Absent disables the cache, which
+    /// means a control plane that is down at startup leaves this gateway unready.
+    #[arg(long)]
+    pub config_cache: Option<std::path::PathBuf>,
+
+    /// How often to ask. Propagation is bounded by this; ADR 3 records that the fix, when it
+    /// matters, is to hold the request open rather than to invert the direction.
+    #[arg(long, default_value = "5", value_name = "SECONDS")]
+    pub control_plane_interval: u64,
 
     /// `namespace/name` of the Service whose LoadBalancer addresses are published in Gateway status.
     #[arg(

@@ -172,6 +172,22 @@ impl Store {
             .store(Arc::new(Runtime::new(config, generation, status)));
         self.ready.store(true, Ordering::Release);
         METRICS.config_last_reload_timestamp_seconds.set(now_secs());
+        METRICS.config_from_cache.set(0);
+    }
+
+    /// Install a configuration read back from the disk cache at startup.
+    ///
+    /// Deliberately not `swap`: that sets `config_last_reload_timestamp_seconds`, and a cache
+    /// load is not a reload. Letting it say otherwise would turn every alert built on "this
+    /// gateway has not reloaded recently" green on a gateway serving a week-old cache, which is
+    /// the one situation those alerts exist to reveal. What this does set is
+    /// `gapura_config_from_cache`, so the state is visible rather than disguised.
+    pub fn swap_from_cache(&self, config: Config) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.current
+            .store(Arc::new(Runtime::new(config, generation, Vec::new())));
+        self.ready.store(true, Ordering::Release);
+        METRICS.config_from_cache.set(1);
     }
 
     pub fn is_ready(&self) -> bool {

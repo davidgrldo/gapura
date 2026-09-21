@@ -78,6 +78,35 @@ fn main() {
     let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
 
+    if let Some(url) = &args.control_plane {
+        let path = args
+            .control_plane_token_file
+            .as_ref()
+            .expect("clap requires the token file alongside --control-plane");
+        let token = match std::fs::read_to_string(path) {
+            Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+            // Fatal rather than starting and failing every poll: a data plane with no
+            // credential has no configuration coming, and saying so once beats saying it forever.
+            Ok(_) => {
+                tracing::error!(path = %path.display(), "the control plane token file is empty, refusing to start");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "cannot read the control plane token file, refusing to start");
+                std::process::exit(1);
+            }
+        };
+        let source = source::control::ControlSource {
+            url: url.clone(),
+            token,
+            cache_path: args.config_cache.clone(),
+            interval: std::time::Duration::from_secs(args.control_plane_interval),
+            store: store.clone(),
+        };
+        tracing::info!(url = %url, "control plane source enabled");
+        server.add_service(background_service("control-plane", source));
+    }
+
     if args.kubernetes {
         let publish_service = match args.publish_service_ref() {
             Ok(p) => p,
