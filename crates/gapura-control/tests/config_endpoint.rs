@@ -29,7 +29,20 @@ async fn fixture() -> Option<(
     axum::Router,
     tokio::sync::MutexGuard<'static, ()>,
 )> {
-    let url = std::env::var("GAPURA_TEST_DATABASE_URL").ok()?;
+    let url = match std::env::var("GAPURA_TEST_DATABASE_URL") {
+        Ok(url) => url,
+        // Optional locally, mandatory in CI. Without this, a typo in the workflow's variable
+        // name would skip these tests and report a green build that proved nothing -- which is
+        // the exact failure they exist to catch, reproduced one level up.
+        Err(_) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "GAPURA_TEST_DATABASE_URL must be set in CI"
+            );
+            eprintln!("skipped: set GAPURA_TEST_DATABASE_URL to run this");
+            return None;
+        }
+    };
     let guard = ONE_AT_A_TIME.lock().await;
     let store = Arc::new(Store::connect(&url).await.expect("connecting"));
     // Each run starts from nothing, so a failure is never yesterday's rows.
@@ -84,7 +97,6 @@ async fn get(
 #[tokio::test]
 async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_changed() {
     let Some((store, app, _guard)) = fixture().await else {
-        eprintln!("skipped: set GAPURA_TEST_DATABASE_URL to run this");
         return;
     };
     let token = store.issue_token("edge-1").await.expect("issuing a token");
@@ -152,7 +164,6 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
 #[tokio::test]
 async fn a_token_that_was_never_issued_gets_nothing() {
     let Some((_store, app, _guard)) = fixture().await else {
-        eprintln!("skipped: set GAPURA_TEST_DATABASE_URL to run this");
         return;
     };
     let (status, _, _) = get(&app, "gpdp_0000000000000000", None).await;
