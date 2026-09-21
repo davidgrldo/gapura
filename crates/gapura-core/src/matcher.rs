@@ -180,6 +180,7 @@ mod tests {
             }],
             timeouts: Timeouts::default(),
             rate_limit: None,
+            plugins: vec![],
         }
     }
 

@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    Cluster, Config, Filters, ListenerConfig, PathMatch, PortEntry, Protocol, ResolveTarget,
-    RouteMatch, RouteRule, Timeouts, WeightedBackend,
+    Cluster, Config, Filters, ListenerConfig, PathMatch, Plugin, PortEntry, Protocol,
+    ResolveTarget, RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -45,10 +45,26 @@ pub struct StoreRoute {
     pub priority: i32,
 }
 
+/// A policy row, attached to exactly one of a route or a service, or to neither -- which means
+/// every route in the workspace. The schema enforces the "exactly one" with a check constraint,
+/// because it is a rule that has to hold for every write path that will ever exist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StorePlugin {
+    /// [`StoreRoute::name`], when this is attached to one route.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// [`StoreService::name`], when this is attached to every route using one service.
+    #[serde(default)]
+    pub service: Option<String>,
+    pub plugin: Plugin,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoreSnapshot {
     pub services: Vec<StoreService>,
     pub routes: Vec<StoreRoute>,
+    #[serde(default)]
+    pub plugins: Vec<StorePlugin>,
 }
 
 /// Runtime settings that are the data plane's, not the store's: which ports this process bound.
@@ -114,6 +130,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 
         let matches = expand(route);
         let rule_index = rules.len();
+        let plugins = plugins_for(&snap.plugins, route);
         rules.push(RouteRule {
             route: route.name.clone(),
             rule_index,
@@ -128,6 +145,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             }],
             timeouts: Timeouts::default(),
             rate_limit: None,
+            plugins,
         });
 
         for m in matches {
@@ -177,6 +195,38 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
         ports,
         clusters,
     }
+}
+
+/// The policies that apply to one route, most specific wins.
+///
+/// A policy on the route beats one on its service, which beats one attached to neither and so to
+/// the whole workspace -- the same precedence Kong settled on, and the one an operator expects
+/// when they attach something narrow to override something broad. "Most specific" is per kind:
+/// a route-level JWT policy replaces a workspace-level JWT policy and leaves everything else
+/// alone, because the alternative is that attaching one narrow policy silently drops every
+/// broad one.
+fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
+    let mut chosen: Vec<(u8, &Plugin)> = Vec::new();
+    for p in all {
+        let rank = match (&p.route, &p.service) {
+            (Some(r), _) if *r == route.name => 2,
+            (Some(_), _) => continue,
+            (None, Some(s)) if *s == route.service => 1,
+            (None, Some(_)) => continue,
+            (None, None) => 0,
+        };
+        match chosen.iter_mut().find(|(_, c)| same_kind(c, &p.plugin)) {
+            Some(slot) if slot.0 < rank => *slot = (rank, &p.plugin),
+            Some(_) => {}
+            None => chosen.push((rank, &p.plugin)),
+        }
+    }
+    chosen.into_iter().map(|(_, p)| p.clone()).collect()
+}
+
+/// Two policies of the same kind compete; two of different kinds both run.
+fn same_kind(a: &Plugin, b: &Plugin) -> bool {
+    matches!((a, b), (Plugin::Jwt(_), Plugin::Jwt(_)))
 }
 
 /// `host:port` rather than the service name: two services pointing at one upstream share a
@@ -264,6 +314,7 @@ mod tests {
     #[test]
     fn a_compiled_config_actually_routes() {
         let snap = StoreSnapshot {
+            plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/orders", 0)],
         };
@@ -280,6 +331,7 @@ mod tests {
     #[test]
     fn a_service_becomes_a_cluster_the_data_plane_must_resolve() {
         let snap = StoreSnapshot {
+            plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/", 0)],
         };
@@ -303,6 +355,7 @@ mod tests {
     #[test]
     fn higher_priority_wins_over_a_route_that_also_matches() {
         let snap = StoreSnapshot {
+            plugins: Vec::new(),
             services: vec![svc("v1", "v1.internal", 80), svc("v2", "v2.internal", 80)],
             routes: vec![
                 route("catch-all", "v1", "/", 0),
@@ -319,10 +372,12 @@ mod tests {
     fn equal_priority_is_broken_by_name_not_by_row_order() {
         let services = vec![svc("a", "a.internal", 80), svc("b", "b.internal", 80)];
         let forwards = StoreSnapshot {
+            plugins: Vec::new(),
             services: services.clone(),
             routes: vec![route("aaa", "a", "/", 5), route("bbb", "b", "/", 5)],
         };
         let backwards = StoreSnapshot {
+            plugins: Vec::new(),
             services,
             routes: vec![route("bbb", "b", "/", 5), route("aaa", "a", "/", 5)],
         };
@@ -342,6 +397,7 @@ mod tests {
     #[test]
     fn a_route_naming_a_missing_service_is_dropped() {
         let snap = StoreSnapshot {
+            plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("ghost", "does-not-exist", "/", 0)],
         };
@@ -356,6 +412,7 @@ mod tests {
     #[test]
     fn hosts_paths_and_methods_expand_into_every_combination() {
         let snap = StoreSnapshot {
+            plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![StoreRoute {
                 name: "api".into(),
@@ -379,10 +436,134 @@ mod tests {
         assert_eq!(hit(&cfg, 80, "a.example", "/v1/x", "DELETE"), None);
     }
 
+    fn jwt(issuer: &str) -> Plugin {
+        Plugin::Jwt(crate::config::JwtPolicy {
+            issuer: Some(issuer.into()),
+            audience: None,
+            jwks: "{}".into(),
+        })
+    }
+
+    fn issuers(cfg: &Config) -> Vec<String> {
+        cfg.listeners[0].rules[0]
+            .plugins
+            .iter()
+            .map(|p| {
+                let Plugin::Jwt(j) = p;
+                j.issuer.clone().unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Narrow beats broad, the precedence Kong settled on and the one an operator expects when
+    /// they attach something to a route to override something attached to everything.
+    #[test]
+    fn a_policy_on_the_route_wins_over_one_on_its_service_and_one_on_everything() {
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            plugins: vec![
+                StorePlugin {
+                    route: None,
+                    service: None,
+                    plugin: jwt("global"),
+                },
+                StorePlugin {
+                    route: None,
+                    service: Some("orders".into()),
+                    plugin: jwt("service"),
+                },
+                StorePlugin {
+                    route: Some("api".into()),
+                    service: None,
+                    plugin: jwt("route"),
+                },
+            ],
+        };
+        assert_eq!(
+            issuers(&compile(&snap, &StoreSettings::default())),
+            ["route"]
+        );
+    }
+
+    #[test]
+    fn a_service_policy_wins_over_a_global_one_when_the_route_has_none() {
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            plugins: vec![
+                StorePlugin {
+                    route: None,
+                    service: None,
+                    plugin: jwt("global"),
+                },
+                StorePlugin {
+                    route: None,
+                    service: Some("orders".into()),
+                    plugin: jwt("service"),
+                },
+            ],
+        };
+        assert_eq!(
+            issuers(&compile(&snap, &StoreSettings::default())),
+            ["service"]
+        );
+    }
+
+    /// A policy attached to another route or another service must not leak onto this one.
+    #[test]
+    fn a_policy_attached_elsewhere_does_not_apply_here() {
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "a", 80), svc("billing", "b", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            plugins: vec![
+                StorePlugin {
+                    route: Some("other".into()),
+                    service: None,
+                    plugin: jwt("wrong-route"),
+                },
+                StorePlugin {
+                    route: None,
+                    service: Some("billing".into()),
+                    plugin: jwt("wrong-service"),
+                },
+            ],
+        };
+        assert!(issuers(&compile(&snap, &StoreSettings::default())).is_empty());
+    }
+
+    /// "Most specific wins" is per kind. Overriding one policy must not silently drop the others,
+    /// which is the failure that turns a narrow tweak into an open route.
+    #[test]
+    fn overriding_one_kind_leaves_other_kinds_alone() {
+        // Only one kind exists today, so this pins the shape rather than the behaviour: two
+        // global policies of the same kind collapse to one, and the count is what a second kind
+        // would change.
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            plugins: vec![
+                StorePlugin {
+                    route: None,
+                    service: None,
+                    plugin: jwt("first"),
+                },
+                StorePlugin {
+                    route: None,
+                    service: None,
+                    plugin: jwt("second"),
+                },
+            ],
+        };
+        let got = issuers(&compile(&snap, &StoreSettings::default()));
+        assert_eq!(got.len(), 1, "two of one kind compete rather than stacking");
+    }
+
     /// Every bound port carries every route, and each listener's table indexes its own listener.
     #[test]
     fn every_bound_port_gets_the_same_routes() {
         let snap = StoreSnapshot {
+            plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
         };

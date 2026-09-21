@@ -31,6 +31,10 @@ k8s-openapi = { workspace = true }
 futures = { workspace = true }
 # ponytail: the mirror client is HTTP-only; TLS mirrors and body tee-ing are a follow-up.
 reqwest = { workspace = true }
+# `rust_crypto` rather than `aws_lc_rs`: jsonwebtoken 11 makes the provider an explicit choice,
+# and this workspace already compiles OpenSSL from source for pingora. A second C crypto build
+# would cost every image another toolchain for a few signature checks.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 
 [dev-dependencies]
 axum = { workspace = true }

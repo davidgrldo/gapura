@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use deadpool_postgres::{Config as PoolConfig, Pool, Runtime};
-use gapura_core::config::{PathMatch, Protocol};
-use gapura_core::store::{StoreRoute, StoreService, StoreSnapshot};
+use gapura_core::config::{JwtPolicy, PathMatch, Plugin, Protocol};
+use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
@@ -135,8 +135,41 @@ impl Store {
             })
             .collect();
 
+        // Only the ones attached to a route or a service, or to neither. A policy scoped to a
+        // consumer needs consumers, which this phase does not have yet, and a row that cannot be
+        // honoured is better left out than half applied.
+        let plugins = tx
+            .query(
+                "select p.name, p.config, r.name as route, s.name as service
+                   from plugins p
+                   left join routes r   on r.id = p.route_id
+                   left join services s on s.id = p.service_id
+                  where p.enabled and p.consumer_id is null
+                  order by p.name",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .filter_map(|r| {
+                let name: String = r.get("name");
+                let config: serde_json::Value = r.get("config");
+                Some(StorePlugin {
+                    route: r.get("route"),
+                    service: r.get("service"),
+                    plugin: parse_plugin(&name, config)?,
+                })
+            })
+            .collect();
+
         tx.commit().await?;
-        Ok((version, StoreSnapshot { services, routes }))
+        Ok((
+            version,
+            StoreSnapshot {
+                services,
+                routes,
+                plugins,
+            },
+        ))
     }
 
     /// Returns the data plane's id when the token is one it holds.
@@ -237,6 +270,25 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// A policy row into the typed thing the data plane runs.
+///
+/// A name this binary does not know, or a configuration that does not fit the shape it names, is
+/// dropped rather than guessed at. The console should refuse the write and the enum should make
+/// the set of names visible; this is the backstop for both being wrong, and dropping is the safe
+/// direction -- a policy that half-applies is worse than one that visibly did not.
+fn parse_plugin(name: &str, config: serde_json::Value) -> Option<Plugin> {
+    match name {
+        "jwt" => serde_json::from_value::<JwtPolicy>(config)
+            .inspect_err(|e| tracing::warn!(error = %e, "a jwt policy row does not fit JwtPolicy and is ignored"))
+            .ok()
+            .map(Plugin::Jwt),
+        other => {
+            tracing::warn!(plugin = %other, "unknown policy name, ignored");
+            None
+        }
+    }
 }
 
 /// `[{"type":"prefix","value":"/v1"}]`. An entry that is not one of the three known shapes is

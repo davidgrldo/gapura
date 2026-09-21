@@ -26,6 +26,9 @@ pub struct Metrics {
     /// 1 while the configuration being served came off disk and has not been confirmed with the
     /// control plane since. The one number that says "this gateway is running blind".
     pub config_from_cache: IntGauge,
+    /// Refusals by route and reason. The reason is the point: "missing" and "bad_signature" are
+    /// different operator problems, and a single counter would hide which one is happening.
+    pub jwt_refused_total: IntCounterVec,
     /// labels: secret (`ns/name`)
     pub tls_cert_parse_errors_total: IntCounterVec,
     /// labels: port
@@ -78,6 +81,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
     config_from_cache: register_int_gauge!(
         "gapura_config_from_cache",
         "1 while serving a configuration read from the disk cache and not since confirmed"
+    )
+    .expect("metric registered once"),
+    jwt_refused_total: register_int_counter_vec!(
+        "gapura_jwt_refused_total",
+        "Requests refused by a JWT policy, by route and reason",
+        &["route", "reason"]
     )
     .expect("metric registered once"),
     tls_cert_parse_errors_total: register_int_counter_vec!(

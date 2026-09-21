@@ -35,6 +35,9 @@ pub struct Runtime {
     /// Compiled `PathMatch::Regex` patterns, like the cursors and certs compiled once per
     /// generation instead of per request.
     regexes: RegexMap,
+    /// Decoding keys per JWKS document, for the same reason: a policy's keys cannot change
+    /// between swaps, so parsing them per request would be work nothing asked for.
+    jwt_keys: HashMap<String, crate::proxy::jwt::JwtKeys>,
 }
 
 impl Runtime {
@@ -82,6 +85,15 @@ impl Runtime {
                 }
             }
         }
+        let (jwt_keys, unusable) = crate::proxy::jwt::compile(&config);
+        if unusable > 0 {
+            // Once per swap rather than once per request. A policy whose keys did not load
+            // refuses everything, which is the safe direction and a loud one.
+            tracing::warn!(
+                keys = unusable,
+                "JWKS keys that could not be used; policies relying on them will refuse every request"
+            );
+        }
         let (regexes, skipped) = compile_regexes(&config);
         for pattern in &skipped {
             tracing::warn!(
@@ -97,7 +109,13 @@ impl Runtime {
             certs,
             upstream_cas,
             regexes,
+            jwt_keys,
         }
+    }
+
+    /// Decoding keys for a policy's JWKS document, compiled with this generation.
+    pub fn jwt_keys(&self, jwks: &str) -> Option<&crate::proxy::jwt::JwtKeys> {
+        self.jwt_keys.get(jwks)
     }
 
     /// Compiled regex path match patterns of this generation, for `match_port_with`.
@@ -372,6 +390,7 @@ mod tests {
             backends: vec![],
             timeouts: Timeouts::default(),
             rate_limit: None,
+            plugins: vec![],
         }];
         let rt = Runtime::new(
             Config {
