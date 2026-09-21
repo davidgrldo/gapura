@@ -101,6 +101,7 @@ mod tests {
             backends: vec![],
             timeouts: Timeouts::default(),
             rate_limit: None,
+            plugins: vec![],
         }
     }
 

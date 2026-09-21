@@ -115,6 +115,8 @@ pub(crate) fn compile(
             backends,
             timeouts,
             rate_limit: rate_limit_of(snap, &rref.namespace, &r.backend_refs),
+            // The Kubernetes path has no policies: they arrive from the store (ADR 2).
+            plugins: Vec::new(),
         });
     }
     let resolved_refs = match first_ref_error {

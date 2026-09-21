@@ -7,6 +7,7 @@
 
 pub mod attrs;
 pub mod client;
+pub mod jwt;
 pub mod rate_limit;
 pub mod select;
 pub mod tls;
@@ -427,11 +428,48 @@ impl ProxyHttp for GapuraProxy {
                 matched,
                 cluster,
             } => {
+                // Policies run before the limit, so that a limit can one day be counted per
+                // consumer rather than per address: the consumer is not known until the
+                // credential has been checked. Both run after the match and before anything
+                // upstream is touched, for the same reason -- a refused request must cost the
+                // backend nothing.
+                let rt = ctx.runtime.as_ref().expect("set above");
+                for plugin in &rt.config.listeners[listener].rules[rule].plugins {
+                    let gapura_core::config::Plugin::Jwt(policy) = plugin;
+                    let presented = jwt::bearer(
+                        session
+                            .req_header()
+                            .headers
+                            .get(http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok()),
+                    );
+                    // No keys for this document means it did not parse at swap time. Refusing is
+                    // the safe direction: the alternative is passing traffic through unverified
+                    // because a configuration error made verification impossible.
+                    let empty = jwt::JwtKeys::default();
+                    let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
+                    if let Err(refusal) = jwt::verify(policy, keys, presented) {
+                        let route = rt.config.listeners[listener].rules[rule].route.clone();
+                        METRICS
+                            .jwt_refused_total
+                            .with_label_values(&[&route, refusal.as_str()])
+                            .inc();
+                        // No detail in the body. Which of five reasons it was is an operator's
+                        // business, and telling a caller narrows the search for whoever is
+                        // guessing at a token.
+                        let mut header = ResponseHeader::build(401u16, Some(1))?;
+                        header.insert_header(http::header::WWW_AUTHENTICATE, "Bearer")?;
+                        session
+                            .write_response_header(Box::new(header), true)
+                            .await?;
+                        return Ok(true);
+                    }
+                }
+
                 // The rule's limit, if its backend Service asked for one, is enforced here:
                 // after the match (the route is known), before any upstream work (the limit
                 // must not cost the backend anything). Same client answer the access log
                 // records, so a limited request names the same client a served one would.
-                let rt = ctx.runtime.as_ref().expect("set above");
                 if let Some(rl) = &rt.config.listeners[listener].rules[rule].rate_limit {
                     let route = rt.config.listeners[listener].rules[rule].route.clone();
                     if let Some(ip) = effective_client_ip(
