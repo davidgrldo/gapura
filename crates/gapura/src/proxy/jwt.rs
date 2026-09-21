@@ -50,7 +50,9 @@ pub fn compile(config: &Config) -> (HashMap<String, JwtKeys>, usize) {
     for listener in &config.listeners {
         for rule in &listener.rules {
             for plugin in &rule.plugins {
-                let Plugin::Jwt(policy) = plugin;
+                let Plugin::Jwt(policy) = plugin else {
+                    continue;
+                };
                 if out.contains_key(&policy.jwks) {
                     continue;
                 }

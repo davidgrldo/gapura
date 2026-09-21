@@ -176,6 +176,7 @@ mod tests {
                 }],
                 ports: Default::default(),
                 clusters: Default::default(),
+                credentials: Default::default(),
             },
             Vec::new(),
         );
