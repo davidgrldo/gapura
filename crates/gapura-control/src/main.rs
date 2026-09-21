@@ -82,6 +82,27 @@ async fn main() -> anyhow::Result<()> {
         pending: gapura_control::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
     };
+    // Served only when there is a store to serve it from, on its own listener: two servers in
+    // one process rather than one router, so the port is the boundary and not a path prefix
+    // somebody can get wrong later.
+    if let Some(url) = &args.database_url {
+        let store = std::sync::Arc::new(gapura_control::store::Store::connect(url).await?);
+        store.migrate().await?;
+        let api = std::sync::Arc::new(gapura_control::config_api::ConfigApi {
+            store,
+            settings: gapura_core::store::StoreSettings {
+                http_ports: args.data_plane_http_ports.clone(),
+            },
+        });
+        let listener = tokio::net::TcpListener::bind(args.listen_config).await?;
+        tracing::info!(addr = %listener.local_addr()?, "configuration endpoint listening");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, gapura_control::config_api::router(api)).await {
+                tracing::error!(error = %e, "the configuration endpoint stopped");
+            }
+        });
+    }
+
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "gapura-control listening");
     axum::serve(listener, gapura_control::api::router_with(state)).await?;

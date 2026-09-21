@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod config_api;
 pub mod declared;
 pub mod kube_source;
 pub mod login;
@@ -14,3 +15,4 @@ pub mod scope;
 pub mod served;
 pub mod session;
 pub mod state;
+pub mod store;
