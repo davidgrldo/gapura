@@ -66,14 +66,19 @@ async fn main() -> anyhow::Result<()> {
         controller_name: Arc::new(args.controller_name.clone()),
         auth_mode,
         local_users,
-        oidc: Arc::new(gapura_control::login::Oidc::new(
-            args.oidc_issuer.as_deref().unwrap_or_default(),
-            args.oidc_client_id.as_deref().unwrap_or_default(),
-            args.oidc_client_secret.as_deref().unwrap_or_default(),
-            args.oidc_redirect_url.as_deref().unwrap_or_default(),
-            &args.oidc_groups_claim,
-            &args.oidc_scopes,
-        )?),
+        // Local mode carries the never-used stand-in: Oidc::new("") cannot parse, and main
+        // builds the state unconditionally. Nothing in local mode ever touches it.
+        oidc: Arc::new(match auth_mode {
+            gapura_control::login::AuthMode::Oidc => gapura_control::login::Oidc::new(
+                args.oidc_issuer.as_deref().expect("validated above"),
+                args.oidc_client_id.as_deref().expect("validated above"),
+                args.oidc_client_secret.as_deref().expect("validated above"),
+                args.oidc_redirect_url.as_deref().expect("validated above"),
+                &args.oidc_groups_claim,
+                &args.oidc_scopes,
+            )?,
+            gapura_control::login::AuthMode::Local => gapura_control::login::Oidc::unused()?,
+        }),
         pending: gapura_control::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
     };
