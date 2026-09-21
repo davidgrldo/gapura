@@ -158,6 +158,21 @@ impl Oidc {
         })
     }
 
+    /// The never-used stand-in local mode carries. Every field parses trivially; nothing
+    /// reaches for it because `begin` answers the form long before any OIDC code runs, and
+    /// if that guard were ever lost, the issuer below points at a reserved documentation
+    /// domain that answers nothing -- loud, not silent.
+    pub fn unused() -> anyhow::Result<Self> {
+        Self::new(
+            "https://invalid.local/.well-known/openid-configuration",
+            "unused",
+            "unused",
+            "https://invalid.local/auth/callback",
+            "groups",
+            &[],
+        )
+    }
+
     /// A client built from the provider's discovery document.
     ///
     /// Discovery runs per sign-in rather than once at startup. It costs two requests on a
