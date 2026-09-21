@@ -204,6 +204,23 @@ pub struct Cluster {
     /// Sorted, unique. Empty is valid config and yields 503 at runtime.
     pub endpoints: Vec<Endpoint>,
     pub tls: Option<ClusterTls>,
+    /// Store mode only: the name whose resolution fills `endpoints`. `None` under Kubernetes,
+    /// where EndpointSlice has already resolved them, and under `--config-dir`.
+    ///
+    /// The control plane cannot resolve this on a data plane's behalf, because a data plane may
+    /// be in another network where the name answers differently or not at all, so the
+    /// configuration carries the name and each data plane resolves it for itself. Until it has,
+    /// `endpoints` is empty and requests get 503 -- which is the same answer as a backend with
+    /// no ready addresses, and correctly so: in both cases there is nowhere to send the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve: Option<ResolveTarget>,
+}
+
+/// A name for the data plane to resolve into `Cluster::endpoints`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResolveTarget {
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -267,6 +284,7 @@ mod tests {
                         port: 8080,
                     }],
                     tls: None,
+                    resolve: None,
                 },
             )]),
         };
@@ -289,6 +307,16 @@ mod tests {
         v["listeners"] = serde_json::json!([]);
         let back: Config = serde_json::from_value(v).expect("unknown fields must be ignored");
         assert_eq!(back, cfg);
+    }
+
+    /// `resolve` is the first field added since the compatibility tests above were written,
+    /// so it is the first real exercise of the promise rather than a hypothetical one: a
+    /// cluster serialised before it existed must still load.
+    #[test]
+    fn a_cluster_from_before_resolve_existed_still_loads() {
+        let old = serde_json::json!({"endpoints": [], "tls": null});
+        let c: Cluster = serde_json::from_value(old).expect("a missing `resolve` must mean None");
+        assert_eq!(c.resolve, None);
     }
 
     /// The other direction, which is easy to miss: ADR 2 gives the data plane a disk cache, so

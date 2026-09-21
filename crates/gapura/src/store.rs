@@ -210,6 +210,7 @@ mod tests {
                     port: 8080,
                 }],
                 tls: None,
+                resolve: None,
             },
         );
         let rt = Runtime::new(
@@ -408,6 +409,7 @@ mod tests {
             Cluster {
                 endpoints: vec![],
                 tls: tls(&ca.pem()),
+                resolve: None,
             },
         );
         config.clusters.insert(
@@ -415,6 +417,7 @@ mod tests {
             Cluster {
                 endpoints: vec![],
                 tls: tls("not a certificate"),
+                resolve: None,
             },
         );
         config.clusters.insert(
@@ -426,6 +429,7 @@ mod tests {
                     ca_pem: None,
                     insecure: false,
                 }),
+                resolve: None,
             },
         );
         let rt = Runtime::new(config, 1, Vec::new());
