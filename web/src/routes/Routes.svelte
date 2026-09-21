@@ -120,16 +120,18 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    border-top: 1px solid #e3e7eb;
+    border-top: 1px solid var(--border);
   }
 
   .rows > li {
-    border-bottom: 1px solid #e3e7eb;
+    border-bottom: 1px solid var(--border);
   }
 
   .summary {
     display: grid;
-    grid-template-columns: 1.25rem minmax(0, 2fr) minmax(0, 1fr) auto;
+    /* Fixed, not fr: every row is its own grid container, so content-sized columns are
+       measured per row and the namespace and badge would sit at a different x on each one. */
+    grid-template-columns: 1.25rem minmax(0, 1fr) 7rem 10rem;
     gap: 0.75rem;
     align-items: center;
     width: 100%;
@@ -142,20 +144,28 @@
   }
 
   .summary:hover {
-    background: #f5f7f9;
+    background: var(--hover);
   }
 
   .caret {
-    color: #55606b;
+    color: var(--text-muted);
+  }
+
+  /* :global because the badge is State.svelte's element, so this component's scoping class
+     is never on it and a plain selector would silently match nothing. Grid items stretch by
+     default, which made a pill render as a full-width bar. */
+  .summary > :global(.badge) {
+    justify-self: start;
   }
 
   .id {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
+    word-break: normal;
   }
 
   .namespace {
-    color: #55606b;
+    color: var(--text-muted);
   }
 
   .detail {
@@ -178,12 +188,12 @@
 
   .count {
     margin: 0 0 0.625rem;
-    color: #55606b;
+    color: var(--text-muted);
   }
 
   .why {
     margin: 0;
-    color: #374151;
+    color: var(--idle-text);
     max-width: 52rem;
   }
 
@@ -197,6 +207,6 @@
   }
 
   .muted {
-    color: #55606b;
+    color: var(--text-muted);
   }
 </style>

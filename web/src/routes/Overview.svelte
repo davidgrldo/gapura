@@ -61,7 +61,7 @@
             <td>
               {listener.port}
               {#if mapsPort(listener)}
-                <span class="muted">(clients dial {listener.client_port})</span>
+                <span class="muted mapped">(clients dial {listener.client_port})</span>
               {/if}
             </td>
             <!-- Upper-cased here rather than at the source. `gapura_core::config::Protocol`
@@ -100,7 +100,7 @@
   td {
     text-align: left;
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #e3e7eb;
+    border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
 
@@ -108,17 +108,24 @@
     font-size: 0.8125rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #55606b;
+    color: var(--text-muted);
   }
 
   .muted {
-    color: #55606b;
+    color: var(--text-muted);
+  }
+
+  /* The mapped-port note is one phrase and reads as nonsense broken across four lines, which
+     is what an auto-sized column does to it when the table is narrow. Its own line, unbroken. */
+  .mapped {
+    display: block;
+    white-space: nowrap;
   }
 
   .notice {
-    background: #fdf3da;
-    border: 1px solid #e5c569;
-    border-radius: 0.375rem;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: var(--radius-md);
     padding: 0.75rem 1rem;
     max-width: 44rem;
   }

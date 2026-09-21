@@ -41,9 +41,9 @@
 
 <style>
   .notice {
-    background: #fdf3da;
-    border: 1px solid #e5c569;
-    border-radius: 0.375rem;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: var(--radius-md);
     padding: 0.75rem 1rem;
     max-width: 44rem;
   }
@@ -64,14 +64,14 @@
   button {
     font: inherit;
     padding: 0.3125rem 0.875rem;
-    border: 1px solid #b08c22;
-    border-radius: 0.25rem;
-    background: #ffffff;
-    color: #713f12;
+    border: 1px solid var(--warn-border);
+    border-radius: var(--radius-xs);
+    background: var(--surface);
+    color: var(--warn-text);
     cursor: pointer;
   }
 
   button:hover {
-    background: #fffaf0;
+    background: var(--hover);
   }
 </style>
