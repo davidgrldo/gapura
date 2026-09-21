@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         controller_name = %args.controller_name,
         gateway_admin = %args.gateway_admin,
         grants = args.grants.len(),
-        oidc_issuer = %args.oidc_issuer,
+        oidc_issuer = args.oidc_issuer.as_deref().unwrap_or("(local mode)"),
         oidc_groups_claim = %args.oidc_groups_claim,
         "gapura-control starting"
     );
@@ -41,7 +41,21 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(users = users.len(), path, "local sign-in enabled");
             (gapura_control::login::AuthMode::Local, users)
         }
-        "oidc" => (gapura_control::login::AuthMode::Oidc, Default::default()),
+        "oidc" => {
+            // Required here rather than by clap: local mode passes no OIDC flags at all, and
+            // a required clap arg would make the IdP-less mode impossible to express.
+            for (flag, value) in [
+                ("--oidc-issuer", args.oidc_issuer.as_deref()),
+                ("--oidc-client-id", args.oidc_client_id.as_deref()),
+                ("--oidc-client-secret", args.oidc_client_secret.as_deref()),
+                ("--oidc-redirect-url", args.oidc_redirect_url.as_deref()),
+            ] {
+                if value.filter(|v| !v.is_empty()).is_none() {
+                    anyhow::bail!("{flag} is required with --auth-mode oidc");
+                }
+            }
+            (gapura_control::login::AuthMode::Oidc, Default::default())
+        }
         other => anyhow::bail!("--auth-mode must be local or oidc, got {other:?}"),
     };
     let state = gapura_control::state::AppState {
@@ -53,10 +67,10 @@ async fn main() -> anyhow::Result<()> {
         auth_mode,
         local_users,
         oidc: Arc::new(gapura_control::login::Oidc::new(
-            &args.oidc_issuer,
-            &args.oidc_client_id,
-            &args.oidc_client_secret,
-            &args.oidc_redirect_url,
+            args.oidc_issuer.as_deref().unwrap_or_default(),
+            args.oidc_client_id.as_deref().unwrap_or_default(),
+            args.oidc_client_secret.as_deref().unwrap_or_default(),
+            args.oidc_redirect_url.as_deref().unwrap_or_default(),
             &args.oidc_groups_claim,
             &args.oidc_scopes,
         )?),

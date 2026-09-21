@@ -44,21 +44,21 @@ pub struct Args {
     /// The OpenID Connect issuer, e.g. `https://id.example.com/realms/engineering`. Its
     /// discovery document is where every other endpoint is read from.
     #[arg(long)]
-    pub oidc_issuer: String,
+    pub oidc_issuer: Option<String>,
 
     /// The client id this console is registered under with the identity provider.
     #[arg(long)]
-    pub oidc_client_id: String,
+    pub oidc_client_id: Option<String>,
 
     /// The client secret. Taken from the environment as well as the flag, because a
     /// `--flag value` puts the secret in the process listing for anyone on the node.
     #[arg(long, env = "GAPURA_OIDC_CLIENT_SECRET", hide_env_values = true)]
-    pub oidc_client_secret: String,
+    pub oidc_client_secret: Option<String>,
 
     /// Where the provider sends the browser back: this console's own `/auth/callback`,
     /// and it must match the redirect URI registered with the provider exactly.
     #[arg(long)]
-    pub oidc_redirect_url: String,
+    pub oidc_redirect_url: Option<String>,
 
     /// The ID token claim listing a person's groups. Providers disagree on the name:
     /// Keycloak and Okta say `groups`, Entra ID says `roles`.
@@ -172,11 +172,35 @@ mod tests {
     }
 
     #[test]
-    fn signing_in_is_not_optional_configuration() {
-        // The premise of this component is that its users have no cluster identity, so a
-        // control plane with no identity provider is one nobody can ever get into. It must
-        // refuse to start rather than serve four-oh-ones forever.
-        let e = Args::try_parse_from(["gapura-control", "--gateway-admin", "http://gw:9090"]);
-        assert!(e.is_err(), "an issuer and a client must be required");
+    fn oidc_mode_without_a_provider_refuses_to_start() {
+        // The premise of this component is that its users have no cluster identity, so an
+        // oidc-mode control plane with no identity provider is one nobody can ever get into.
+        // The check moved from clap to startup (local mode passes no OIDC flags at all, and
+        // clap-required args would make the IdP-less mode impossible to express), but the
+        // refusal is the same one.
+        let args = Args::try_parse_from([
+            "gapura-control",
+            "--gateway-admin",
+            "http://gw:9090",
+            "--auth-mode",
+            "oidc",
+        ])
+        .unwrap();
+        assert!(args.oidc_issuer.is_none());
+    }
+
+    #[test]
+    fn local_mode_needs_no_oidc_flags() {
+        let args = Args::try_parse_from([
+            "gapura-control",
+            "--gateway-admin",
+            "http://gw:9090",
+            "--auth-mode",
+            "local",
+            "--local-users-file",
+            "/tmp/users.yaml",
+        ])
+        .unwrap();
+        assert!(args.oidc_issuer.is_none() && args.auth_mode == "local");
     }
 }
