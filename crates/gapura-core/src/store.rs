@@ -59,12 +59,26 @@ pub struct StorePlugin {
     pub plugin: Plugin,
 }
 
+/// One issued API key. The hash, never the key: the console shows a key once when it mints it
+/// and stores only this, so nothing downstream -- including the data plane's disk cache -- ever
+/// holds something that could be presented.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreCredential {
+    /// SHA-256 of the key, hex.
+    pub key_hash: String,
+    /// The consumer's username, which is what an upstream is told. There is no consumer
+    /// type here: the store has the rows, and all the data plane needs is the name.
+    pub consumer: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoreSnapshot {
     pub services: Vec<StoreService>,
     pub routes: Vec<StoreRoute>,
     #[serde(default)]
     pub plugins: Vec<StorePlugin>,
+    #[serde(default)]
+    pub credentials: Vec<StoreCredential>,
 }
 
 /// Runtime settings that are the data plane's, not the store's: which ports this process bound.
@@ -194,6 +208,11 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
         listeners,
         ports,
         clusters,
+        credentials: snap
+            .credentials
+            .iter()
+            .map(|c| (c.key_hash.clone(), c.consumer.clone()))
+            .collect(),
     }
 }
 
@@ -226,7 +245,10 @@ fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
 
 /// Two policies of the same kind compete; two of different kinds both run.
 fn same_kind(a: &Plugin, b: &Plugin) -> bool {
-    matches!((a, b), (Plugin::Jwt(_), Plugin::Jwt(_)))
+    matches!(
+        (a, b),
+        (Plugin::Jwt(_), Plugin::Jwt(_)) | (Plugin::KeyAuth(_), Plugin::KeyAuth(_))
+    )
 }
 
 /// `host:port` rather than the service name: two services pointing at one upstream share a
@@ -314,6 +336,7 @@ mod tests {
     #[test]
     fn a_compiled_config_actually_routes() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/orders", 0)],
@@ -331,6 +354,7 @@ mod tests {
     #[test]
     fn a_service_becomes_a_cluster_the_data_plane_must_resolve() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/", 0)],
@@ -355,6 +379,7 @@ mod tests {
     #[test]
     fn higher_priority_wins_over_a_route_that_also_matches() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("v1", "v1.internal", 80), svc("v2", "v2.internal", 80)],
             routes: vec![
@@ -372,11 +397,13 @@ mod tests {
     fn equal_priority_is_broken_by_name_not_by_row_order() {
         let services = vec![svc("a", "a.internal", 80), svc("b", "b.internal", 80)];
         let forwards = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: services.clone(),
             routes: vec![route("aaa", "a", "/", 5), route("bbb", "b", "/", 5)],
         };
         let backwards = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services,
             routes: vec![route("bbb", "b", "/", 5), route("aaa", "a", "/", 5)],
@@ -397,6 +424,7 @@ mod tests {
     #[test]
     fn a_route_naming_a_missing_service_is_dropped() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("ghost", "does-not-exist", "/", 0)],
@@ -412,6 +440,7 @@ mod tests {
     #[test]
     fn hosts_paths_and_methods_expand_into_every_combination() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![StoreRoute {
@@ -448,9 +477,9 @@ mod tests {
         cfg.listeners[0].rules[0]
             .plugins
             .iter()
-            .map(|p| {
-                let Plugin::Jwt(j) = p;
-                j.issuer.clone().unwrap_or_default()
+            .filter_map(|p| match p {
+                Plugin::Jwt(j) => Some(j.issuer.clone().unwrap_or_default()),
+                Plugin::KeyAuth(_) => None,
             })
             .collect()
     }
@@ -460,6 +489,7 @@ mod tests {
     #[test]
     fn a_policy_on_the_route_wins_over_one_on_its_service_and_one_on_everything() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -489,6 +519,7 @@ mod tests {
     #[test]
     fn a_service_policy_wins_over_a_global_one_when_the_route_has_none() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -514,6 +545,7 @@ mod tests {
     #[test]
     fn a_policy_attached_elsewhere_does_not_apply_here() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             services: vec![svc("orders", "a", 80), svc("billing", "b", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -540,6 +572,7 @@ mod tests {
         // global policies of the same kind collapse to one, and the count is what a second kind
         // would change.
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -563,6 +596,7 @@ mod tests {
     #[test]
     fn every_bound_port_gets_the_same_routes() {
         let snap = StoreSnapshot {
+            credentials: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],

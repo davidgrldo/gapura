@@ -184,3 +184,56 @@ async fn a_token_that_was_never_issued_gets_nothing() {
         "and neither does no token at all"
     );
 }
+
+/// The credential seam, end to end: the console issues a key, the store keeps only its hash, the
+/// configuration carries that hash, and the data plane turns a presented key into a consumer.
+/// ADR 1 separated this from JWT precisely so a failure anywhere along it is unambiguous.
+#[tokio::test]
+async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.issue_token("edge-1").await.expect("issuing a token");
+
+    let client = store.client().await.unwrap();
+    client
+        .batch_execute(
+            "insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'orders.internal', 8080 from workspaces limit 1;
+             insert into routes (workspace_id, service_id, name, paths)
+               select w.id, s.id, 'orders-api', '[{\"type\":\"prefix\",\"value\":\"/\"}]'
+                 from workspaces w, services s limit 1;
+             insert into consumers (workspace_id, username)
+               select id, 'team-orders' from workspaces limit 1;
+             insert into plugins (workspace_id, name, config)
+               select id, 'key_auth', '{\"header\":\"x-api-key\"}' from workspaces limit 1;",
+        )
+        .await
+        .expect("seeding");
+
+    let key = store.issue_key("team-orders").await.expect("issuing a key");
+
+    let (status, _, body) = get(&app, &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let config: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
+
+    // The key itself must not be anywhere in what the data plane receives and caches to disk.
+    assert!(
+        !String::from_utf8_lossy(&body).contains(&key),
+        "a configuration must never carry a presentable credential"
+    );
+
+    // And the data plane, given the real key, names the consumer.
+    assert_eq!(
+        gapura_core::credentials::identify(&config, Some(&key)),
+        Ok("team-orders")
+    );
+    assert!(gapura_core::credentials::identify(&config, Some("gpak_wrong")).is_err());
+
+    // The policy reached the rule that needs it.
+    let plugins = &config.listeners[0].rules[0].plugins;
+    assert!(matches!(
+        plugins.as_slice(),
+        [gapura_core::config::Plugin::KeyAuth(_)]
+    ));
+}

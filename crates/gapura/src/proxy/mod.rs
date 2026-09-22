@@ -81,6 +81,10 @@ pub struct Ctx {
     upstream_started: Option<Instant>,
     client_abort: bool,
     mirrored: bool,
+    /// Who the caller turned out to be, when a key_auth policy identified them. Carried here
+    /// rather than written straight onto the request, because the upstream header can only be
+    /// set after the inbound one is removed, and that happens later.
+    consumer: Option<String>,
 }
 
 impl Ctx {
@@ -345,6 +349,7 @@ impl ProxyHttp for GapuraProxy {
             upstream_started: None,
             client_abort: false,
             mirrored: false,
+            consumer: None,
         }
     }
 
@@ -434,31 +439,58 @@ impl ProxyHttp for GapuraProxy {
                 // upstream is touched, for the same reason -- a refused request must cost the
                 // backend nothing.
                 let rt = ctx.runtime.as_ref().expect("set above");
+                let route = rt.config.listeners[listener].rules[rule].route.clone();
                 for plugin in &rt.config.listeners[listener].rules[rule].plugins {
-                    let gapura_core::config::Plugin::Jwt(policy) = plugin;
-                    let presented = jwt::bearer(
-                        session
-                            .req_header()
-                            .headers
-                            .get(http::header::AUTHORIZATION)
-                            .and_then(|v| v.to_str().ok()),
-                    );
-                    // No keys for this document means it did not parse at swap time. Refusing is
-                    // the safe direction: the alternative is passing traffic through unverified
-                    // because a configuration error made verification impossible.
-                    let empty = jwt::JwtKeys::default();
-                    let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                    if let Err(refusal) = jwt::verify(policy, keys, presented) {
-                        let route = rt.config.listeners[listener].rules[rule].route.clone();
+                    let refusal: Option<(&'static str, &'static str, String)> = match plugin {
+                        gapura_core::config::Plugin::Jwt(policy) => {
+                            let presented = jwt::bearer(
+                                session
+                                    .req_header()
+                                    .headers
+                                    .get(http::header::AUTHORIZATION)
+                                    .and_then(|v| v.to_str().ok()),
+                            );
+                            // No keys for this document means it did not parse at swap time.
+                            // Refusing is the safe direction: the alternative is passing traffic
+                            // through unverified because a configuration error made verification
+                            // impossible.
+                            let empty = jwt::JwtKeys::default();
+                            let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
+                            jwt::verify(policy, keys, presented)
+                                .err()
+                                .map(|r| ("jwt", r.as_str(), "Bearer".to_string()))
+                        }
+                        gapura_core::config::Plugin::KeyAuth(policy) => {
+                            let presented = session
+                                .req_header()
+                                .headers
+                                .get(&policy.header)
+                                .and_then(|v| v.to_str().ok());
+                            match gapura_core::credentials::identify(&rt.config, presented) {
+                                // Carried on the context rather than written here: the upstream
+                                // header is set in upstream_request_filter, after the inbound one
+                                // has been removed.
+                                Ok(consumer) => {
+                                    ctx.consumer = Some(consumer.to_string());
+                                    None
+                                }
+                                Err(r) => Some((
+                                    "key_auth",
+                                    r.as_str(),
+                                    format!("Key realm=\"{}\"", policy.header),
+                                )),
+                            }
+                        }
+                    };
+                    if let Some((kind, reason, challenge)) = refusal {
                         METRICS
-                            .jwt_refused_total
-                            .with_label_values(&[&route, refusal.as_str()])
+                            .policy_refused_total
+                            .with_label_values(&[&route, kind, reason])
                             .inc();
-                        // No detail in the body. Which of five reasons it was is an operator's
-                        // business, and telling a caller narrows the search for whoever is
-                        // guessing at a token.
+                        // No detail in the body. Which reason it was is an operator's business,
+                        // and telling a caller narrows the search for whoever is guessing.
                         let mut header = ResponseHeader::build(401u16, Some(1))?;
-                        header.insert_header(http::header::WWW_AUTHENTICATE, "Bearer")?;
+                        header.insert_header(http::header::WWW_AUTHENTICATE, challenge)?;
                         session
                             .write_response_header(Box::new(header), true)
                             .await?;
@@ -587,6 +619,15 @@ impl ProxyHttp for GapuraProxy {
             return Ok(());
         };
         let rule = &rt.config.listeners[li].rules[ri];
+
+        // Removed unconditionally, before anything is set. This header is the gateway's word
+        // about who called; a client that sends it themselves must not be believed, and an
+        // upstream cannot tell the two apart. Stripping only when a policy ran would leave every
+        // route without one forwarding whatever a caller claimed.
+        upstream.remove_header(gapura_core::credentials::CONSUMER_HEADER);
+        if let Some(consumer) = &ctx.consumer {
+            upstream.insert_header(gapura_core::credentials::CONSUMER_HEADER, consumer.as_str())?;
+        }
 
         if let Some(rewrite) = &rule.filters.rewrite {
             if let (Some(modifier), Some(matched), Some(ex)) =

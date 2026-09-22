@@ -19,6 +19,19 @@ pub struct Config {
     pub ports: BTreeMap<u16, Vec<PortEntry>>,
     /// Key: `namespace/service:port`.
     pub clusters: BTreeMap<String, Cluster>,
+    /// API key credentials: SHA-256 of the key, hex, to the consumer it was issued to.
+    ///
+    /// Held once for the whole configuration rather than per rule, because a key belongs to a
+    /// consumer and not to a route, and duplicating them per rule would multiply the one part of
+    /// the configuration that scales with how many callers there are.
+    ///
+    /// Hashes, never keys: a configuration is written to the data plane's disk cache and read by
+    /// whoever can read that file, and a stolen cache should not yield working credentials.
+    /// Keyed by the hash directly, with no prefix index -- SHA-256 is deterministic, so the
+    /// presented key hashes to exactly the map key. The `key_prefix` column in the store exists
+    /// for the SQL side and for showing an operator which key is which; neither is needed here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,6 +161,27 @@ pub struct KvMatch {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Plugin {
     Jwt(JwtPolicy),
+    KeyAuth(KeyAuthPolicy),
+}
+
+/// Reject a request unless it carries an API key issued to a consumer.
+///
+/// ADR 1 put this after JWT on purpose: JWT proves the extension mechanism without touching the
+/// credential seam, and this is the seam. What it needs that JWT did not is somewhere to look a
+/// presented key up -- see [`Config::credentials`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyAuthPolicy {
+    /// Where to read the key from. Named rather than fixed because deployments migrating from
+    /// another gateway arrive with a header their callers already send.
+    pub header: String,
+}
+
+impl Default for KeyAuthPolicy {
+    fn default() -> Self {
+        Self {
+            header: "x-api-key".to_string(),
+        }
+    }
 }
 
 /// Reject a request unless it carries a JWT this policy accepts.
@@ -325,6 +359,7 @@ mod tests {
                     resolve: None,
                 },
             )]),
+            credentials: BTreeMap::from([("abc123".to_string(), "team-orders".to_string())]),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();

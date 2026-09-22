@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use deadpool_postgres::{Config as PoolConfig, Pool, Runtime};
-use gapura_core::config::{JwtPolicy, PathMatch, Plugin, Protocol};
-use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+use gapura_core::config::{JwtPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
+use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot};
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
@@ -161,6 +161,27 @@ impl Store {
             })
             .collect();
 
+        // Expired keys are left out here rather than checked at request time: the data plane
+        // holds a map, not a clock over rows, so a key that has expired is one the next
+        // configuration no longer contains. The bound on that is the polling interval, which is
+        // the bound revocation already has.
+        let credentials = tx
+            .query(
+                "select k.key_hash, c.username
+                   from consumer_keys k
+                   join consumers c on c.id = k.consumer_id
+                  where k.expires_at is null or k.expires_at > now()
+                  order by k.key_hash",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|r| StoreCredential {
+                key_hash: r.get("key_hash"),
+                consumer: r.get("username"),
+            })
+            .collect();
+
         tx.commit().await?;
         Ok((
             version,
@@ -168,6 +189,7 @@ impl Store {
                 services,
                 routes,
                 plugins,
+                credentials,
             },
         ))
     }
@@ -245,6 +267,26 @@ impl Store {
         Ok(self.pool.get().await?)
     }
 
+    /// Issues an API key for a consumer and returns it. Shown once; only the hash is kept.
+    ///
+    /// Plain SHA-256, for the reason ADR 4 gives for data plane tokens and one more: the data
+    /// plane has to compute this over a presented key and look it up directly, which a salted
+    /// hash cannot be.
+    pub async fn issue_key(&self, consumer: &str) -> Result<String> {
+        let raw: [u8; 32] = rand::random();
+        let key = format!("gpak_{}", hex(&raw));
+        let client = self.pool.get().await?;
+        let n = client
+            .execute(
+                "insert into consumer_keys (consumer_id, key_prefix, key_hash)
+                 select id, $2, $3 from consumers where username = $1",
+                &[&consumer, &&key[..PREFIX_LEN], &hash(&key)],
+            )
+            .await?;
+        anyhow::ensure!(n == 1, "no consumer named {consumer}");
+        Ok(key)
+    }
+
     pub fn timeout() -> Duration {
         Duration::from_secs(5)
     }
@@ -281,9 +323,17 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn parse_plugin(name: &str, config: serde_json::Value) -> Option<Plugin> {
     match name {
         "jwt" => serde_json::from_value::<JwtPolicy>(config)
-            .inspect_err(|e| tracing::warn!(error = %e, "a jwt policy row does not fit JwtPolicy and is ignored"))
+            .inspect_err(
+                |e| tracing::warn!(error = %e, "a jwt policy row does not fit JwtPolicy and is ignored"),
+            )
             .ok()
             .map(Plugin::Jwt),
+        "key_auth" => serde_json::from_value::<KeyAuthPolicy>(config)
+            .inspect_err(
+                |e| tracing::warn!(error = %e, "a key_auth policy row does not fit KeyAuthPolicy and is ignored"),
+            )
+            .ok()
+            .map(Plugin::KeyAuth),
         other => {
             tracing::warn!(plugin = %other, "unknown policy name, ignored");
             None

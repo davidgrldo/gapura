@@ -35,6 +35,7 @@ reqwest = { workspace = true }
 # and this workspace already compiles OpenSSL from source for pingora. A second C crypto build
 # would cost every image another toolchain for a few signature checks.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+sha2.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true }
