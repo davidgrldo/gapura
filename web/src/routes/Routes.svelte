@@ -30,17 +30,20 @@
       groups are granted.
     </p>
   {:else}
-    <ul class="divide-y rounded-lg border bg-card shadow-xs">
+    <!-- role="list" because Tailwind's base styles take the bullets off every list, and
+         Safari then stops announcing it as one; the same goes for the list inside a row.
+         overflow-hidden keeps each row's hover inside the card's rounded corners. -->
+    <ul class="divide-y overflow-hidden rounded-lg border bg-card shadow-xs" role="list">
       {#each rows as route (route.id)}
         <li>
-          <!-- Fixed column widths from `sm` up, not fr: every row is its own grid container,
-               so content-sized columns are measured per row and the namespace and badge would
-               sit at a different x on each one. Below `sm` the two fixed columns would leave
+          <!-- Fixed namespace and badge columns from `sm` up, not content-sized ones: every
+               row is its own grid container, so an `auto` column is measured per row and the
+               namespace and badge would sit at a different x on each one. Below `sm` the two fixed columns would leave
                the id a few pixels and break it one letter per line, so the namespace column
                goes (the id already starts with it) and the badge takes only its own width. -->
           <button
             type="button"
-            class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring sm:grid-cols-[1.25rem_minmax(0,1fr)_7rem_10rem]"
+            class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[1.25rem_minmax(0,1fr)_7rem_10rem]"
             aria-expanded={open[route.id] === true}
             onclick={() => toggle(route.id)}
           >
@@ -49,11 +52,13 @@
               aria-hidden="true"
             />
             <span class="font-mono text-sm break-words">{route.id}</span>
-            <span class="hidden text-muted-foreground sm:block">{route.namespace}</span>
+            <span class="hidden text-sm break-words text-muted-foreground sm:block">{route.namespace}</span>
             <State state={route.state} />
           </button>
 
           {#if open[route.id]}
+            <!-- pl-11 starts the detail under the id: the button's px-3, plus the 1.25rem
+                 caret column, plus gap-3. -->
             <div class="pb-4 pl-11 pr-3 text-sm">
               {#if route.parents.length === 0}
                 <!-- The summary of a route with no parents is `pending`, which on its own
@@ -76,7 +81,7 @@
                 {@render why(only)}
               {:else}
                 <p class="mb-2.5 text-muted-foreground">Attached to {route.parents.length} Gateways:</p>
-                <ul class="space-y-3.5">
+                <ul class="space-y-3.5" role="list">
                   {#each route.parents as parent (parent.gateway + '/' + (parent.section ?? ''))}
                     <li>
                       <p class="mb-1">
