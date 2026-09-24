@@ -52,6 +52,9 @@
   <Sidebar.Inset>
     <header class="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/85 px-4 backdrop-blur">
       <Sidebar.Trigger class="-ml-1" />
+      <!-- self-center on the component's own data-vertical variant, so that cn replaces the
+           generated self-stretch, which beats the header's items-center and puts a 16px line at
+           the top of the header. -->
       <Separator orientation="vertical" decorative class="mr-2 data-vertical:h-4 data-vertical:self-center" />
       <Breadcrumb.Root>
         <Breadcrumb.List>

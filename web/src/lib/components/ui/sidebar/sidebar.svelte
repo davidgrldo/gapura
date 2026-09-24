@@ -41,9 +41,10 @@
 			style="--sidebar-width: {SIDEBAR_WIDTH_MOBILE};"
 			{side}
 		>
+			<!-- gapura: the dialog's name, which a screen reader announces when the sheet opens. -->
 			<Sheet.Header class="sr-only">
-				<Sheet.Title>Sidebar</Sheet.Title>
-				<Sheet.Description>Displays the mobile sidebar.</Sheet.Description>
+				<Sheet.Title>Console navigation</Sheet.Title>
+				<Sheet.Description>The console's screens.</Sheet.Description>
 			</Sheet.Header>
 			<div class="flex h-full w-full flex-col">
 				{@render children?.()}
