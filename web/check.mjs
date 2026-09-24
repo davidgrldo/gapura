@@ -115,19 +115,36 @@ if (!/STATES\[parent\.state\]\.detail|STATES\[parent\.state\]\?\.detail/.test(ro
 }
 
 // The console shows cluster state and may run in a cluster with no route to the internet, so
-// it must not ask a third party for anything: no web font or icon CDN, no remote stylesheet.
-// Fonts and icons are bundled, and this fails the build that quietly stops bundling them.
-// It reads the document and the built CSS, which is where such a request would have to be;
-// the JavaScript bundle is left alone because library code carries documentation URLs in its
-// error messages that are never fetched.
-const builtCss = readdirSync('dist/assets')
-  .filter((file) => file.endsWith('.css'))
-  .map((file) => readFileSync(`dist/assets/${file}`, 'utf8'))
-  .join('\n')
-for (const [where, text] of [['dist/index.html', html], ['the built CSS', builtCss]]) {
-  const remote = text.match(/(?:url\(\s*['"]?|href=['"]|@import\s+['"])(?:https?:)?\/\/[^'")\s]+/)
+// it must not ask a third party for anything: no web font or icon CDN, no remote stylesheet,
+// script or image. Fonts and icons are bundled, and this fails the build that starts fetching
+// them instead. It reads everything the build emits, JavaScript included, because markup
+// written in a component is compiled into the bundle: a font <link> in a <svelte:head> never
+// reaches index.html. Only requests are matched, not every address: a link to a page (an
+// <a href>) fetches nothing, and the bundle carries svelte.dev and w3.org strings in warnings
+// and namespaces that are never requested.
+const REMOTE =
+  /(?:url\(\s*['"]?|<link\b[^>]*?\shref=\s*['"]?|\bsrc(?:set)?=\s*['"]?|@import\s*['"])((?:https?:)?\/\/[^'")\s>]+)/i
+function built(extension) {
+  const text = readdirSync('dist/assets')
+    .filter((file) => file.endsWith(extension))
+    .map((file) => readFileSync(`dist/assets/${file}`, 'utf8'))
+    .join('\n')
+  // Loud rather than empty, for the same reason as the enum parser above: with nothing to
+  // read, this check would pass without having looked.
+  if (!text) throw new Error(`dist/assets holds no ${extension} file for the third-party check to read`)
+  return text
+}
+for (const [where, text] of [
+  ['dist/index.html', html],
+  ['the built CSS', built('.css')],
+  ['the built JavaScript', built('.js')],
+]) {
+  const remote = text.match(REMOTE)
   if (remote) {
-    throw new Error(`${where} asks a third party for ${remote[0]}; the console must not`)
+    throw new Error(
+      `${where} asks a third party for ${remote[1]}, and the console may run where no third ` +
+        `party can be reached`,
+    )
   }
 }
 console.log('ok: the console asks no third party for anything it needs to render')
