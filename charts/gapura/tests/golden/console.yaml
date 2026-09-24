@@ -6,11 +6,11 @@ metadata:
   name: gapura
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 spec:
@@ -34,11 +34,11 @@ metadata:
   name: gapura-control
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: console
@@ -50,11 +50,11 @@ metadata:
   name: gapura
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 ---
@@ -64,11 +64,11 @@ kind: ClusterRole
 metadata:
   name: gapura-control
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: console
@@ -86,11 +86,11 @@ kind: ClusterRole
 metadata:
   name: gapura
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 rules:
@@ -113,11 +113,11 @@ kind: ClusterRoleBinding
 metadata:
   name: gapura-control
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: console
@@ -136,11 +136,11 @@ kind: ClusterRoleBinding
 metadata:
   name: gapura
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 roleRef:
@@ -159,11 +159,11 @@ metadata:
   name: gapura-leader
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 rules:
@@ -178,11 +178,11 @@ metadata:
   name: gapura-leader
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 roleRef:
@@ -201,11 +201,11 @@ metadata:
   name: gapura-control
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: console
@@ -230,11 +230,11 @@ metadata:
   name: gapura-admin
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     # Own label instead of overriding app.kubernetes.io/component, which gapura.labels already sets.
@@ -258,11 +258,11 @@ metadata:
   name: gapura
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 spec:
@@ -290,11 +290,11 @@ metadata:
   name: gapura-control
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: console
@@ -321,7 +321,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
       - name: control
-        image: ghcr.io/davidgrldo/gapura-control:0.1.0
+        image: ghcr.io/davidgrldo/gapura-control:0.2.0
         imagePullPolicy: IfNotPresent
         args:
         - --listen=0.0.0.0:8080
@@ -373,11 +373,11 @@ metadata:
   name: gapura
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 spec:
@@ -411,7 +411,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: gapura
-        image: ghcr.io/davidgrldo/gapura:0.1.0
+        image: ghcr.io/davidgrldo/gapura:0.2.0
         imagePullPolicy: IfNotPresent
         args:
         - --kubernetes
@@ -465,11 +465,11 @@ kind: GatewayClass
 metadata:
   name: gapura
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
 spec:
@@ -484,11 +484,11 @@ metadata:
   name: gapura-smoke-backend
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: smoke-backend
@@ -510,11 +510,11 @@ metadata:
   name: gapura-smoke-curl
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: smoke
@@ -553,11 +553,11 @@ metadata:
   name: gapura-smoke-backend
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     app.kubernetes.io/component: smoke-backend
@@ -605,11 +605,11 @@ metadata:
   name: gapura-smoke
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     gapura.dev/smoke: "true"
@@ -631,11 +631,11 @@ metadata:
   name: gapura-smoke
   namespace: gapura-system
   labels:
-    helm.sh/chart: gapura-0.1.0
+    helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
     gapura.dev/smoke: "true"

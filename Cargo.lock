@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "gapura"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1417,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "gapura-control"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1449,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "gapura-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "insta",

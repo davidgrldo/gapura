@@ -6,8 +6,57 @@ to v0.1.0 means `helm upgrade` from that checkout to the published chart. From v
 means what it usually does, moving from one version below to a later one. Release procedure:
 [docs/RELEASING.md](docs/RELEASING.md).
 
-## Unreleased
+## 0.2.0 — 2026-09-24
 
+- A key a caller presents identifies it as a consumer (#87): the console issues an API key, the
+  store keeps only its SHA-256, and the configuration carries that hash — never the key. A
+  configuration is written to the data plane's disk cache and read by whoever can read that file,
+  so a stolen cache must not yield a working credential; the hash is deterministic, so a presented
+  key hashes to exactly the map key and no prefix index is needed. Keys ride the configuration
+  rather than a lookup per request, which keeps the control plane off the data path — a round trip
+  there would put it in front of every request and take every gateway down with it — at the cost
+  that revocation waits for the next poll, the bound routes already accept. The consumer header is
+  stripped from the inbound request unconditionally and only then set, so a route with no policy
+  cannot forward whatever a caller claimed.
+- Policies come from the store, starting with JWT (#86): a rule carries the policy the control
+  plane serves with it, and the data plane refuses a request whose token does not verify.
+  `gapura_policy_refused_total` carries a `policy` label — two policies refusing on one route were
+  otherwise indistinguishable.
+- A gateway can take its configuration from the control plane, and survive losing it (#84): a
+  third source beside `--config-dir` and `--kubernetes` and exclusive with both, with the disk
+  cache that makes a control plane outage cost new configuration instead of traffic. The cache is
+  loaded before the first successful call, because a control plane that is down at startup would
+  otherwise mean `/readyz` never passes, the pod never joins its Service, and a gateway holding a
+  perfectly good configuration refuses to serve with it — readiness here means "I can route", not
+  "I have spoken to the control plane". It is written after a swap and never before, atomically at
+  0600 (it holds a private key for every certificate the gateway serves), and a damaged cache is
+  logged and ignored rather than taking the gateway down harder than never having had one. Loading
+  it does not touch `config_last_reload_timestamp_seconds`, which would turn every "has not
+  reloaded recently" alert green on a gateway serving a week-old cache; `gapura_config_from_cache`
+  says so instead. The endpoint's tests now run against a real Postgres in CI, and stop skipping
+  when `CI` is set, so a typo in the variable name cannot report a green build that exercised
+  nothing.
+- A configuration written by an older binary still loads (#83): `Config` had no `serde(default)`,
+  so a cache missing any field failed the whole load — a path nothing exercises until an operator
+  upgrades in production and the gateway comes back empty instead of serving what it had. The
+  default is at the top level and deliberately nowhere below it: a missing field there sensibly
+  means "none of those", while an `Endpoint` whose address defaults to the empty string is a
+  silent hole where failing loudly is correct.
+- One token layer in the console, and a dark mode that follows the system (#82): colour, radius
+  and surface were hardcoded across six components, so there was no way to have a dark mode and no
+  way to change a grey once. The chrome is deliberately almost colourless — on the Routes screen
+  the badge tones *are* the data, so anything else putting colour on the page competes with the
+  only colour that carries meaning, and the accent is spent on links and the active tab and
+  nowhere else. No web font: a CDN font is a third-party request from a page showing cluster
+  state, and a bundled one is hundreds of kilobytes inside a binary that ships to a cluster.
+- The console's local mode actually starts (#80, #81): clap-required OIDC flags made the IdP-less
+  mode impossible to express, and the chart's local Deployment passes none of them, so the binary
+  exited on a usage error — CrashLoopBackOff on a fresh install. The flags are `Option` now and
+  main validates the four of them only under `--auth-mode oidc`. Making them optional then exposed
+  `Oidc::new` refusing the empty strings local mode passed it; local mode carries `Oidc::unused()`
+  instead, whose issuer points at a reserved domain that answers nothing, so losing the guard that
+  keeps it unreachable would be loud rather than silent. Both were found deploying to the live
+  cluster.
 - The console is IdP-less by default (#78): `--auth-mode local` (the chart's default) signs
   users in from a mounted users file -- `users: [{email, bcrypt, groups}]`, rendered by the
   chart into a Secret -- through a server-rendered form at /auth/login. No identity provider
