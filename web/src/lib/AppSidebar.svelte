@@ -28,7 +28,7 @@
             <a href="/" {...mergeProps(props, { onclick: (event) => choose(event, '/') })}>
               <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand text-brand-foreground">
                 <!-- The Gapura mark: a candi bentar, the split gate a gapura is. -->
-                <svg viewBox="0 0 24 24" fill="currentColor" class="size-[18px]" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor" class="size-[18px]!" aria-hidden="true">
                   <path d="M10.6 22V2H9v3H7.5v4H6v4H4.5v4H3v5z" />
                   <path d="M13.4 22V2H15v3h1.5v4H18v4h1.5v4H21v5z" />
                 </svg>
@@ -46,27 +46,37 @@
 
   <Sidebar.Content>
     <Sidebar.Group>
-      <Sidebar.Menu>
-        {#each screens as screen (screen.path)}
-          {@const here = screen.path === current.path}
-          <Sidebar.MenuItem>
-            <Sidebar.MenuButton isActive={here} tooltipContent={screen.label}>
-              {#snippet child({ props })}
-                <!-- Plain links, so that middle-click and "open in new tab" still work and
-                     the href is a real URL. -->
-                <a
-                  href={screen.path}
-                  aria-current={here ? 'page' : undefined}
-                  {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
-                >
-                  <screen.icon class={here ? 'text-brand' : 'text-muted-foreground'} />
-                  <span>{screen.label}</span>
-                </a>
-              {/snippet}
-            </Sidebar.MenuButton>
-          </Sidebar.MenuItem>
-        {/each}
-      </Sidebar.Menu>
+      <!-- A landmark, so a screen reader can jump to the console's navigation: the generated
+           sidebar renders a <div> and a <ul>, and the only other <nav> is the breadcrumb. -->
+      <nav aria-label="Console">
+        <Sidebar.Menu>
+          {#each screens as screen (screen.path)}
+            {@const here = screen.path === current.path}
+            <Sidebar.MenuItem>
+              <!-- A tooltip only while collapsed to icons. Expanded, the label is already on
+                   screen, and a tooltip is wired as the link's description, so screen readers
+                   would read the label twice. -->
+              <Sidebar.MenuButton
+                isActive={here}
+                tooltipContent={sidebar.state === 'collapsed' && !sidebar.isMobile ? screen.label : undefined}
+              >
+                {#snippet child({ props })}
+                  <!-- Plain links, so that middle-click and "open in new tab" still work and
+                       the href is a real URL. -->
+                  <a
+                    href={screen.path}
+                    aria-current={here ? 'page' : undefined}
+                    {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
+                  >
+                    <screen.icon aria-hidden="true" class={here ? 'text-brand' : 'text-muted-foreground'} />
+                    <span>{screen.label}</span>
+                  </a>
+                {/snippet}
+              </Sidebar.MenuButton>
+            </Sidebar.MenuItem>
+          {/each}
+        </Sidebar.Menu>
+      </nav>
     </Sidebar.Group>
   </Sidebar.Content>
 
