@@ -32,15 +32,18 @@
   {:else}
     <!-- role="list" because Tailwind's base styles take the bullets off every list, and
          Safari then stops announcing it as one; the same goes for the list inside a row.
-         overflow-hidden keeps each row's hover inside the card's rounded corners. -->
+         overflow-hidden keeps each row's hover inside the card's rounded corners, which is
+         also why the rows' focus ring is inset, and why the detail below breaks long words:
+         anything drawn past the card's edge is cut off. -->
     <ul class="divide-y overflow-hidden rounded-lg border bg-card shadow-xs" role="list">
       {#each rows as route (route.id)}
         <li>
           <!-- Fixed namespace and badge columns from `sm` up, not content-sized ones: every
                row is its own grid container, so an `auto` column is measured per row and the
-               namespace and badge would sit at a different x on each one. Below `sm` the two fixed columns would leave
-               the id a few pixels and break it one letter per line, so the namespace column
-               goes (the id already starts with it) and the badge takes only its own width. -->
+               namespace and badge would sit at a different x on each one. Below `sm` the two
+               fixed columns would leave the id a few pixels and break it one letter per line,
+               so the namespace column goes (the id already starts with it) and the badge takes
+               only its own width. -->
           <button
             type="button"
             class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[1.25rem_minmax(0,1fr)_7rem_10rem]"
@@ -59,7 +62,7 @@
           {#if open[route.id]}
             <!-- pl-11 starts the detail under the id: the button's px-3, plus the 1.25rem
                  caret column, plus gap-3. -->
-            <div class="pb-4 pl-11 pr-3 text-sm">
+            <div class="pb-4 pl-11 pr-3 text-sm break-words">
               {#if route.parents.length === 0}
                 <!-- The summary of a route with no parents is `pending`, which on its own
                      reads as "a gateway has not got to it yet". Saying that no gateway was
