@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## 0.2.0 — 2026-09-24
 
-- A key a caller presents identifies it as a consumer (#87): the console issues an API key, the
+- A key a caller presents identifies it as a consumer (#87): a key is issued, the
   store keeps only its SHA-256, and the configuration carries that hash — never the key. A
   configuration is written to the data plane's disk cache and read by whoever can read that file,
   so a stolen cache must not yield a working credential; the hash is deterministic, so a presented
@@ -36,10 +36,15 @@ means what it usually does, moving from one version below to a later one. Releas
   says so instead. The endpoint's tests now run against a real Postgres in CI, and stop skipping
   when `CI` is set, so a typo in the variable name cannot report a green build that exercised
   nothing.
-  The chart does not expose this mode yet: `--control-plane` and its token file are flags on the
-  binary with no values entry behind them, so a Helm install still takes its configuration from
-  the cluster exactly as it did in 0.1.0. Wiring the chart is the next release's work — this one
-  ships the mechanism and the proof it works, not the way to turn it on from a chart.
+  **What this release does not give an operator.** The path above is a vertical slice: the schema,
+  the read path from the store through `/v1/config` to a routing data plane, and tests that walk
+  it end to end. Nothing above SQL exists yet. The chart has no values behind `--control-plane`
+  and its token file, so a Helm install takes its configuration from the cluster exactly as it
+  did in 0.1.0. The store can be read, and can issue a data plane token and an API key; it has
+  no function that creates a consumer, a service, a route or a policy, and there is no endpoint,
+  subcommand or screen for any of it. The console's two screens still read the gateway's admin
+  endpoint, not the store. Filling a store today means writing SQL by hand. That surface is the
+  next release's work; this one ships the mechanism and the proof that it routes.
 - A configuration written by an older binary still loads (#83): `Config` had no `serde(default)`,
   so a cache missing any field failed the whole load — a path nothing exercises until an operator
   upgrades in production and the gateway comes back empty instead of serving what it had. The
