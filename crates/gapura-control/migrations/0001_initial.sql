@@ -6,8 +6,9 @@ create table workspaces (
 );
 insert into workspaces (name) values ('default');
 
--- ADR 1's two ways in. password_hash is null for people who only ever arrive
--- through OIDC: there is no local credential to store and none should be invented.
+-- The console's two ways in, a local password or OIDC. password_hash is null for
+-- people who only ever arrive through OIDC: there is no local credential to store
+-- and none should be invented.
 create table users (
     id            uuid primary key default gen_random_uuid(),
     username      text not null unique,
@@ -26,7 +27,7 @@ create table role_bindings (
     primary key (user_id, workspace_id)
 );
 
--- OIDC users are not rows. ADR 1 maps the groups claim, so authorisation for them
+-- OIDC users are not rows. Sign-in maps their groups claim, so authorisation for them
 -- is a binding on a group name that no local user ever has to exist for.
 create table group_bindings (
     group_name   text not null,
@@ -127,9 +128,10 @@ create table certificates (
     unique (workspace_id, name)
 );
 
--- ADR 4. last_seen_at and last_seen_version are ADR 3's liveness: they are set by
--- the configuration call itself, because a data plane that asked a second ago is
--- alive and a second mechanism saying so again is a thing to keep consistent.
+-- Registered data planes. last_seen_at and last_seen_version are their liveness:
+-- they are set by the configuration call itself, because a data plane that asked a
+-- second ago is alive and a second mechanism saying so again is a thing to keep
+-- consistent.
 create table data_planes (
     id                uuid primary key default gen_random_uuid(),
     name              text not null unique,
@@ -139,7 +141,7 @@ create table data_planes (
     last_seen_address inet
 );
 
--- Two live rows per data plane is how ADR 4 rotates: issue, accept both, update
+-- Two live rows per data plane is how a token rotates: issue, accept both, update
 -- the data plane, delete the first. Same prefix-then-verify shape as API keys.
 create table data_plane_tokens (
     id            uuid primary key default gen_random_uuid(),
@@ -150,7 +152,7 @@ create table data_plane_tokens (
     expires_at    timestamptz
 );
 
--- ADR 3 has the data plane send the version it holds, so there must be ONE
+-- The data plane sends the version it holds, so there must be ONE
 -- comparable number for the whole configuration. Per-table timestamps cannot
 -- answer "has anything changed", which is the only question the protocol asks.
 create table config_state (
@@ -181,7 +183,7 @@ create trigger t_bump after insert or update or delete
 create trigger t_bump after insert or update or delete
     on certificates for each statement execute function bump_config_version();
 
--- ADR 1's audit trail. actor_name is denormalised on purpose: deleting a user
+-- The console's audit trail. actor_name is denormalised on purpose: deleting a user
 -- must not quietly erase who did what.
 create table audit_log (
     id           bigserial primary key,

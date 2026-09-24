@@ -1,4 +1,4 @@
-//! Postgres, which ADR 2 made the owner of the configuration.
+//! Postgres, the owner of the configuration.
 //!
 //! Nothing in the request path of a *data plane* opens a connection here. This is the control
 //! plane's own store, read on behalf of data planes that ask for their configuration over the
@@ -13,7 +13,7 @@ use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService,
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
-/// Applied in order, recorded in `_migrations`. ADR 2 called schema migration permanent work;
+/// Applied in order, recorded in `_migrations`. Schema migration is permanent work;
 /// embedding them in the binary is what keeps the schema and the code that queries it shipped
 /// as one thing rather than matched by release notes.
 const MIGRATIONS: &[(&str, &str)] = &[(
@@ -223,7 +223,7 @@ impl Store {
         Ok(None)
     }
 
-    /// ADR 3: liveness is the configuration call, not a second mechanism reporting the same fact.
+    /// Liveness is the configuration call, not a second mechanism reporting the same fact.
     pub async fn record_call(&self, id: uuid::Uuid, version: i64) -> Result<()> {
         let client = self.pool.get().await?;
         client
@@ -269,7 +269,7 @@ impl Store {
 
     /// Issues an API key for a consumer and returns it. Shown once; only the hash is kept.
     ///
-    /// Plain SHA-256, for the reason ADR 4 gives for data plane tokens and one more: the data
+    /// Plain SHA-256, for the reason data plane tokens use it and one more: the data
     /// plane has to compute this over a presented key and look it up directly, which a salted
     /// hash cannot be.
     pub async fn issue_key(&self, consumer: &str) -> Result<String> {

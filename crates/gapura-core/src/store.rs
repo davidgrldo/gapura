@@ -1,7 +1,7 @@
 //! Compiling a store-shaped configuration into the [`Config`] the data plane serves.
 //!
 //! [`translate()`](crate::translate()) does this from Gateway API resources. This does it from the
-//! objects ADR 2 put in Postgres: Kong's shape, where a route names a service and a service names
+//! objects stored in Postgres: Kong's shape, where a route names a service and a service names
 //! an upstream. Same output type, same purity -- no I/O, no clock, no async -- so both paths are
 //! covered by fixtures rather than by a running cluster.
 //!

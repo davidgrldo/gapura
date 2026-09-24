@@ -105,8 +105,8 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
-/// `WWW-Authenticate` so the failure is legible to whoever is holding a curl, which ADR 3 said
-/// was worth keeping.
+/// `WWW-Authenticate` so the failure is legible to whoever is holding a curl, because being
+/// debuggable with curl is worth keeping.
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,

@@ -300,7 +300,7 @@ fn assemble(
         listeners: listeners_cfg,
         ports,
         clusters,
-        // Consumers live in the store (ADR 2); the Kubernetes path has none.
+        // Consumers live in the store; the Kubernetes path has none.
         credentials: BTreeMap::new(),
     }
 }
