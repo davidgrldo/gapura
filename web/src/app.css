@@ -15,8 +15,8 @@
 
 /* The console design's tokens, under shadcn-svelte's names, plus four of Gapura's own.
    One accent: --brand, the terracotta of a brick gate, spent on identity and selection and
-   nowhere else, so buttons stay neutral. The status colours carry the state of traffic and
-   nothing else, which is why nothing decorative is allowed to borrow them.
+   nowhere else, so buttons stay neutral. The status colours carry state, of traffic or of
+   the console's own requests, and nothing decorative is allowed to borrow them.
    Shape rule: controls use radius-md, containers radius-lg, overlays radius-xl. */
 :root {
   color-scheme: light dark;

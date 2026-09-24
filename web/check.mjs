@@ -1,7 +1,7 @@
 // Not a test framework: one script that fails if the console cannot render the API's
 // answers. It exists because the Rust tests prove the API and nothing proves the page.
 import { readFileSync } from 'node:fs'
-import { STATES } from './src/lib/states.js'
+import { STATES, TONES } from './src/lib/states.js'
 
 const html = readFileSync('dist/index.html', 'utf8')
 if (!html.includes('<div id="app"')) throw new Error('dist/index.html lost its mount point')
@@ -48,6 +48,11 @@ for (const state of reportable) {
 for (const state of Object.keys(STATES)) {
   if (!reportable.includes(state)) {
     throw new Error(`the badge map has an entry for "${state}", which ${ROWS} cannot report`)
+  }
+}
+for (const [state, { tone }] of Object.entries(STATES)) {
+  if (!Object.hasOwn(TONES, tone)) {
+    throw new Error(`"${state}" is toned "${tone}", which TONES in src/lib/states.js has no colours for`)
   }
 }
 
@@ -98,9 +103,11 @@ console.log(
 // else in this file would keep passing if the sentence quietly moved back into one. This
 // reads the component source rather than the bundle because a minifier keeps attribute
 // strings and element text indistinguishably, while the source cannot lie about which it is.
+// The element is pinned to `sr-only` as well, because hiding the sentence from everyone takes
+// one utility: `hidden` would still be element text, and would not be announced.
 const stateComponent = readFileSync('src/lib/State.svelte', 'utf8')
-if (!/>\s*:?\s*\{shown\.detail\}\s*</.test(stateComponent)) {
-  throw new Error('State.svelte must render shown.detail as element text, not an attribute')
+if (!/<span class="sr-only">\s*:?\s*\{shown\.detail\}\s*<\/span>/.test(stateComponent)) {
+  throw new Error('State.svelte must render shown.detail as sr-only element text, not an attribute or hidden text')
 }
 const routesScreen = readFileSync('src/routes/Routes.svelte', 'utf8')
 if (!/STATES\[parent\.state\]\.detail|STATES\[parent\.state\]\?\.detail/.test(routesScreen)) {
