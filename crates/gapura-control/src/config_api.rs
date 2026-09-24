@@ -1,4 +1,4 @@
-//! `GET /v1/config`: the endpoint [ADR 3](../../../docs/adr) has data planes call.
+//! `GET /v1/config`: the endpoint data planes poll for their configuration.
 //!
 //! A conditional GET. The data plane sends the version it holds as `If-None-Match` and gets
 //! either 304 or the configuration that replaces it. The call is also the liveness signal, so a
@@ -7,8 +7,8 @@
 //!
 //! **This is the one endpoint that serves private key material.** `admin.rs` on the data plane
 //! redacts `tls/key_pem` even on its admin port, and that rule is right; this is its single
-//! exception, because a data plane cannot terminate TLS without the key. It is why ADR 4 asks
-//! for authentication in both directions, and why this listens on its own port rather than
+//! exception, because a data plane cannot terminate TLS without the key. It is why this call is
+//! authenticated in both directions, and why this listens on its own port rather than
 //! sharing the console's: an operator can reach the console through an ingress without that
 //! also publishing the keys.
 
