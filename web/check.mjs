@@ -1,6 +1,6 @@
 // Not a test framework: one script that fails if the console cannot render the API's
 // answers. It exists because the Rust tests prove the API and nothing proves the page.
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { STATES, TONES } from './src/lib/states.js'
 
 const html = readFileSync('dist/index.html', 'utf8')
@@ -114,3 +114,20 @@ if (!/STATES\[parent\.state\]\.detail|STATES\[parent\.state\]\?\.detail/.test(ro
   throw new Error('Routes.svelte must show the state sentence visibly in the expanded row')
 }
 
+// The console shows cluster state and may run in a cluster with no route to the internet, so
+// it must not ask a third party for anything: no web font or icon CDN, no remote stylesheet.
+// Fonts and icons are bundled, and this fails the build that quietly stops bundling them.
+// It reads the document and the built CSS, which is where such a request would have to be;
+// the JavaScript bundle is left alone because library code carries documentation URLs in its
+// error messages that are never fetched.
+const builtCss = readdirSync('dist/assets')
+  .filter((file) => file.endsWith('.css'))
+  .map((file) => readFileSync(`dist/assets/${file}`, 'utf8'))
+  .join('\n')
+for (const [where, text] of [['dist/index.html', html], ['the built CSS', builtCss]]) {
+  const remote = text.match(/(?:url\(\s*['"]?|href=['"]|@import\s+['"])(?:https?:)?\/\/[^'")\s]+/)
+  if (remote) {
+    throw new Error(`${where} asks a third party for ${remote[0]}; the console must not`)
+  }
+}
+console.log('ok: the console asks no third party for anything it needs to render')
