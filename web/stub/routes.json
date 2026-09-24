@@ -1,0 +1,18 @@
+[
+  { "id": "apps/storefront", "namespace": "apps", "state": "served",
+    "parents": [{ "gateway": "infra/main", "section": "https", "state": "served", "reason": null, "message": null }] },
+  { "id": "apps/checkout", "namespace": "apps", "state": "unresolved",
+    "parents": [{ "gateway": "infra/main", "section": null, "state": "unresolved", "reason": "BackendNotFound", "message": "backendRef apps/checkout-v2:8080 does not exist" }] },
+  { "id": "team-a/catalog", "namespace": "team-a", "state": "refused",
+    "parents": [{ "gateway": "infra/main", "section": "https", "state": "refused", "reason": "NotAllowedByListeners", "message": "listener infra/main/https admits routes from namespace infra only" }] },
+  { "id": "apps/search", "namespace": "apps", "state": "mixed",
+    "parents": [
+      { "gateway": "infra/main", "section": null, "state": "served", "reason": null, "message": null },
+      { "gateway": "infra/edge", "section": null, "state": "missing", "reason": null, "message": null }
+    ] },
+  { "id": "apps/status", "namespace": "apps", "state": "unknown",
+    "parents": [{ "gateway": "infra/main", "section": null, "state": "unknown", "reason": null, "message": "the gateway admin port did not answer" }] },
+  { "id": "apps/blog", "namespace": "apps", "state": "missing",
+    "parents": [{ "gateway": "infra/edge", "section": null, "state": "missing", "reason": null, "message": null }] },
+  { "id": "apps/docs", "namespace": "apps", "state": "pending", "parents": [] }
+]

@@ -59,3 +59,16 @@ export const STATES = {
     detail: 'No gateway has ruled on this yet. Not a fault: nobody has looked.',
   },
 }
+
+// Four tones, not seven colours: the point of the grouping is that two states painted the
+// same are the same kind of bad, and seven distinguishable hues would undo that by making
+// every state look like its own separate category. Written out in full so that Tailwind
+// finds every class in this file. Here rather than in State.svelte for the reason above:
+// check.mjs holds every tone in STATES to a key of this map, because a misspelt tone would
+// otherwise render an uncoloured pill and pass everything else.
+export const TONES = {
+  ok: 'bg-success-soft text-success',
+  bad: 'bg-danger-soft text-danger',
+  warn: 'bg-warning-soft text-warning',
+  idle: 'bg-muted text-muted-foreground',
+}

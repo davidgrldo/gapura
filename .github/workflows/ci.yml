@@ -51,6 +51,23 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: "1.89"
 
+  console:
+    runs-on: ubuntu-latest
+    # The console's own guard, web/check.mjs: it fails a build whose page cannot show every state
+    # the API can report, or that asks a third party for anything. The image jobs only build the
+    # console, so without this nothing ran it. From a checkout rather than inside an image,
+    # because the check reads the route states from the Rust enum in crates/.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # The version Dockerfile.control builds the console with.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npm run build && npm run check
+        working-directory: web
+
   deny:
     runs-on: ubuntu-latest
     steps:

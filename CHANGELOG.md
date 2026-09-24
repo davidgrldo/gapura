@@ -6,6 +6,19 @@ to v0.1.0 means `helm upgrade` from that checkout to the published chart. From v
 means what it usually does, moving from one version below to a later one. Release procedure:
 [docs/RELEASING.md](docs/RELEASING.md).
 
+## Unreleased
+
+- The console is drawn from shadcn-svelte components on Tailwind, and bundles its font (#90): the
+  two screens and the shell say and do what they did, but from one set of components and tokens
+  instead of CSS written per component, with one accent, a terracotta, spent on identity and
+  selection. 0.2.0 ruled a web font out as hundreds of kilobytes inside a binary; Geist bundled is
+  about 76 KB of woff2 across five subsets, of which a browser fetches only those it needs, and
+  the console's assets inside `gapura-control` come to about 410 KB. What 0.2.0 was protecting
+  still holds, and is now checked: the build fails if the page, its CSS or its JavaScript asks a
+  third party for anything, and CI runs that check. The console now sets a `sidebar_state` cookie
+  (path `/`, seven days) remembering whether the sidebar is collapsed, and Ctrl/Cmd+B toggles the
+  sidebar in place of the browser's own shortcut; nothing on the server reads the cookie.
+
 ## 0.2.0 — 2026-09-24
 
 - A key a caller presents identifies it as a consumer (#87): the console issues an API key, the

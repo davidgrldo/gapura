@@ -1,5 +1,6 @@
 <script>
   import { SessionNotSticking, retrySignIn } from './api.js'
+  import { Button } from '$lib/components/ui/button/index.js'
 
   // Both screens fail in the same two ways, and one of the two takes several sentences to
   // explain. It lives here rather than in either screen for the same reason the state badge
@@ -10,7 +11,7 @@
 </script>
 
 {#if error instanceof SessionNotSticking}
-  <div class="notice">
+  <div class="max-w-2xl space-y-3 rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm">
     <p>
       <strong>Signing in worked, but the session is not coming back.</strong> This tab went
       through the sign-in flow, returned, and the console still treats every request as
@@ -32,46 +33,11 @@
       out that the session is expired the moment it is issued, look identical from here.
     </p>
     <p>
-      <button type="button" onclick={retrySignIn}>Try signing in again</button>
+      <Button variant="outline" size="sm" onclick={retrySignIn}>Try signing in again</Button>
     </p>
   </div>
 {:else}
-  <p class="notice">Could not load {what}: {error.message}</p>
+  <p class="max-w-2xl rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm">
+    Could not load {what}: {error.message}
+  </p>
 {/if}
-
-<style>
-  .notice {
-    background: var(--warn-bg);
-    border: 1px solid var(--warn-border);
-    border-radius: var(--radius-md);
-    padding: 0.75rem 1rem;
-    max-width: 44rem;
-  }
-
-  .notice p {
-    margin: 0 0 0.75rem;
-  }
-
-  .notice p:last-child {
-    margin-bottom: 0;
-  }
-
-  code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.875em;
-  }
-
-  button {
-    font: inherit;
-    padding: 0.3125rem 0.875rem;
-    border: 1px solid var(--warn-border);
-    border-radius: var(--radius-xs);
-    background: var(--surface);
-    color: var(--warn-text);
-    cursor: pointer;
-  }
-
-  button:hover {
-    background: var(--hover);
-  }
-</style>
