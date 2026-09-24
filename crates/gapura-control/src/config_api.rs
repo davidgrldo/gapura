@@ -1,4 +1,4 @@
-//! `GET /v1/config`: the endpoint [ADR 3](../../../docs/adr) has data planes call.
+//! `GET /v1/config`: the endpoint data planes poll for their configuration.
 //!
 //! A conditional GET. The data plane sends the version it holds as `If-None-Match` and gets
 //! either 304 or the configuration that replaces it. The call is also the liveness signal, so a
