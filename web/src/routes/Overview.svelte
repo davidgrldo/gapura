@@ -44,9 +44,15 @@
     <p class="text-muted-foreground">The gateway answered, and has no listeners you can see.</p>
   {:else}
     <div class="rounded-lg border bg-card shadow-xs">
-      <Table.Root>
+      <!-- Named, so a screen reader moving between tables hears what this one is. The
+           container scrolls sideways on a phone, and a scroller has to be focusable to be
+           scrolled from the keyboard; as a named region it also says what it holds. -->
+      <Table.Root
+        aria-label="Listeners"
+        containerProps={{ tabindex: 0, role: 'region', 'aria-label': 'Listeners' }}
+      >
         <Table.Header>
-          <Table.Row>
+          <Table.Row class="hover:bg-transparent">
             <Table.Head>Gateway</Table.Head>
             <Table.Head>Listener</Table.Head>
             <Table.Head>Port</Table.Head>
@@ -57,16 +63,15 @@
         <Table.Body>
           {#each data.listeners as listener (listener.id)}
             {@const name = split(listener.id)}
-            <Table.Row>
+            <Table.Row class="hover:bg-transparent">
               <Table.Cell class="align-top font-medium">{name.gateway}</Table.Cell>
               <Table.Cell class="align-top">{name.section ?? '—'}</Table.Cell>
               <Table.Cell class="align-top tabular-nums">
                 {listener.port}
                 {#if mapsPort(listener)}
-                  <!-- The mapped-port note is one phrase and reads as nonsense broken across
-                       four lines, which is what an auto-sized column does to it when the
-                       table is narrow. Its own line, unbroken. -->
-                  <span class="block whitespace-nowrap text-muted-foreground">(clients dial {listener.client_port})</span>
+                  <!-- Its own line, under the port. Table cells do not wrap, so a narrow table
+                       scrolls sideways rather than breaking the phrase across lines. -->
+                  <span class="block text-muted-foreground">(clients dial {listener.client_port})</span>
                 {/if}
               </Table.Cell>
               <!-- Upper-cased here rather than at the source. `gapura_core::config::Protocol`
