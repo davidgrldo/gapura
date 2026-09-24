@@ -1,0 +1,8 @@
+{
+  "reachable": true,
+  "listeners": [
+    { "id": "infra/main/http", "port": 80, "client_port": null, "protocol": "Http", "hostname": null },
+    { "id": "infra/main/https", "port": 443, "client_port": null, "protocol": "Https", "hostname": "*.shop.example" },
+    { "id": "infra/edge/https", "port": 8443, "client_port": 443, "protocol": "Https", "hostname": "edge.shop.example" }
+  ]
+}

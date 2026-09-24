@@ -5,6 +5,7 @@
   "version": "0.0.0",
   "scripts": {
     "dev": "vite",
+    "dev:stub": "STUB=1 vite",
     "build": "vite build",
     "preview": "vite preview",
     "check": "node check.mjs"
