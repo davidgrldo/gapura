@@ -36,6 +36,10 @@ means what it usually does, moving from one version below to a later one. Releas
   says so instead. The endpoint's tests now run against a real Postgres in CI, and stop skipping
   when `CI` is set, so a typo in the variable name cannot report a green build that exercised
   nothing.
+  The chart does not expose this mode yet: `--control-plane` and its token file are flags on the
+  binary with no values entry behind them, so a Helm install still takes its configuration from
+  the cluster exactly as it did in 0.1.0. Wiring the chart is the next release's work — this one
+  ships the mechanism and the proof it works, not the way to turn it on from a chart.
 - A configuration written by an older binary still loads (#83): `Config` had no `serde(default)`,
   so a cache missing any field failed the whole load — a path nothing exercises until an operator
   upgrades in production and the gateway comes back empty instead of serving what it had. The
