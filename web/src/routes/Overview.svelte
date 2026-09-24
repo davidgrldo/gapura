@@ -1,6 +1,7 @@
 <script>
   import { get } from '../lib/api.js'
   import Failure from '../lib/Failure.svelte'
+  import * as Table from '$lib/components/ui/table/index.js'
 
   // Fetched once on mount and awaited in the markup. `{#await}` is the whole of the loading
   // and error handling this screen needs, which is why there is no state variable here to
@@ -25,108 +26,67 @@
   }
 </script>
 
-<h1>Overview</h1>
+<h1 class="mb-4 text-2xl font-semibold tracking-tight">Overview</h1>
 
 {#await overview}
-  <p class="muted">Reading the gateway…</p>
+  <p class="text-muted-foreground">Reading the gateway…</p>
 {:then data}
   {#if !data.reachable}
     <!-- `reachable: false` means the admin port could not be read, and the server sends no
          listeners with it. Drawing an empty table here would say "this gateway serves
          nothing", which is a different and much more alarming claim than "nobody could ask
          it". -->
-    <p class="notice">
+    <p class="max-w-2xl rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm">
       The gateway could not be reached, so there is nothing to show here. This says nothing
       about whether it is serving traffic — only that its admin port did not answer.
     </p>
   {:else if data.listeners.length === 0}
-    <p class="muted">The gateway answered, and has no listeners you can see.</p>
+    <p class="text-muted-foreground">The gateway answered, and has no listeners you can see.</p>
   {:else}
-    <table>
-      <thead>
-        <tr>
-          <th>Gateway</th>
-          <th>Listener</th>
-          <th>Port</th>
-          <th>Protocol</th>
-          <th>Hostname</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each data.listeners as listener (listener.id)}
-          {@const name = split(listener.id)}
-          <tr>
-            <td>{name.gateway}</td>
-            <td>{name.section ?? '—'}</td>
-            <td>
-              {listener.port}
-              {#if mapsPort(listener)}
-                <span class="muted mapped">(clients dial {listener.client_port})</span>
-              {/if}
-            </td>
-            <!-- Upper-cased here rather than at the source. `gapura_core::config::Protocol`
-                 is a plain derived enum with no `rename_all`, so `/debug/config` spells these
-                 `Http` and `Https`, while the Gateway API — and therefore `kubectl get
-                 gateway`, which is what an operator has open next to this — spells them `HTTP`
-                 and `HTTPS`. A console whose whole purpose is to sit beside what Kubernetes
-                 was told has to use Kubernetes' spelling. Fixing it in the enum's serde
-                 instead would change the admin JSON contract, which is a separate decision
-                 with other consumers. -->
-            <td>{listener.protocol ? listener.protocol.toUpperCase() : '—'}</td>
-            <!-- A listener with no hostname takes any host, which is a real setting rather
-                 than missing information, so it is spelled out instead of left blank. -->
-            <td>{listener.hostname ?? 'any host'}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+    <div class="rounded-lg border bg-card shadow-xs">
+      <Table.Root>
+        <Table.Header>
+          <Table.Row>
+            <Table.Head>Gateway</Table.Head>
+            <Table.Head>Listener</Table.Head>
+            <Table.Head>Port</Table.Head>
+            <Table.Head>Protocol</Table.Head>
+            <Table.Head>Hostname</Table.Head>
+          </Table.Row>
+        </Table.Header>
+        <Table.Body>
+          {#each data.listeners as listener (listener.id)}
+            {@const name = split(listener.id)}
+            <Table.Row>
+              <Table.Cell class="align-top font-medium">{name.gateway}</Table.Cell>
+              <Table.Cell class="align-top">{name.section ?? '—'}</Table.Cell>
+              <Table.Cell class="align-top tabular-nums">
+                {listener.port}
+                {#if mapsPort(listener)}
+                  <!-- The mapped-port note is one phrase and reads as nonsense broken across
+                       four lines, which is what an auto-sized column does to it when the
+                       table is narrow. Its own line, unbroken. -->
+                  <span class="block whitespace-nowrap text-muted-foreground">(clients dial {listener.client_port})</span>
+                {/if}
+              </Table.Cell>
+              <!-- Upper-cased here rather than at the source. `gapura_core::config::Protocol`
+                   is a plain derived enum with no `rename_all`, so `/debug/config` spells these
+                   `Http` and `Https`, while the Gateway API — and therefore `kubectl get
+                   gateway`, which is what an operator has open next to this — spells them `HTTP`
+                   and `HTTPS`. A console whose whole purpose is to sit beside what Kubernetes
+                   was told has to use Kubernetes' spelling. Fixing it in the enum's serde
+                   instead would change the admin JSON contract, which is a separate decision
+                   with other consumers. -->
+              <Table.Cell class="align-top">{listener.protocol ? listener.protocol.toUpperCase() : '—'}</Table.Cell>
+              <!-- A listener with no hostname takes any host, which is a real setting rather
+                   than missing information, so it is spelled out instead of left blank. -->
+              <Table.Cell class="align-top">{listener.hostname ?? 'any host'}</Table.Cell>
+            </Table.Row>
+          {/each}
+        </Table.Body>
+      </Table.Root>
+    </div>
   {/if}
 {:catch error}
   <Failure {error} what="the overview" />
 {/await}
-
-<style>
-  h1 {
-    font-size: 1.375rem;
-    margin: 0 0 1rem;
-  }
-
-  table {
-    border-collapse: collapse;
-    width: 100%;
-  }
-
-  th,
-  td {
-    text-align: left;
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-  }
-
-  th {
-    font-size: 0.8125rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-  }
-
-  .muted {
-    color: var(--text-muted);
-  }
-
-  /* The mapped-port note is one phrase and reads as nonsense broken across four lines, which
-     is what an auto-sized column does to it when the table is narrow. Its own line, unbroken. */
-  .mapped {
-    display: block;
-    white-space: nowrap;
-  }
-
-  .notice {
-    background: var(--warn-bg);
-    border: 1px solid var(--warn-border);
-    border-radius: var(--radius-md);
-    padding: 0.75rem 1rem;
-    max-width: 44rem;
-  }
-</style>
