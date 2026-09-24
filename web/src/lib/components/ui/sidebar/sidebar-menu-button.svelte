@@ -66,7 +66,9 @@
 {#if !tooltipContent}
 	{@render Button({})}
 {:else}
-	<Tooltip.Root>
+	<!-- gapura: disabled rather than left to open with its content hidden. An open tooltip
+	     describes its trigger, so an expanded link would be read with its label twice. -->
+	<Tooltip.Root disabled={sidebar.state !== "collapsed" || sidebar.isMobile}>
 		<Tooltip.Trigger>
 			{#snippet child({ props })}
 				{@render Button({ props })}

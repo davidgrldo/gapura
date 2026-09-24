@@ -53,20 +53,16 @@
           {#each screens as screen (screen.path)}
             {@const here = screen.path === current.path}
             <Sidebar.MenuItem>
-              <!-- A tooltip only while collapsed to icons. Expanded, the label is already on
-                   screen, and a tooltip is wired as the link's description, so screen readers
-                   would read the label twice. -->
-              <Sidebar.MenuButton
-                isActive={here}
-                tooltipContent={sidebar.state === 'collapsed' && !sidebar.isMobile ? screen.label : undefined}
-              >
+              <Sidebar.MenuButton isActive={here} tooltipContent={screen.label}>
                 {#snippet child({ props })}
                   <!-- Plain links, so that middle-click and "open in new tab" still work and
-                       the href is a real URL. -->
+                       the href is a real URL. The tooltip trigger hands over a button's props,
+                       type="button" among them, which a link has no use for. -->
                   <a
                     href={screen.path}
                     aria-current={here ? 'page' : undefined}
                     {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
+                    type={undefined}
                   >
                     <screen.icon aria-hidden="true" class={here ? 'text-brand' : 'text-muted-foreground'} />
                     <span>{screen.label}</span>
