@@ -1,1 +1,154 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn-svelte/tailwind.css";
+/* Bundled, never fetched: the console shows cluster state and may run with no route to the
+   internet, so it asks no third party for anything (check.mjs fails a build that does).
+   About 76 KB across all subsets; a browser downloads only the subsets a page uses. */
+@import "@fontsource-variable/geist";
+
+/* Follows the operating system instead of offering a switch, as the console always has:
+   nobody opens a gateway console to choose a theme, and a switch is state to store, sync and
+   get wrong. The generated components write `dark:` variants that expect a `.dark` class;
+   redefining the variant as the media query makes every one of them follow the OS with no
+   script at all. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+/* The console design's tokens, under shadcn-svelte's names, plus four of Gapura's own.
+   One accent: --brand, the terracotta of a brick gate, spent on identity and selection and
+   nowhere else, so buttons stay neutral. The status colours carry the state of traffic and
+   nothing else, which is why nothing decorative is allowed to borrow them.
+   Shape rule: controls use radius-md, containers radius-lg, overlays radius-xl. */
+:root {
+  color-scheme: light dark;
+  --radius: 0.625rem;
+
+  --background: oklch(0.985 0.002 250);
+  --foreground: oklch(0.21 0.02 257);
+  --card: oklch(0.997 0.001 250);
+  --card-foreground: var(--foreground);
+  --popover: oklch(0.997 0.001 250);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.24 0.022 257);
+  --primary-foreground: oklch(0.985 0.002 250);
+  --secondary: oklch(0.955 0.005 250);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.962 0.005 250);
+  --muted-foreground: oklch(0.49 0.018 257);
+  --accent: oklch(0.952 0.006 250);
+  --accent-foreground: var(--foreground);
+  --destructive: oklch(0.577 0.215 27);
+  --border: oklch(0.915 0.007 250);
+  --input: oklch(0.885 0.008 250);
+  --ring: oklch(0.63 0.135 42);
+
+  --brand: oklch(0.63 0.135 42);
+  --brand-foreground: oklch(0.99 0 0);
+  --success: oklch(0.5 0.12 155);
+  --success-soft: oklch(0.955 0.035 155);
+  --warning: oklch(0.52 0.11 65);
+  --warning-soft: oklch(0.962 0.045 85);
+  --danger: oklch(0.53 0.19 25);
+  --danger-soft: oklch(0.955 0.03 25);
+
+  --sidebar: oklch(0.972 0.004 250);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: oklch(0.935 0.007 250);
+  --sidebar-accent-foreground: var(--foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.165 0.01 257);
+    --foreground: oklch(0.955 0.004 250);
+    --card: oklch(0.195 0.011 257);
+    --popover: oklch(0.215 0.012 257);
+    --primary: oklch(0.945 0.004 250);
+    --primary-foreground: oklch(0.2 0.015 257);
+    --secondary: oklch(0.25 0.012 257);
+    --muted: oklch(0.235 0.012 257);
+    --muted-foreground: oklch(0.71 0.014 257);
+    --accent: oklch(0.265 0.013 257);
+    --border: oklch(1 0 0 / 0.085);
+    --input: oklch(1 0 0 / 0.14);
+    --ring: oklch(0.7 0.12 45);
+
+    --brand: oklch(0.69 0.13 45);
+    --success: oklch(0.77 0.13 155);
+    --success-soft: oklch(0.28 0.05 155);
+    --warning: oklch(0.81 0.12 80);
+    --warning-soft: oklch(0.3 0.05 75);
+    --danger: oklch(0.73 0.15 25);
+    --danger-soft: oklch(0.3 0.07 25);
+
+    --sidebar: oklch(0.15 0.01 257);
+    --sidebar-accent: oklch(0.235 0.012 257);
+  }
+}
+
+@theme inline {
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  /* Every screen shows ids, reasons and addresses in code; one rule here instead of one per
+     component. */
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+  }
+}
