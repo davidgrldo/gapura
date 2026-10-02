@@ -49,6 +49,21 @@ for values in "$CHART"/tests/values-*.yaml; do
   case=$(basename "$values" .yaml)
   case=${case#values-}
   out=$(helm template gapura "$CHART" --namespace gapura-system --values "$values" --kube-version 1.34)
+  # Two objects in one document parse as one object with duplicate keys, and the later object's
+  # keys win: a template missing its `---` once turned the console's users Secret into stray
+  # fields on its ServiceAccount, so the Secret was never installed. The golden file recorded
+  # that output faithfully, and helm and the API server only warned, so check it here.
+  merged=$(printf '%s\n' "$out" | awk '
+    /^---/ { n = 0; next }
+    /^kind:/ { if (++n == 2) print "  " src ": " $0 }
+    /^# Source: / { src = $3 }
+  ')
+  if [ -n "$merged" ]; then
+    echo "FAIL $case: a document holds more than one object (missing --- in a template?)" >&2
+    printf '%s\n' "$merged" >&2
+    status=1
+    continue
+  fi
   if [ "$UPDATE" = "--update" ]; then
     printf '%s\n' "$out" > "$GOLDEN/$case.yaml"
     echo "updated $GOLDEN/$case.yaml"

@@ -43,6 +43,7 @@ stringData:
 {{- fail (printf "console.service.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $port) }}
 {{- end }}
 {{- $fullname := include "gapura.fullname" . }}
+---
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
 # terminates OIDC, the data plane faces the internet, and neither should carry the other's
