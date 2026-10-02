@@ -22,32 +22,6 @@ spec:
       app.kubernetes.io/component: gateway
 ---
 # Source: gapura/templates/console.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: gapura-control-users
-  namespace: gapura-system
-  labels:
-    helm.sh/chart: gapura-0.2.0
-    app.kubernetes.io/name: gapura
-    app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
-    app.kubernetes.io/version: "0.2.0"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: console
-type: Opaque
-stringData:
-  users.yaml: |
-    users:
-      - email: admin@example.test
-        bcrypt: $2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
-        groups:
-        - admins
-      - email: viewer@example.test
-        bcrypt: $2b$10$zyxwvutsrqponmlkjihgO9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
-        groups:
-        []
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
 # terminates OIDC, the data plane faces the internet, and neither should carry the other's
@@ -83,6 +57,34 @@ metadata:
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
+---
+# Source: gapura/templates/console.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gapura-control-users
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.2.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+    app.kubernetes.io/component: console
+type: Opaque
+stringData:
+  users.yaml: |
+    users:
+      - email: admin@example.test
+        bcrypt: $2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
+        groups:
+        - admins
+      - email: viewer@example.test
+        bcrypt: $2b$10$zyxwvutsrqponmlkjihgO9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
+        groups:
+        []
 ---
 # Source: gapura/templates/console.yaml
 apiVersion: rbac.authorization.k8s.io/v1

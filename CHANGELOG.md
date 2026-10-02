@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The chart installs the console's local users Secret again: `console.yaml` had no `---` between
+  that Secret and the console's ServiceAccount, so the two parsed as one object, the
+  ServiceAccount's keys won, and the Secret was never created -- helm and the API server only
+  warned (`unknown field "stringData"`, `unknown field "type"`). A local-mode install without
+  `console.auth.local.existingSecret` therefore had no users file, and changes to
+  `console.auth.local.users` reached nothing. `hack/chart-render.sh` now fails on any rendered
+  document that holds two objects. Upgrading over a cluster where that Secret was created by
+  hand fails on Helm's ownership check: either point `console.auth.local.existingSecret` at it,
+  or delete it and let the chart create it from the values.
 - The console is drawn from shadcn-svelte components on Tailwind, and bundles its font (#90): the
   two screens and the shell say and do what they did, but from one set of components and tokens
   instead of CSS written per component, with one accent, a terracotta, spent on identity and
