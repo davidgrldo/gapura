@@ -1,5 +1,8 @@
+import path from 'node:path'
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
+import tailwindcss from '@tailwindcss/vite'
 
 // `web/public/.gitkeep` is not decoration. Vite empties `outDir` before every build, which
 // would otherwise delete the tracked `web/dist/.gitkeep` that keeps that folder present in a
@@ -16,8 +19,36 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 // from the root of its own listener and never from a sub-path, so the asset URLs baked into
 // index.html must be absolute from the root — a relative base would break the moment a
 // client-side route one level deep, such as /routes, was reloaded.
+
+// Answers the console's two API paths from web/stub/ so that its screens can be looked at
+// without a control plane or a cluster. `apply: 'serve'` keeps it out of every build, and it
+// does nothing unless STUB is set, so a plain `npm run dev` behaves exactly as it did
+// before this existed.
+function stubApi() {
+  const answers = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
+  return {
+    name: 'gapura-stub-api',
+    apply: 'serve',
+    configureServer(server) {
+      if (!process.env.STUB) return
+      server.middlewares.use((req, res, next) => {
+        const file = answers[req.url.split('?')[0]]
+        if (!file) return next()
+        res.setHeader('content-type', 'application/json')
+        res.end(readFileSync(path.join(import.meta.dirname, 'stub', file)))
+      })
+    },
+  }
+}
+
+// `$lib` is the alias every shadcn-svelte component imports from (see components.json).
+// SvelteKit would provide it; this is a plain Vite app, so it is declared here, and
+// jsconfig.json repeats it only so that the CLI and editors resolve what the build resolves.
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [tailwindcss(), svelte(), stubApi()],
+  resolve: {
+    alias: { $lib: path.resolve(import.meta.dirname, 'src/lib') },
+  },
   base: '/',
   build: {
     outDir: 'dist',
