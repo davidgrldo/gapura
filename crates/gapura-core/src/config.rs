@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-// `serde(default)` here and deliberately not on the types below. ADR 2 gives the data plane a
+// `serde(default)` here and deliberately not on the types below. The data plane keeps a
 // disk cache, so after an upgrade a new binary reads a configuration an older one wrote, and any
 // field added since would otherwise be a missing field that fails the whole load. At the top
 // level a missing field sensibly means "none of those". Inside an `Endpoint` it does not: an
@@ -153,7 +153,7 @@ pub struct KvMatch {
 /// place that has to handle it, and a blob makes every one of those places a runtime `match` on
 /// a string that can be wrong in production instead of at build time.
 ///
-/// ADR 1 put JWT first deliberately. Two separate things were unproven -- the extension
+/// JWT came first deliberately. Two separate things were unproven -- the extension
 /// mechanism itself, and the seam that looks a credential up -- and checking a signature needs
 /// nothing looked up and nothing stored, so it exercises the first and touches none of the
 /// second. Taking both bets in one plugin would have left a failure ambiguous.
@@ -166,7 +166,7 @@ pub enum Plugin {
 
 /// Reject a request unless it carries an API key issued to a consumer.
 ///
-/// ADR 1 put this after JWT on purpose: JWT proves the extension mechanism without touching the
+/// This came after JWT on purpose: JWT proves the extension mechanism without touching the
 /// credential seam, and this is the seam. What it needs that JWT did not is somewhere to look a
 /// presented key up -- see [`Config::credentials`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(back, cfg);
     }
 
-    /// ADR 2 requires an old data plane to keep talking to a new control plane across a
+    /// An old data plane has to keep talking to a new control plane across a
     /// rolling upgrade, and the configuration protocol carries `Config` itself. That promise
     /// is either pinned here or discovered by an operator mid-upgrade.
     #[test]
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(c.resolve, None);
     }
 
-    /// The other direction, which is easy to miss: ADR 2 gives the data plane a disk cache, so
+    /// The other direction, which is easy to miss: the data plane keeps a disk cache, so
     /// after an upgrade a NEW binary reads a config an OLD one wrote. Every field a future
     /// version adds has to be able to be absent, which is what `#[serde(default)]` on the
     /// struct buys. If this fails, the cache stops loading across exactly one upgrade.

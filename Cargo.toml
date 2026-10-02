@@ -36,7 +36,7 @@ kube = { version = "4.2", default-features = false, features = ["client", "runti
 k8s-openapi = { version = "0.28", features = ["latest"] }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
-# Postgres for the control plane's store (ADR 2). tokio-postgres rather than sqlx: the
+# Postgres for the control plane's store. tokio-postgres rather than sqlx: the
 # compile-time query checking sqlx buys costs a committed .sqlx directory that has to be
 # regenerated in step with every migration, and this workspace would rather carry the checking
 # in tests than carry that in CI. deadpool is the pool, because a single connection that dies

@@ -187,7 +187,7 @@ async fn a_token_that_was_never_issued_gets_nothing() {
 
 /// The credential seam, end to end: the console issues a key, the store keeps only its hash, the
 /// configuration carries that hash, and the data plane turns a presented key into a consumer.
-/// ADR 1 separated this from JWT precisely so a failure anywhere along it is unambiguous.
+/// It was built separately from JWT precisely so a failure anywhere along it is unambiguous.
 #[tokio::test]
 async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
     let Some((store, app, _guard)) = fixture().await else {

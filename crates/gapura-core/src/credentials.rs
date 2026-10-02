@@ -1,12 +1,12 @@
 //! Identifying a caller by an API key.
 //!
-//! ADR 1 put this after JWT deliberately. JWT proves the extension mechanism and looks nothing
+//! This came after JWT deliberately. JWT proves the extension mechanism and looks nothing
 //! up; this is the seam that looks a credential up, and the two bets are worth taking one at a
 //! time so a failure in either is unambiguous.
 //!
 //! The lookup is a map in the configuration, not a query. A round trip per request would put the
 //! control plane on the data path and take every gateway down with it; the cost is that
-//! revocation waits for the next poll, which is the bound ADR 3 already accepts for routes.
+//! revocation waits for the next poll, which is the bound routes already accept.
 
 use crate::config::Config;
 use sha2::{Digest, Sha256};

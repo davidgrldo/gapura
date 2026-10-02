@@ -10,7 +10,7 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:8080")]
     pub listen: std::net::SocketAddr,
 
-    /// Postgres for the store ADR 2 made the owner of the configuration. Absent means the
+    /// Postgres for the store that owns the configuration. Absent means the
     /// control plane runs read-only over Kubernetes, which is the mode the console ships in
     /// today; the configuration endpoint is simply not served.
     #[arg(long, env = "DATABASE_URL")]

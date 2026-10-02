@@ -1,4 +1,4 @@
-//! Configuration from `gapura-control`, which ADR 2 made its owner and ADR 3 said we ask for.
+//! Configuration from `gapura-control`, which owns it and hands it out only when asked.
 //!
 //! The data plane calls carrying the version it holds and gets either "nothing has changed" or
 //! the configuration that replaces it. The call is also the liveness signal: there is no second
@@ -137,7 +137,7 @@ impl ControlSource {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    // Keep serving. ADR 2 put the cache here precisely so that losing the
+                    // Keep serving. The cache is here precisely so that losing the
                     // control plane costs new configuration and not traffic.
                     tracing::warn!(error = %e, "asking the control plane for configuration");
                 }
@@ -163,7 +163,7 @@ impl ControlSource {
 
 /// Fill in `Cluster::endpoints` for every cluster that names a host instead.
 ///
-/// Only the data plane can do this. ADR 3 deliberately supports data planes in another network,
+/// Only the data plane can do this. Data planes in another network are deliberately supported,
 /// where a name answers differently or not at all, so the control plane sends the name and each
 /// data plane asks its own resolver. A name that does not resolve leaves the cluster empty,
 /// which is 503 -- the same answer as a backend with no ready addresses, and correct for the
