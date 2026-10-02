@@ -459,25 +459,111 @@ pub fn origin_can_keep_secure_cookie(headers: &header::HeaderMap) -> bool {
 /// says why no session came out of it, instead of a redirect that fails one request later
 /// and looks like the blank-page loop this replaced.
 fn refused_page() -> Response {
-    let body = "<!DOCTYPE html>\
-<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Signed in, session not stored</title>\
-<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:4rem auto;padding:0 1rem}\
-code{background:#f3f4f6;padding:0 .3rem}</style></head>\
-<body><h1>Signed in — session not stored</h1>\
-<p>The identity provider verified you, but this console was reached over plain HTTP on an
-address a browser does not trust with a <code>Secure</code> session cookie, so the cookie was
-not issued: it would have been silently dropped, and every request after the redirect would
-have asked you to sign in again.</p>\
-<p>Serve the console over HTTPS, or reach it at <code>localhost</code> (for example
-<code>kubectl port-forward</code> on the loopback address), where browsers keep
+    let body = auth_page(
+        "Signed in, session not stored",
+        "<div class=\"card\"><div class=\"card-header\">\
+<h1 class=\"card-title\">Signed in \u{2014} session not stored</h1>\
+<p class=\"card-description\">The identity provider verified you, but no session was issued.</p>\
+</div><div class=\"card-content prose\">\
+<p>This console was reached over plain HTTP on an address a browser does not trust with a \
+<code>Secure</code> session cookie, so the cookie was not issued: it would have been silently \
+dropped, and every request after the redirect would have asked you to sign in again.</p>\
+<p>Serve the console over HTTPS, or reach it at <code>localhost</code> (for example \
+<code>kubectl port-forward</code> on the loopback address), where browsers keep \
 <code>Secure</code> cookies over plain HTTP.</p>\
-</body></html>";
+</div></div>",
+    );
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
         .body(axum::body::Body::from(body))
         .expect("static page")
+}
+
+/// The console's tokens and the generated shadcn-svelte Card, Label, Input and Button, as
+/// plain CSS. The sign-in pages are served without the console's bundle so that they work
+/// when the assets do not, which rules out Tailwind classes; what they share with the
+/// console instead is the values. Colours, radius and control heights are copied from
+/// `web/src/app.css` and `web/src/lib/components/ui`, so a change there should be repeated
+/// here. Geist is the console's font, but it lives in the bundle under a hashed name, so
+/// these pages name it and fall back to the system face when it is not installed.
+const AUTH_PAGE_STYLE: &str = r#"
+:root{color-scheme:light dark;--radius:.625rem;
+--background:oklch(.985 .002 250);--foreground:oklch(.21 .02 257);--card:oklch(.997 .001 250);
+--primary:oklch(.24 .022 257);--primary-foreground:oklch(.985 .002 250);
+--muted:oklch(.962 .005 250);--muted-foreground:oklch(.49 .018 257);
+--border:oklch(.915 .007 250);--input:oklch(.885 .008 250);--ring:oklch(.63 .135 42);
+--brand:oklch(.63 .135 42);--brand-foreground:oklch(.99 0 0);--danger:oklch(.53 .19 25);
+--danger-soft:oklch(.955 .03 25);--input-bg:transparent}
+@media (prefers-color-scheme:dark){:root{
+--background:oklch(.165 .01 257);--foreground:oklch(.955 .004 250);--card:oklch(.195 .011 257);
+--primary:oklch(.945 .004 250);--primary-foreground:oklch(.2 .015 257);
+--muted:oklch(.235 .012 257);--muted-foreground:oklch(.71 .014 257);
+--border:oklch(1 0 0/.085);--input:oklch(1 0 0/.14);--ring:oklch(.7 .12 45);
+--brand:oklch(.69 .13 45);--brand-foreground:oklch(.2 .015 257);--danger:oklch(.73 .15 25);
+--danger-soft:oklch(.3 .07 25);--input-bg:oklch(1 0 0/.042)}}
+*,::before,::after{box-sizing:border-box;margin:0;border:0 solid var(--border)}
+body{min-height:100svh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+gap:1.5rem;padding:1.5rem;background:var(--muted);color:var(--foreground);
+font:400 .875rem/1.43 'Geist Variable',ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+@media (min-width:768px){body{padding:2.5rem}}
+main{display:flex;width:100%;max-width:24rem;flex-direction:column;gap:1.5rem}
+.brand{display:flex;align-items:center;gap:.5rem;align-self:center;font-weight:500;color:inherit;text-decoration:none}
+.brand-mark{display:flex;width:1.5rem;height:1.5rem;align-items:center;justify-content:center;
+border-radius:calc(var(--radius)*.8);background:var(--brand);color:var(--brand-foreground)}
+.brand-mark svg{width:1rem;height:1rem}
+.card{display:flex;flex-direction:column;gap:1.5rem;padding:1.5rem 0;border:1px solid var(--border);
+border-radius:var(--radius);background:var(--card);box-shadow:0 1px 2px 0 rgb(0 0 0/.05)}
+.card-header{display:grid;gap:.375rem;padding:0 1.5rem;text-align:center}
+.card-title{font-size:1.25rem;font-weight:600;line-height:1.2}
+.card-description{color:var(--muted-foreground)}
+.card-content{padding:0 1.5rem}
+.prose{display:grid;gap:.75rem}
+.form{display:grid;gap:1.5rem}
+.field{display:grid;gap:.5rem}
+label{font-weight:500;line-height:1;user-select:none}
+input{height:2rem;width:100%;min-width:0;padding:.25rem .625rem;border:1px solid var(--input);
+border-radius:var(--radius);background:var(--input-bg);color:inherit;font:inherit;font-size:1rem;
+outline:none;transition:color .15s,border-color .15s,box-shadow .15s}
+@media (min-width:768px){input{font-size:.875rem}}
+input:focus-visible{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in oklch,var(--ring) 50%,transparent)}
+.button{display:inline-flex;height:2rem;width:100%;align-items:center;justify-content:center;
+padding:0 .625rem;border:1px solid transparent;border-radius:var(--radius);background:var(--primary);
+color:var(--primary-foreground);font:inherit;font-weight:500;white-space:nowrap;text-decoration:none;
+cursor:pointer;outline:none;transition:all .15s}
+.button:hover{background:color-mix(in oklch,var(--primary) 80%,transparent)}
+.button:active{transform:translateY(1px)}
+.button:focus-visible{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in oklch,var(--ring) 50%,transparent)}
+.alert{padding:.75rem 1rem;border:1px solid color-mix(in oklch,var(--danger) 30%,transparent);
+border-radius:var(--radius);background:var(--danger-soft);color:var(--danger)}
+code{padding:0 .3rem;border-radius:calc(var(--radius)*.6);background:var(--muted);
+font:.8125rem ui-monospace,SFMono-Regular,Menlo,monospace}
+"#;
+
+/// The same mark the console's sidebar shows: a candi bentar, the split gate a gapura is.
+const BRAND: &str = "<a class=\"brand\" href=\"/\"><span class=\"brand-mark\">\
+<svg viewBox=\"0 0 24 24\" fill=\"currentColor\" aria-hidden=\"true\">\
+<path d=\"M10.6 22V2H9v3H7.5v4H6v4H4.5v4H3v5z\"/><path d=\"M13.4 22V2H15v3h1.5v4H18v4h1.5v4H21v5z\"/>\
+</svg></span>Gapura console</a>";
+
+/// A whole sign-in page around `content`: shadcn's centred-card login layout with the
+/// console's mark above it. Built by concatenation rather than `format!` so the stylesheet
+/// can keep its braces as written.
+fn auth_page(title: &str, content: &str) -> String {
+    let mut page = String::with_capacity(AUTH_PAGE_STYLE.len() + content.len() + 512);
+    page.push_str(
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>",
+    );
+    page.push_str(title);
+    page.push_str(" \u{2014} gapura console</title><style>");
+    page.push_str(AUTH_PAGE_STYLE);
+    page.push_str("</style></head><body><main>");
+    page.push_str(BRAND);
+    page.push_str(content);
+    page.push_str("</main></body></html>");
+    page
 }
 
 fn now_seconds() -> u64 {
@@ -556,20 +642,22 @@ fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
         "",
         return_to,
     ));
-    let body = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in — gapura console</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:22rem;margin:8rem auto;padding:0 1rem}}
-input{{width:100%;padding:.55rem .7rem;margin:.3rem 0 1rem;box-sizing:border-box}}
-button{{width:100%;padding:.6rem;background:#14532d;color:#fff;border:0;border-radius:.4rem;font-size:1rem;cursor:pointer}}</style>
-</head><body><h1>gapura console</h1>
-<form method="post" action="/auth/login">
+    let body = auth_page(
+        "Sign in",
+        &format!(
+            r#"<div class="card"><div class="card-header">
+<h1 class="card-title">Welcome back</h1>
+<p class="card-description">Sign in with your console account</p>
+</div><div class="card-content">
+<form class="form" method="post" action="/auth/login">
 <input type="hidden" name="state" value="{login_state}">
-<label>Email<input type="text" name="email" autocomplete="username" required></label>
-<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
-</form></body></html>"#
+<div class="field"><label for="email">Email</label>
+<input id="email" type="text" name="email" autocomplete="username" required autofocus></div>
+<div class="field"><label for="password">Password</label>
+<input id="password" type="password" name="password" autocomplete="current-password" required></div>
+<button class="button" type="submit">Sign in</button>
+</form></div></div>"#
+        ),
     );
     Response::builder()
         .status(StatusCode::OK)
@@ -633,11 +721,16 @@ pub async fn login_local(
 }
 
 fn refused_local(message: &str) -> Response {
-    let body = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Sign in failed</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:22rem;margin:8rem auto;padding:0 1rem}}</style>
-</head><body><h1>Not signed in</h1><p>{message}</p><p><a href="/auth/login">Try again</a></p></body></html>"#
+    let body = auth_page(
+        "Sign in failed",
+        &format!(
+            r#"<div class="card"><div class="card-header">
+<h1 class="card-title">Not signed in</h1>
+</div><div class="card-content form">
+<p class="alert" role="alert">{message}</p>
+<a class="button" href="/auth/login">Try again</a>
+</div></div>"#
+        ),
     );
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)

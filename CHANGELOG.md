@@ -18,6 +18,10 @@ means what it usually does, moving from one version below to a later one. Releas
   third party for anything, and CI runs that check. The console now sets a `sidebar_state` cookie
   (path `/`, seven days) remembering whether the sidebar is collapsed, and Ctrl/Cmd+B toggles the
   sidebar in place of the browser's own shortcut; nothing on the server reads the cookie.
+- The sign-in pages look like the console they lead to (#93): the local sign-in form, "Not signed in"
+  and "Signed in — session not stored" now use shadcn's centred-card login layout with the
+  console's mark, tokens and dark mode. They are still server-rendered with their CSS inline, so
+  they keep working when `web/dist` is empty; nothing about the sign-in flow itself changed.
 
 ## 0.2.0 — 2026-09-24
 
