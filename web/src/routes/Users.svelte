@@ -94,7 +94,7 @@
           </span>
           <Tag tone={status.tone}>{status.label}</Tag>
           <span class="hidden text-sm text-muted-foreground @4xl:block">
-            <span class="sr-only">Last sign-in: </span>{@render signedIn(user.last_sign_in_at)}
+            <span class="sr-only">Last sign-in:{' '}</span>{@render signedIn(user.last_sign_in_at)}
           </span>
         </button>
 
@@ -106,8 +106,8 @@
             {#if user.status === 'disabled'}
               <p class="text-muted-foreground">A disabled account holds no role.</p>
             {:else if user.access.length === 0}
-              <!-- The same sentence whether the account is waiting or holds roles elsewhere:
-                   which, is not the reader's to know. -->
+              <!-- The same sentence whether the account is waiting or holds roles elsewhere: the
+                   reader is not told which. -->
               <p class="text-muted-foreground">No role in the workspaces you administer.</p>
             {:else}
               <!-- wrap-anywhere on the workspace and sources cells: a table sizes its columns
