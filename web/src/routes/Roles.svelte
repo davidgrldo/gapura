@@ -19,11 +19,18 @@
 {#await roles}
   <p class="text-muted-foreground">Reading roles…</p>
 {:then answer}
-  <section aria-labelledby="what-roles-do">
-    <h2 id="what-roles-do" class="mb-1 text-base font-semibold">What each role can do</h2>
+  <!-- Plain sections: each table's scrolling region is already a named landmark, and naming the
+       section too would list every name twice. The headings carry the navigation. -->
+  <section>
+    <h2 class="mb-1 text-base font-semibold">What each role can do</h2>
     <p class="mb-3 max-w-2xl text-sm text-muted-foreground">
       Roles are fixed. A person's role in a workspace is the highest one any of their grants gives
-      them there.
+      them there. The console cannot change who holds which role yet.
+    </p>
+    <p class="mb-3 max-w-2xl text-sm text-muted-foreground">
+      Held by counts the accounts holding each role in at least one of the workspaces you
+      administer. An account with different roles in two workspaces counts under both, and a
+      superuser counts only as a superuser.
     </p>
     <div class="rounded-lg border bg-card shadow-xs">
       <Table.Root aria-label="What each role can do" containerProps={region('What each role can do')}>
@@ -39,10 +46,12 @@
         <Table.Body>
           {#each MATRIX as row (row.key)}
             <Table.Row class="hover:bg-transparent">
-              <Table.Cell class="min-w-48 align-top whitespace-normal">
+              <!-- A row header, so a screen reader moving down a column hears which role each
+                   Yes or No belongs to. Restyled from the column header's look to a cell's. -->
+              <Table.Head scope="row" class="h-auto min-w-48 p-2 align-top font-normal whitespace-normal">
                 <span class="font-medium">{row.label}</span>
                 <span class="block text-xs text-muted-foreground">{row.scope}</span>
-              </Table.Cell>
+              </Table.Head>
               {#each row.can as allowed, i (ABILITIES[i])}
                 <Table.Cell class="text-center align-top">
                   {#if allowed}
@@ -60,11 +69,11 @@
     </div>
   </section>
 
-  <section class="mt-8" aria-labelledby="group-mappings">
-    <h2 id="group-mappings" class="mb-1 text-base font-semibold">Group mappings</h2>
+  <section class="mt-8">
+    <h2 class="mb-1 text-base font-semibold">Group mappings</h2>
     <p class="mb-3 max-w-2xl text-sm text-muted-foreground">
-      Everyone the identity provider puts in a group holds that role in that workspace. Only the
-      workspaces you administer are shown.
+      Everyone the identity provider put in a group at their last sign-in holds at least that role
+      in that workspace. Only the workspaces you administer are shown.
     </p>
     {#if answer.mappings.length === 0}
       <p class="text-muted-foreground">No group mappings in the workspaces you administer.</p>
