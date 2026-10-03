@@ -14,6 +14,9 @@ workspace = true
 anyhow = { workspace = true }
 axum = { workspace = true }
 bcrypt = { workspace = true }
+# Store-mode passwords. bcrypt stays for Kubernetes mode's users file, whose hashes operators
+# already hold; argon2id is what new accounts get.
+argon2 = "0.5"
 base64 = { workspace = true }
 clap = { workspace = true }
 hmac = { workspace = true }

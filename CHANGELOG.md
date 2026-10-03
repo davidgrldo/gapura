@@ -8,6 +8,20 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console keeps its accounts in Postgres when it has one. With `DATABASE_URL` set, a local
+  account is a row that signs in with an argon2id password, an OIDC account becomes a row at its
+  first sign-in, and roles come from the role and group bindings there; new Users and Roles pages
+  show them to superusers and to each workspace's admins, who see roles only in the workspaces
+  they administer. The pages only read: in this release a role is granted by writing
+  `role_bindings` or `group_bindings` in SQL. `GAPURA_BOOTSTRAP_USERNAME` and
+  `GAPURA_BOOTSTRAP_PASSWORD` create the first superuser in an empty store and are ignored once
+  any account exists, an SSO one included, so set them before anyone signs in.
+  `--local-users-file` and `--grant` are refused alongside `DATABASE_URL` rather than ignored. A
+  deployment that already sets `DATABASE_URL` for the configuration endpoint moves its console
+  into this mode on upgrade: sessions signed in before it end, and it will not start while it
+  still passes `--local-users-file`, whose users are not imported. The chart does not set
+  `DATABASE_URL` yet. In this mode Overview and Routes are for superusers until they learn about
+  workspaces. `POST /auth/logout` signs out, in either mode.
 - The chart installs the console's local users Secret again: `console.yaml` had no `---` between
   that Secret and the console's ServiceAccount, so the two parsed as one object, the
   ServiceAccount's keys won, and the Secret was never created -- helm and the API server only

@@ -1,0 +1,7 @@
+{
+  "held_by": { "viewer": 1, "editor": 2, "admin": 2, "superuser": 1 },
+  "mappings": [
+    { "group": "payments-dev", "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "editor" },
+    { "group": "storefront-readers", "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "viewer" }
+  ]
+}

@@ -72,3 +72,14 @@ export const TONES = {
   warn: 'bg-warning-soft text-warning',
   idle: 'bg-muted text-muted-foreground',
 }
+
+// The statuses crates/gapura-control/src/access_api.rs gives an account, as the Users screen
+// words and colours them. check.mjs holds the keys to the server's `Status` and the tones to
+// TONES, as it does for STATES. `waiting` is worked out from the roles the reader can see, so
+// to a workspace admin it means no role in their workspaces, which is not always no role at
+// all; "No role" is true from either seat, where "Waiting for access" would not be.
+export const ACCOUNT_STATUS = {
+  active: { label: 'Active', tone: 'ok' },
+  waiting: { label: 'No role', tone: 'warn' },
+  disabled: { label: 'Disabled', tone: 'idle' },
+}

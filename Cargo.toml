@@ -58,3 +58,12 @@ unsafe_code = "forbid"
 # Workspace crates keep full debuginfo for backtraces.
 [profile.dev.package."*"]
 debug = false
+
+# argon2id is slow on purpose, and unoptimised it is slow enough to turn every sign-in test into
+# seconds. Optimising only these two crates keeps debug builds honest about its real cost
+# without building the rest of the tree in release.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

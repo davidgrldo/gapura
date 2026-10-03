@@ -5,10 +5,11 @@
 // exceptional case, and a screen that forgot to handle it would render an error page where
 // the right answer is a sign-in.
 
-// Where the server begins the OpenID Connect authorization-code flow. Named once so that a
-// screen can never invent a slightly different path and quietly get the 404 fallback. The
-// query carries the screen the reader was on, so a session that ran out mid-task returns
-// them there instead of to the overview (#61); the server decides what is safe to honour.
+// Where the server begins sign-in: the identity provider's authorization-code flow, or the
+// console's own form, which store mode always shows first. Named once so that a screen cannot
+// invent a slightly different path and quietly get the 404 fallback. The query carries the
+// screen the reader was on, so a session that ran out mid-task returns them there instead of
+// to the overview (#61); the server decides what is safe to honour.
 const LOGIN = '/auth/login'
 
 function loginUrl() {
@@ -78,6 +79,18 @@ export class SessionNotSticking extends Error {
 }
 
 /**
+ * Thrown on a 403: the reader is signed in, and this is not theirs to see. Its own type so a
+ * screen can say exactly that, instead of reporting it as a backend that failed.
+ */
+export class Forbidden extends Error {
+  constructor(path) {
+    super('You do not have access to this page.')
+    this.name = 'Forbidden'
+    this.path = path
+  }
+}
+
+/**
  * Go to the sign-in flow because the reader asked to. This is the only way a tab gets a
  * second attempt: an automatic one is precisely what was looping, so every attempt after the
  * first has to be one a person pressed — typically after changing the cause, by reopening the
@@ -96,8 +109,8 @@ export function retrySignIn() {
 
 /**
  * GET `path` as JSON, signed in. Resolves with the parsed body, redirects the browser to the
- * sign-in flow on the first 401, throws `SessionNotSticking` on a later one, and throws on
- * anything else so the caller's `{:catch}` can say what went wrong.
+ * sign-in flow on the first 401, throws `SessionNotSticking` on a later one, throws `Forbidden`
+ * on a 403, and throws on anything else so the caller's `{:catch}` can say what went wrong.
  */
 export async function get(path) {
   // `same-origin` rather than the default `omit`: the session lives in a cookie the server
@@ -126,6 +139,13 @@ export async function get(path) {
     // Never settling leaves the screen exactly as the reader left it until the new document
     // arrives, instead of flashing a parse error against a body that was never JSON.
     await new Promise(() => {})
+  }
+
+  if (response.status === 403) {
+    // A 403 proves the session works — the server knew who was asking — so the next 401 in
+    // this tab is an ordinary expiry again, not a sign-in that failed to stick.
+    forgetSentToSignIn()
+    throw new Forbidden(path)
   }
 
   if (!response.ok) {
