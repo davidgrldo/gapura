@@ -56,16 +56,21 @@ pub async fn verify_or_dummy(password: String, stored: Option<String>) -> bool {
     if password.len() > MAX_PASSWORD_BYTES {
         return false;
     }
-    let Ok(_permit) = CHECKING.acquire().await else {
+    let Ok(permit) = CHECKING.acquire().await else {
         return false;
     };
     tokio::task::spawn_blocking(move || {
+        // The permit travels with the work. Held by the request instead, it would be returned
+        // the moment a client hung up mid-check, while the hashing it was counting carried on.
+        let _permit = permit;
         verify(&password, stored.as_deref().unwrap_or(DUMMY.as_str()))
     })
     .await
     .unwrap_or(false)
 }
 
+/// Long enough for any name a person or a team uses, and well inside what a unique index on
+/// the column can hold.
 pub const MAX_USERNAME_CHARS: usize = 64;
 
 /// A letter or digit first, then letters, digits and `.` `_` `~` `-`, at most
@@ -178,7 +183,10 @@ mod tests {
         assert!(verify_or_dummy("correct horse battery".into(), Some(stored.clone())).await);
         assert!(!verify_or_dummy("wrong horse battery".into(), Some(stored)).await);
         assert!(!verify_or_dummy("correct horse battery".into(), None).await);
-        assert!(!verify_or_dummy("x".repeat(MAX_PASSWORD_BYTES + 1), None).await);
+        // Refused for its length alone: the hash below would match it without the cap.
+        let long = "x".repeat(MAX_PASSWORD_BYTES + 1);
+        let long_hash = hash(&long).unwrap();
+        assert!(!verify_or_dummy(long, Some(long_hash)).await);
     }
 
     #[test]
