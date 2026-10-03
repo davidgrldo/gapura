@@ -43,16 +43,20 @@
   <!-- The same card, rows and focus ring as Routes: role="list" because Tailwind's base styles
        take the bullets off and Safari then stops announcing a list; overflow-hidden keeps a
        row's hover inside the rounded corners, which is why the ring is inset and the detail
-       breaks long words. -->
-  <ul class="divide-y overflow-hidden rounded-lg border bg-card shadow-xs" role="list">
+       breaks long words. @container: the columns below are chosen by the list's own width, not
+       the window's, which the sidebar shares. -->
+  <ul class="@container divide-y overflow-hidden rounded-lg border bg-card shadow-xs" role="list">
     {#each rows as user (user.id)}
       <li>
-        <!-- From `sm` up: caret, account, access, status and last sign-in, with fixed status
-             and sign-in columns so they line up across rows that are each their own grid.
-             Below `sm` only the account and its status stay; the rest is in the opened row. -->
+        <!-- From a 56rem list (@4xl) up: caret, account, access, status and last sign-in, with
+             fixed status and sign-in columns so they line up across rows that are each their own
+             grid. The fixed columns, gaps and padding take about 27rem and the account up to 14rem,
+             which leaves the roles at least 15rem; any narrower and they would run under the
+             status. Below
+             that only the account and its status stay; the rest is in the opened row. -->
         <button
           type="button"
-          class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[1.25rem_minmax(0,14rem)_minmax(0,1fr)_10rem_11rem]"
+          class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring @4xl:grid-cols-[1.25rem_minmax(0,14rem)_minmax(0,1fr)_10rem_11rem]"
           aria-expanded={open[user.id] === true}
           onclick={() => toggle(user.id)}
         >
@@ -61,11 +65,13 @@
             aria-hidden="true"
           />
           <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span class="text-sm font-medium break-words">{user.name}</span>
+            <!-- wrap-anywhere rather than break-words: in a flex row only a break the browser
+                 counts when sizing lets a long address shrink instead of running past the cell. -->
+            <span class="text-sm font-medium wrap-anywhere">{user.name}</span>
             <Tag>{user.method === 'oidc' ? 'SSO' : 'Local'}</Tag>
             {#if user.superuser}<Tag>Superuser</Tag>{/if}
           </span>
-          <span class="hidden min-w-0 flex-wrap gap-1.5 sm:flex">
+          <span class="hidden min-w-0 flex-wrap gap-1.5 @4xl:flex">
             {#each user.access as held (held.workspace_id)}
               <Tag>{held.workspace} · {ROLE_LABEL[held.role]}</Tag>
             {:else}
@@ -73,14 +79,14 @@
             {/each}
           </span>
           <Tag tone={STATUS[user.status].tone}>{STATUS[user.status].label}</Tag>
-          <span class="hidden text-sm text-muted-foreground sm:block">{lastSignIn(user.last_sign_in_at)}</span>
+          <span class="hidden text-sm text-muted-foreground @4xl:block">{lastSignIn(user.last_sign_in_at)}</span>
         </button>
 
         {#if open[user.id]}
           <!-- pl-11 starts the detail under the account name: the button's px-3, plus the
                1.25rem caret column, plus gap-3. -->
           <div class="pb-4 pl-11 pr-3 text-sm break-words">
-            <p class="mb-2 text-muted-foreground sm:hidden">Last sign-in: {lastSignIn(user.last_sign_in_at)}</p>
+            <p class="mb-2 text-muted-foreground @4xl:hidden">Last sign-in: {lastSignIn(user.last_sign_in_at)}</p>
             {#if user.access.length === 0}
               <!-- One sentence for every empty list: whether the account holds a role somewhere
                    the reader does not administer is not the reader's to know. -->
