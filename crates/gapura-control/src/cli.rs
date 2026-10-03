@@ -13,7 +13,7 @@ pub struct Args {
     /// Postgres for the store that owns the configuration. With it, the console keeps its
     /// accounts and roles there too (store mode): --local-users-file and --grant are refused,
     /// and the first superuser comes from GAPURA_BOOTSTRAP_USERNAME and
-    /// GAPURA_BOOTSTRAP_PASSWORD, which are read only while the store has no account at all.
+    /// GAPURA_BOOTSTRAP_PASSWORD, which are used only by a start that finds no account at all.
     /// Absent, the control plane runs read-only over Kubernetes, which is the mode the console
     /// ships in today, and the configuration endpoint is not served.
     // `hide_env_values`, because the URL usually carries the database password, and `--help`
@@ -96,9 +96,10 @@ pub struct Args {
     #[arg(long = "oidc-scope")]
     pub oidc_scopes: Vec<String>,
 
-    /// How long a session lasts, in seconds. Short, because nothing is stored and so a
-    /// session cannot be revoked before it expires; not so short that an identity-provider
-    /// outage throws people out of a console they were already reading.
+    /// How long a session lasts, in seconds. Short, because without DATABASE_URL nothing is
+    /// stored and so a session cannot be revoked before it expires (with it, a disabled
+    /// account is refused at its next request); not so short that an identity-provider outage
+    /// throws people out of a console they were already reading.
     #[arg(long, default_value_t = 60 * 60)]
     pub session_lifetime_seconds: u64,
 }

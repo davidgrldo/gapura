@@ -18,9 +18,10 @@ means what it usually does, moving from one version below to a later one. Releas
   any account exists, an SSO one included, so set them before anyone signs in.
   `--local-users-file` and `--grant` are refused alongside `DATABASE_URL` rather than ignored. A
   deployment that already sets `DATABASE_URL` for the configuration endpoint moves its console
-  into this mode on upgrade: sessions signed in before it end, and its users file is refused
-  rather than imported. The chart does not set it yet. In this mode Overview and Routes are for
-  superusers until they learn about workspaces. `POST /auth/logout` signs out, in either mode.
+  into this mode on upgrade: sessions signed in before it end, and it will not start while it
+  still passes `--local-users-file`, whose users are not imported. The chart does not set
+  `DATABASE_URL` yet. In this mode Overview and Routes are for superusers until they learn about
+  workspaces. `POST /auth/logout` signs out, in either mode.
 - The chart installs the console's local users Secret again: `console.yaml` had no `---` between
   that Secret and the console's ServiceAccount, so the two parsed as one object, the
   ServiceAccount's keys won, and the Secret was never created -- helm and the API server only

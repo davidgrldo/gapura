@@ -7,8 +7,8 @@
   import CaretRight from 'phosphor-svelte/lib/CaretRight'
 
   // `/api/users` lists every account, each with its roles trimmed to the workspaces the reader
-  // administers, sorted with the accounts holding no role there first; nothing here filters or
-  // sorts.
+  // administers, sorted with the enabled accounts that hold no role there first; nothing here
+  // filters or sorts.
   const users = get('/api/users')
 
   // Which rows the reader has opened, keyed by account id, as on the Routes screen.

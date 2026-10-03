@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button/index.js'
 
   // Every screen fails in the same few ways, and one of them takes several sentences to
-  // explain. It lives here rather than in either screen for the same reason the state badge
+  // explain. It lives here rather than in any one screen for the same reason the state badge
   // does: the reader must not be told a different story about the same failure depending on
   // which screen happened to notice it. `what` — the noun the screen was loading — is the
   // only part that legitimately differs, so it is the only part a screen passes.

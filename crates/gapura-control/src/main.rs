@@ -80,25 +80,29 @@ async fn main() -> anyhow::Result<()> {
         )?,
         gapura_control::login::AuthMode::Local => gapura_control::login::Oidc::unused()?,
     });
+    // With `DATABASE_URL` set the console is in store mode: its accounts and roles are rows
+    // there, and the two flags that describe them in Kubernetes mode are refused rather than
+    // ignored -- an operator who passed them expected them to mean something. Refused before
+    // the Kubernetes client is built, so a stray flag is the error reported, not whatever the
+    // client finds wrong first.
+    if store_mode {
+        anyhow::ensure!(
+            args.local_users_file.is_none(),
+            "--local-users-file cannot be used with DATABASE_URL: in store mode the console's \
+             accounts are rows in Postgres"
+        );
+        anyhow::ensure!(
+            args.grants.is_empty(),
+            "--grant cannot be used with DATABASE_URL: in store mode access comes from role and \
+             group bindings in Postgres"
+        );
+    }
     // The session key and the Kubernetes client are part of "every flag" too: a key Secret that
     // resolves to nothing has to stop the process before the store is migrated, not after.
     let session_key = Arc::from(gapura_control::session::session_key()?);
     let source = Arc::new(gapura_control::kube_source::Source::from_environment().await?);
-    // With `DATABASE_URL` set the console is in store mode: its accounts and roles are rows
-    // there, and the two flags that describe them in Kubernetes mode are refused rather than
-    // ignored -- an operator who passed them expected them to mean something.
     let store = match &args.database_url {
         Some(url) => {
-            anyhow::ensure!(
-                args.local_users_file.is_none(),
-                "--local-users-file cannot be used with DATABASE_URL: in store mode the console's \
-                 accounts are rows in Postgres"
-            );
-            anyhow::ensure!(
-                args.grants.is_empty(),
-                "--grant cannot be used with DATABASE_URL: in store mode access comes from role \
-                 and group bindings in Postgres"
-            );
             let store = Arc::new(gapura_control::store::Store::connect(url).await?);
             store.migrate().await?;
             gapura_control::bootstrap::run(&store).await?;
