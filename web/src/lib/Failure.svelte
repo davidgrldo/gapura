@@ -1,5 +1,5 @@
 <script>
-  import { SessionNotSticking, retrySignIn } from './api.js'
+  import { Forbidden, SessionNotSticking, retrySignIn } from './api.js'
   import { Button } from '$lib/components/ui/button/index.js'
 
   // Both screens fail in the same two ways, and one of the two takes several sentences to
@@ -36,6 +36,12 @@
       <Button variant="outline" size="sm" onclick={retrySignIn}>Try signing in again</Button>
     </p>
   </div>
+{:else if error instanceof Forbidden}
+  <!-- Not a failure, so not in the warning colour: the console worked, and the answer is that
+       this is not the reader's to see. -->
+  <p class="max-w-2xl rounded-lg border px-4 py-3 text-sm text-muted-foreground">
+    You do not have access to {what}.
+  </p>
 {:else}
   <p class="max-w-2xl rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm">
     Could not load {what}: {error.message}

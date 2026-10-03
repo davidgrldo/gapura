@@ -108,8 +108,8 @@ export function retrySignIn() {
 
 /**
  * GET `path` as JSON, signed in. Resolves with the parsed body, redirects the browser to the
- * sign-in flow on the first 401, throws `SessionNotSticking` on a later one, and throws on
- * anything else so the caller's `{:catch}` can say what went wrong.
+ * sign-in flow on the first 401, throws `SessionNotSticking` on a later one, throws `Forbidden`
+ * on a 403, and throws on anything else so the caller's `{:catch}` can say what went wrong.
  */
 export async function get(path) {
   // `same-origin` rather than the default `omit`: the session lives in a cookie the server
@@ -141,7 +141,7 @@ export async function get(path) {
   }
 
   if (response.status === 403) {
-    // A 403 proves the session works -- the server knew who was asking -- so the next 401 in
+    // A 403 proves the session works — the server knew who was asking — so the next 401 in
     // this tab is an ordinary expiry again, not a sign-in that failed to stick.
     forgetSentToSignIn()
     throw new Forbidden(path)

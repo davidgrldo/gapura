@@ -2,7 +2,7 @@
 // answers. It exists because the Rust tests prove the API and nothing proves the page.
 import { readdirSync, readFileSync } from 'node:fs'
 import { STATES, TONES } from './src/lib/states.js'
-import { ROLES } from './src/lib/roles.js'
+import { ABILITIES, MATRIX, ROLE_LABEL, ROLES } from './src/lib/roles.js'
 
 const html = readFileSync('dist/index.html', 'utf8')
 if (!html.includes('<div id="app"')) throw new Error('dist/index.html lost its mount point')
@@ -153,17 +153,26 @@ console.log('ok: the console asks no third party for anything it needs to render
 // The console's roles are the store's roles, read from the migrations for the reason the states
 // are read from rows.rs above: a role added in Postgres and forgotten here has to fail in this
 // file. Every migration is read, and one that alters role_name is refused outright rather than
-// half understood, because this parser only reads the `create`.
+// half understood, because this parser only reads the `create`. Both patterns accept the name
+// schema-qualified or quoted, the other spellings Postgres takes, so neither can be stepped
+// round by writing `public.role_name`.
 const MIGRATIONS = '../crates/gapura-control/migrations'
-const migrations = readdirSync(MIGRATIONS)
+const ROLE_NAME = String.raw`(?:\w+\.)?"?role_name"?`
+const migrationFiles = readdirSync(MIGRATIONS)
   .filter((file) => file.endsWith('.sql'))
   .sort()
+for (const file of migrationFiles) {
+  const sql = readFileSync(`${MIGRATIONS}/${file}`, 'utf8')
+  if (new RegExp(String.raw`alter\s+type\s+${ROLE_NAME}(?!\w)`, 'i').test(sql)) {
+    throw new Error(`${MIGRATIONS}/${file} alters role_name, which this check cannot read yet`)
+  }
+}
+const migrations = migrationFiles
   .map((file) => readFileSync(`${MIGRATIONS}/${file}`, 'utf8'))
   .join('\n')
-if (/alter\s+type\s+role_name/i.test(migrations)) {
-  throw new Error(`${MIGRATIONS}: a migration alters role_name, which this check cannot read yet`)
-}
-const declaredRoles = migrations.match(/create\s+type\s+role_name\s+as\s+enum\s*\(([^)]*)\)/i)
+const declaredRoles = migrations.match(
+  new RegExp(String.raw`create\s+type\s+${ROLE_NAME}\s+as\s+enum\s*\(([^)]*)\)`, 'i'),
+)
 if (!declaredRoles) {
   throw new Error(`${MIGRATIONS}: no "create type role_name" to read the roles from`)
 }
@@ -173,5 +182,28 @@ if (storeRoles.join() !== ROLES.join()) {
     `web/src/lib/roles.js lists ${ROLES.join(', ')} but the store declares ` +
       `${storeRoles.join(', ')}; they must match, in the same rising order`,
   )
+}
+// What the screens draw from: a row of the matrix for each role and for superuser, in the
+// same order, and a tick for every ability. `can` is matched to ABILITIES by position, so a
+// row of the wrong length would shift every tick after the gap without a word.
+const matrixKeys = MATRIX.map((row) => row.key)
+if (matrixKeys.join() !== [...ROLES, 'superuser'].join()) {
+  throw new Error(
+    `web/src/lib/roles.js's MATRIX has rows ${matrixKeys.join(', ')}; it needs one per role, ` +
+      `in order, then superuser`,
+  )
+}
+for (const row of MATRIX) {
+  if (row.can.length !== ABILITIES.length) {
+    throw new Error(
+      `web/src/lib/roles.js's ${row.key} row has ${row.can.length} ticks for ` +
+        `${ABILITIES.length} abilities`,
+    )
+  }
+}
+for (const role of ROLES) {
+  if (!ROLE_LABEL[role]) {
+    throw new Error(`web/src/lib/roles.js has no label for the role ${role}`)
+  }
 }
 console.log(`ok: the console knows the ${storeRoles.length} roles the store declares`)
