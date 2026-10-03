@@ -110,9 +110,11 @@
                    which, is not the reader's to know. -->
               <p class="text-muted-foreground">No role in the workspaces you administer.</p>
             {:else}
-              <!-- wrap-anywhere: a table sizes its columns from the longest word, and a long
-                   group name would otherwise push the table past the card, which clips it. -->
-              <table class="w-full max-w-2xl text-left wrap-anywhere">
+              <!-- wrap-anywhere on the workspace and sources cells: a table sizes its columns
+                   from the longest word, and a long group name would otherwise push the table
+                   past the card, which clips it. Not on the headings or the role, whose words
+                   then set each column's least width, so short words are not split as well. -->
+              <table class="w-full max-w-2xl text-left">
                 <caption class="sr-only">Roles {user.name} holds in the workspaces you administer</caption>
                 <thead class="text-muted-foreground">
                   <tr>
@@ -124,9 +126,9 @@
                 <tbody>
                   {#each user.access as held (held.workspace_id)}
                     <tr class="border-t">
-                      <td class="py-1.5 pr-4">{held.workspace}</td>
+                      <td class="py-1.5 pr-4 wrap-anywhere">{held.workspace}</td>
                       <td class="py-1.5 pr-4 font-medium">{ROLE_LABEL[held.role]}</td>
-                      <td class="py-1.5">{held.sources.map(source).join(', ')}</td>
+                      <td class="py-1.5 wrap-anywhere">{held.sources.map(source).join(', ')}</td>
                     </tr>
                   {/each}
                 </tbody>
