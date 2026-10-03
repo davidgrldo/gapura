@@ -406,3 +406,340 @@ async fn into_an_empty_table_an_invalid_pair_stops_the_start() {
     assert!(refused.is_err(), "a password the sign-in form cannot send");
     assert_eq!(store.user_count().await.unwrap(), 0);
 }
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use gapura_control::session::{encode, Session};
+use gapura_control::state::AppState;
+use std::time::Duration;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+/// The console's router over `store`, with readers pointed at nothing: these tests are about
+/// accounts, and Overview answering "unreachable" is all they need from the gateway.
+fn console(store: Arc<Store>, auth_mode: gapura_control::login::AuthMode) -> axum::Router {
+    gapura_control::api::router_with(AppState {
+        mapping: Arc::new(Default::default()),
+        session_key: Arc::from(KEY.to_vec()),
+        source: Arc::new(gapura_control::kube_source::Source::new(
+            "http://127.0.0.1:1".to_string(),
+        )),
+        admin: Arc::new(gapura_control::served::Admin::new("http://127.0.0.1:1")),
+        controller_name: Arc::new("gapura.dev/controller".to_string()),
+        oidc: Arc::new(gapura_control::login::Oidc::unused().unwrap()),
+        auth_mode,
+        local_users: Default::default(),
+        pending: Default::default(),
+        session_lifetime: Duration::from_secs(3600),
+        store: Some(store),
+    })
+}
+
+fn cookie(subject: &str) -> String {
+    format!(
+        "{}={}",
+        gapura_control::login::COOKIE_NAME,
+        encode(
+            &Session {
+                subject: subject.to_string(),
+                groups: vec![],
+                expires_at: u64::MAX
+            },
+            KEY
+        )
+    )
+}
+
+async fn call(app: &axum::Router, path: &str, as_: Option<Uuid>) -> (StatusCode, String) {
+    let mut req = Request::builder().uri(path);
+    if let Some(id) = as_ {
+        req = req.header("cookie", cookie(&id.to_string()));
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+fn json(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
+}
+
+const PASSWORD: &str = "correct horse battery";
+
+/// - `root`: superuser.
+/// - `pat`: admin of payments.
+/// - `vic`: viewer of payments.
+/// - `wes`: no grants, so waiting.
+/// - `dee`: viewer of default, but disabled.
+/// - `oli`: OIDC, a direct viewer of payments and in `payments-dev`, who are editors of payments.
+/// - Group mappings: `payments-dev` is editor of payments, `default-readers` is viewer of default.
+struct Seed {
+    root: Uuid,
+    pat: Uuid,
+    vic: Uuid,
+    wes: Uuid,
+    dee: Uuid,
+    oli: Uuid,
+    default: Uuid,
+    payments: Uuid,
+}
+
+async fn seed(store: &Store) -> Seed {
+    let db = store.client().await.unwrap();
+    let hash = gapura_control::password::hash(PASSWORD).unwrap();
+    let default: Uuid = db
+        .query_one("select id from workspaces where name = 'default'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let payments: Uuid = db
+        .query_one(
+            "insert into workspaces (name) values ('payments') returning id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let mut local = std::collections::HashMap::new();
+    for (name, superuser, disabled) in [
+        ("root", true, false),
+        ("pat", false, false),
+        ("vic", false, false),
+        ("wes", false, false),
+        ("dee", false, true),
+    ] {
+        let id: Uuid = db
+            .query_one(
+                "insert into users (username, password_hash, superuser, disabled_at)
+                 values ($1, $2, $3, case when $4 then now() end) returning id",
+                &[&name, &hash, &superuser, &disabled],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        local.insert(name, id);
+    }
+    let oli = store
+        .upsert_oidc_user(
+            "https://id.example",
+            "s-oli",
+            "oli",
+            &["payments-dev".to_string()],
+        )
+        .await
+        .unwrap()
+        .id;
+    for (user, workspace, role) in [
+        (local["pat"], payments, "admin"),
+        (local["vic"], payments, "viewer"),
+        (local["dee"], default, "viewer"),
+        (oli, payments, "viewer"),
+    ] {
+        db.execute(
+            "insert into role_bindings (user_id, workspace_id, role) values ($1, $2, $3::text::role_name)",
+            &[&user, &workspace, &role],
+        )
+        .await
+        .unwrap();
+    }
+    for (group, workspace, role) in [
+        ("payments-dev", payments, "editor"),
+        ("default-readers", default, "viewer"),
+    ] {
+        db.execute(
+            "insert into group_bindings (group_name, workspace_id, role) values ($1, $2, $3::text::role_name)",
+            &[&group, &workspace, &role],
+        )
+        .await
+        .unwrap();
+    }
+    Seed {
+        root: local["root"],
+        pat: local["pat"],
+        vic: local["vic"],
+        wes: local["wes"],
+        dee: local["dee"],
+        oli,
+        default,
+        payments,
+    }
+}
+
+#[tokio::test]
+async fn me_tells_each_account_what_it_holds() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+
+    let root = json(&call(&app, "/api/me", Some(s.root)).await.1);
+    assert_eq!(root["mode"], "store");
+    assert_eq!(root["superuser"], true);
+    assert_eq!(root["roles"].as_array().unwrap().len(), 2);
+    assert_eq!(root["grantable"].as_array().unwrap().len(), 2);
+
+    let pat = json(&call(&app, "/api/me", Some(s.pat)).await.1);
+    assert_eq!(pat["grantable"], serde_json::json!([s.payments]));
+    assert_eq!(pat["roles"][0]["role"], "admin");
+
+    let vic = json(&call(&app, "/api/me", Some(s.vic)).await.1);
+    assert_eq!(vic["grantable"], serde_json::json!([]));
+    assert_eq!(vic["waiting"], false);
+    assert_eq!(vic["roles"][0]["role"], "viewer");
+
+    let wes = json(&call(&app, "/api/me", Some(s.wes)).await.1);
+    assert_eq!(wes["waiting"], true);
+    assert_eq!(wes["roles"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_disabled_unknown_or_foreign_session_is_signed_out() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    assert_eq!(
+        call(&app, "/api/me", Some(s.dee)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&app, "/api/me", Some(Uuid::new_v4())).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&app, "/api/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // A Kubernetes-mode session names an email, not an account id.
+    let foreign = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/me")
+                .header("cookie", cookie("a@example.test"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_workspace_admin_sees_every_account_but_roles_only_in_their_workspace() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    let (status, body) = call(&app, "/api/users", Some(s.pat)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains(&s.default.to_string()),
+        "the default workspace leaked to an admin of payments only: {body}"
+    );
+    let users = json(&body);
+    let users = users.as_array().unwrap();
+    assert_eq!(users.len(), 6, "every account is listed");
+    assert_eq!(users[0]["name"], "wes", "waiting accounts come first");
+    assert_eq!(users[0]["status"], "waiting");
+    let by_name = |name: &str| users.iter().find(|u| u["name"] == name).unwrap().clone();
+    assert_eq!(by_name("dee")["status"], "disabled");
+    let root = by_name("root");
+    assert_eq!(root["access"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        root["access"][0]["sources"],
+        serde_json::json!([{"kind": "superuser"}])
+    );
+    let oli = by_name("oli");
+    assert_eq!(oli["method"], "oidc");
+    assert_eq!(oli["access"][0]["role"], "editor");
+    assert_eq!(
+        oli["access"][0]["sources"],
+        serde_json::json!([{"kind": "direct"}, {"kind": "group", "name": "payments-dev"}])
+    );
+
+    // The superuser sees the default workspace too.
+    let all = json(&call(&app, "/api/users", Some(s.root)).await.1);
+    let root_seen_by_root = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["name"] == "root")
+        .unwrap()
+        .clone();
+    assert_eq!(root_seen_by_root["access"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn roles_are_counted_and_mapped_within_the_callers_workspaces() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    let pat = json(&call(&app, "/api/roles", Some(s.pat)).await.1);
+    assert_eq!(
+        pat["mappings"],
+        serde_json::json!([{
+            "group": "payments-dev", "workspace_id": s.payments, "workspace": "payments", "role": "editor"
+        }])
+    );
+    assert_eq!(
+        pat["held_by"],
+        serde_json::json!({"viewer": 1, "editor": 1, "admin": 1, "superuser": 1})
+    );
+    let root = json(&call(&app, "/api/roles", Some(s.root)).await.1);
+    assert_eq!(root["mappings"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn the_access_pages_are_refused_to_anyone_who_administers_nothing() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    for who in [s.vic, s.wes, s.oli] {
+        for path in ["/api/users", "/api/roles"] {
+            assert_eq!(
+                call(&app, path, Some(who)).await.0,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_gateway_screens_are_for_superusers_in_store_mode() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    let (status, body) = call(&app, "/api/overview", Some(s.root)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["reachable"], false);
+    for who in [s.pat, s.vic, s.wes] {
+        assert_eq!(
+            call(&app, "/api/overview", Some(who)).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, "/api/routes", Some(who)).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+}

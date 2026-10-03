@@ -851,6 +851,11 @@ pub async fn callback(
     Ok(response)
 }
 
+/// `POST /auth/logout`. The cookie clearing comes with the store-mode sign-in work.
+pub async fn logout() -> axum::response::Response {
+    axum::http::StatusCode::NOT_IMPLEMENTED.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

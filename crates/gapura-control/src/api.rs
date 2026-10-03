@@ -5,7 +5,10 @@ use crate::scope::{self, Scope};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::{routing::get, Json, Router};
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
 
 pub fn router_with(state: AppState) -> Router {
     Router::new()
@@ -15,6 +18,10 @@ pub fn router_with(state: AppState) -> Router {
             get(crate::login::begin).post(crate::login::login_local),
         )
         .route("/auth/callback", get(crate::login::callback))
+        .route("/auth/logout", post(crate::login::logout))
+        .route("/api/me", get(crate::access_api::me))
+        .route("/api/users", get(crate::access_api::users))
+        .route("/api/roles", get(crate::access_api::roles))
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
         // Explicit routes above always win a match first, so this only ever runs for a path
@@ -28,7 +35,7 @@ pub fn router_with(state: AppState) -> Router {
 /// Pulls the signed session out of the `gapura_session` cookie. Any failure — no
 /// cookie, no signature, a bad signature, an expired session — collapses to `None`;
 /// the caller turns that into a uniform 401 rather than leaking which case it was.
-fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Session> {
+pub(crate) fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Session> {
     // Every `cookie` field, not just the first: HTTP/2 lets a client or an intermediary
     // split the cookies across several of them (RFC 9113 section 8.2.3) and hyper leaves
     // them as it found them, so a session that landed in the second field would otherwise
@@ -135,12 +142,35 @@ mod session_cookie_tests {
     }
 }
 
+/// Which namespaces the caller may read on the screens that read Kubernetes.
+///
+/// In store mode those screens know nothing about workspaces, so they are a superuser's until
+/// store-backed versions exist. Anyone else is refused outright, rather than shown a list
+/// filtered by a namespace mapping store mode does not have.
+async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, StatusCode> {
+    match &state.store {
+        None => {
+            let session =
+                session_from(headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
+            Ok(scope::visible(&session.groups, &state.mapping))
+        }
+        Some(store) => {
+            let caller =
+                crate::access_api::store_caller(store, headers, &state.session_key).await?;
+            if caller.me.superuser {
+                Ok(Scope::AllNamespaces)
+            } else {
+                Err(StatusCode::FORBIDDEN)
+            }
+        }
+    }
+}
+
 async fn routes(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Row>>, StatusCode> {
-    let session = session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
-    let visible = scope::visible(&session.groups, &state.mapping);
+    let visible = namespaces_for(&state, &headers).await?;
     let declared = state
         .source
         .routes(&state.controller_name)
@@ -210,7 +240,7 @@ async fn overview(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Overview>, StatusCode> {
-    let session = session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
+    let visible = namespaces_for(&state, &headers).await?;
     // Same rule as `/api/routes`: a gateway that cannot be reached is not a failed request,
     // it is the answer. Collapsing the error to `None` here, rather than propagating it,
     // is what keeps this handler from turning "the gateway is down" into a 5xx for a page
@@ -227,7 +257,7 @@ async fn overview(
         // already the whole story, and going on to ask the API server would only add a
         // second way for this response to fail at telling it.
         None => Vec::new(),
-        Some(s) => match scope::visible(&session.groups, &state.mapping) {
+        Some(s) => match visible {
             // A grant of every namespace already sees every route, so it can see every
             // Gateway too — and it is the only caller who needs to notice a Gateway with
             // no routes attached to it at all, which filtering would hide from everyone.
@@ -319,6 +349,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn me_in_kubernetes_mode_says_only_the_mode_and_still_needs_a_session() {
+        let anonymous = router_with(state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/me")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let session = crate::session::Session {
+            subject: "alice".into(),
+            groups: vec![],
+            expires_at: u64::MAX,
+        };
+        let cookie = format!(
+            "{}={}",
+            crate::login::COOKIE_NAME,
+            crate::session::encode(&session, b"test key")
+        );
+        let response = router_with(state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/me")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"mode":"kubernetes"}"#);
     }
 
     #[tokio::test]
