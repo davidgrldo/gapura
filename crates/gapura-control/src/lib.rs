@@ -4,6 +4,7 @@
 //! from integration tests, and so `pub` means something: in a binary crate it was a
 //! promise nothing could check.
 
+pub mod access;
 pub mod api;
 pub mod assets;
 pub mod config_api;
