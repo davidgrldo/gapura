@@ -7,6 +7,7 @@
 pub mod access;
 pub mod api;
 pub mod assets;
+pub mod bootstrap;
 pub mod config_api;
 pub mod declared;
 pub mod kube_source;

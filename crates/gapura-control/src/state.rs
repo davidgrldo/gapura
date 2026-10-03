@@ -4,6 +4,7 @@ use crate::kube_source::Source;
 use crate::login::{AuthMode, LocalUsers, Oidc, PendingLogins};
 use crate::scope::Mapping;
 use crate::served::Admin;
+use crate::store::Store;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,4 +28,7 @@ pub struct AppState {
     pub pending: PendingLogins,
     /// How long a session minted now stays valid, in the cookie and in its `Max-Age`.
     pub session_lifetime: Duration,
+    /// Set in store mode, when `DATABASE_URL` is: accounts and roles are rows there, and every
+    /// request reads its caller back from it. `None` is Kubernetes mode.
+    pub store: Option<Arc<Store>>,
 }

@@ -303,6 +303,7 @@ mod tests {
             oidc: std::sync::Arc::new(test_oidc()),
             pending: crate::login::PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
+            store: None,
         }
     }
 
@@ -442,6 +443,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         oidc: Arc::new(tests::test_oidc()),
         pending: crate::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(3600),
+        store: None,
     }
 }
 
@@ -682,6 +684,7 @@ mod overview_tests {
             oidc: Arc::new(tests::test_oidc()),
             pending: crate::login::PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
+            store: None,
         }
     }
 

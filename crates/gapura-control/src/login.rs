@@ -1088,6 +1088,7 @@ mod against_a_stub_provider {
             ),
             pending: PendingLogins::default(),
             session_lifetime: Duration::from_secs(3600),
+            store: None,
         }
     }
 
@@ -1541,6 +1542,7 @@ mod local_login_flow_tests {
             ),
             pending: PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
+            store: None,
         }
     }
 
