@@ -72,3 +72,12 @@ export const TONES = {
   warn: 'bg-warning-soft text-warning',
   idle: 'bg-muted text-muted-foreground',
 }
+
+// The three statuses crates/gapura-control/src/access_api.rs gives an account, as the Users
+// screen words and colours them. check.mjs holds the keys to the server's `Status` and the
+// tones to TONES, as it does for STATES.
+export const ACCOUNT_STATUS = {
+  active: { label: 'Active', tone: 'ok' },
+  waiting: { label: 'Waiting for access', tone: 'warn' },
+  disabled: { label: 'Disabled', tone: 'idle' },
+}

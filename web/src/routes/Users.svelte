@@ -3,10 +3,12 @@
   import Failure from '../lib/Failure.svelte'
   import Tag from '../lib/Tag.svelte'
   import { ROLE_LABEL } from '../lib/roles.js'
+  import { ACCOUNT_STATUS } from '../lib/states.js'
   import CaretRight from 'phosphor-svelte/lib/CaretRight'
 
-  // `/api/users` arrives trimmed to the workspaces the reader administers, and sorted with the
-  // accounts waiting for access first; nothing here filters or sorts.
+  // `/api/users` lists every account, each with its roles trimmed to the workspaces the reader
+  // administers, sorted with the accounts waiting for access first; nothing here filters or
+  // sorts.
   const users = get('/api/users')
 
   // Which rows the reader has opened, keyed by account id, as on the Routes screen.
@@ -16,17 +18,17 @@
     open[id] = !open[id]
   }
 
-  const STATUS = {
-    active: { label: 'Active', tone: 'ok' },
-    waiting: { label: 'Waiting for access', tone: 'warn' },
-    disabled: { label: 'Disabled', tone: 'idle' },
-  }
-
-  const when = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-
-  function lastSignIn(seconds) {
-    return seconds == null ? 'Never' : when.format(new Date(seconds * 1000))
-  }
+  // In the reader's own locale and zone, with the zone named: two admins in different zones
+  // would otherwise quote different times for the same sign-in, with nothing on screen to say
+  // why.
+  const when = new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  })
 
   function source(s) {
     if (s.kind === 'superuser') return 'Superuser'
@@ -34,6 +36,10 @@
     return `Group ${s.name}`
   }
 </script>
+
+{#snippet signedIn(seconds)}
+  {#if seconds == null}Never{:else}<time datetime={new Date(seconds * 1000).toISOString()}>{when.format(seconds * 1000)}</time>{/if}
+{/snippet}
 
 <h1 class="mb-4 text-2xl font-semibold tracking-tight">Users</h1>
 
@@ -47,16 +53,19 @@
        the window's, which the sidebar shares. -->
   <ul class="@container divide-y overflow-hidden rounded-lg border bg-card shadow-xs" role="list">
     {#each rows as user (user.id)}
+      <!-- A status this console has not been taught can only come from a newer server, during
+           a rolling upgrade; the raw word uncoloured is more use than a screen that fails. -->
+      {@const status = ACCOUNT_STATUS[user.status] ?? { label: user.status, tone: 'idle' }}
       <li>
         <!-- From a 56rem list (@4xl) up: caret, account, access, status and last sign-in, with
              fixed status and sign-in columns so they line up across rows that are each their own
-             grid. The fixed columns, gaps and padding take about 27rem and the account up to 14rem,
-             which leaves the roles at least 15rem; any narrower and they would run under the
-             status. Below
-             that only the account and its status stay; the rest is in the opened row. -->
+             grid. The fixed columns, gaps and padding take about 28rem and the account 14rem,
+             which leaves the roles at least 13.75rem; a chip longer than that wraps inside
+             itself rather than running under the status. Below that only the account and its
+             status stay; the rest is in the opened row. -->
         <button
           type="button"
-          class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring @4xl:grid-cols-[1.25rem_minmax(0,14rem)_minmax(0,1fr)_10rem_11rem]"
+          class="grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring @4xl:grid-cols-[1.25rem_minmax(0,14rem)_minmax(0,1fr)_10rem_12.5rem]"
           aria-expanded={open[user.id] === true}
           onclick={() => toggle(user.id)}
         >
@@ -73,26 +82,38 @@
           </span>
           <span class="hidden min-w-0 flex-wrap gap-1.5 @4xl:flex">
             {#each user.access as held (held.workspace_id)}
-              <Tag>{held.workspace} · {ROLE_LABEL[held.role]}</Tag>
+              <!-- Workspace names have no length limit, so a chip may wrap. -->
+              <Tag class="max-w-full whitespace-normal wrap-anywhere">{held.workspace} · {ROLE_LABEL[held.role]}</Tag>
             {:else}
-              <span class="text-sm text-muted-foreground">Not in your workspaces</span>
+              <!-- A disabled account holds nothing anywhere, so "not in your workspaces" would
+                   suggest the reader is missing something. -->
+              <span class="text-sm text-muted-foreground">
+                {user.status === 'disabled' ? 'Holds nothing while disabled' : 'Not in your workspaces'}
+              </span>
             {/each}
           </span>
-          <Tag tone={STATUS[user.status].tone}>{STATUS[user.status].label}</Tag>
-          <span class="hidden text-sm text-muted-foreground @4xl:block">{lastSignIn(user.last_sign_in_at)}</span>
+          <Tag tone={status.tone}>{status.label}</Tag>
+          <span class="hidden text-sm text-muted-foreground @4xl:block">
+            <span class="sr-only">Last sign-in: </span>{@render signedIn(user.last_sign_in_at)}
+          </span>
         </button>
 
         {#if open[user.id]}
           <!-- pl-11 starts the detail under the account name: the button's px-3, plus the
                1.25rem caret column, plus gap-3. -->
           <div class="pb-4 pl-11 pr-3 text-sm break-words">
-            <p class="mb-2 text-muted-foreground @4xl:hidden">Last sign-in: {lastSignIn(user.last_sign_in_at)}</p>
-            {#if user.access.length === 0}
-              <!-- One sentence for every empty list: whether the account holds a role somewhere
-                   the reader does not administer is not the reader's to know. -->
+            <p class="mb-2 text-muted-foreground @4xl:hidden">Last sign-in: {@render signedIn(user.last_sign_in_at)}</p>
+            {#if user.status === 'disabled'}
+              <p class="text-muted-foreground">A disabled account holds no role.</p>
+            {:else if user.access.length === 0}
+              <!-- The same sentence whether the account is waiting or holds roles elsewhere:
+                   which, is not the reader's to know. -->
               <p class="text-muted-foreground">No role in the workspaces you administer.</p>
             {:else}
-              <table class="w-full max-w-2xl text-left">
+              <!-- wrap-anywhere: a table sizes its columns from the longest word, and a long
+                   group name would otherwise push the table past the card, which clips it. -->
+              <table class="w-full max-w-2xl text-left wrap-anywhere">
+                <caption class="sr-only">Roles {user.name} holds in the workspaces you administer</caption>
                 <thead class="text-muted-foreground">
                   <tr>
                     <th scope="col" class="py-1 pr-4 font-medium">Workspace</th>

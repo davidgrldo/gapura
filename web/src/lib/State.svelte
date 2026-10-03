@@ -1,5 +1,6 @@
 <script>
-  import { STATES, TONES } from './states.js'
+  import { STATES } from './states.js'
+  import Tag from './Tag.svelte'
 
   let { state } = $props()
 
@@ -20,12 +21,7 @@
      announces, there is no hover on a touch device, and no keyboard path to it. Rendered as
      text visually hidden from sighted readers (`sr-only` keeps it rendered, and so announced,
      where a `display: none` sentence is dropped), it is announced without configuration; the
-     expanded row on the Routes screen shows the same sentence visibly.
-     `justify-self-start` because grid items stretch by default, which made a pill render as a
-     full-width bar in the Routes list. The transparent border is for forced-colours mode,
-     which drops backgrounds but paints borders, so the pill keeps its outline there. -->
-<span
-  class="inline-flex items-center gap-1.5 justify-self-start whitespace-nowrap rounded-md border border-transparent px-2 py-px text-xs font-medium {TONES[shown.tone]}"
->
+     expanded row on the Routes screen shows the same sentence visibly. -->
+<Tag tone={shown.tone}>
   <span class="size-1.5 rounded-full bg-current" aria-hidden="true"></span>{shown.label}<span class="sr-only">: {shown.detail}</span>
-</span>
+</Tag>

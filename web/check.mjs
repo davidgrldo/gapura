@@ -1,7 +1,7 @@
 // Not a test framework: one script that fails if the console cannot render the API's
 // answers. It exists because the Rust tests prove the API and nothing proves the page.
 import { readdirSync, readFileSync } from 'node:fs'
-import { STATES, TONES } from './src/lib/states.js'
+import { ACCOUNT_STATUS, STATES, TONES } from './src/lib/states.js'
 import { ABILITIES, MATRIX, ROLE_LABEL, ROLES } from './src/lib/roles.js'
 
 const html = readFileSync('dist/index.html', 'utf8')
@@ -94,9 +94,37 @@ for (const [state, { label }] of Object.entries(STATES)) {
   }
 }
 
+// The account statuses on the Users screen, read from the server for the same reason as the
+// states: a status added to `Status` and forgotten in ACCOUNT_STATUS has to fail here rather
+// than reach a reader as a bare wire word.
+const ACCESS_API = '../crates/gapura-control/src/access_api.rs'
+const statusDeclaration = readFileSync(ACCESS_API, 'utf8').match(
+  /#\[serde\(rename_all = "lowercase"\)\]\s*pub enum Status \{([\s\S]*?)\n\}/,
+)
+if (!statusDeclaration) {
+  throw new Error(`${ACCESS_API}: no lowercase-serialised "pub enum Status" to read the statuses from`)
+}
+const statuses = [...statusDeclaration[1].matchAll(/^ {4}([A-Z][A-Za-z0-9]*),$/gm)].map((m) =>
+  m[1].toLowerCase(),
+)
+if (statuses.length === 0) {
+  throw new Error(`${ACCESS_API}: found "pub enum Status" but could not read any variants out of it`)
+}
+if ([...statuses].sort().join() !== Object.keys(ACCOUNT_STATUS).sort().join()) {
+  throw new Error(
+    `ACCOUNT_STATUS in src/lib/states.js words ${Object.keys(ACCOUNT_STATUS).join(', ')}, but ` +
+      `${ACCESS_API} can report ${statuses.join(', ')}`,
+  )
+}
+for (const [status, { tone }] of Object.entries(ACCOUNT_STATUS)) {
+  if (!Object.hasOwn(TONES, tone)) {
+    throw new Error(`account status "${status}" is toned "${tone}", which TONES has no colours for`)
+  }
+}
+
 console.log(
-  `ok: the build produced a document that mounts the app, and the badge map covers the ` +
-    `${reportable.length} states the server can report`,
+  `ok: the build produced a document that mounts the app, and the badge maps cover the ` +
+    `${reportable.length} states and ${statuses.length} account statuses the server can report`,
 )
 
 // #62: the explanation must reach the document. A `title` attribute is not in the document --
