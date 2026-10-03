@@ -65,8 +65,8 @@
   }
   const current = $derived(screenFor(path))
 
-  // The address bar names the screen on show: sign-in lands every account on /, and a stale
-  // bookmark can name a screen this account does not have. Replaced rather than pushed, so Back
+  // The address bar names the screen on show: sign-in with nowhere to return to lands on /, and
+  // a stale bookmark can name a screen this account does not have. Replaced rather than pushed, so Back
   // does not return to an address that only ever showed this same screen.
   $effect(() => {
     if (me === undefined) return
@@ -100,11 +100,15 @@
 <!-- Without onpopstate, Back and Forward would change the URL and leave the screen as it was.
      onpageshow: a browser may restore this page from its back/forward cache after Sign out,
      showing the account that just left without asking the server; reloading asks /api/me again,
-     which sends a signed-out browser to sign in. -->
+     which sends a signed-out browser to sign in. The page is hidden first, or the restored
+     screen would stay in view until the reload answers. -->
 <svelte:window
   onpopstate={() => (path = window.location.pathname)}
   onpageshow={(event) => {
-    if (event.persisted) location.reload()
+    if (event.persisted) {
+      document.documentElement.style.visibility = 'hidden'
+      location.reload()
+    }
   }}
 />
 
