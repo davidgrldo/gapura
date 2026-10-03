@@ -743,3 +743,107 @@ async fn the_gateway_screens_are_for_superusers_in_store_mode() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_account_whose_roles_are_all_elsewhere_looks_to_an_admin_like_one_with_none() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let db = store.client().await.unwrap();
+    let hash = gapura_control::password::hash(PASSWORD).unwrap();
+    let zed: Uuid = db
+        .query_one(
+            "insert into users (username, password_hash) values ('zed', $1) returning id",
+            &[&hash],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    // zed holds a role only in default, which pat does not administer; vic now holds a second
+    // role there too, so the superuser sees one account counted under two roles.
+    for user in [zed, s.vic] {
+        db.execute(
+            "insert into role_bindings (user_id, workspace_id, role) values ($1, $2, 'editor')",
+            &[&user, &s.default],
+        )
+        .await
+        .unwrap();
+    }
+    let app = console(store, gapura_control::login::AuthMode::Local);
+
+    let seen = json(&call(&app, "/api/users", Some(s.pat)).await.1);
+    let by_name = |name: &str| {
+        seen.as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_name("zed")["access"], serde_json::json!([]));
+    assert_eq!(
+        by_name("zed")["status"],
+        by_name("wes")["status"],
+        "a role somewhere pat cannot see must not show through the status"
+    );
+    let held_by_pat = json(&call(&app, "/api/roles", Some(s.pat)).await.1)["held_by"].clone();
+    assert_eq!(
+        held_by_pat,
+        serde_json::json!({"viewer": 1, "editor": 1, "admin": 1, "superuser": 1}),
+        "zed's and vic's editor roles are in default, which pat does not administer"
+    );
+    let held_by_root = json(&call(&app, "/api/roles", Some(s.root)).await.1)["held_by"].clone();
+    assert_eq!(
+        held_by_root,
+        serde_json::json!({"viewer": 1, "editor": 3, "admin": 1, "superuser": 1}),
+        "vic is a viewer of payments and an editor of default, and counted under both"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_store_is_unavailable_to_a_session_and_unauthorized_to_anyone_else() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute("alter table group_bindings rename to group_bindings_gone")
+        .await
+        .unwrap();
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    assert_eq!(
+        call(&app, "/api/me", Some(s.root)).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        call(&app, "/api/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn a_superuser_keeps_the_access_pages_with_no_workspaces() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute("delete from workspaces")
+        .await
+        .unwrap();
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    for path in ["/api/users", "/api/roles"] {
+        assert_eq!(
+            call(&app, path, Some(s.root)).await.0,
+            StatusCode::OK,
+            "{path}"
+        );
+    }
+}

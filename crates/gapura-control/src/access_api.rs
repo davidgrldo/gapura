@@ -47,15 +47,20 @@ pub async fn store_caller(
     Ok(StoreCaller { rows, me })
 }
 
-/// The caller, when they administer at least one workspace. Kubernetes mode has no accounts
-/// to list, so there these pages do not exist at all.
-async fn admin_caller(state: &AppState, headers: &HeaderMap) -> Result<StoreCaller, StatusCode> {
+/// The caller and the workspaces they administer, when they are a superuser or administer at
+/// least one. A superuser keeps these pages even with no workspaces at all, the state `waiting`
+/// already guards. Kubernetes mode has no accounts to list, so there these pages do not exist.
+async fn admin_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(StoreCaller, BTreeSet<Uuid>), StatusCode> {
     let store = state.store.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let caller = store_caller(store, headers, &state.session_key).await?;
-    if caller.rows.grantable(&caller.me).is_empty() {
+    let within = caller.rows.grantable(&caller.me);
+    if within.is_empty() && !caller.me.superuser {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok(caller)
+    Ok((caller, within))
 }
 
 #[derive(Serialize)]
@@ -75,10 +80,12 @@ pub enum Me {
     },
 }
 
+/// A workspace and a role in it, named the way `/api/users` and `/api/roles` name them, so the
+/// console reads one shape.
 #[derive(Serialize)]
 pub struct WorkspaceRole {
-    id: Uuid,
-    name: String,
+    workspace_id: Uuid,
+    workspace: String,
     role: Role,
 }
 
@@ -99,8 +106,8 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
                 .rows
                 .effective(&caller.me, w.id)
                 .map(|a| WorkspaceRole {
-                    id: w.id,
-                    name: w.name.clone(),
+                    workspace_id: w.id,
+                    workspace: w.name.clone(),
                     role: a.role,
                 })
         })
@@ -150,26 +157,13 @@ pub async fn users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<UserView>>, StatusCode> {
-    let caller = admin_caller(&state, &headers).await?;
-    let within = caller.rows.grantable(&caller.me);
+    let (caller, within) = admin_caller(&state, &headers).await?;
     let mut views: Vec<UserView> = caller
         .rows
         .users
         .iter()
-        .map(|u| UserView {
-            id: u.id,
-            name: u.name.clone(),
-            method: u.method,
-            superuser: u.superuser,
-            status: if u.disabled {
-                Status::Disabled
-            } else if caller.rows.waiting(u) {
-                Status::Waiting
-            } else {
-                Status::Active
-            },
-            last_sign_in_at: u.last_sign_in,
-            access: caller
+        .map(|u| {
+            let access: Vec<AccessView> = caller
                 .rows
                 .access_in(u, &within)
                 .into_iter()
@@ -178,11 +172,31 @@ pub async fn users(
                     workspace: w.name.clone(),
                     access,
                 })
-                .collect(),
+                .collect();
+            // Waiting as the caller can see it: no role in the workspaces they administer. For a
+            // superuser that is every workspace, so it is the account's own waiting state; for a
+            // workspace admin it is the set they are here to act on, and a role somewhere they
+            // cannot see does not show through as "active".
+            let status = if u.disabled {
+                Status::Disabled
+            } else if !u.superuser && access.is_empty() {
+                Status::Waiting
+            } else {
+                Status::Active
+            };
+            UserView {
+                id: u.id,
+                name: u.name.clone(),
+                method: u.method,
+                superuser: u.superuser,
+                status,
+                last_sign_in_at: u.last_sign_in,
+                access,
+            }
         })
         .collect();
     // Waiting accounts first: they are the ones someone is here to act on.
-    views.sort_by_key(|v| (v.status != Status::Waiting, v.name.to_lowercase()));
+    views.sort_by_cached_key(|v| (v.status != Status::Waiting, v.name.to_lowercase()));
     Ok(Json(views))
 }
 
@@ -214,8 +228,7 @@ pub async fn roles(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RolesView>, StatusCode> {
-    let caller = admin_caller(&state, &headers).await?;
-    let within = caller.rows.grantable(&caller.me);
+    let (caller, within) = admin_caller(&state, &headers).await?;
     let mut held_by = HeldBy::default();
     for user in caller.rows.users.iter().filter(|u| !u.disabled) {
         // A superuser is counted as one, not again as the admin they are everywhere.

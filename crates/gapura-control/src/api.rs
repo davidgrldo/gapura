@@ -352,6 +352,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_access_pages_do_not_exist_in_kubernetes_mode() {
+        let session = crate::session::Session {
+            subject: "alice".into(),
+            groups: vec![],
+            expires_at: u64::MAX,
+        };
+        let cookie = format!(
+            "{}={}",
+            crate::login::COOKIE_NAME,
+            crate::session::encode(&session, b"test key")
+        );
+        for path in ["/api/users", "/api/roles"] {
+            for signed_in in [false, true] {
+                let mut request = Request::builder().uri(path);
+                if signed_in {
+                    request = request.header("cookie", &cookie);
+                }
+                let response = router_with(state())
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn me_in_kubernetes_mode_says_only_the_mode_and_still_needs_a_session() {
         let anonymous = router_with(state())
             .oneshot(
