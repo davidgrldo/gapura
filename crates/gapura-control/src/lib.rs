@@ -10,6 +10,7 @@ pub mod config_api;
 pub mod declared;
 pub mod kube_source;
 pub mod login;
+pub mod password;
 pub mod rows;
 pub mod scope;
 pub mod served;
