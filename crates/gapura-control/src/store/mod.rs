@@ -16,10 +16,16 @@ use tokio_postgres::NoTls;
 /// Applied in order, recorded in `_migrations`. Schema migration is permanent work;
 /// embedding them in the binary is what keeps the schema and the code that queries it shipped
 /// as one thing rather than matched by release notes.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_initial",
-    include_str!("../../migrations/0001_initial.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_initial",
+        include_str!("../../migrations/0001_initial.sql"),
+    ),
+    (
+        "0002_identity",
+        include_str!("../../migrations/0002_identity.sql"),
+    ),
+];
 
 pub struct Store {
     pool: Pool,
