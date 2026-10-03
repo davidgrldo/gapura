@@ -132,7 +132,7 @@ async fn usernames_are_unique_ignoring_case_and_subjects_per_issuer() {
         .expect("the same subject from another issuer is another person");
 }
 
-use gapura_control::access::{Method, Role, Source};
+use gapura_control::access::{Grant, Method, Role, Source};
 
 #[tokio::test]
 async fn access_rows_reads_accounts_grants_and_mappings_in_one_go() {
@@ -164,8 +164,28 @@ async fn access_rows_reads_accounts_grants_and_mappings_in_one_go() {
     )
     .await
     .unwrap();
+    let root_id: uuid::Uuid = db
+        .query_one("select id from users where username = 'root'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    db.execute(
+        "insert into role_bindings (user_id, workspace_id, role) values ($1, $2, 'viewer')",
+        &[&root_id, &payments],
+    )
+    .await
+    .unwrap();
 
     let rows = store.access_rows().await.unwrap();
+    assert_eq!(
+        rows.grants,
+        [Grant {
+            user: root_id,
+            workspace: payments,
+            role: Role::Viewer,
+        }],
+        "a direct grant reads back with its user and workspace the right way round"
+    );
     assert_eq!(rows.workspaces.len(), 2, "default and payments");
     let oli_row = rows.users.iter().find(|u| u.id == oli.id).unwrap();
     assert_eq!(oli_row.method, Method::Oidc);
@@ -186,6 +206,17 @@ async fn an_oidc_account_is_one_row_per_subject_and_follows_its_latest_sign_in()
     };
     let first = store
         .upsert_oidc_user("https://id.example", "s1", "rini", &["a".to_string()])
+        .await
+        .unwrap();
+    // Cleared, so the next sign-in has to stamp it rather than leave the first one standing.
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "update users set last_sign_in_at = null where id = $1",
+            &[&first.id],
+        )
         .await
         .unwrap();
     let again = store
@@ -234,20 +265,60 @@ async fn a_disabled_oidc_account_stays_disabled_and_its_refused_sign_in_is_not_r
 }
 
 #[tokio::test]
+async fn an_oidc_account_with_no_name_is_shown_by_its_subject() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    store
+        .upsert_oidc_user("https://id.example", "s-quiet", "", &[])
+        .await
+        .unwrap();
+    let rows = store.access_rows().await.unwrap();
+    assert_eq!(rows.users[0].name, "s-quiet");
+}
+
+#[tokio::test]
 async fn bootstrap_creates_one_superuser_and_only_into_an_empty_table() {
     let Some((store, _guard)) = fresh_store().await else {
         return;
     };
-    let (a, b) = tokio::join!(
-        store.bootstrap_superuser("root", "x"),
-        store.bootstrap_superuser("admin", "y")
-    );
+    // Both bootstraps are made to queue behind a lock this test holds, and released together,
+    // so they really do overlap instead of depending on how fast a connection opens.
+    let mut holder = store.client().await.unwrap();
+    let hold = holder.transaction().await.unwrap();
+    hold.batch_execute("lock table users in access exclusive mode")
+        .await
+        .unwrap();
+    let a = tokio::spawn({
+        let store = store.clone();
+        async move { store.bootstrap_superuser("root", "x").await }
+    });
+    let b = tokio::spawn({
+        let store = store.clone();
+        async move { store.bootstrap_superuser("admin", "y").await }
+    });
+    let probe = store.client().await.unwrap();
+    loop {
+        let queued: i64 = probe
+            .query_one(
+                "select count(*) from pg_locks where relation = 'users'::regclass and not granted",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if queued == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    hold.rollback().await.unwrap();
+    let created = [a.await.unwrap().unwrap(), b.await.unwrap().unwrap()]
+        .iter()
+        .filter(|created| **created)
+        .count();
     assert_eq!(
-        [a.unwrap(), b.unwrap()]
-            .iter()
-            .filter(|created| **created)
-            .count(),
-        1,
+        created, 1,
         "two replicas starting at once create one superuser"
     );
     assert_eq!(store.user_count().await.unwrap(), 1);

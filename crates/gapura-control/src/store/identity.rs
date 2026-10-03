@@ -40,9 +40,9 @@ impl Store {
                         superuser,
                         disabled_at is not null as disabled,
                         oidc_groups,
-                        extract(epoch from last_sign_in_at)::bigint as last_sign_in
+                        floor(extract(epoch from last_sign_in_at))::bigint as last_sign_in
                    from users
-                  order by lower(coalesce(username, display_name, oidc_subject))",
+                  order by lower(coalesce(username, display_name, oidc_subject)), id",
                 &[],
             )
             .await?
@@ -71,8 +71,10 @@ impl Store {
             })
             .collect();
         // `role` is a Postgres enum, read as text and parsed: the enum is what keeps an
-        // unknown name out of the table, so `parse` failing here would mean the binary is older
-        // than the schema, and such a row is left out rather than guessed at.
+        // unknown name out of the table, so `parse` failing here means the binary is older than
+        // the schema -- a rolling upgrade, mid-way. Such a row is left out rather than guessed at,
+        // and said so, or an operator seeing a grant honoured by some replicas and not others
+        // would have nothing to go on.
         let grants = tx
             .query(
                 "select user_id, workspace_id, role::text as role from role_bindings",
@@ -81,10 +83,17 @@ impl Store {
             .await?
             .into_iter()
             .filter_map(|r| {
+                let user: Uuid = r.get("user_id");
+                let workspace: Uuid = r.get("workspace_id");
+                let name: &str = r.get("role");
+                let Some(role) = Role::parse(name) else {
+                    tracing::warn!(role = %name, %user, %workspace, "a role this binary does not know; the grant is ignored");
+                    return None;
+                };
                 Some(Grant {
-                    user: r.get("user_id"),
-                    workspace: r.get("workspace_id"),
-                    role: Role::parse(r.get("role"))?,
+                    user,
+                    workspace,
+                    role,
                 })
             })
             .collect();
@@ -96,10 +105,17 @@ impl Store {
             .await?
             .into_iter()
             .filter_map(|r| {
+                let group: String = r.get("group_name");
+                let workspace: Uuid = r.get("workspace_id");
+                let name: &str = r.get("role");
+                let Some(role) = Role::parse(name) else {
+                    tracing::warn!(role = %name, %group, %workspace, "a role this binary does not know; the group mapping is ignored");
+                    return None;
+                };
                 Some(GroupGrant {
-                    group: r.get("group_name"),
-                    workspace: r.get("workspace_id"),
-                    role: Role::parse(r.get("role"))?,
+                    group,
+                    workspace,
+                    role,
                 })
             })
             .collect();
@@ -130,6 +146,8 @@ impl Store {
         }))
     }
 
+    /// Stamps a local account's sign-in. An OIDC sign-in is stamped by `upsert_oidc_user`, in
+    /// the statement that records it.
     pub async fn record_sign_in(&self, id: Uuid) -> Result<()> {
         let client = self.pool.get().await?;
         client
@@ -142,8 +160,9 @@ impl Store {
     }
 
     /// Records an OIDC sign-in: the row for (issuer, subject), created the first time, with
-    /// the name and groups the provider gave this time. A disabled account keeps its last
-    /// recorded sign-in, because this one is about to be refused.
+    /// the name and groups the provider gave this time. An empty name is stored as none, so the
+    /// account is shown by its subject rather than as a blank. A disabled account keeps its
+    /// last recorded sign-in, because this one is about to be refused.
     pub async fn upsert_oidc_user(
         &self,
         issuer: &str,
@@ -155,7 +174,7 @@ impl Store {
         let row = client
             .query_one(
                 "insert into users (oidc_issuer, oidc_subject, display_name, oidc_groups, last_sign_in_at)
-                 values ($1, $2, $3, $4, now())
+                 values ($1, $2, nullif($3::text, ''), $4, now())
                  on conflict (oidc_issuer, oidc_subject) do update
                     set display_name = excluded.display_name,
                         oidc_groups = excluded.oidc_groups,
@@ -174,12 +193,23 @@ impl Store {
     /// Creates the first superuser, but only into an empty table, and says whether it did.
     ///
     /// The lock is what makes "only into an empty table" true when two replicas start at once:
-    /// without it both count zero rows and both insert.
+    /// without it both count zero rows and both insert. SHARE ROW EXCLUSIVE is the weakest mode
+    /// that conflicts with itself and with the writes sign-ins make, so the two take turns and a
+    /// first OIDC sign-in cannot land between the count and the insert; SHARE would let both
+    /// count zero and then deadlock on their inserts.
     pub async fn bootstrap_superuser(&self, username: &str, password_hash: &str) -> Result<bool> {
+        // Every start after the first answers here, without touching the lock.
+        if self.user_count().await? > 0 {
+            return Ok(false);
+        }
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        tx.batch_execute("lock table users in share row exclusive mode")
-            .await?;
+        // Bounded, so a start-up queued behind a long write on `users` fails with a reason
+        // instead of hanging, and stops holding up the sign-ins queued behind it.
+        tx.batch_execute(
+            "set local lock_timeout = '10s'; lock table users in share row exclusive mode",
+        )
+        .await?;
         let existing: i64 = tx
             .query_one("select count(*) from users", &[])
             .await?
@@ -197,6 +227,8 @@ impl Store {
         Ok(true)
     }
 
+    /// How many accounts exist, disabled ones included: what decides whether the bootstrap
+    /// variables apply.
     pub async fn user_count(&self) -> Result<i64> {
         let client = self.pool.get().await?;
         Ok(client
