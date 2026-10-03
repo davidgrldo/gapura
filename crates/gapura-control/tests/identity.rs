@@ -847,3 +847,126 @@ async fn a_superuser_keeps_the_access_pages_with_no_workspaces() {
         );
     }
 }
+
+fn form_value(html: &str, name: &str) -> String {
+    let marker = format!(r#"name="{name}" value=""#);
+    let start = html.find(&marker).expect("field present") + marker.len();
+    let end = start + html[start..].find('"').expect("closing quote");
+    html[start..end].to_string()
+}
+
+/// Opens the sign-in form, posts `username` and `password` with the state it carried, and
+/// returns the answer's status, `Set-Cookie` and body.
+async fn sign_in(
+    app: &axum::Router,
+    username: &str,
+    password: &str,
+) -> (StatusCode, Option<String>, String) {
+    let (_, page) = call(app, "/auth/login", None).await;
+    let state = form_value(&page, "state");
+    let body = format!(
+        "state={state}&username={}&password={}",
+        username,
+        password.replace(' ', "+")
+    );
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let cookie = res
+        .headers()
+        .get("set-cookie")
+        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, cookie, String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn a_local_account_signs_in_by_username_in_any_case() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    seed(&store).await;
+    let app = console(store.clone(), gapura_control::login::AuthMode::Local);
+    let (_, page) = call(&app, "/auth/login", None).await;
+    assert!(
+        page.contains(r#"name="username""#),
+        "store mode asks for a username"
+    );
+    assert!(
+        !page.contains("Sign in with SSO"),
+        "local mode offers no provider"
+    );
+
+    let (status, cookie, _) = sign_in(&app, "PAT", PASSWORD).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let me = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/me")
+                .header("cookie", cookie.expect("a session cookie"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(me.into_body(), 1 << 16).await.unwrap();
+    assert_eq!(json(std::str::from_utf8(&body).unwrap())["name"], "pat");
+    let rows = store.access_rows().await.unwrap();
+    assert!(rows
+        .users
+        .iter()
+        .find(|u| u.name == "pat")
+        .unwrap()
+        .last_sign_in
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_wrong_password_an_unknown_name_and_a_disabled_account_get_the_same_answer() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    seed(&store).await;
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    let wrong = sign_in(&app, "pat", "not the password").await;
+    let unknown = sign_in(&app, "nobody", PASSWORD).await;
+    let disabled = sign_in(&app, "dee", PASSWORD).await;
+    for (what, answer) in [
+        ("wrong", &wrong),
+        ("unknown", &unknown),
+        ("disabled", &disabled),
+    ] {
+        assert_eq!(answer.0, StatusCode::UNAUTHORIZED, "{what}");
+        assert!(answer.1.is_none(), "{what} was given a cookie");
+    }
+    assert_eq!(wrong.2, unknown.2);
+    assert_eq!(wrong.2, disabled.2);
+}
+
+#[tokio::test]
+async fn with_an_identity_provider_the_form_offers_it_and_stays_for_break_glass() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(store, gapura_control::login::AuthMode::Oidc);
+    let (status, page) = call(&app, "/auth/login?return_to=%2Fusers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains(r#"href="/auth/login?sso=1&amp;return_to=/users""#),
+        "{page}"
+    );
+    assert!(page.contains(r#"name="username""#));
+}

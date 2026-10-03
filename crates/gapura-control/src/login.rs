@@ -5,13 +5,14 @@
 //! provider is the only thing that can say who they are. This module runs the authorization
 //! code flow with PKCE and turns its answer into the signed cookie `session` defines.
 //!
-//! Nothing here is persisted. A login in flight lives in memory for a few minutes and a
-//! session lives only in the browser's cookie jar, so a control-plane restart mid-login
-//! means signing in again. That is deliberate rather than forgotten: this stage stores
-//! nothing, and a login is cheap to repeat where a database to lose is not.
+//! A login in flight lives in memory for a few minutes and a session lives only in the
+//! browser's cookie jar, so a control-plane restart mid-login means signing in again. In store
+//! mode a sign-in also writes: it records when an account last signed in, and an account that
+//! arrives through OIDC becomes a row the first time.
 
 use crate::session::{self, Session};
 use crate::state::AppState;
+use crate::store::Store;
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -121,6 +122,7 @@ type Client = openidconnect::Client<
 /// What this console was registered as with the identity provider, and what it asks for.
 pub struct Oidc {
     issuer: IssuerUrl,
+    issuer_name: String,
     client_id: ClientId,
     client_secret: ClientSecret,
     redirect: RedirectUrl,
@@ -142,10 +144,13 @@ impl Oidc {
         scopes: &[String],
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            issuer: IssuerUrl::new(issuer.to_string())?,
+            issuer: IssuerUrl::new(issuer.to_string())
+                .map_err(|e| anyhow::anyhow!("--oidc-issuer {issuer:?}: {e}"))?,
+            issuer_name: issuer.to_string(),
             client_id: ClientId::new(client_id.to_string()),
             client_secret: ClientSecret::new(client_secret.to_string()),
-            redirect: RedirectUrl::new(redirect_url.to_string())?,
+            redirect: RedirectUrl::new(redirect_url.to_string())
+                .map_err(|e| anyhow::anyhow!("--oidc-redirect-url {redirect_url:?}: {e}"))?,
             groups_claim: groups_claim.to_string(),
             scopes: scopes.iter().map(|s| Scope::new(s.clone())).collect(),
             http: reqwest::Client::builder()
@@ -171,6 +176,11 @@ impl Oidc {
             "groups",
             &[],
         )
+    }
+
+    /// The issuer exactly as configured: half of the key an OIDC account's row is found by.
+    pub fn issuer(&self) -> &str {
+        &self.issuer_name
     }
 
     /// A client built from the provider's discovery document.
@@ -578,7 +588,10 @@ pub async fn begin(
     State(state): State<AppState>,
     Query(query): Query<Begin>,
 ) -> Result<Response, StatusCode> {
-    if state.auth_mode == AuthMode::Local {
+    // In store mode the form is always offered first: the bootstrap superuser, and any account
+    // kept for when the identity provider is down, sign in with a password even when one is
+    // configured. Its "Sign in with SSO" link comes back here with `sso` set.
+    if state.auth_mode == AuthMode::Local || (state.store.is_some() && query.sso.is_none()) {
         return Ok(local_login_form(&state, query.return_to.as_deref()));
     }
     let client = state.oidc.client().await.map_err(|error| {
@@ -621,6 +634,10 @@ pub async fn begin(
 pub struct Begin {
     #[serde(default)]
     return_to: Option<String>,
+    /// Present when the form's "Sign in with SSO" link was followed: in store mode the form
+    /// comes first, and this is the way on to the identity provider.
+    #[serde(default)]
+    sso: Option<String>,
 }
 
 /// The local sign-in form, server-rendered: no SPA route, no client bundle involved -- the
@@ -636,9 +653,29 @@ fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
     let return_to = return_to
         .filter(|p| safe_return_path(p))
         .map(str::to_string);
+    let store_mode = state.store.is_some();
+    // Kubernetes mode's accounts are named by email in its users file; store mode's are
+    // usernames. `LocalLogin` reads either field name.
+    let (field, label) = if store_mode {
+        ("username", "Username")
+    } else {
+        ("email", "Email")
+    };
+    let sso = if store_mode && state.auth_mode == AuthMode::Oidc {
+        let href = match &return_to {
+            Some(path) => format!("/auth/login?sso=1&amp;return_to={}", query_escape(path)),
+            None => "/auth/login?sso=1".to_string(),
+        };
+        format!(
+            r#"<a class="button" href="{href}">Sign in with SSO</a>
+<p class="card-description">Or with a console account:</p>"#
+        )
+    } else {
+        String::new()
+    };
     state.pending.remember(Pending::new(
         &login_state,
-        "", // no verifier and no nonce in local mode: nothing exchanges with a provider
+        "", // no verifier and no nonce for a password: nothing exchanges with a provider
         "",
         return_to,
     ));
@@ -648,11 +685,11 @@ fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
             r#"<div class="card"><div class="card-header">
 <h1 class="card-title">Welcome back</h1>
 <p class="card-description">Sign in with your console account</p>
-</div><div class="card-content">
+</div><div class="card-content">{sso}
 <form class="form" method="post" action="/auth/login">
 <input type="hidden" name="state" value="{login_state}">
-<div class="field"><label for="email">Email</label>
-<input id="email" type="text" name="email" autocomplete="username" required autofocus></div>
+<div class="field"><label for="{field}">{label}</label>
+<input id="{field}" type="text" name="{field}" autocomplete="username" required autofocus></div>
 <div class="field"><label for="password">Password</label>
 <input id="password" type="password" name="password" autocomplete="current-password" required></div>
 <button class="button" type="submit">Sign in</button>
@@ -671,11 +708,28 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `POST /auth/login` (local mode only): the form above lands here.
+/// `path` made safe inside a query string and an HTML attribute. It has already passed
+/// `safe_return_path`; everything outside the unreserved characters and `/` is
+/// percent-encoded, so neither `&` nor a quote can end the parameter or the attribute early.
+fn query_escape(path: &str) -> String {
+    path.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// `POST /auth/login`: the form above lands here.
 #[derive(Deserialize)]
 pub struct LocalLogin {
     state: String,
-    email: String,
+    /// `email` is what Kubernetes mode's form has always posted; store mode's posts `username`.
+    /// One field under two names, so neither form has to change shape for the other.
+    #[serde(alias = "email")]
+    username: String,
     password: String,
 }
 
@@ -684,40 +738,167 @@ pub async fn login_local(
     axum::Form(form): axum::Form<LocalLogin>,
 ) -> Response {
     // The pending state is single-use, exactly as in the OIDC callback: a replayed form
-    // finds nothing, and a form this process never issued is refused before any bcrypt
+    // finds nothing, and a form this process never issued is refused before any password
     // work happens.
     let Ok(pending) = state.pending.take(&form.state) else {
         return refused_local("This sign-in form is no longer valid — open the console again.");
     };
+    if let Some(store) = state.store.clone() {
+        return store_login(&state, &store, form, pending.return_to).await;
+    }
     // Only the password's verdict is logged, never the email: the users file is small, but
     // the habit is the same one the OIDC path keeps.
-    match state.local_users.verify(&form.email, &form.password) {
+    match state.local_users.verify(&form.username, &form.password) {
         Some(groups) => {
-            tracing::info!(subject = %form.email, groups = groups.len(), "signed in");
-            let cookie = set_cookie(
-                &session::encode(
-                    &Session {
-                        subject: form.email.clone(),
-                        groups,
-                        expires_at: now_seconds() + state.session_lifetime.as_secs(),
-                    },
-                    &state.session_key,
-                ),
-                state.session_lifetime,
-            );
-            let destination = pending
-                .return_to
-                .as_deref()
-                .filter(|p| safe_return_path(p))
-                .unwrap_or(AFTER_LOGIN);
-            let mut response = Redirect::to(destination).into_response();
-            if let Ok(value) = header::HeaderValue::from_str(&cookie) {
-                response.headers_mut().insert(header::SET_COOKIE, value);
-            }
-            response
+            tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
+            session_response(&state, form.username, groups, pending.return_to.as_deref())
         }
         None => refused_local("That email and password do not match."),
     }
+}
+
+/// Store mode's half of `POST /auth/login`.
+///
+/// An unknown name, a wrong password and a disabled account answer alike and cost alike: the
+/// password is verified against a real hash in every case -- the account's, or the dummy --
+/// and only then is the account's state consulted, so neither the words nor the timing say
+/// which it was.
+async fn store_login(
+    state: &AppState,
+    store: &Store,
+    form: LocalLogin,
+    return_to: Option<String>,
+) -> Response {
+    let account = match store.local_user(&form.username).await {
+        Ok(account) => account,
+        Err(error) => {
+            tracing::warn!(%error, "reading an account from the store failed");
+            return unavailable_page();
+        }
+    };
+    // Off the async workers, a bounded number at a time, and against the dummy when there is
+    // no account: see `verify_or_dummy`.
+    let matches = crate::password::verify_or_dummy(
+        form.password,
+        account.as_ref().map(|a| a.password_hash.clone()),
+    )
+    .await;
+    let Some(account) = account.filter(|a| matches && !a.disabled) else {
+        return refused_local("Wrong username or password.");
+    };
+    if let Err(error) = store.record_sign_in(account.id).await {
+        // The sign-in itself is good; only the "last sign-in" column misses it.
+        tracing::warn!(%error, "recording a sign-in failed");
+    }
+    tracing::info!(user = %account.id, "signed in");
+    session_response(
+        state,
+        account.id.to_string(),
+        Vec::new(),
+        return_to.as_deref(),
+    )
+}
+
+/// A redirect to where the reader was going, carrying a fresh session for `subject`.
+fn session_response(
+    state: &AppState,
+    subject: String,
+    groups: Vec<String>,
+    return_to: Option<&str>,
+) -> Response {
+    let cookie = set_cookie(
+        &session::encode(
+            &Session {
+                subject,
+                groups,
+                expires_at: now_seconds() + state.session_lifetime.as_secs(),
+            },
+            &state.session_key,
+        ),
+        state.session_lifetime,
+    );
+    let destination = return_to
+        .filter(|p| safe_return_path(p))
+        .unwrap_or(AFTER_LOGIN);
+    let mut response = Redirect::to(destination).into_response();
+    if let Ok(value) = header::HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+}
+
+/// `POST /auth/logout`: forget the session in this browser.
+///
+/// The cookie is the whole session, so expiring it is the whole of signing out. A copy of the
+/// cookie taken elsewhere stays valid until it expires; ending every session an account has
+/// needs sessions kept in the store.
+pub async fn logout() -> Response {
+    let mut response = Redirect::to("/auth/login").into_response();
+    let expired = format!("{COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        header::HeaderValue::from_str(&expired).expect("an ASCII header"),
+    );
+    response
+}
+
+/// A server-rendered notice in the sign-in pages' style.
+fn notice_page(status: StatusCode, title: &str, heading: &str, message: &str) -> Response {
+    let body = auth_page(
+        title,
+        &format!(
+            r#"<div class="card"><div class="card-header">
+<h1 class="card-title">{heading}</h1>
+</div><div class="card-content form">
+<p class="alert" role="alert">{message}</p>
+<a class="button" href="/auth/login">Back to sign-in</a>
+</div></div>"#
+        ),
+    );
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(body))
+        .expect("static page")
+}
+
+/// What sign-in answers when the store cannot be read: not "wrong password", which would send
+/// someone hunting for a typo while the database is down.
+fn unavailable_page() -> Response {
+    notice_page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sign-in unavailable",
+        "Sign-in is unavailable right now",
+        "The console cannot reach its database. Try again in a moment.",
+    )
+}
+
+/// An OIDC account this console has disabled. The identity provider has already said who
+/// this is, so unlike the password form there is nothing for a uniform answer to hide.
+fn disabled_page() -> Response {
+    notice_page(
+        StatusCode::FORBIDDEN,
+        "Account disabled",
+        "This account is disabled",
+        "Your identity provider signed you in, but this console has disabled the account. A \
+         superuser can enable it again.",
+    )
+}
+
+/// The name an OIDC account is shown under: what the provider calls the person, or their email
+/// when it does not say, or the bare subject when it says neither.
+pub fn display_name(claims: &serde_json::Value, subject: &str) -> String {
+    ["preferred_username", "email"]
+        .iter()
+        .find_map(|claim| {
+            claims
+                .get(*claim)
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or(subject)
+        .to_string()
 }
 
 fn refused_local(message: &str) -> Response {
@@ -826,6 +1007,26 @@ pub async fn callback(
         "signed in"
     );
 
+    // In store mode the session names the account's row, not the provider's subject: the row
+    // is what roles are granted to, and every request reads it back.
+    let subject = match &state.store {
+        None => subject,
+        Some(store) => {
+            let name = display_name(&as_json, &subject);
+            match store
+                .upsert_oidc_user(state.oidc.issuer(), &subject, &name, &groups)
+                .await
+            {
+                Ok(account) if account.disabled => return Ok(disabled_page()),
+                Ok(account) => account.id.to_string(),
+                Err(error) => {
+                    tracing::warn!(%error, "recording a signed-in OIDC account failed");
+                    return Ok(unavailable_page());
+                }
+            }
+        }
+    };
+
     let cookie = set_cookie(
         &session::encode(
             &Session {
@@ -849,11 +1050,6 @@ pub async fn callback(
     })?;
     response.headers_mut().insert(header::SET_COOKIE, value);
     Ok(response)
-}
-
-/// `POST /auth/logout`. The cookie clearing comes with the store-mode sign-in work.
-pub async fn logout() -> axum::response::Response {
-    axum::http::StatusCode::NOT_IMPLEMENTED.into_response()
 }
 
 #[cfg(test)]
@@ -1671,6 +1867,41 @@ mod local_login_flow_tests {
             replay.status(),
             StatusCode::UNAUTHORIZED,
             "state is single-use"
+        );
+    }
+}
+
+#[cfg(test)]
+mod store_mode_tests {
+    use super::*;
+
+    #[test]
+    fn an_oidc_account_is_named_by_preferred_username_then_email_then_subject() {
+        let both = serde_json::json!({"preferred_username": "rini", "email": "r@example.test"});
+        assert_eq!(display_name(&both, "s1"), "rini");
+        let email = serde_json::json!({"preferred_username": "", "email": "r@example.test"});
+        assert_eq!(display_name(&email, "s1"), "r@example.test");
+        assert_eq!(display_name(&serde_json::json!({}), "s1"), "s1");
+    }
+
+    #[test]
+    fn a_return_path_is_escaped_for_a_query_and_an_attribute() {
+        assert_eq!(
+            query_escape("/routes?a=1&b=\"x\""),
+            "/routes%3Fa%3D1%26b%3D%22x%22"
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_out_expires_the_cookie_and_goes_to_the_sign_in_page() {
+        let response = logout().await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/auth/login");
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.starts_with(&format!("{COOKIE_NAME}=;")), "{cookie}");
+        assert!(
+            cookie.contains("Max-Age=0") && cookie.contains("HttpOnly"),
+            "{cookie}"
         );
     }
 }

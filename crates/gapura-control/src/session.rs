@@ -8,7 +8,8 @@ use sha2::Sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
-    /// The identity provider's subject claim.
+    /// Who this is. In Kubernetes mode, the identity provider's subject or a local user's
+    /// email; in store mode, the account's id in `users`, which every request reads back.
     pub subject: String,
     pub groups: Vec<String>,
     /// Unix seconds after which this is no longer valid.
