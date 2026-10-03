@@ -6,6 +6,7 @@
   { "id": "10000000-0000-4000-8000-000000000001", "name": "david", "method": "local", "superuser": true, "status": "active", "last_sign_in_at": 1790812800, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "superuser" }] }
   ] },
+  { "id": "10000000-0000-4000-8000-000000000009", "name": "dewi.anggraini.kusumawardhani@payments.example", "method": "oidc", "superuser": false, "status": "disabled", "last_sign_in_at": 1788000000, "access": [] },
   { "id": "10000000-0000-4000-8000-000000000003", "name": "fikri.ramadhan", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790790000, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "editor", "sources": [{ "kind": "group", "name": "payments-dev" }] }
   ] },

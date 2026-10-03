@@ -26,7 +26,10 @@ import tailwindcss from '@tailwindcss/vite'
 //
 // STUB_AS picks whose eyes the console is seen through: web/stub/as-<persona>/ holds that
 // account's /api/me, /api/users and /api/roles, and superuser is the default. A file a persona
-// lacks answers 403, which is what the server says to an account that may not see it.
+// lacks answers 403, which is what the server says to an account that may not see it; the
+// kubernetes persona is the console with no store at all. Overview and Routes are served to
+// every persona, where the server keeps them for superusers in store mode, but the console only
+// asks for them when its navigation offers them.
 function stubApi() {
   const shared = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
   const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
@@ -37,19 +40,25 @@ function stubApi() {
       if (!process.env.STUB) return
       const stub = path.join(import.meta.dirname, 'stub')
       const persona = path.join(stub, `as-${process.env.STUB_AS || 'superuser'}`)
-      if (!existsSync(persona)) {
-        throw new Error(`STUB_AS=${process.env.STUB_AS}: there is no ${persona}`)
+      // Every persona has an /api/me, which the server never refuses a signed-in account; a
+      // persona without one is a typo, or a path that is not a persona at all.
+      if (!existsSync(path.join(persona, 'me.json'))) {
+        throw new Error(`STUB_AS=${process.env.STUB_AS}: there is no ${persona}/me.json`)
       }
       server.middlewares.use((req, res, next) => {
         const url = req.url.split('?')[0]
-        // Signing out is a form post the server answers with its sign-in page; the stub has no
-        // sign-in page, so it goes back to the console instead.
+        // The server answers sign-out with a "signed out" page; the stub keeps no session to
+        // end, so it goes straight back to the console.
         if (url === '/auth/logout') {
           res.statusCode = 303
           res.setHeader('location', '/')
           return res.end()
         }
-        const file = shared[url] ? path.join(stub, shared[url]) : personal[url] && path.join(persona, personal[url])
+        const file = shared[url]
+          ? path.join(stub, shared[url])
+          : personal[url]
+            ? path.join(persona, personal[url])
+            : null
         if (!file) return next()
         if (!existsSync(file)) {
           res.statusCode = 403
