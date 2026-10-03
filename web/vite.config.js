@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import tailwindcss from '@tailwindcss/vite'
@@ -20,22 +20,43 @@ import tailwindcss from '@tailwindcss/vite'
 // index.html must be absolute from the root — a relative base would break the moment a
 // client-side route one level deep, such as /routes, was reloaded.
 
-// Answers the console's two API paths from web/stub/ so that its screens can be looked at
-// without a control plane or a cluster. `apply: 'serve'` keeps it out of every build, and it
-// does nothing unless STUB is set, so a plain `npm run dev` behaves exactly as it did
-// before this existed.
+// Answers the console's API from web/stub/ so that its screens can be looked at without a
+// control plane or a cluster. `apply: 'serve'` keeps it out of every build, and it does nothing
+// unless STUB is set, so a plain `npm run dev` behaves exactly as it did before this existed.
+//
+// STUB_AS picks whose eyes the console is seen through: web/stub/as-<persona>/ holds that
+// account's /api/me, /api/users and /api/roles, and superuser is the default. A file a persona
+// lacks answers 403, which is what the server says to an account that may not see it.
 function stubApi() {
-  const answers = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
+  const shared = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
+  const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
   return {
     name: 'gapura-stub-api',
     apply: 'serve',
     configureServer(server) {
       if (!process.env.STUB) return
+      const stub = path.join(import.meta.dirname, 'stub')
+      const persona = path.join(stub, `as-${process.env.STUB_AS || 'superuser'}`)
+      if (!existsSync(persona)) {
+        throw new Error(`STUB_AS=${process.env.STUB_AS}: there is no ${persona}`)
+      }
       server.middlewares.use((req, res, next) => {
-        const file = answers[req.url.split('?')[0]]
+        const url = req.url.split('?')[0]
+        // Signing out is a form post the server answers with its sign-in page; the stub has no
+        // sign-in page, so it goes back to the console instead.
+        if (url === '/auth/logout') {
+          res.statusCode = 303
+          res.setHeader('location', '/')
+          return res.end()
+        }
+        const file = shared[url] ? path.join(stub, shared[url]) : personal[url] && path.join(persona, personal[url])
         if (!file) return next()
+        if (!existsSync(file)) {
+          res.statusCode = 403
+          return res.end()
+        }
         res.setHeader('content-type', 'application/json')
-        res.end(readFileSync(path.join(import.meta.dirname, 'stub', file)))
+        res.end(readFileSync(file))
       })
     },
   }
