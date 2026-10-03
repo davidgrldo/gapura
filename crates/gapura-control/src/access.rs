@@ -192,7 +192,7 @@ mod tests {
 
     /// Two workspaces, 100 and 200, and:
     /// - 1: a superuser;
-    /// - 2: a direct admin of 100;
+    /// - 2: a direct admin of 100, also in `readers`, who are viewers of 100;
     /// - 3: a direct viewer of 100, also in `devs`, who are editors of 100;
     /// - 4: nothing at all;
     /// - 5: a direct viewer of 200, disabled.
@@ -202,7 +202,7 @@ mod tests {
         Rows {
             users: vec![
                 user(1, true, &[]),
-                user(2, false, &[]),
+                user(2, false, &["readers"]),
                 user(3, false, &["devs"]),
                 user(4, false, &[]),
                 disabled,
@@ -234,11 +234,18 @@ mod tests {
                     role: Role::Viewer,
                 },
             ],
-            group_grants: vec![GroupGrant {
-                group: "devs".into(),
-                workspace: id(100),
-                role: Role::Editor,
-            }],
+            group_grants: vec![
+                GroupGrant {
+                    group: "devs".into(),
+                    workspace: id(100),
+                    role: Role::Editor,
+                },
+                GroupGrant {
+                    group: "readers".into(),
+                    workspace: id(100),
+                    role: Role::Viewer,
+                },
+            ],
         }
     }
 
