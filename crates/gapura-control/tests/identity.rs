@@ -131,3 +131,144 @@ async fn usernames_are_unique_ignoring_case_and_subjects_per_issuer() {
         .await
         .expect("the same subject from another issuer is another person");
 }
+
+use gapura_control::access::{Method, Role, Source};
+
+#[tokio::test]
+async fn access_rows_reads_accounts_grants_and_mappings_in_one_go() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let db = store.client().await.unwrap();
+    let payments: uuid::Uuid = db
+        .query_one(
+            "insert into workspaces (name) values ('payments') returning id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(store.bootstrap_superuser("root", "x").await.unwrap());
+    let oli = store
+        .upsert_oidc_user(
+            "https://id.example",
+            "s-oli",
+            "oli",
+            &["payments-dev".to_string()],
+        )
+        .await
+        .unwrap();
+    db.execute(
+        "insert into group_bindings (group_name, workspace_id, role) values ('payments-dev', $1, 'editor')",
+        &[&payments],
+    )
+    .await
+    .unwrap();
+
+    let rows = store.access_rows().await.unwrap();
+    assert_eq!(rows.workspaces.len(), 2, "default and payments");
+    let oli_row = rows.users.iter().find(|u| u.id == oli.id).unwrap();
+    assert_eq!(oli_row.method, Method::Oidc);
+    assert_eq!(oli_row.name, "oli");
+    assert_eq!(
+        rows.effective(oli_row, payments)
+            .map(|a| (a.role, a.sources)),
+        Some((Role::Editor, vec![Source::Group("payments-dev".into())]))
+    );
+    let root = rows.users.iter().find(|u| u.name == "root").unwrap();
+    assert!(root.superuser && root.method == Method::Local);
+}
+
+#[tokio::test]
+async fn an_oidc_account_is_one_row_per_subject_and_follows_its_latest_sign_in() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let first = store
+        .upsert_oidc_user("https://id.example", "s1", "rini", &["a".to_string()])
+        .await
+        .unwrap();
+    let again = store
+        .upsert_oidc_user(
+            "https://id.example",
+            "s1",
+            "rini.wulandari",
+            &["b".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.id, again.id);
+    let rows = store.access_rows().await.unwrap();
+    assert_eq!(rows.users.len(), 1);
+    assert_eq!(rows.users[0].name, "rini.wulandari");
+    assert_eq!(rows.users[0].groups, ["b"]);
+    assert!(rows.users[0].last_sign_in.is_some());
+}
+
+#[tokio::test]
+async fn a_disabled_oidc_account_stays_disabled_and_its_refused_sign_in_is_not_recorded() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let account = store
+        .upsert_oidc_user("https://id.example", "s1", "rini", &[])
+        .await
+        .unwrap();
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "update users set disabled_at = now(), last_sign_in_at = null where id = $1",
+            &[&account.id],
+        )
+        .await
+        .unwrap();
+    let refused = store
+        .upsert_oidc_user("https://id.example", "s1", "rini", &[])
+        .await
+        .unwrap();
+    assert!(refused.disabled);
+    let rows = store.access_rows().await.unwrap();
+    assert_eq!(rows.users[0].last_sign_in, None);
+}
+
+#[tokio::test]
+async fn bootstrap_creates_one_superuser_and_only_into_an_empty_table() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let (a, b) = tokio::join!(
+        store.bootstrap_superuser("root", "x"),
+        store.bootstrap_superuser("admin", "y")
+    );
+    assert_eq!(
+        [a.unwrap(), b.unwrap()]
+            .iter()
+            .filter(|created| **created)
+            .count(),
+        1,
+        "two replicas starting at once create one superuser"
+    );
+    assert_eq!(store.user_count().await.unwrap(), 1);
+    assert!(!store.bootstrap_superuser("third", "z").await.unwrap());
+}
+
+#[tokio::test]
+async fn a_local_account_is_found_ignoring_case_and_its_sign_in_is_recorded() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    store.bootstrap_superuser("Root", "the-hash").await.unwrap();
+    let found = store
+        .local_user("rOOt")
+        .await
+        .unwrap()
+        .expect("found ignoring case");
+    assert_eq!(found.password_hash, "the-hash");
+    assert!(!found.disabled);
+    assert!(store.local_user("nobody").await.unwrap().is_none());
+    store.record_sign_in(found.id).await.unwrap();
+    let rows = store.access_rows().await.unwrap();
+    assert!(rows.users[0].last_sign_in.is_some());
+}
