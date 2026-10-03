@@ -343,3 +343,66 @@ async fn a_local_account_is_found_ignoring_case_and_its_sign_in_is_recorded() {
     let rows = store.access_rows().await.unwrap();
     assert!(rows.users[0].last_sign_in.is_some());
 }
+
+#[tokio::test]
+async fn bootstrap_stores_a_hash_and_never_replaces_the_first_superuser() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let pair = |password: &str| (Some("root".to_string()), Some(password.to_string()));
+    let (u, p) = pair("correct horse battery");
+    gapura_control::bootstrap::apply(&store, u, p)
+        .await
+        .unwrap();
+    let first = store.local_user("root").await.unwrap().expect("created");
+    assert_ne!(first.password_hash, "correct horse battery");
+    assert!(gapura_control::password::verify(
+        "correct horse battery",
+        &first.password_hash
+    ));
+    let (u, p) = pair("another long password");
+    gapura_control::bootstrap::apply(&store, u, p)
+        .await
+        .unwrap();
+    let still = store.local_user("root").await.unwrap().expect("kept");
+    assert!(
+        gapura_control::password::verify("correct horse battery", &still.password_hash),
+        "a second start with another password changed nothing"
+    );
+}
+
+#[tokio::test]
+async fn once_accounts_exist_an_invalid_or_half_pair_is_ignored_rather_than_fatal() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    store.bootstrap_superuser("root", "x").await.unwrap();
+    for (username, password) in [
+        (Some("root"), Some("short")),
+        (Some("root"), None),
+        (None, Some("correct horse battery")),
+    ] {
+        gapura_control::bootstrap::apply(
+            &store,
+            username.map(String::from),
+            password.map(String::from),
+        )
+        .await
+        .expect("ignored once an account exists");
+    }
+}
+
+#[tokio::test]
+async fn into_an_empty_table_an_invalid_pair_stops_the_start() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let refused = gapura_control::bootstrap::apply(
+        &store,
+        Some("root".to_string()),
+        Some("correct horse battery\n".to_string()),
+    )
+    .await;
+    assert!(refused.is_err(), "a password the sign-in form cannot send");
+    assert_eq!(store.user_count().await.unwrap(), 0);
+}

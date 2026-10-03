@@ -2,8 +2,9 @@
 //!
 //! A console nobody can sign in to cannot grant anyone a role, so the first account cannot be
 //! created through it. Two variables, fed from a Secret, create it at start-up instead, and
-//! only into an empty table: once anyone exists they are ignored, so rotating the Secret never
-//! quietly changes a password.
+//! only into an empty table. Once anyone exists they are ignored -- not applied and not even
+//! checked -- so rotating the Secret never quietly changes a password, and a Secret still mounted
+//! long after, or a rule tightened by an upgrade, never stops a console that no longer needs it.
 
 use crate::store::Store;
 
@@ -29,32 +30,60 @@ pub fn requested(
     }
 }
 
-/// Applies the variables to `store`. An invalid pair stops the process: a console that started
-/// anyway would be one nobody can sign in to, with nothing on the screen saying why.
+/// One variable: `None` when unset, an error when set to something that is not UTF-8, rather
+/// than mistaking that for unset.
+fn variable(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} is set, but not to valid UTF-8")
+        }
+    }
+}
+
+/// Reads the two variables and applies them to `store`.
 pub async fn run(store: &Store) -> anyhow::Result<()> {
-    // Made now rather than by the first unknown name to sign in, which would otherwise take
-    // twice as long as every sign-in after it.
-    std::sync::LazyLock::force(&crate::password::DUMMY);
-    let wanted = requested(
-        std::env::var(USERNAME_VAR).ok(),
-        std::env::var(PASSWORD_VAR).ok(),
-    )?;
-    match wanted {
+    apply(store, variable(USERNAME_VAR)?, variable(PASSWORD_VAR)?).await
+}
+
+/// Applies a requested pair to `store`, taking the values as arguments so it is tested without
+/// touching the process environment.
+///
+/// Once any account exists the pair is ignored without being checked. Into an empty table an
+/// invalid pair stops the process instead: a console that started anyway would be one where
+/// nobody can be granted anything, with nothing on the screen saying why.
+pub async fn apply(
+    store: &Store,
+    username: Option<String>,
+    password: Option<String>,
+) -> anyhow::Result<()> {
+    let asked = username.is_some() || password.is_some();
+    if store.user_count().await? > 0 {
+        if asked {
+            tracing::info!(
+                "accounts already exist, so {USERNAME_VAR} and {PASSWORD_VAR} are ignored"
+            );
+        }
+        return Ok(());
+    }
+    match requested(username, password)? {
         Some((username, password)) => {
             let hash = crate::password::hash(&password)?;
             if store.bootstrap_superuser(&username, &hash).await? {
                 tracing::info!(%username, "created the bootstrap superuser");
             } else {
+                // Another replica created the first account between the count and the lock.
                 tracing::info!(
                     "accounts already exist, so {USERNAME_VAR} and {PASSWORD_VAR} are ignored"
                 );
             }
         }
-        None if store.user_count().await? == 0 => tracing::warn!(
-            "the store holds no accounts and {USERNAME_VAR} is not set, so nobody can sign in \
-             to the console"
+        None => tracing::warn!(
+            "the store holds no accounts and {USERNAME_VAR} is not set, so nobody can grant \
+             access in the console; set it before anyone signs in, because the first account of \
+             any kind, an OIDC sign-in included, makes it too late"
         ),
-        None => {}
     }
     Ok(())
 }

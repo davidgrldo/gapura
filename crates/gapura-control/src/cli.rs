@@ -13,7 +13,9 @@ pub struct Args {
     /// Postgres for the store that owns the configuration. Absent means the
     /// control plane runs read-only over Kubernetes, which is the mode the console ships in
     /// today; the configuration endpoint is simply not served.
-    #[arg(long, env = "DATABASE_URL")]
+    // `hide_env_values`, because the URL usually carries the database password, and `--help`
+    // would otherwise print it.
+    #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     pub database_url: Option<String>,
 
     /// Where data planes fetch their configuration. Its own port and not `--listen`, because

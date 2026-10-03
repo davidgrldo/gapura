@@ -29,35 +29,15 @@ async fn main() -> anyhow::Result<()> {
         store = args.database_url.is_some(),
         "gapura-control starting"
     );
-    // The store comes first, because whether there is one decides where accounts live. With
-    // `DATABASE_URL` set the console is in store mode: its accounts and roles are rows there,
-    // and the two flags that describe them in Kubernetes mode are refused rather than ignored --
-    // an operator who passed them expected them to mean something.
-    let store = match &args.database_url {
-        Some(url) => {
-            anyhow::ensure!(
-                args.local_users_file.is_none(),
-                "--local-users-file cannot be used with DATABASE_URL: in store mode the console's \
-                 accounts are rows in Postgres"
-            );
-            anyhow::ensure!(
-                args.grants.is_empty(),
-                "--grant cannot be used with DATABASE_URL: in store mode access comes from role \
-                 and group bindings in Postgres"
-            );
-            let store = Arc::new(gapura_control::store::Store::connect(url).await?);
-            store.migrate().await?;
-            gapura_control::bootstrap::run(&store).await?;
-            Some(store)
-        }
-        None => None,
-    };
-    // Auth mode resolves before anything OIDC is touched: local mode never builds a client,
-    // never requires an issuer, and a users file that names nobody stops the process here --
-    // the honest failure, not a console that starts and signs nobody in.
+    // Every flag is checked before anything touches the store, so a typo during an upgrade stops
+    // the process before a migration runs, rather than leaving a new schema for the old image to
+    // roll back onto. Auth mode resolves before anything OIDC is touched: local mode never builds
+    // a client, never requires an issuer, and a users file that names nobody stops the process
+    // here -- the honest failure, not a console that starts and signs nobody in.
+    let store_mode = args.database_url.is_some();
     let (auth_mode, local_users) = match args.auth_mode.as_str() {
         // In store mode a local account is a row, so there is no file to read.
-        "local" if store.is_some() => (gapura_control::login::AuthMode::Local, Default::default()),
+        "local" if store_mode => (gapura_control::login::AuthMode::Local, Default::default()),
         "local" => {
             let path = args
                 .local_users_file
@@ -83,6 +63,31 @@ async fn main() -> anyhow::Result<()> {
             (gapura_control::login::AuthMode::Oidc, Default::default())
         }
         other => anyhow::bail!("--auth-mode must be local or oidc, got {other:?}"),
+    };
+    // With `DATABASE_URL` set the console is in store mode: its accounts and roles are rows
+    // there, and the two flags that describe them in Kubernetes mode are refused rather than
+    // ignored -- an operator who passed them expected them to mean something.
+    let store = match &args.database_url {
+        Some(url) => {
+            anyhow::ensure!(
+                args.local_users_file.is_none(),
+                "--local-users-file cannot be used with DATABASE_URL: in store mode the console's \
+                 accounts are rows in Postgres"
+            );
+            anyhow::ensure!(
+                args.grants.is_empty(),
+                "--grant cannot be used with DATABASE_URL: in store mode access comes from role \
+                 and group bindings in Postgres"
+            );
+            let store = Arc::new(gapura_control::store::Store::connect(url).await?);
+            store.migrate().await?;
+            gapura_control::bootstrap::run(&store).await?;
+            // Made now rather than by the first unknown name to sign in, which would otherwise
+            // take twice as long as every sign-in after it.
+            std::sync::LazyLock::force(&gapura_control::password::DUMMY);
+            Some(store)
+        }
+        None => None,
     };
     let state = gapura_control::state::AppState {
         mapping: Arc::new(args.mapping()),

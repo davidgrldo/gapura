@@ -110,9 +110,9 @@ pub const MIN_PASSWORD_CHARS: usize = 12;
 /// does for anyone stays bounded by the memory-hard part rather than by reading the input.
 pub const MAX_PASSWORD_BYTES: usize = 1024;
 
-/// Long enough, short enough, and not the username with something added: the first guess
-/// anyone makes. The containment check skips usernames under three characters, which would
-/// otherwise refuse every password sharing a letter with them.
+/// Long enough, short enough, typeable, and not the username with something added: the first
+/// guess anyone makes. The containment check skips usernames under three characters, which
+/// would otherwise refuse every password sharing a letter with them.
 pub fn check_password(username: &str, password: &str) -> Result<(), String> {
     if password.chars().count() < MIN_PASSWORD_CHARS {
         return Err(format!(
@@ -121,6 +121,16 @@ pub fn check_password(username: &str, password: &str) -> Result<(), String> {
     }
     if password.len() > MAX_PASSWORD_BYTES {
         return Err(format!("a password has at most {MAX_PASSWORD_BYTES} bytes"));
+    }
+    // A sign-in form's password field cannot hold a line break, so a password with one could
+    // never be typed back. The usual way to get one is a Secret made with `echo`, which adds a
+    // newline the operator never sees.
+    if password.chars().any(char::is_control) {
+        return Err(
+            "a password must not contain a line break or other control character; a value \
+             written with `echo` ends in one"
+                .to_string(),
+        );
     }
     if username.chars().count() >= 3 && password.to_lowercase().contains(&username.to_lowercase()) {
         return Err("a password must not contain the username".to_string());
@@ -227,6 +237,8 @@ mod tests {
         assert!(check_password("maya", &"é".repeat(11)).is_err());
         assert_eq!(check_password("maya", &"é".repeat(12)), Ok(()));
         assert!(check_password("maya", &"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err());
+        assert!(check_password("maya", "correct horse battery\n").is_err());
+        assert!(check_password("maya", "correct\thorse battery").is_err());
         let error = check_password("maya", "hello-MAYA-2026").unwrap_err();
         assert!(error.contains("username"), "got {error}");
         // A two-letter username is not checked for, or "ab" would refuse half of all passwords.
