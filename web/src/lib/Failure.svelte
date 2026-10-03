@@ -2,7 +2,7 @@
   import { Forbidden, SessionNotSticking, retrySignIn } from './api.js'
   import { Button } from '$lib/components/ui/button/index.js'
 
-  // Both screens fail in the same two ways, and one of the two takes several sentences to
+  // Every screen fails in the same few ways, and one of them takes several sentences to
   // explain. It lives here rather than in either screen for the same reason the state badge
   // does: the reader must not be told a different story about the same failure depending on
   // which screen happened to notice it. `what` — the noun the screen was loading — is the

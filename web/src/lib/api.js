@@ -5,10 +5,11 @@
 // exceptional case, and a screen that forgot to handle it would render an error page where
 // the right answer is a sign-in.
 
-// Where the server begins the OpenID Connect authorization-code flow. Named once so that a
-// screen can never invent a slightly different path and quietly get the 404 fallback. The
-// query carries the screen the reader was on, so a session that ran out mid-task returns
-// them there instead of to the overview (#61); the server decides what is safe to honour.
+// Where the server begins sign-in: the identity provider's authorization-code flow, or the
+// console's own form when there is no provider. Named once so that a screen can never invent
+// a slightly different path and quietly get the 404 fallback. The query carries the screen the
+// reader was on, so a session that ran out mid-task returns them there instead of to the
+// overview (#61); the server decides what is safe to honour.
 const LOGIN = '/auth/login'
 
 function loginUrl() {

@@ -7,7 +7,7 @@
   import CaretRight from 'phosphor-svelte/lib/CaretRight'
 
   // `/api/users` lists every account, each with its roles trimmed to the workspaces the reader
-  // administers, sorted with the accounts waiting for access first; nothing here filters or
+  // administers, sorted with the accounts holding no role there first; nothing here filters or
   // sorts.
   const users = get('/api/users')
 
@@ -33,7 +33,9 @@
   function source(s) {
     if (s.kind === 'superuser') return 'Superuser'
     if (s.kind === 'direct') return 'Direct grant'
-    return `Group ${s.name}`
+    if (s.kind === 'group') return `Group ${s.name}`
+    // A kind from a server newer than the page: its own word, as with an unknown status.
+    return s.kind
   }
 </script>
 
@@ -41,7 +43,10 @@
   {#if seconds == null}Never{:else}<time datetime={new Date(seconds * 1000).toISOString()}>{when.format(seconds * 1000)}</time>{/if}
 {/snippet}
 
-<h1 class="mb-4 text-2xl font-semibold tracking-tight">Users</h1>
+<h1 class="mb-1 text-2xl font-semibold tracking-tight">Users</h1>
+<p class="mb-4 max-w-2xl text-sm text-muted-foreground">
+  Every account, with its roles in the workspaces you administer.
+</p>
 
 {#await users}
   <p class="text-muted-foreground">Reading accounts…</p>
