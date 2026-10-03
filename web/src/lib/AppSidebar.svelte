@@ -47,37 +47,40 @@
 
   <Sidebar.Content>
     <!-- A landmark, so a screen reader can jump to the console's navigation: the generated
-         sidebar renders a <div> and a <ul>, and the only other <nav> is the breadcrumb. -->
-    <nav aria-label="Console">
-      {#each groups as group (group.label)}
-        <Sidebar.Group>
-          <Sidebar.GroupLabel>{group.label}</Sidebar.GroupLabel>
-          <Sidebar.Menu>
-            {#each group.screens as screen (screen.path)}
-              {@const here = screen.path === current?.path}
-              <Sidebar.MenuItem>
-                <Sidebar.MenuButton isActive={here} tooltipContent={screen.label}>
-                  {#snippet child({ props })}
-                    <!-- Plain links, so that middle-click and "open in new tab" still work and
-                         the href is a real URL. The tooltip trigger hands over a button's props,
-                         type="button" among them, which a link has no use for. -->
-                    <a
-                      href={screen.path}
-                      aria-current={here ? 'page' : undefined}
-                      {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
-                      type={undefined}
-                    >
-                      <screen.icon aria-hidden="true" class={here ? 'text-brand' : 'text-muted-foreground'} />
-                      <span>{screen.label}</span>
-                    </a>
-                  {/snippet}
-                </Sidebar.MenuButton>
-              </Sidebar.MenuItem>
-            {/each}
-          </Sidebar.Menu>
-        </Sidebar.Group>
-      {/each}
-    </nav>
+         sidebar renders a <div> and a <ul>, and the only other <nav> is the breadcrumb. None
+         while there is nothing in it, so a reader is not offered an empty one. -->
+    {#if groups.length > 0}
+      <nav aria-label="Console">
+        {#each groups as group (group.label)}
+          <Sidebar.Group>
+            <Sidebar.GroupLabel>{group.label}</Sidebar.GroupLabel>
+            <Sidebar.Menu>
+              {#each group.screens as screen (screen.path)}
+                {@const here = screen.path === current?.path}
+                <Sidebar.MenuItem>
+                  <Sidebar.MenuButton isActive={here} tooltipContent={screen.label}>
+                    {#snippet child({ props })}
+                      <!-- Plain links, so that middle-click and "open in new tab" still work and
+                           the href is a real URL. The tooltip trigger hands over a button's props,
+                           type="button" among them, which a link has no use for. -->
+                      <a
+                        href={screen.path}
+                        aria-current={here ? 'page' : undefined}
+                        {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
+                        type={undefined}
+                      >
+                        <screen.icon aria-hidden="true" class={here ? 'text-brand' : 'text-muted-foreground'} />
+                        <span>{screen.label}</span>
+                      </a>
+                    {/snippet}
+                  </Sidebar.MenuButton>
+                </Sidebar.MenuItem>
+              {/each}
+            </Sidebar.Menu>
+          </Sidebar.Group>
+        {/each}
+      </nav>
+    {/if}
   </Sidebar.Content>
 
   <Sidebar.Footer>

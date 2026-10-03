@@ -42,21 +42,40 @@
 
   // The navigation this account gets. In store mode the gateway screens read Kubernetes and the
   // gateway's admin port without knowing about workspaces, so they are a superuser's until
-  // store-backed versions exist; the access screens are for anyone who administers a workspace.
-  // The server enforces both. This only avoids offering a screen that would answer 403.
+  // store-backed versions exist; the access screens are for superusers and anyone who
+  // administers a workspace. The server enforces both. This only avoids offering a screen the
+  // server would refuse.
   const groups = $derived(
     me === undefined
       ? []
       : [
           { label: 'Gateway', screens: me.mode === 'kubernetes' || me.superuser ? GATEWAY : [] },
-          { label: 'Access', screens: me.mode === 'store' && me.grantable.length > 0 ? ACCESS : [] },
+          {
+            label: 'Access',
+            screens: me.mode === 'store' && (me.superuser || me.grantable.length > 0) ? ACCESS : [],
+          },
         ].filter((group) => group.screens.length > 0),
   )
   const screens = $derived(groups.flatMap((group) => group.screens))
 
-  // An unrecognised path shows the first screen this account may open rather than a dead end.
-  // An account with no screens at all gets Home, which says why.
-  const current = $derived(screens.find((s) => s.path === path) ?? screens[0])
+  // A path this account has no screen for shows the first screen it may open rather than a dead
+  // end. An account with no screens at all gets Home, which says why.
+  function screenFor(to) {
+    return screens.find((s) => s.path === to) ?? screens[0]
+  }
+  const current = $derived(screenFor(path))
+
+  // The address bar names the screen on show: sign-in lands every account on /, and a stale
+  // bookmark can name a screen this account does not have. Replaced rather than pushed, so Back
+  // does not return to an address that only ever showed this same screen.
+  $effect(() => {
+    if (me === undefined) return
+    const shown = current?.path ?? '/'
+    if (shown !== path) {
+      history.replaceState(history.state, '', shown)
+      path = shown
+    }
+  })
 
   // Whether the sidebar starts open. shadcn-svelte's provider writes its state to a
   // `sidebar_state` cookie on every toggle and expects a server to read it back; nothing here
@@ -70,15 +89,24 @@
       return
     }
     event.preventDefault()
-    if (to !== path) {
-      history.pushState({}, '', to)
-      path = to
+    const target = screenFor(to)?.path ?? '/'
+    if (target !== path) {
+      history.pushState({}, '', target)
+      path = target
     }
   }
 </script>
 
-<!-- Without this, Back and Forward would change the URL and leave the screen as it was. -->
-<svelte:window onpopstate={() => (path = window.location.pathname)} />
+<!-- Without onpopstate, Back and Forward would change the URL and leave the screen as it was.
+     onpageshow: a browser may restore this page from its back/forward cache after Sign out,
+     showing the account that just left without asking the server; reloading asks /api/me again,
+     which sends a signed-out browser to sign in. -->
+<svelte:window
+  onpopstate={() => (path = window.location.pathname)}
+  onpageshow={(event) => {
+    if (event.persisted) location.reload()
+  }}
+/>
 
 <Sidebar.Provider open={startOpen}>
   <AppSidebar {groups} {current} {go} {me} />
@@ -90,13 +118,17 @@
            generated self-stretch, which beats the header's items-center and puts a 16px line at
            the top of the header. -->
       <Separator orientation="vertical" decorative class="mr-2 data-vertical:h-4 data-vertical:self-center" />
-      <Breadcrumb.Root>
-        <Breadcrumb.List>
-          <Breadcrumb.Item>
-            <Breadcrumb.Page>{current?.label ?? 'Home'}</Breadcrumb.Page>
-          </Breadcrumb.Item>
-        </Breadcrumb.List>
-      </Breadcrumb.Root>
+      <!-- Only once the page is known: "Home" while loading would be a guess, and on a failure
+           there is no page to name. -->
+      {#if me}
+        <Breadcrumb.Root>
+          <Breadcrumb.List>
+            <Breadcrumb.Item>
+              <Breadcrumb.Page>{current?.label ?? 'Home'}</Breadcrumb.Page>
+            </Breadcrumb.Item>
+          </Breadcrumb.List>
+        </Breadcrumb.Root>
+      {/if}
     </header>
     <div class="w-full max-w-7xl px-4 py-6 md:px-8 md:py-7">
       {#if failed}
