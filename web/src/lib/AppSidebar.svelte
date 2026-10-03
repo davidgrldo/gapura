@@ -1,10 +1,11 @@
 <script>
   import { mergeProps } from 'bits-ui'
   import * as Sidebar from '$lib/components/ui/sidebar/index.js'
+  import SignOut from 'phosphor-svelte/lib/SignOut'
 
-  // The screens, which one is open, and App's navigation function: App owns routing, this
-  // component only draws it.
-  let { screens, current, go } = $props()
+  // The screens in their groups, which one is open, App's navigation function, and who is
+  // signed in: App owns routing and identity, this component only draws them.
+  let { groups, current, go, me } = $props()
 
   // On a phone the sidebar is a sheet over the page. Choosing a screen from it has to close
   // the sheet, or the reader is left looking at the menu they just used instead of the
@@ -45,36 +46,69 @@
   </Sidebar.Header>
 
   <Sidebar.Content>
-    <Sidebar.Group>
-      <!-- A landmark, so a screen reader can jump to the console's navigation: the generated
-           sidebar renders a <div> and a <ul>, and the only other <nav> is the breadcrumb. -->
-      <nav aria-label="Console">
-        <Sidebar.Menu>
-          {#each screens as screen (screen.path)}
-            {@const here = screen.path === current.path}
-            <Sidebar.MenuItem>
-              <Sidebar.MenuButton isActive={here} tooltipContent={screen.label}>
-                {#snippet child({ props })}
-                  <!-- Plain links, so that middle-click and "open in new tab" still work and
-                       the href is a real URL. The tooltip trigger hands over a button's props,
-                       type="button" among them, which a link has no use for. -->
-                  <a
-                    href={screen.path}
-                    aria-current={here ? 'page' : undefined}
-                    {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
-                    type={undefined}
-                  >
-                    <screen.icon aria-hidden="true" class={here ? 'text-brand' : 'text-muted-foreground'} />
-                    <span>{screen.label}</span>
-                  </a>
-                {/snippet}
-              </Sidebar.MenuButton>
-            </Sidebar.MenuItem>
-          {/each}
-        </Sidebar.Menu>
-      </nav>
-    </Sidebar.Group>
+    <!-- A landmark, so a screen reader can jump to the console's navigation: the generated
+         sidebar renders a <div> and a <ul>, and the only other <nav> is the breadcrumb. -->
+    <nav aria-label="Console">
+      {#each groups as group (group.label)}
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>{group.label}</Sidebar.GroupLabel>
+          <Sidebar.Menu>
+            {#each group.screens as screen (screen.path)}
+              {@const here = screen.path === current?.path}
+              <Sidebar.MenuItem>
+                <Sidebar.MenuButton isActive={here} tooltipContent={screen.label}>
+                  {#snippet child({ props })}
+                    <!-- Plain links, so that middle-click and "open in new tab" still work and
+                         the href is a real URL. The tooltip trigger hands over a button's props,
+                         type="button" among them, which a link has no use for. -->
+                    <a
+                      href={screen.path}
+                      aria-current={here ? 'page' : undefined}
+                      {...mergeProps(props, { onclick: (event) => choose(event, screen.path) })}
+                      type={undefined}
+                    >
+                      <screen.icon aria-hidden="true" class={here ? 'text-brand' : 'text-muted-foreground'} />
+                      <span>{screen.label}</span>
+                    </a>
+                  {/snippet}
+                </Sidebar.MenuButton>
+              </Sidebar.MenuItem>
+            {/each}
+          </Sidebar.Menu>
+        </Sidebar.Group>
+      {/each}
+    </nav>
   </Sidebar.Content>
+
+  <Sidebar.Footer>
+    <Sidebar.Menu>
+      {#if me?.mode === 'store'}
+        <Sidebar.MenuItem>
+          <!-- Who is signed in, hidden with the labels when the sidebar is down to icons. -->
+          <div class="grid px-2 py-1 leading-tight group-data-[collapsible=icon]:hidden">
+            <span class="truncate text-sm font-medium">{me.name}</span>
+            <span class="text-xs text-muted-foreground">{me.method === 'oidc' ? 'Signed in with SSO' : 'Console account'}</span>
+          </div>
+        </Sidebar.MenuItem>
+      {/if}
+      <Sidebar.MenuItem>
+        <!-- A form rather than a fetch: signing out is a navigation, and the server answers it
+             with its "signed out" page. -->
+        <form method="post" action="/auth/logout">
+          <Sidebar.MenuButton tooltipContent="Sign out">
+            {#snippet child({ props })}
+              <!-- type after the spread: the tooltip trigger's props carry type="button", which
+                   would leave a button that submits nothing. -->
+              <button {...props} type="submit">
+                <SignOut aria-hidden="true" class="text-muted-foreground" />
+                <span>Sign out</span>
+              </button>
+            {/snippet}
+          </Sidebar.MenuButton>
+        </form>
+      </Sidebar.MenuItem>
+    </Sidebar.Menu>
+  </Sidebar.Footer>
 
   <Sidebar.Rail />
 </Sidebar.Root>
