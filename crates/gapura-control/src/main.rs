@@ -80,6 +80,10 @@ async fn main() -> anyhow::Result<()> {
         )?,
         gapura_control::login::AuthMode::Local => gapura_control::login::Oidc::unused()?,
     });
+    // The session key and the Kubernetes client are part of "every flag" too: a key Secret that
+    // resolves to nothing has to stop the process before the store is migrated, not after.
+    let session_key = Arc::from(gapura_control::session::session_key()?);
+    let source = Arc::new(gapura_control::kube_source::Source::from_environment().await?);
     // With `DATABASE_URL` set the console is in store mode: its accounts and roles are rows
     // there, and the two flags that describe them in Kubernetes mode are refused rather than
     // ignored -- an operator who passed them expected them to mean something.
@@ -107,8 +111,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let state = gapura_control::state::AppState {
         mapping: Arc::new(args.mapping()),
-        session_key: Arc::from(gapura_control::session::session_key()?),
-        source: Arc::new(gapura_control::kube_source::Source::from_environment().await?),
+        session_key,
+        source,
         admin: Arc::new(gapura_control::served::Admin::new(&args.gateway_admin)),
         controller_name: Arc::new(args.controller_name.clone()),
         auth_mode,

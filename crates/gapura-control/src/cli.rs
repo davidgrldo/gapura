@@ -10,9 +10,12 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:8080")]
     pub listen: std::net::SocketAddr,
 
-    /// Postgres for the store that owns the configuration. Absent means the
-    /// control plane runs read-only over Kubernetes, which is the mode the console ships in
-    /// today; the configuration endpoint is simply not served.
+    /// Postgres for the store that owns the configuration. With it, the console keeps its
+    /// accounts and roles there too (store mode): --local-users-file and --grant are refused,
+    /// and the first superuser comes from GAPURA_BOOTSTRAP_USERNAME and
+    /// GAPURA_BOOTSTRAP_PASSWORD, which are read only while the store has no account at all.
+    /// Absent, the control plane runs read-only over Kubernetes, which is the mode the console
+    /// ships in today, and the configuration endpoint is not served.
     // `hide_env_values`, because the URL usually carries the database password, and `--help`
     // would otherwise print it.
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
@@ -38,7 +41,8 @@ pub struct Args {
     #[arg(long, default_value = "gapura.dev/controller")]
     pub controller_name: String,
 
-    /// `group=namespace` grant, repeatable. `group=*` grants every namespace.
+    /// `group=namespace` grant, repeatable. `group=*` grants every namespace. Kubernetes mode
+    /// only: with DATABASE_URL, access comes from role and group bindings in the store.
     #[arg(long = "grant", value_parser = parse_grant)]
     pub grants: Vec<(String, String)>,
 
@@ -47,16 +51,18 @@ pub struct Args {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
-    /// How sign-in works: `local` (default -- users from --local-users-file, no identity
-    /// provider anywhere) or `oidc` (everything below this flag). An IdP-less default is the
+    /// How sign-in works: `local` (default -- users from --local-users-file, or the store's
+    /// accounts with DATABASE_URL; no identity provider anywhere) or `oidc` (everything below
+    /// this flag). An IdP-less default is the
     /// ArgoCD shape: a first install works on its own, SSO arrives when there is one to add.
     #[arg(long, default_value = "local")]
     pub auth_mode: String,
 
     /// A YAML file of local users for --auth-mode local, as
     /// `users: [{email, bcrypt, groups}]` (bcrypt is the only password form accepted, the
-    /// same shape dex staticPasswords use). Required in local mode; zero users refuses to
-    /// start rather than serving a console nobody can log into.
+    /// same shape dex staticPasswords use). Required in local mode without DATABASE_URL, and
+    /// refused with it; zero users refuses to start rather than serving a console nobody can
+    /// log into.
     #[arg(long, value_name = "PATH")]
     pub local_users_file: Option<String>,
 
