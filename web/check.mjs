@@ -2,6 +2,7 @@
 // answers. It exists because the Rust tests prove the API and nothing proves the page.
 import { readdirSync, readFileSync } from 'node:fs'
 import { STATES, TONES } from './src/lib/states.js'
+import { ROLES } from './src/lib/roles.js'
 
 const html = readFileSync('dist/index.html', 'utf8')
 if (!html.includes('<div id="app"')) throw new Error('dist/index.html lost its mount point')
@@ -148,3 +149,29 @@ for (const [where, text] of [
   }
 }
 console.log('ok: the console asks no third party for anything it needs to render')
+
+// The console's roles are the store's roles, read from the migrations for the reason the states
+// are read from rows.rs above: a role added in Postgres and forgotten here has to fail in this
+// file. Every migration is read, and one that alters role_name is refused outright rather than
+// half understood, because this parser only reads the `create`.
+const MIGRATIONS = '../crates/gapura-control/migrations'
+const migrations = readdirSync(MIGRATIONS)
+  .filter((file) => file.endsWith('.sql'))
+  .sort()
+  .map((file) => readFileSync(`${MIGRATIONS}/${file}`, 'utf8'))
+  .join('\n')
+if (/alter\s+type\s+role_name/i.test(migrations)) {
+  throw new Error(`${MIGRATIONS}: a migration alters role_name, which this check cannot read yet`)
+}
+const declaredRoles = migrations.match(/create\s+type\s+role_name\s+as\s+enum\s*\(([^)]*)\)/i)
+if (!declaredRoles) {
+  throw new Error(`${MIGRATIONS}: no "create type role_name" to read the roles from`)
+}
+const storeRoles = [...declaredRoles[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+if (storeRoles.join() !== ROLES.join()) {
+  throw new Error(
+    `web/src/lib/roles.js lists ${ROLES.join(', ')} but the store declares ` +
+      `${storeRoles.join(', ')}; they must match, in the same rising order`,
+  )
+}
+console.log(`ok: the console knows the ${storeRoles.length} roles the store declares`)
