@@ -64,6 +64,22 @@ async fn main() -> anyhow::Result<()> {
         }
         other => anyhow::bail!("--auth-mode must be local or oidc, got {other:?}"),
     };
+    // Parsed here, with the other flags, so an issuer or redirect URL that was never going to
+    // work stops the process before the store is touched. Parsing does no network work; the
+    // provider is first asked anything at the first sign-in. Local mode carries the never-used
+    // stand-in: Oidc::new("") cannot parse, and the state is built unconditionally. Nothing in
+    // local mode ever touches it.
+    let oidc = Arc::new(match auth_mode {
+        gapura_control::login::AuthMode::Oidc => gapura_control::login::Oidc::new(
+            args.oidc_issuer.as_deref().expect("validated above"),
+            args.oidc_client_id.as_deref().expect("validated above"),
+            args.oidc_client_secret.as_deref().expect("validated above"),
+            args.oidc_redirect_url.as_deref().expect("validated above"),
+            &args.oidc_groups_claim,
+            &args.oidc_scopes,
+        )?,
+        gapura_control::login::AuthMode::Local => gapura_control::login::Oidc::unused()?,
+    });
     // With `DATABASE_URL` set the console is in store mode: its accounts and roles are rows
     // there, and the two flags that describe them in Kubernetes mode are refused rather than
     // ignored -- an operator who passed them expected them to mean something.
@@ -97,19 +113,7 @@ async fn main() -> anyhow::Result<()> {
         controller_name: Arc::new(args.controller_name.clone()),
         auth_mode,
         local_users,
-        // Local mode carries the never-used stand-in: Oidc::new("") cannot parse, and main
-        // builds the state unconditionally. Nothing in local mode ever touches it.
-        oidc: Arc::new(match auth_mode {
-            gapura_control::login::AuthMode::Oidc => gapura_control::login::Oidc::new(
-                args.oidc_issuer.as_deref().expect("validated above"),
-                args.oidc_client_id.as_deref().expect("validated above"),
-                args.oidc_client_secret.as_deref().expect("validated above"),
-                args.oidc_redirect_url.as_deref().expect("validated above"),
-                &args.oidc_groups_claim,
-                &args.oidc_scopes,
-            )?,
-            gapura_control::login::AuthMode::Local => gapura_control::login::Oidc::unused()?,
-        }),
+        oidc,
         pending: gapura_control::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
         store: store.clone(),

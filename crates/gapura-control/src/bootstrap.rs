@@ -2,9 +2,10 @@
 //!
 //! A console nobody can sign in to cannot grant anyone a role, so the first account cannot be
 //! created through it. Two variables, fed from a Secret, create it at start-up instead, and
-//! only into an empty table. Once anyone exists they are ignored -- not applied and not even
-//! checked -- so rotating the Secret never quietly changes a password, and a Secret still mounted
-//! long after, or a rule tightened by an upgrade, never stops a console that no longer needs it.
+//! only into an empty table. Once anyone exists they are ignored -- not applied, and not checked
+//! against the account rules -- so rotating the Secret never quietly changes a password, and a
+//! Secret still mounted long after, or a rule tightened by an upgrade, never stops a console that
+//! no longer needs it.
 
 use crate::store::Store;
 
