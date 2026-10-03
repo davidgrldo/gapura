@@ -583,7 +583,8 @@ fn now_seconds() -> u64 {
         .as_secs()
 }
 
-/// `GET /auth/login`: send the browser to the identity provider.
+/// `GET /auth/login`: the sign-in form, or, with an identity provider and no form in front of
+/// it, the redirect to the provider.
 pub async fn begin(
     State(state): State<AppState>,
     Query(query): Query<Begin>,
@@ -769,11 +770,20 @@ async fn store_login(
     form: LocalLogin,
     return_to: Option<String>,
 ) -> Response {
-    let account = match store.local_user(&form.username).await {
-        Ok(account) => account,
-        Err(error) => {
-            tracing::warn!(%error, "reading an account from the store failed");
-            return unavailable_page();
+    // A name no account can have -- Postgres refuses a NUL in text, and the rules cap the
+    // length -- is an unknown name: verified against the dummy like any other, so it costs and
+    // answers the same, rather than reaching the store and coming back as an outage.
+    let possible = !form.username.contains('\0')
+        && form.username.chars().count() <= crate::password::MAX_USERNAME_CHARS;
+    let account = if !possible {
+        None
+    } else {
+        match store.local_user(&form.username).await {
+            Ok(account) => account,
+            Err(error) => {
+                tracing::warn!(%error, "reading an account from the store failed");
+                return unavailable_page();
+            }
         }
     };
     // Off the async workers, a bounded number at a time, and against the dummy when there is
@@ -827,19 +837,32 @@ fn session_response(
     response
 }
 
-/// `POST /auth/logout`: forget the session in this browser.
+/// `POST /auth/logout`: forget the session in this browser, and say so.
 ///
-/// The cookie is the whole session, so expiring it is the whole of signing out. A copy of the
-/// cookie taken elsewhere stays valid until it expires; ending every session an account has
-/// needs sessions kept in the store.
+/// It answers with a page rather than a redirect to `/auth/login`: in Kubernetes mode with an
+/// identity provider that address goes straight to the provider, which still has its own
+/// session and would sign the reader back in before they saw anything. The cookie is the whole
+/// session, so expiring it is the whole of signing out; a copy taken elsewhere stays valid until
+/// it expires, and ending every session an account has needs sessions kept in the store. The
+/// expired cookie comes from `set_cookie`, so it always carries the attributes the browser needs
+/// to match it to the one it replaces.
 pub async fn logout() -> Response {
-    let mut response = Redirect::to("/auth/login").into_response();
-    let expired = format!("{COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        header::HeaderValue::from_str(&expired).expect("an ASCII header"),
+    let body = auth_page(
+        "Signed out",
+        r#"<div class="card"><div class="card-header">
+<h1 class="card-title">You are signed out</h1>
+<p class="card-description">Your session in this browser has ended.</p>
+</div><div class="card-content form">
+<a class="button" href="/auth/login">Sign in again</a>
+</div></div>"#,
     );
-    response
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::SET_COOKIE, set_cookie("", Duration::ZERO))
+        .body(axum::body::Body::from(body))
+        .expect("static page")
 }
 
 /// A server-rendered notice in the sign-in pages' style.
@@ -998,27 +1021,32 @@ pub async fn callback(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let groups = groups_from(&as_json, &state.oidc.groups_claim);
-    // The subject and how many groups it came with: enough to answer "did they get in, and
-    // did the console look empty because of the grants or because of the claim?" without
-    // the code, the tokens, or the cookie ever reaching a log.
-    tracing::info!(
-        subject = %subject,
-        groups = groups.len(),
-        "signed in"
-    );
-
-    // In store mode the session names the account's row, not the provider's subject: the row
-    // is what roles are granted to, and every request reads it back.
-    let subject = match &state.store {
-        None => subject,
+    // Who signed in and how many groups they came with, logged once the outcome is known: enough
+    // to answer "did they get in, and did the console look empty because of the grants or
+    // because of the claim?" without the code, the tokens, or the cookie ever reaching a log.
+    //
+    // In store mode the session names the account's row, not the provider's subject: the row is
+    // what roles are granted to, and every request reads it back, groups included. The cookie
+    // carries none, so it grants nothing if ever shown to a console that reads them from it.
+    let (subject, groups) = match &state.store {
+        None => {
+            tracing::info!(subject = %subject, groups = groups.len(), "signed in");
+            (subject, groups)
+        }
         Some(store) => {
             let name = display_name(&as_json, &subject);
             match store
                 .upsert_oidc_user(state.oidc.issuer(), &subject, &name, &groups)
                 .await
             {
-                Ok(account) if account.disabled => return Ok(disabled_page()),
-                Ok(account) => account.id.to_string(),
+                Ok(account) if account.disabled => {
+                    tracing::info!(user = %account.id, "an OIDC sign-in was refused: the account is disabled");
+                    return Ok(disabled_page());
+                }
+                Ok(account) => {
+                    tracing::info!(user = %account.id, groups = groups.len(), "signed in");
+                    (account.id.to_string(), Vec::new())
+                }
                 Err(error) => {
                     tracing::warn!(%error, "recording a signed-in OIDC account failed");
                     return Ok(unavailable_page());
@@ -1357,6 +1385,93 @@ mod against_a_stub_provider {
             "the authorization request must carry a PKCE challenge"
         );
         (query["state"].clone(), query["nonce"].clone())
+    }
+
+    /// A store with nothing in it, when there is one to test against: the variable and the rule
+    /// tests/identity.rs uses. Cargo runs one test binary at a time and no other test in this
+    /// one touches a database, so resetting the schema here is safe.
+    async fn empty_store() -> Option<Arc<crate::store::Store>> {
+        let Ok(url) = std::env::var("GAPURA_TEST_DATABASE_URL") else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "GAPURA_TEST_DATABASE_URL must be set in CI"
+            );
+            return None;
+        };
+        let store = Arc::new(crate::store::Store::connect(&url).await.unwrap());
+        store
+            .client()
+            .await
+            .unwrap()
+            .batch_execute(
+                "drop schema public cascade; create schema public;
+                 grant all on schema public to public;",
+            )
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        Some(store)
+    }
+
+    /// One OIDC sign-in through the stub, as far as the callback's answer. `sso=1` because in
+    /// store mode the form comes first.
+    async fn sign_in_through(state: &AppState, provider: &Provider) -> axum::response::Response {
+        let (csrf, nonce) = begin_at(state, "/auth/login?sso=1").await;
+        *provider.nonce.lock().unwrap() = Some(nonce);
+        get_from(state, &format!("/auth/callback?code=a-code&state={csrf}")).await
+    }
+
+    fn session_of(response: &axum::response::Response) -> Session {
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        let value = cookie
+            .strip_prefix("gapura_session=")
+            .and_then(|rest| rest.split(';').next())
+            .expect("a gapura_session cookie");
+        session::decode(value, SESSION_KEY, now_seconds()).expect("a valid session")
+    }
+
+    #[tokio::test]
+    async fn in_store_mode_a_sign_in_names_the_row_and_a_disabled_account_gets_no_session() {
+        let Some(store) = empty_store().await else {
+            return;
+        };
+        let provider = Arc::new(Provider::default());
+        *provider.groups.lock().unwrap() = serde_json::json!(["payments-dev"]);
+        let mut state = state(&stub(provider.clone()).await);
+        state.store = Some(store.clone());
+
+        let first = sign_in_through(&state, &provider).await;
+        assert_eq!(first.status(), StatusCode::SEE_OTHER);
+        let session = session_of(&first);
+        let id: uuid::Uuid = session
+            .subject
+            .parse()
+            .expect("the session names the account's row");
+        assert!(
+            session.groups.is_empty(),
+            "store mode reads groups from the row, not the cookie"
+        );
+        let rows = store.access_rows().await.unwrap();
+        assert_eq!(rows.users.len(), 1);
+        assert_eq!(rows.users[0].groups, ["payments-dev"]);
+
+        let again = sign_in_through(&state, &provider).await;
+        assert_eq!(
+            session_of(&again).subject,
+            id.to_string(),
+            "the same person signing in again is the same row"
+        );
+
+        store
+            .client()
+            .await
+            .unwrap()
+            .execute("update users set disabled_at = now() where id = $1", &[&id])
+            .await
+            .unwrap();
+        let refused = sign_in_through(&state, &provider).await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert!(refused.headers().get(header::SET_COOKIE).is_none());
     }
 
     #[tokio::test]
@@ -1893,15 +2008,16 @@ mod store_mode_tests {
     }
 
     #[tokio::test]
-    async fn signing_out_expires_the_cookie_and_goes_to_the_sign_in_page() {
+    async fn signing_out_expires_the_cookie_and_says_so_without_going_to_the_provider() {
         let response = logout().await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers()[header::LOCATION], "/auth/login");
-        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
-        assert!(cookie.starts_with(&format!("{COOKIE_NAME}=;")), "{cookie}");
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            cookie.contains("Max-Age=0") && cookie.contains("HttpOnly"),
-            "{cookie}"
+            response.headers().get(header::LOCATION).is_none(),
+            "a redirect to /auth/login would send an OIDC reader straight back in"
+        );
+        assert_eq!(
+            response.headers()[header::SET_COOKIE],
+            set_cookie("", Duration::ZERO).as_str()
         );
     }
 }

@@ -944,15 +944,19 @@ async fn a_wrong_password_an_unknown_name_and_a_disabled_account_get_the_same_an
     let wrong = sign_in(&app, "pat", "not the password").await;
     let unknown = sign_in(&app, "nobody", PASSWORD).await;
     let disabled = sign_in(&app, "dee", PASSWORD).await;
+    // A NUL is refused by Postgres itself; it must still read as an unknown name, not an outage.
+    let impossible = sign_in(&app, "pat%00x", PASSWORD).await;
     for (what, answer) in [
         ("wrong", &wrong),
         ("unknown", &unknown),
         ("disabled", &disabled),
+        ("impossible", &impossible),
     ] {
         assert_eq!(answer.0, StatusCode::UNAUTHORIZED, "{what}");
         assert!(answer.1.is_none(), "{what} was given a cookie");
     }
     assert_eq!(wrong.2, unknown.2);
+    assert_eq!(wrong.2, impossible.2);
     assert_eq!(wrong.2, disabled.2);
 }
 
