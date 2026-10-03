@@ -31,7 +31,8 @@ impl Role {
     }
 }
 
-/// Why someone holds a role in a workspace.
+/// Why someone holds a role in a workspace. Sources are listed in this declaration order, and
+/// groups by name, which is the order a reader sees them in.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", content = "name", rename_all = "lowercase")]
 pub enum Source {
@@ -101,9 +102,10 @@ pub struct Access {
 }
 
 impl Rows {
-    /// The highest role `user` holds in `workspace`, with every source of a role there,
-    /// whatever its level: the direct viewer grant underneath a group's editor role is what an
-    /// admin needs to see before removing either.
+    /// The highest role `user` holds in `workspace`, and every grant that gives them a role there,
+    /// whatever its level: a direct grant underneath a group's higher role is what an admin needs
+    /// to see before removing either. Other people's roles reach a caller only through
+    /// `access_in`, which keeps them inside the caller's `grantable` set.
     pub fn effective(&self, user: &User, workspace: Uuid) -> Option<Access> {
         if user.disabled {
             return None;
@@ -144,9 +146,11 @@ impl Rows {
             .collect()
     }
 
-    /// Signed in, enabled, and reaching nothing: the account exists, but nobody has granted it
-    /// anything yet. Derived rather than stored, so a grant ends the wait by itself.
+    /// Enabled, not a superuser, and reaching nothing: the account exists, but nobody has granted
+    /// it anything yet. Derived rather than stored, so a grant ends the wait by itself.
     pub fn waiting(&self, user: &User) -> bool {
+        // `!user.superuser` is not redundant: with no workspaces at all, `all` over nothing is
+        // true, and a superuser would read as waiting for access to a console they run.
         !user.disabled
             && !user.superuser
             && self
@@ -193,7 +197,8 @@ mod tests {
     /// Two workspaces, 100 and 200, and:
     /// - 1: a superuser;
     /// - 2: a direct admin of 100, also in `readers`, who are viewers of 100;
-    /// - 3: a direct viewer of 100, also in `devs`, who are editors of 100;
+    /// - 3: a direct viewer of 100, also in `devs` (editors of 100) and `auditors` (viewers of
+    ///   100), listed after `devs` so that the sources' order has to be sorted, not inherited;
     /// - 4: nothing at all;
     /// - 5: a direct viewer of 200, disabled.
     fn rows() -> Rows {
@@ -203,7 +208,7 @@ mod tests {
             users: vec![
                 user(1, true, &[]),
                 user(2, false, &["readers"]),
-                user(3, false, &["devs"]),
+                user(3, false, &["devs", "auditors"]),
                 user(4, false, &[]),
                 disabled,
             ],
@@ -245,6 +250,11 @@ mod tests {
                     workspace: id(100),
                     role: Role::Viewer,
                 },
+                GroupGrant {
+                    group: "auditors".into(),
+                    workspace: id(100),
+                    role: Role::Viewer,
+                },
             ],
         }
     }
@@ -256,8 +266,18 @@ mod tests {
             rows.effective(&rows.users[2], id(100)),
             Some(Access {
                 role: Role::Editor,
-                sources: vec![Source::Direct, Source::Group("devs".into())],
+                sources: vec![
+                    Source::Direct,
+                    Source::Group("auditors".into()),
+                    Source::Group("devs".into()),
+                ],
             })
+        );
+        // A group's role stays in its own workspace.
+        assert_eq!(
+            rows.effective(&rows.users[2], id(200)),
+            None,
+            "devs and auditors hold roles in payments only"
         );
     }
 
@@ -280,6 +300,14 @@ mod tests {
         let rows = rows();
         assert_eq!(rows.effective(&rows.users[3], id(100)), None);
         assert_eq!(rows.effective(&rows.users[4], id(200)), None);
+        let mut fallen = rows.users[0].clone();
+        fallen.disabled = true;
+        assert_eq!(
+            rows.effective(&fallen, id(100)),
+            None,
+            "a disabled superuser holds nothing"
+        );
+        assert!(rows.grantable(&fallen).is_empty());
     }
 
     #[test]
@@ -300,6 +328,14 @@ mod tests {
         assert!(!rows.waiting(&rows.users[2]));
         assert!(!rows.waiting(&rows.users[0]), "a superuser never waits");
         assert!(!rows.waiting(&rows.users[4]), "disabled is its own status");
+        let no_workspaces = Rows {
+            users: rows.users.clone(),
+            ..Rows::default()
+        };
+        assert!(
+            !no_workspaces.waiting(&rows.users[0]),
+            "a superuser does not wait, even with no workspaces"
+        );
     }
 
     #[test]
