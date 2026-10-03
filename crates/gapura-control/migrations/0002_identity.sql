@@ -1,16 +1,20 @@
--- Identity moves into the store. A local account signs in against its row here; an account
--- that arrives through OIDC becomes a row the first time it signs in, keyed by the issuer and
--- subject the identity provider vouched for, so that it can be listed and granted roles like any
--- other. Its display name and groups are kept as of that last sign-in.
+-- Identity moves into the store, which replaces 0001's position that OIDC users are not rows.
+-- A local account signs in against its row here; an account that arrives through OIDC becomes a
+-- row the first time it signs in, keyed by the issuer and subject the identity provider vouched
+-- for, so that it can be listed and granted roles like any other. Its display name and groups
+-- are the ones the provider sent at its latest sign-in, and group bindings still reach it
+-- through those groups.
 
 -- An OIDC row has no username: the name it is known by belongs to the provider, and it can
 -- change there without this row having to.
 alter table users alter column username drop not null;
 
 -- Unique ignoring case, so `Maya` and `maya` cannot be two accounts that sign in as each other
--- depending on how the name was typed.
+-- depending on how the name was typed. Lowered under the "C" collation, which folds ASCII the
+-- same way in every database: under a Turkish one, lower('IVAN') is not 'ivan'. Usernames are
+-- ASCII, and a query that wants this index has to lower them the same way.
 alter table users drop constraint users_username_key;
-create unique index users_username_lower on users (lower(username));
+create unique index users_username_lower on users (lower(username collate "C"));
 
 alter table users
     add column oidc_issuer     text,

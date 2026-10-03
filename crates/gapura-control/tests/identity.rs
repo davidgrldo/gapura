@@ -14,7 +14,9 @@ use std::sync::Arc;
 use gapura_control::store::Store;
 
 /// One database, so the tests take turns: each starts by dropping the schema, and two doing
-/// that at once would delete each other's tables mid-run.
+/// that at once would delete each other's tables mid-run. The guard is held for the whole test
+/// rather than just the reset, because the race is between one test's reset and another's
+/// queries.
 static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn fresh_store() -> Option<(Arc<Store>, tokio::sync::MutexGuard<'static, ()>)> {
@@ -47,39 +49,53 @@ async fn fresh_store() -> Option<(Arc<Store>, tokio::sync::MutexGuard<'static, (
     Some((store, guard))
 }
 
+/// The constraint a failed statement broke, by name, so a test can tell the rule it meant to
+/// exercise from any other way the insert might have failed.
+fn violated(error: tokio_postgres::Error) -> Option<String> {
+    error
+        .as_db_error()
+        .and_then(|d| d.constraint())
+        .map(str::to_string)
+}
+
 #[tokio::test]
-async fn an_account_is_either_local_or_oidc_and_never_both_or_neither() {
+async fn an_account_is_exactly_local_or_exactly_oidc() {
     let Some((store, _guard)) = fresh_store().await else {
         return;
     };
     let db = store.client().await.unwrap();
-    for (what, sql) in [
-        ("a local row without a password hash", "insert into users (username) values ('maya')"),
-        (
-            "an OIDC row without a subject",
-            "insert into users (oidc_issuer) values ('https://id.example')",
-        ),
-        (
-            "a row claiming both shapes",
-            "insert into users (username, password_hash, oidc_issuer, oidc_subject)
-             values ('maya', 'x', 'https://id.example', 's1')",
-        ),
-        ("a row with neither", "insert into users (superuser) values (true)"),
-    ] {
-        assert!(db.execute(sql, &[]).await.is_err(), "{what} was accepted");
+    // Every combination of the four identity columns, set or not. Each value is unique to its
+    // combination, so no uniqueness rule can be what refuses one; exactly two shapes are accounts.
+    let mut accepted = Vec::new();
+    for mask in 0u8..16 {
+        let [username, hash, issuer, subject] = [0, 1, 2, 3].map(|bit| mask & (1 << bit) != 0);
+        let value = |set: bool| set.then(|| format!("v{mask}"));
+        let result = db
+            .execute(
+                "insert into users (username, password_hash, oidc_issuer, oidc_subject)
+                 values ($1, $2, $3, $4)",
+                &[
+                    &value(username),
+                    &value(hash),
+                    &value(issuer),
+                    &value(subject),
+                ],
+            )
+            .await;
+        match result {
+            Ok(_) => accepted.push((username, hash, issuer, subject)),
+            Err(error) => assert_eq!(
+                violated(error),
+                Some("users_local_or_oidc".to_string()),
+                "shape {mask:04b} was refused by something other than the shape rule"
+            ),
+        }
     }
-    db.execute(
-        "insert into users (username, password_hash) values ('maya', 'x')",
-        &[],
-    )
-    .await
-    .expect("a local row");
-    db.execute(
-        "insert into users (oidc_issuer, oidc_subject) values ('https://id.example', 's1')",
-        &[],
-    )
-    .await
-    .expect("an OIDC row");
+    assert_eq!(
+        accepted,
+        [(true, true, false, false), (false, false, true, true)],
+        "only (username, password) and (issuer, subject) are accounts"
+    );
 }
 
 #[tokio::test]
@@ -88,38 +104,30 @@ async fn usernames_are_unique_ignoring_case_and_subjects_per_issuer() {
         return;
     };
     let db = store.client().await.unwrap();
-    db.execute(
-        "insert into users (username, password_hash) values ('maya', 'x')",
-        &[],
-    )
-    .await
-    .unwrap();
-    assert!(
-        db.execute(
-            "insert into users (username, password_hash) values ('MAYA', 'y')",
-            &[]
-        )
+    let local = "insert into users (username, password_hash) values ($1, 'x')";
+    let oidc = "insert into users (oidc_issuer, oidc_subject) values ($1, $2)";
+    db.execute(local, &[&"maya"]).await.unwrap();
+    let same_name = db
+        .execute(local, &[&"MAYA"])
         .await
-        .is_err(),
-        "maya and MAYA would be two accounts that sign in as each other"
+        .expect_err("maya and MAYA would be two accounts that sign in as each other");
+    assert_eq!(
+        violated(same_name),
+        Some("users_username_lower".to_string())
     );
-    db.execute(
-        "insert into users (oidc_issuer, oidc_subject) values ('https://id.example', 's1')",
-        &[],
-    )
-    .await
-    .unwrap();
-    assert!(db
-        .execute(
-            "insert into users (oidc_issuer, oidc_subject) values ('https://id.example', 's1')",
-            &[]
-        )
+
+    db.execute(oidc, &[&"https://id.example", &"s1"])
         .await
-        .is_err());
-    db.execute(
-        "insert into users (oidc_issuer, oidc_subject) values ('https://other.example', 's1')",
-        &[],
-    )
-    .await
-    .expect("the same subject from another issuer is another person");
+        .unwrap();
+    let same_subject = db
+        .execute(oidc, &[&"https://id.example", &"s1"])
+        .await
+        .expect_err("one subject from one issuer is one person");
+    assert_eq!(
+        violated(same_subject),
+        Some("users_oidc_identity".to_string())
+    );
+    db.execute(oidc, &[&"https://other.example", &"s1"])
+        .await
+        .expect("the same subject from another issuer is another person");
 }
