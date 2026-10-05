@@ -272,6 +272,38 @@ data: { tls.crt: Zm9v, tls.key: YmFy }
         );
     }
 
+    /// A Service with nothing behind it: the API server sends `endpoints: null` (and `ports:
+    /// null`) for its slice, as for the read-replica Service CloudNativePG creates next to a
+    /// one-instance cluster. That is an empty slice, not a malformed one.
+    #[test]
+    fn endpointslice_with_null_endpoints_loads_as_empty() {
+        let s = Snapshot::from_yaml_docs(
+            "apiVersion: discovery.k8s.io/v1\nkind: EndpointSlice\nmetadata:\n  { name: db-ro-rf7s8, namespace: db, labels: { kubernetes.io/service-name: db-ro } }\naddressType: IPv4\nendpoints: null\nports: null\n",
+        )
+        .unwrap();
+        let slice = &s.endpoint_slices[&ObjectRef::new("db", "db-ro-rf7s8")];
+        assert!(
+            slice.endpoints.is_empty(),
+            "null endpoints read as no endpoints"
+        );
+        assert!(slice.ports.is_empty());
+    }
+
+    #[test]
+    fn endpointslice_with_null_endpoint_entries_skips_only_those() {
+        let s = Snapshot::from_yaml_docs(
+            "apiVersion: discovery.k8s.io/v1\nkind: EndpointSlice\nmetadata:\n  { name: whoami-nd8nh, namespace: default, labels: { kubernetes.io/service-name: whoami } }\naddressType: IPv4\nendpoints:\n- null\n- { addresses: [10.42.0.14] }\nports:\n- { name: http, port: 80, protocol: TCP }\n",
+        )
+        .unwrap();
+        let slice = &s.endpoint_slices[&ObjectRef::new("default", "whoami-nd8nh")];
+        assert_eq!(
+            slice.endpoints.len(),
+            1,
+            "the null entry is skipped, not fatal"
+        );
+        assert_eq!(slice.endpoints[0].addresses, ["10.42.0.14"]);
+    }
+
     #[test]
     fn endpointslice_with_null_port_entries_skips_only_those() {
         let s = Snapshot::from_yaml_docs(
