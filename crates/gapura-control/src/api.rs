@@ -5,6 +5,7 @@ use crate::scope::{self, Scope};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{
     routing::{get, post},
     Json, Router,
@@ -29,7 +30,15 @@ pub fn router_with(state: AppState) -> Router {
         // that is merely missing — a typo, not yet built — 404s instead of resolving to the
         // console's document.
         .fallback(crate::assets::fallback)
+        // Added last, so it wraps every route above and the fallback: a request another site's
+        // page sent is refused before any handler reads it. See `same_origin`.
+        .layer(axum::middleware::from_fn(crate::same_origin::guard))
         .with_state(state)
+}
+
+/// An answer the console shows as it is: `status`, with `{"error": sentence}` as the body.
+pub(crate) fn refuse(status: StatusCode, sentence: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": sentence }))).into_response()
 }
 
 /// Pulls the signed session out of the `gapura_session` cookie. Any failure — no

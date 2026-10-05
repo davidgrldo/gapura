@@ -16,6 +16,7 @@ pub mod kube_source;
 pub mod login;
 pub mod password;
 pub mod rows;
+pub mod same_origin;
 pub mod scope;
 pub mod served;
 pub mod session;
