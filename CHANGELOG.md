@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The chart can run the console in store mode: `console.store.existingSecret` names a Secret
+  holding `DATABASE_URL` (key `console.store.urlKey`, default `database-url`), and
+  `console.store.bootstrap.existingSecret` one holding the first superuser's `username` and
+  `password`. The URL is never a plain value, since it carries the database password. With a
+  store the chart renders no users Secret, mounts no users file and passes no `--grant`, and it
+  fails at render time when `console.grants` or `console.auth.local` is still set -- the same
+  combinations gapura-control refuses at start, caught before a pod crash-loops on them. Moving
+  an existing local-mode release over means emptying those values; its users are not imported,
+  so the bootstrap superuser is the first account. Nothing changes for a release that does not
+  set `console.store`.
 - The console keeps its accounts in Postgres when it has one. With `DATABASE_URL` set, a local
   account is a row that signs in with an argon2id password, an OIDC account becomes a row at its
   first sign-in, and roles come from the role and group bindings there; new Users and Roles pages
@@ -19,8 +29,8 @@ means what it usually does, moving from one version below to a later one. Releas
   `--local-users-file` and `--grant` are refused alongside `DATABASE_URL` rather than ignored. A
   deployment that already sets `DATABASE_URL` for the configuration endpoint moves its console
   into this mode on upgrade: sessions signed in before it end, and it will not start while it
-  still passes `--local-users-file`, whose users are not imported. The chart does not set
-  `DATABASE_URL` yet. In this mode Overview and Routes are for superusers until they learn about
+  still passes `--local-users-file`, whose users are not imported. The chart sets it through
+  `console.store` (below). In this mode Overview and Routes are for superusers until they learn about
   workspaces. `POST /auth/logout` signs out, in either mode.
 - The chart installs the console's local users Secret again: `console.yaml` had no `---` between
   that Secret and the console's ServiceAccount, so the two parsed as one object, the

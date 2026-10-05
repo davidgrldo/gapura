@@ -239,6 +239,24 @@ console:
     # Name of an existing Secret holding the client secret...
     existingSecret: ""
     clientSecretKey: client-secret
+  # Store mode: the console keeps its accounts and roles in Postgres, and the Users and Roles
+  # pages appear. Set existingSecret to a Secret whose `urlKey` holds the DATABASE_URL
+  # (postgres://user:password@host:5432/db); the URL carries a password, so the chart never takes
+  # it as a plain value. The schema is migrated when the console starts. With a store,
+  # console.grants and console.auth.local must be empty: access comes from role and group
+  # bindings in the database, and local users are accounts there, not a file -- the users from
+  # console.auth.local are not imported. auth.mode still picks local passwords or OIDC.
+  store:
+    existingSecret: ""
+    urlKey: database-url
+    # The first superuser, created only when the store has no accounts at all (an SSO account
+    # counts) and ignored from then on, so set it before anyone signs in. A Secret with the
+    # username and password under the keys below; optional, but without it an empty store has
+    # nobody who can sign in and grant a role.
+    bootstrap:
+      existingSecret: ""
+      usernameKey: username
+      passwordKey: password
   # Name of an existing Secret holding the session-signing key (>= 32 bytes, base64
   # accepted). Not created by the chart: a key generated at install time would rotate on
   # every upgrade and sign every reader out of a console they were using.

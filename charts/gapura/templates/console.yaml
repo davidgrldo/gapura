@@ -4,11 +4,24 @@
 {{- fail (printf "console.auth.mode must be local or oidc, got %q" $mode) }}
 {{- end }}
 {{- $localUsers := (((.Values.console).auth).local).users | default list }}
-{{- if and (eq $mode "local") (not (((.Values.console).auth).local).existingSecret) (eq (len $localUsers) 0) }}
+{{- /* Store mode: the console keeps its accounts and roles in Postgres. gapura-control refuses
+       --local-users-file and --grant alongside DATABASE_URL rather than ignoring them, and the
+       chart says so at render time instead of leaving a pod in CrashLoopBackOff. */}}
+{{- $store := (((.Values.console).store).existingSecret) | default "" }}
+{{- if $store }}
+{{- if or (gt (len $localUsers) 0) ((((.Values.console).auth).local).existingSecret) }}
+{{- fail "console.store is set: accounts live in Postgres, so console.auth.local.users and console.auth.local.existingSecret must be empty (their users are not imported; create the first superuser with console.store.bootstrap)" }}
+{{- end }}
+{{- if ((.Values.console).grants) }}
+{{- fail "console.store is set: access comes from role and group bindings in Postgres, so console.grants must be empty" }}
+{{- end }}
+{{- end }}
+{{- $localFile := and (eq $mode "local") (not $store) }}
+{{- if and $localFile (not (((.Values.console).auth).local).existingSecret) (eq (len $localUsers) 0) }}
 {{- fail "console.auth.mode local with no console.auth.local.users: a console nobody can log into is the failure this catches" }}
 {{- end }}
 {{- $usersSecret := "" }}
-{{- if eq $mode "local" }}
+{{- if $localFile }}
 {{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" .)) }}
 {{- if not ((((.Values.console).auth).local).existingSecret) }}
 ---
@@ -141,7 +154,7 @@ spec:
         app.kubernetes.io/component: console
     spec:
       serviceAccountName: {{ $fullname }}-control
-      {{- if eq $mode "local" }}
+      {{- if $localFile }}
       volumes:
       - name: users
         secret: { secretName: {{ $usersSecret }} }
@@ -162,7 +175,7 @@ spec:
         args:
         - --listen=0.0.0.0:{{ ((.Values.console).service).port | default 8080 }}
         - --auth-mode={{ $mode }}
-        {{- if eq $mode "local" }}
+        {{- if $localFile }}
         - --local-users-file=/etc/gapura-control/users.yaml
         {{- end }}
         - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ .Values.ports.admin }}
@@ -194,7 +207,28 @@ spec:
               name: {{ ((.Values.console).oidc.existingSecret) }}
               key: {{ ((.Values.console).oidc.clientSecretKey) }}
         {{- end }}
-        {{- if eq $mode "local" }}
+        {{- if $store }}
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ $store }}
+              key: {{ (((.Values.console).store).urlKey) | default "database-url" }}
+        {{- with (((.Values.console).store).bootstrap) }}
+        {{- if .existingSecret }}
+        - name: GAPURA_BOOTSTRAP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ .existingSecret }}
+              key: {{ .usernameKey | default "username" }}
+        - name: GAPURA_BOOTSTRAP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .existingSecret }}
+              key: {{ .passwordKey | default "password" }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if $localFile }}
         volumeMounts:
         - { name: users, mountPath: /etc/gapura-control, readOnly: true }
         {{- end }}
