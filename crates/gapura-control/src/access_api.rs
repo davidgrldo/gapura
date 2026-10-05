@@ -69,14 +69,18 @@ pub enum Me {
     /// Enough for the console to leave out what only store mode has.
     Kubernetes,
     Store {
+        /// The account's id, as `/api/users` names it, so the console can tell the reader's own
+        /// row from everyone else's.
+        id: Uuid,
         name: String,
         method: Method,
         superuser: bool,
         waiting: bool,
         /// Every workspace where the caller holds a role, and that role.
         roles: Vec<WorkspaceRole>,
-        /// Where the caller is admin: where they may see, and later grant, other people's roles.
-        grantable: Vec<Uuid>,
+        /// Where the caller is admin, and so may see and grant other people's roles. Named, so a
+        /// form can list them without asking again, and in the order of their names.
+        grantable: Vec<WorkspaceName>,
     },
 }
 
@@ -87,6 +91,13 @@ pub struct WorkspaceRole {
     workspace_id: Uuid,
     workspace: String,
     role: Role,
+}
+
+/// A workspace, named the same way.
+#[derive(Serialize)]
+pub struct WorkspaceName {
+    workspace_id: Uuid,
+    workspace: String,
 }
 
 /// `GET /api/me`: who this is and what they hold. A waiting account gets an answer here and a
@@ -112,13 +123,26 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
                 })
         })
         .collect();
+    // Walked in the rows' order, which is by name, rather than in the set's, which is by id.
+    let within = caller.rows.grantable(&caller.me);
+    let grantable = caller
+        .rows
+        .workspaces
+        .iter()
+        .filter(|w| within.contains(&w.id))
+        .map(|w| WorkspaceName {
+            workspace_id: w.id,
+            workspace: w.name.clone(),
+        })
+        .collect();
     Ok(Json(Me::Store {
+        id: caller.me.id,
         name: caller.me.name.clone(),
         method: caller.me.method,
         superuser: caller.me.superuser,
         waiting: caller.rows.waiting(&caller.me),
         roles,
-        grantable: caller.rows.grantable(&caller.me).into_iter().collect(),
+        grantable,
     }))
 }
 
@@ -214,6 +238,12 @@ pub struct MappingView {
     workspace_id: Uuid,
     workspace: String,
     role: Role,
+    /// How many enabled accounts were in the group at their last sign-in. Zero beside a mapping
+    /// just made is the quickest sign that its name does not match what the identity provider
+    /// sends. Each one counted is listed in `/api/users` with this group as a source in this
+    /// workspace, which the caller administers, so the number says nothing the caller could not
+    /// already see.
+    seen: usize,
 }
 
 #[derive(Serialize)]
@@ -266,6 +296,12 @@ pub async fn roles(
                 workspace_id: g.workspace,
                 workspace: workspace.name.clone(),
                 role: g.role,
+                seen: caller
+                    .rows
+                    .users
+                    .iter()
+                    .filter(|u| !u.disabled && u.groups.contains(&g.group))
+                    .count(),
             })
         })
         .collect();

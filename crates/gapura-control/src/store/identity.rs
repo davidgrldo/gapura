@@ -62,7 +62,12 @@ impl Store {
             })
             .collect();
         let workspaces = tx
-            .query("select id, name from workspaces order by name", &[])
+            // collate "C", so every deployment lists workspaces in one order, the one Rust's own
+            // sorting of names elsewhere in the console agrees with.
+            .query(
+                "select id, name from workspaces order by name collate \"C\"",
+                &[],
+            )
             .await?
             .into_iter()
             .map(|r| Workspace {

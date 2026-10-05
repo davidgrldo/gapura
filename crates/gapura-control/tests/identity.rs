@@ -586,16 +586,46 @@ async fn me_tells_each_account_what_it_holds() {
         return;
     };
     let s = seed(&store).await;
+    // First by id and last by name, so a list walked in id order cannot pass for one walked in
+    // name order by luck of the random ids the other two drew.
+    let zeta: uuid::Uuid = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "insert into workspaces (id, name) values ($1, 'zeta')",
+            &[&zeta],
+        )
+        .await
+        .unwrap();
     let app = console(store, gapura_control::login::AuthMode::Local);
 
     let root = json(&call(&app, "/api/me", Some(s.root)).await.1);
     assert_eq!(root["mode"], "store");
+    assert_eq!(
+        root["id"],
+        serde_json::json!(s.root),
+        "the console knows the reader's own row by this"
+    );
     assert_eq!(root["superuser"], true);
-    assert_eq!(root["roles"].as_array().unwrap().len(), 2);
-    assert_eq!(root["grantable"].as_array().unwrap().len(), 2);
+    assert_eq!(root["roles"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        root["grantable"],
+        serde_json::json!([
+            {"workspace_id": s.default, "workspace": "default"},
+            {"workspace_id": s.payments, "workspace": "payments"},
+            {"workspace_id": zeta, "workspace": "zeta"}
+        ]),
+        "named, so a form can list them, and in the order of their names"
+    );
 
     let pat = json(&call(&app, "/api/me", Some(s.pat)).await.1);
-    assert_eq!(pat["grantable"], serde_json::json!([s.payments]));
+    assert_eq!(pat["id"], serde_json::json!(s.pat));
+    assert_eq!(
+        pat["grantable"],
+        serde_json::json!([{"workspace_id": s.payments, "workspace": "payments"}])
+    );
     assert_eq!(pat["roles"][0]["role"], "admin");
 
     let vic = json(&call(&app, "/api/me", Some(s.vic)).await.1);
@@ -697,20 +727,96 @@ async fn roles_are_counted_and_mapped_within_the_callers_workspaces() {
         return;
     };
     let s = seed(&store).await;
+    // In payments-dev but disabled: the mapping reaches nobody through this account, so it is
+    // not seen, and it holds nothing, so it is not counted either.
+    let gone = store
+        .upsert_oidc_user(
+            "https://id.example",
+            "s-gone",
+            "gone",
+            &["payments-dev".to_string()],
+        )
+        .await
+        .unwrap();
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "update users set disabled_at = now() where id = $1",
+            &[&gone.id],
+        )
+        .await
+        .unwrap();
+    // In payments-dev and a superuser: counted as a superuser only in held_by, but seen like any
+    // member, because /api/users lists payments-dev among its sources in payments too.
+    let sue = store
+        .upsert_oidc_user(
+            "https://id.example",
+            "s-sue",
+            "sue",
+            &["payments-dev".to_string()],
+        )
+        .await
+        .unwrap();
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "update users set superuser = true where id = $1",
+            &[&sue.id],
+        )
+        .await
+        .unwrap();
     let app = console(store, gapura_control::login::AuthMode::Local);
     let pat = json(&call(&app, "/api/roles", Some(s.pat)).await.1);
     assert_eq!(
         pat["mappings"],
         serde_json::json!([{
-            "group": "payments-dev", "workspace_id": s.payments, "workspace": "payments", "role": "editor"
-        }])
+            "group": "payments-dev", "workspace_id": s.payments, "workspace": "payments",
+            "role": "editor", "seen": 2
+        }]),
+        "oli and sue are in payments-dev; the disabled account is not seen"
     );
     assert_eq!(
         pat["held_by"],
-        serde_json::json!({"viewer": 1, "editor": 1, "admin": 1, "superuser": 1})
+        serde_json::json!({"viewer": 1, "editor": 1, "admin": 1, "superuser": 2})
     );
+    // The number says nothing /api/users does not: it is how many accounts that page lists with
+    // payments-dev among their sources in payments.
+    let users = json(&call(&app, "/api/users", Some(s.pat)).await.1);
+    let listed = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| {
+            u["access"].as_array().unwrap().iter().any(|a| {
+                a["workspace_id"] == serde_json::json!(s.payments)
+                    && a["sources"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|src| src["kind"] == "group" && src["name"] == "payments-dev")
+            })
+        })
+        .count();
+    assert_eq!(serde_json::json!(listed), pat["mappings"][0]["seen"]);
     let root = json(&call(&app, "/api/roles", Some(s.root)).await.1);
-    assert_eq!(root["mappings"].as_array().unwrap().len(), 2);
+    let seen: Vec<(serde_json::Value, serde_json::Value)> = root["mappings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["group"].clone(), m["seen"].clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (serde_json::json!("default-readers"), serde_json::json!(0)),
+            (serde_json::json!("payments-dev"), serde_json::json!(2)),
+        ],
+        "nobody has signed in with default-readers, which is the sign of a name that matches no claim"
+    );
 }
 
 #[tokio::test]

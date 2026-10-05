@@ -1,9 +1,10 @@
 {
   "mode": "store",
+  "id": "10000000-0000-4000-8000-000000000008",
   "name": "sari.dewi",
   "method": "local",
   "superuser": false,
   "waiting": false,
   "roles": [{ "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin" }],
-  "grantable": ["00000000-0000-4000-8000-000000000002"]
+  "grantable": [{ "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments" }]
 }
