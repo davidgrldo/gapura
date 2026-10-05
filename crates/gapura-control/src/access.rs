@@ -31,14 +31,30 @@ impl Role {
     }
 }
 
-/// Why someone holds a role in a workspace. Sources are listed in this declaration order, and
-/// groups by name, which is the order a reader sees them in.
+/// Why someone holds a role in a workspace, and the role that one grant gives. Sources are
+/// listed in this declaration order, and groups by name, which is the order a reader sees them
+/// in.
+///
+/// Each carries its own role because the highest is not the only one that matters. The form
+/// that edits an account's access holds its direct grant even where a group gives more, and
+/// someone deciding what to remove needs to see what is left underneath.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(tag = "kind", content = "name", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Source {
-    Superuser,
-    Direct,
-    Group(String),
+    Superuser { role: Role },
+    Direct { role: Role },
+    Group { name: String, role: Role },
+}
+
+impl Source {
+    /// The role this one grant gives, whatever the others give.
+    pub fn role(&self) -> Role {
+        match self {
+            Source::Superuser { role } | Source::Direct { role } | Source::Group { role, .. } => {
+                *role
+            }
+        }
+    }
 }
 
 /// How an account signs in.
@@ -110,24 +126,29 @@ impl Rows {
         if user.disabled {
             return None;
         }
-        let mut held: Vec<(Role, Source)> = Vec::new();
+        let mut sources: Vec<Source> = Vec::new();
         if user.superuser {
-            held.push((Role::Admin, Source::Superuser));
+            sources.push(Source::Superuser { role: Role::Admin });
         }
-        held.extend(
+        sources.extend(
             self.grants
                 .iter()
                 .filter(|g| g.user == user.id && g.workspace == workspace)
-                .map(|g| (g.role, Source::Direct)),
+                .map(|g| Source::Direct { role: g.role }),
         );
-        held.extend(
+        sources.extend(
             self.group_grants
                 .iter()
                 .filter(|g| g.workspace == workspace && user.groups.contains(&g.group))
-                .map(|g| (g.role, Source::Group(g.group.clone()))),
+                .map(|g| Source::Group {
+                    name: g.group.clone(),
+                    role: g.role,
+                }),
         );
-        let role = held.iter().map(|(role, _)| *role).max()?;
-        let mut sources: Vec<Source> = held.into_iter().map(|(_, source)| source).collect();
+        let role = sources.iter().map(Source::role).max()?;
+        // Each binding table's primary key keeps a grant from appearing twice, and a group named
+        // twice in the claim still matches its one binding once, so rows read from the store
+        // never repeat a source. The dedup guards rows built by hand.
         sources.sort();
         sources.dedup();
         Some(Access { role, sources })
@@ -266,10 +287,17 @@ mod tests {
             rows.effective(&rows.users[2], id(100)),
             Some(Access {
                 role: Role::Editor,
+                // The direct grant keeps its own role underneath the group's higher one.
                 sources: vec![
-                    Source::Direct,
-                    Source::Group("auditors".into()),
-                    Source::Group("devs".into()),
+                    Source::Direct { role: Role::Viewer },
+                    Source::Group {
+                        name: "auditors".into(),
+                        role: Role::Viewer
+                    },
+                    Source::Group {
+                        name: "devs".into(),
+                        role: Role::Editor
+                    },
                 ],
             })
         );
@@ -278,6 +306,40 @@ mod tests {
             rows.effective(&rows.users[2], id(200)),
             None,
             "devs and auditors hold roles in payments only"
+        );
+        // And a direct grant above a group's keeps the group's lower role beneath it.
+        assert_eq!(
+            rows.effective(&rows.users[1], id(100)),
+            Some(Access {
+                role: Role::Admin,
+                sources: vec![
+                    Source::Direct { role: Role::Admin },
+                    Source::Group {
+                        name: "readers".into(),
+                        role: Role::Viewer
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn a_superuser_with_a_direct_grant_lists_both_superuser_first() {
+        let mut rows = rows();
+        rows.grants.push(Grant {
+            user: rows.users[0].id,
+            workspace: id(100),
+            role: Role::Viewer,
+        });
+        assert_eq!(
+            rows.effective(&rows.users[0], id(100)),
+            Some(Access {
+                role: Role::Admin,
+                sources: vec![
+                    Source::Superuser { role: Role::Admin },
+                    Source::Direct { role: Role::Viewer },
+                ],
+            })
         );
     }
 
@@ -289,7 +351,7 @@ mod tests {
                 rows.effective(&rows.users[0], workspace),
                 Some(Access {
                     role: Role::Admin,
-                    sources: vec![Source::Superuser]
+                    sources: vec![Source::Superuser { role: Role::Admin }]
                 })
             );
         }
@@ -352,5 +414,29 @@ mod tests {
             ["payments"],
             "storefront is outside what user 2 administers"
         );
+    }
+
+    #[test]
+    fn every_source_says_the_role_it_gives_in_the_shape_the_console_reads() {
+        let shapes = [
+            (
+                Source::Superuser { role: Role::Admin },
+                serde_json::json!({"kind": "superuser", "role": "admin"}),
+            ),
+            (
+                Source::Direct { role: Role::Viewer },
+                serde_json::json!({"kind": "direct", "role": "viewer"}),
+            ),
+            (
+                Source::Group {
+                    name: "/platform".into(),
+                    role: Role::Admin,
+                },
+                serde_json::json!({"kind": "group", "name": "/platform", "role": "admin"}),
+            ),
+        ];
+        for (source, shape) in shapes {
+            assert_eq!(serde_json::to_value(&source).unwrap(), shape);
+        }
     }
 }

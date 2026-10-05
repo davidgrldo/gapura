@@ -133,7 +133,12 @@
                     <tr class="border-t">
                       <td class="py-1.5 pr-4 wrap-anywhere">{held.workspace}</td>
                       <td class="py-1.5 pr-4 font-medium">{ROLE_LABEL[held.role]}</td>
-                      <td class="py-1.5 wrap-anywhere">{held.sources.map(source).join(', ')}</td>
+                      <!-- Each grant with the role it gives. One below the role that applies is
+                           muted: it changes nothing while the higher one stands, and it is what
+                           is left when that one goes. -->
+                      <td class="py-1.5 wrap-anywhere">
+                        {#each held.sources as s, i (i)}{#if i > 0}{', '}{/if}<span class={s.role === held.role ? undefined : 'text-muted-foreground'}>{source(s)}: {ROLE_LABEL[s.role] ?? s.role}</span>{/each}
+                      </td>
                     </tr>
                   {/each}
                 </tbody>

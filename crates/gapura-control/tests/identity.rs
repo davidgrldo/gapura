@@ -193,7 +193,13 @@ async fn access_rows_reads_accounts_grants_and_mappings_in_one_go() {
     assert_eq!(
         rows.effective(oli_row, payments)
             .map(|a| (a.role, a.sources)),
-        Some((Role::Editor, vec![Source::Group("payments-dev".into())]))
+        Some((
+            Role::Editor,
+            vec![Source::Group {
+                name: "payments-dev".into(),
+                role: Role::Editor
+            }]
+        ))
     );
     let root = rows.users.iter().find(|u| u.name == "root").unwrap();
     assert!(root.superuser && root.method == Method::Local);
@@ -660,14 +666,17 @@ async fn a_workspace_admin_sees_every_account_but_roles_only_in_their_workspace(
     assert_eq!(root["access"].as_array().unwrap().len(), 1);
     assert_eq!(
         root["access"][0]["sources"],
-        serde_json::json!([{"kind": "superuser"}])
+        serde_json::json!([{"kind": "superuser", "role": "admin"}])
     );
     let oli = by_name("oli");
     assert_eq!(oli["method"], "oidc");
     assert_eq!(oli["access"][0]["role"], "editor");
     assert_eq!(
         oli["access"][0]["sources"],
-        serde_json::json!([{"kind": "direct"}, {"kind": "group", "name": "payments-dev"}])
+        serde_json::json!([
+            {"kind": "direct", "role": "viewer"},
+            {"kind": "group", "name": "payments-dev", "role": "editor"}
+        ])
     );
 
     // The superuser sees the default workspace too.
