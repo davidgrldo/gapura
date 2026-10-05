@@ -13,7 +13,9 @@ use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService,
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
+mod grants;
 mod identity;
+pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
 
 /// Applied in order, recorded in `_migrations`. Schema migration is permanent work;

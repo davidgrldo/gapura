@@ -29,6 +29,15 @@ impl Role {
             _ => None,
         }
     }
+
+    /// The same spelling the other way, for a role about to be written.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Editor => "editor",
+            Role::Admin => "admin",
+        }
+    }
 }
 
 /// Why someone holds a role in a workspace, and the role that one grant gives. Sources are
@@ -63,6 +72,16 @@ impl Source {
 pub enum Method {
     Local,
     Oidc,
+}
+
+impl Method {
+    /// How `audit_log.actor_method` records it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Method::Local => "local",
+            Method::Oidc => "oidc",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -438,5 +457,15 @@ mod tests {
         for (source, shape) in shapes {
             assert_eq!(serde_json::to_value(&source).unwrap(), shape);
         }
+    }
+
+    #[test]
+    fn roles_and_methods_are_spelled_the_way_the_store_spells_them() {
+        for role in [Role::Viewer, Role::Editor, Role::Admin] {
+            assert_eq!(Role::parse(role.as_str()), Some(role));
+            assert_eq!(serde_json::to_value(role).unwrap(), role.as_str());
+        }
+        assert_eq!(Method::Local.as_str(), "local");
+        assert_eq!(Method::Oidc.as_str(), "oidc");
     }
 }
