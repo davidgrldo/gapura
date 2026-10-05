@@ -9,7 +9,7 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - An EndpointSlice whose `endpoints` is null, or holds null entries, loads as a slice with no
-  endpoints instead of being dropped. The API server sends `endpoints: null` for the slice of any
+  endpoints instead of being dropped (#98). The API server sends `endpoints: null` for the slice of any
   Service with nothing behind it -- the read-replica Service CloudNativePG creates beside a
   one-instance cluster, a Deployment scaled to zero -- and the strict sequence type rejected it
   with a WARN (`invalid type: null, expected a sequence`) and a tick of
