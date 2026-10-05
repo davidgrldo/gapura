@@ -7,7 +7,7 @@
 
 The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
-Status: v0.1 is code-complete: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI. The Gateway API GATEWAY-HTTP conformance suite passes all 37 core tests plus the four extended tests it claims; the report is in [conformance/](conformance/).
+Status: v0.1.0 is the latest published release: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI, everything the quickstart below installs. The tree is ahead of that release, the console, consumer API keys, and JWT policies among it, none of it in a stable release yet; [CHANGELOG.md](CHANGELOG.md) lists what changed. The Gateway API GATEWAY-HTTP conformance suite passes all 37 core tests plus the four extended tests it claims; the report is in [conformance/](conformance/).
 
 - Release notes, and what changes for operators on upgrade: [CHANGELOG.md](CHANGELOG.md)
 - Contributing, security policy, and code of conduct: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
@@ -26,9 +26,16 @@ Gateway API core, served out of one binary with no database and no separate cont
   `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.
 - **Traffic**: per-rule request and backend timeouts, and one retry against a second endpoint when a
   connection fails.
+- **Consumer credentials**: a rule can require an API key or a JWT. The key travels through the
+  configuration only as its SHA-256 hash, so a stolen config cache yields nothing to replay, and
+  the presented key maps straight to the consumer it was issued to; a token that does not verify
+  is refused with `401` and a `WWW-Authenticate` challenge before the request goes upstream.
 - **Operations**: Prometheus metrics, a JSON access log carrying trace context, a Grafana dashboard
   and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
   config swap so in-flight requests finish on the config they started with.
+- **Console**: off by default. `console.enabled` deploys `gapura-control` in its own Deployment
+  and Service with read-only RBAC: sign-in from a local users file or OIDC, and routes scoped to
+  the namespaces each group is granted. The stock install stays one binary with no database.
 
 ## The name
 
@@ -102,14 +109,13 @@ upstream looks wrong: the Gateway reports `Programmed=True`, and step 4 answers
 <details>
 <summary>Why, what to do if your cluster has no such mapping, and why minikube is not on that list</summary>
 
-reads out of Gateway status and dials, a Gateway address carries no port, so step 4 goes to
-`127.0.0.1:80` while the Service above is on NodePort 30080. The `kind create cluster` block above
-bridges the two with `extraPortMappings`; a cluster you already had almost certainly does not. If
+Gapura reads the address out of Gateway status and dials it; a Gateway address carries no port,
+so step 4 goes to `127.0.0.1:80` while the Service above is on NodePort 30080. The
+`kind create cluster` block above bridges the two with `extraPortMappings`; a cluster you already
+had almost certainly does not. If
 yours does not, either recreate it with that mapping, or find the host port that does reach 30080
 and put it into step 4's `curl` by hand -- `http://127.0.0.1:<hostPort>/echo?msg=it-works` -- since
-the published address stays `127.0.0.1` with no port to carry it. Skip this and nothing upstream
-looks wrong: the Gateway reports `Programmed=True` with address `127.0.0.1`, and step 4 answers
-`curl: (7) Failed to connect to 127.0.0.1 port 80`.
+the published address stays `127.0.0.1` with no port to carry it.
 
 minikube is deliberately not on that list. Its NodePort answers at `$(minikube ip):30080`, and
 nothing listens on `127.0.0.1:80` by default, so `publishAddresses={127.0.0.1}` publishes an address
@@ -234,6 +240,7 @@ for that address. Pass `FIXTURE=1 ./hack/conformance.sh` to keep the fixture as 
 
 ```bash
 cargo test -p gapura-core                 # unit + golden tests (< 60 s)
+cargo test -p gapura-control              # console; the Postgres test skips without GAPURA_TEST_DATABASE_URL
 cargo install cargo-insta                 # once; needed for the review command below
 cargo insta review                        # review changed golden snapshots
 cargo run -p gapura-core --example dump -- crates/gapura-core/tests/fixtures/basic-http/input
