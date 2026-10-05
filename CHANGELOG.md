@@ -8,6 +8,22 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Superusers and workspace admins grant, change and remove direct roles and group mappings from
+  the console: Edit access on an opened Users row, and Map a group, Edit and Remove on Roles,
+  whose mappings now say how many accounts were in each group at their last sign-in. An admin does
+  so in the workspaces they administer, up to and including admin and their own grant. The check
+  is made again inside the transaction that writes, so a demotion that races the write is ordered,
+  never interleaved. `/api/me` gains the account's `id` and names the workspaces in `grantable`,
+  and every source in `/api/users` names the role it gives. Workspaces are listed by name in byte
+  order, the same on every deployment, so `Zeta` comes before `alpha`.
+- Every such change is an `audit_log` entry naming who made it and how they signed in, in the
+  nullable `actor_method` column (`local` or `oidc`) that migration `0003` adds.
+- A request other than `GET` or `HEAD` from another site is refused, sign-in and sign-out
+  included: `Sec-Fetch-Site` has to say `same-origin`, or, from a browser that does not send it,
+  `Origin` has to name the host the request was sent to. That fallback is for Safari before 16.4,
+  and it needs a proxy in front of the console to pass `Host` through as the browser sent it.
+  Writes to the API take JSON only, so a script that writes through it has to send `Content-Type:
+  application/json`, on a `DELETE` with no body too, and must not send another site's `Origin`.
 - The console's OIDC callback only finishes a sign-in in the browser that began it. Before, the
   `state` it checked was held by the server alone, so someone could begin a sign-in, sign in at
   the identity provider as themselves, and send another person's browser to the callback with
@@ -39,16 +55,15 @@ means what it usually does, moving from one version below to a later one. Releas
   account is a row that signs in with an argon2id password, an OIDC account becomes a row at its
   first sign-in, and roles come from the role and group bindings there; new Users and Roles pages
   show them to superusers and to each workspace's admins, who see roles only in the workspaces
-  they administer. The pages only read: in this release a role is granted by writing
-  `role_bindings` or `group_bindings` in SQL. `GAPURA_BOOTSTRAP_USERNAME` and
-  `GAPURA_BOOTSTRAP_PASSWORD` create the first superuser in an empty store and are ignored once
-  any account exists, an SSO one included, so set them before anyone signs in.
-  `--local-users-file` and `--grant` are refused alongside `DATABASE_URL` rather than ignored. A
-  deployment that already sets `DATABASE_URL` for the configuration endpoint moves its console
-  into this mode on upgrade: sessions signed in before it end, and it will not start while it
-  still passes `--local-users-file`, whose users are not imported. The chart sets it through
-  `console.store` (below). In this mode Overview and Routes are for superusers until they learn about
-  workspaces. `POST /auth/logout` signs out, in either mode.
+  they administer. `GAPURA_BOOTSTRAP_USERNAME` and `GAPURA_BOOTSTRAP_PASSWORD` create the first
+  superuser in an empty store and are ignored once any account exists, an SSO one included, so set
+  them before anyone signs in. `--local-users-file` and `--grant` are refused alongside
+  `DATABASE_URL` rather than ignored. A deployment that already sets `DATABASE_URL` for the
+  configuration endpoint moves its console into this mode on upgrade: sessions signed in before it
+  end, and it will not start while it still passes `--local-users-file`, whose users are not
+  imported. The chart sets it through `console.store` (below). In this mode Overview and Routes
+  are for superusers until they learn about workspaces. `POST /auth/logout` signs out, in either
+  mode.
 - The chart installs the console's local users Secret again: `console.yaml` had no `---` between
   that Secret and the console's ServiceAccount, so the two parsed as one object, the
   ServiceAccount's keys won, and the Secret was never created -- helm and the API server only
