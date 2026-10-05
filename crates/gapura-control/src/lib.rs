@@ -12,6 +12,7 @@ pub mod bootstrap;
 pub mod config_api;
 pub mod declared;
 pub mod grants;
+pub mod grants_api;
 pub mod kube_source;
 pub mod login;
 pub mod password;

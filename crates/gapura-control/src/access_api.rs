@@ -5,12 +5,13 @@
 
 use crate::access::{Access, Method, Role, Rows, User};
 use crate::state::AppState;
-use crate::store::Store;
+use crate::store::{sqlstate, Store};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Serialize;
 use std::collections::BTreeSet;
+use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 /// The signed-in account in store mode, with the rows its access is computed from.
@@ -35,7 +36,13 @@ pub async fn store_caller(
         .parse()
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let rows = store.access_rows().await.map_err(|error| {
-        tracing::warn!(%error, "reading accounts from the store failed");
+        // An `anyhow::Error` shown with `%` prints only its outermost error, and for a database
+        // error that is just "db error": the chain and the SQLSTATE hold the reason.
+        tracing::warn!(
+            error = format!("{error:#}"),
+            sqlstate = sqlstate(&error).map(SqlState::code),
+            "reading accounts from the store failed"
+        );
         StatusCode::SERVICE_UNAVAILABLE
     })?;
     let me = rows
@@ -47,20 +54,22 @@ pub async fn store_caller(
     Ok(StoreCaller { rows, me })
 }
 
-/// The caller and the workspaces they administer, when they are a superuser or administer at
-/// least one. A superuser keeps these pages even with no workspaces at all, the state `waiting`
-/// already guards. Kubernetes mode has no accounts to list, so there these pages do not exist.
-async fn admin_caller(
-    state: &AppState,
+/// The store, the caller and the workspaces they administer, when they are a superuser or
+/// administer at least one. A superuser keeps these pages even with no workspaces at all, the
+/// state `waiting` already guards. Kubernetes mode has no accounts to list, so there these pages
+/// do not exist. The writes in `grants_api` start here too, so they refuse exactly whom these
+/// pages refuse, and they take the store from here rather than look for it a second time.
+pub(crate) async fn admin_caller<'a>(
+    state: &'a AppState,
     headers: &HeaderMap,
-) -> Result<(StoreCaller, BTreeSet<Uuid>), StatusCode> {
-    let store = state.store.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<(&'a Store, StoreCaller, BTreeSet<Uuid>), StatusCode> {
+    let store = state.store.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let caller = store_caller(store, headers, &state.session_key).await?;
     let within = caller.rows.grantable(&caller.me);
     if within.is_empty() && !caller.me.superuser {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok((caller, within))
+    Ok((store, caller, within))
 }
 
 #[derive(Serialize)]
@@ -181,7 +190,7 @@ pub async fn users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<UserView>>, StatusCode> {
-    let (caller, within) = admin_caller(&state, &headers).await?;
+    let (_, caller, within) = admin_caller(&state, &headers).await?;
     let mut views: Vec<UserView> = caller
         .rows
         .users
@@ -258,7 +267,7 @@ pub async fn roles(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RolesView>, StatusCode> {
-    let (caller, within) = admin_caller(&state, &headers).await?;
+    let (_, caller, within) = admin_caller(&state, &headers).await?;
     let mut held_by = HeldBy::default();
     for user in caller.rows.users.iter().filter(|u| !u.disabled) {
         // A superuser is counted as one, not again as the admin they are everywhere.

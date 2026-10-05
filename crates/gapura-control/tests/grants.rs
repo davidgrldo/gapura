@@ -1098,3 +1098,581 @@ async fn a_grant_made_meanwhile_is_what_the_write_replaces() {
         "the entry names what it replaced, not an empty slot"
     );
 }
+
+const JSON: (&str, &str) = ("content-type", "application/json");
+
+/// What a browser sends with the console's own writes.
+const FROM_THE_CONSOLE: &[(&str, &str)] = &[JSON, ("sec-fetch-site", "same-origin")];
+
+/// The sentence a refusal carries, which every refusal must.
+fn sentence(body: &str) -> String {
+    json(body)["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error sentence in {body}"))
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_write_from_the_console_is_made_and_answered_with_no_content() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/users/{}/roles", s.wes),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &format!(r#"{{"{}": "viewer"}}"#, s.payments),
+    )
+    .await;
+    assert_eq!((status, body.as_str()), (StatusCode::NO_CONTENT, ""));
+    let (_, users) = send(&app, "GET", "/api/users", Some(s.pat), &[], "").await;
+    let wes = json(&users)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["name"] == "wes")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        wes["access"][0]["sources"],
+        serde_json::json!([{"kind": "direct", "role": "viewer"}]),
+        "the list fetched after a save shows the grant"
+    );
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/group-mappings",
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &format!(
+            r#"{{"workspace_id": "{}", "group": "/platform-team", "role": "editor"}}"#,
+            s.payments
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Percent-encoded, as the console sends it: the name has a slash of its own.
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!(
+            "/api/group-mappings?workspace_id={}&group=%2Fplatform-team",
+            s.payments
+        ),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let actions: Vec<serde_json::Value> = audit(&store)
+        .await
+        .iter()
+        .map(|e| e["action"].clone())
+        .collect();
+    assert_eq!(actions, ["update", "create", "delete"]);
+}
+
+#[tokio::test]
+async fn a_malformed_request_is_400_and_says_why() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let roles_of_wes = format!("/api/users/{}/roles", s.wes);
+    let payments = s.payments;
+    let malformed = [
+        ("PATCH", roles_of_wes.clone(), "{".to_string()),
+        (
+            "PATCH",
+            roles_of_wes.clone(),
+            format!(r#"{{"{payments}": "owner"}}"#),
+        ),
+        (
+            "PATCH",
+            roles_of_wes.clone(),
+            r#"{"payments": "viewer"}"#.to_string(),
+        ),
+        (
+            "PATCH",
+            "/api/users/not-an-id/roles".to_string(),
+            "{}".to_string(),
+        ),
+        (
+            "PUT",
+            "/api/group-mappings".to_string(),
+            format!(r#"{{"workspace_id": "{payments}", "group": "lead ", "role": "viewer"}}"#),
+        ),
+        (
+            "PUT",
+            "/api/group-mappings".to_string(),
+            format!(r#"{{"workspace_id": "{payments}", "group": "lead"}}"#),
+        ),
+        (
+            "DELETE",
+            "/api/group-mappings?group=lead".to_string(),
+            String::new(),
+        ),
+        (
+            "DELETE",
+            "/api/group-mappings?workspace_id=payments&group=lead".to_string(),
+            String::new(),
+        ),
+        // NUL cannot be stored in text; without the check it would reach Postgres and come
+        // back as a 503 that reads like an outage.
+        (
+            "DELETE",
+            format!("/api/group-mappings?workspace_id={payments}&group=lead%00"),
+            String::new(),
+        ),
+        // A body is held to its fields, and so is the query: a misspelt one is not ignored.
+        (
+            "DELETE",
+            format!("/api/group-mappings?workspace_id={payments}&group=lead&gruop=lead"),
+            String::new(),
+        ),
+        // A path segment that is not UTF-8 once decoded never reaches the handler as a string.
+        (
+            "PATCH",
+            "/api/users/%ff/roles".to_string(),
+            "{}".to_string(),
+        ),
+    ];
+    for (method, path, request) in &malformed {
+        let (status, body) = send(&app, method, path, Some(s.pat), FROM_THE_CONSOLE, request).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {path} {request}: {body}"
+        );
+        assert!(!sentence(&body).is_empty());
+    }
+    let (_, body) = send(
+        &app,
+        "PUT",
+        "/api/group-mappings",
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &malformed[4].2,
+    )
+    .await;
+    assert!(
+        sentence(&body).contains("start or end with a space"),
+        "the reason is given: {body}"
+    );
+    assert!(grants_of(&store, s.wes).await.is_empty());
+    assert!(audit(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_write_without_a_live_session_is_401() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let path = format!("/api/users/{}/roles", s.wes);
+    let body = format!(r#"{{"{}": "viewer"}}"#, s.payments);
+    // No session; a disabled account; an id that names no account.
+    for who in [None, Some(s.dee), Some(Uuid::new_v4())] {
+        let (status, answer) = send(&app, "PATCH", &path, who, FROM_THE_CONSOLE, &body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{who:?}");
+        assert_eq!(sentence(&answer), "You are not signed in.");
+    }
+    // The request was a valid one, so what keeps it from being made is the 401 alone.
+    assert!(grants_of(&store, s.wes).await.is_empty());
+    assert!(audit(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_request_is_judged_by_who_sent_it_before_it_is_judged_by_what_it_says() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let roles_of_wes = format!("/api/users/{}/roles", s.wes);
+    // Longer than the console reads of a body, whatever it says.
+    let too_long = format!(r#"{{"{}": "{}"}}"#, s.payments, "a".repeat(100_000));
+    // Each is malformed in a different way, and the last is not a body at all but a query.
+    let malformed = [
+        ("PATCH", roles_of_wes.clone(), "{".to_string(), 400),
+        ("PATCH", roles_of_wes, too_long.clone(), 413),
+        (
+            "PATCH",
+            "/api/users/not-an-id/roles".to_string(),
+            "{}".to_string(),
+            400,
+        ),
+        (
+            "PATCH",
+            "/api/users/%ff/roles".to_string(),
+            "{}".to_string(),
+            400,
+        ),
+        (
+            "PUT",
+            "/api/group-mappings".to_string(),
+            "{".to_string(),
+            400,
+        ),
+        ("PUT", "/api/group-mappings".to_string(), too_long, 413),
+        (
+            "DELETE",
+            "/api/group-mappings?group=lead".to_string(),
+            String::new(),
+            400,
+        ),
+    ];
+    for (method, path, request, status_for_an_admin) in &malformed {
+        // No session, and a disabled account: not signed in, so nothing else is said.
+        for who in [None, Some(s.dee)] {
+            let (status, body) = send(&app, method, path, who, FROM_THE_CONSOLE, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path} {who:?}");
+            assert_eq!(sentence(&body), "You are not signed in.");
+        }
+        // Waiting, and holding a role while administering nothing: signed in, but not allowed
+        // to ask for anything, however it is asked.
+        for who in [s.wes, s.vic] {
+            let (status, body) =
+                send(&app, method, path, Some(who), FROM_THE_CONSOLE, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} {who}");
+            assert_eq!(sentence(&body), "You do not administer any workspace.");
+        }
+        // Only an administrator is told what is wrong with it.
+        let (status, body) = send(&app, method, path, Some(s.pat), FROM_THE_CONSOLE, request).await;
+        assert_eq!(
+            status.as_u16(),
+            *status_for_an_admin,
+            "{method} {path}: {body}"
+        );
+        assert!(!sentence(&body).is_empty());
+    }
+    assert!(grants_of(&store, s.wes).await.is_empty());
+    assert!(audit(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_caller_who_may_not_make_the_change_is_403_and_nothing_changes() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let to_vic = format!("/api/users/{}/roles", s.vic);
+    let editor_in = |workspace: Uuid| format!(r#"{{"{workspace}": "editor"}}"#);
+    // Waiting, and holding a role while administering nothing.
+    for who in [s.wes, s.vic] {
+        let (status, body) = send(
+            &app,
+            "PATCH",
+            &to_vic,
+            Some(who),
+            FROM_THE_CONSOLE,
+            &editor_in(s.payments),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}");
+        assert_eq!(sentence(&body), "You do not administer any workspace.");
+    }
+    // A workspace pat does not administer, and one that does not exist, get one answer.
+    let outside = send(
+        &app,
+        "PATCH",
+        &to_vic,
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &editor_in(s.default),
+    )
+    .await;
+    let unknown = send(
+        &app,
+        "PATCH",
+        &to_vic,
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &editor_in(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(outside.0, StatusCode::FORBIDDEN);
+    assert_eq!(outside, unknown);
+    // The sentence the rules give, not one the handler worded for itself.
+    let outside_yours = Refusal::outside_your_workspaces().sentence().to_string();
+    assert_eq!(sentence(&outside.1), outside_yours);
+    // A new mapping there gets it too, whether the workspace exists or not.
+    let put_in = |workspace: Uuid| {
+        format!(r#"{{"workspace_id": "{workspace}", "group": "new-group", "role": "viewer"}}"#)
+    };
+    let put_outside = send(
+        &app,
+        "PUT",
+        "/api/group-mappings",
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &put_in(s.default),
+    )
+    .await;
+    let put_unknown = send(
+        &app,
+        "PUT",
+        "/api/group-mappings",
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &put_in(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(put_outside.0, StatusCode::FORBIDDEN);
+    assert_eq!(put_outside, put_unknown);
+    assert_eq!(sentence(&put_outside.1), outside_yours);
+    // So does removing one, whether it exists or not.
+    let mapping = |group: &str| {
+        format!(
+            "/api/group-mappings?workspace_id={}&group={group}",
+            s.default
+        )
+    };
+    let exists = send(
+        &app,
+        "DELETE",
+        &mapping("default-readers"),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        "",
+    )
+    .await;
+    let missing = send(
+        &app,
+        "DELETE",
+        &mapping("nobody"),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        "",
+    )
+    .await;
+    assert_eq!(exists.0, StatusCode::FORBIDDEN);
+    assert_eq!(exists, missing);
+    assert_eq!(sentence(&exists.1), outside_yours);
+    assert_eq!(
+        grants_of(&store, s.vic).await,
+        [(s.payments, "viewer".to_string())]
+    );
+    assert_eq!(
+        mappings(&store).await,
+        [
+            (
+                "default-readers".to_string(),
+                s.default,
+                "viewer".to_string()
+            ),
+            ("payments-dev".to_string(), s.payments, "editor".to_string()),
+        ],
+        "the mappings are as they were seeded"
+    );
+    assert!(audit(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_account_or_mapping_is_404_once_the_workspace_is_the_callers() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store));
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/users/{}/roles", Uuid::new_v4()),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        &format!(r#"{{"{}": "viewer"}}"#, s.payments),
+    )
+    .await;
+    assert_eq!(
+        (status, sentence(&body)),
+        (
+            StatusCode::NOT_FOUND,
+            "There is no such account.".to_string()
+        )
+    );
+    // Asking for nothing is still asking about an account, and the answer for one that does not
+    // exist does not depend on there being anything to change.
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/users/{}/roles", Uuid::new_v4()),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        "{}",
+    )
+    .await;
+    assert_eq!(
+        (status, sentence(&body)),
+        (
+            StatusCode::NOT_FOUND,
+            "There is no such account.".to_string()
+        )
+    );
+    let (status, body) = send(
+        &app,
+        "DELETE",
+        &format!(
+            "/api/group-mappings?workspace_id={}&group=nobody",
+            s.payments
+        ),
+        Some(s.pat),
+        FROM_THE_CONSOLE,
+        "",
+    )
+    .await;
+    assert_eq!(
+        (status, sentence(&body)),
+        (
+            StatusCode::NOT_FOUND,
+            "There is no such group mapping.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_group_with_a_space_or_a_plus_is_removed_as_the_console_encodes_it() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let seeded = mappings(&store).await;
+    // `%20` and `%2B` are what `encodeURIComponent` makes of a space and a plus; `+` is what a
+    // form encoder makes of a space, and a query reads it back as one.
+    let removed = [
+        ("front end", "front%20end"),
+        ("front end", "front+end"),
+        ("c++", "c%2B%2B"),
+    ];
+    for (group, encoded) in removed {
+        let (status, body) = send(
+            &app,
+            "PUT",
+            "/api/group-mappings",
+            Some(s.pat),
+            FROM_THE_CONSOLE,
+            &format!(
+                r#"{{"workspace_id": "{}", "group": "{group}", "role": "editor"}}"#,
+                s.payments
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{group}: {body}");
+        assert_eq!(mappings(&store).await.len(), seeded.len() + 1, "{group}");
+        let (status, body) = send(
+            &app,
+            "DELETE",
+            &format!(
+                "/api/group-mappings?workspace_id={}&group={encoded}",
+                s.payments
+            ),
+            Some(s.pat),
+            FROM_THE_CONSOLE,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{encoded}: {body}");
+        assert_eq!(mappings(&store).await, seeded, "{encoded} removed {group}");
+    }
+    let removed_groups: Vec<serde_json::Value> = audit(&store)
+        .await
+        .iter()
+        .filter(|entry| entry["action"] == "delete")
+        .map(|entry| entry["before"]["group"].clone())
+        .collect();
+    assert_eq!(removed_groups, ["front end", "front end", "c++"]);
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_read_or_written_is_503_and_nothing_is_half_written() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let path = format!("/api/users/{}/roles", s.wes);
+    let body = format!(r#"{{"{}": "viewer"}}"#, s.payments);
+    let db = store.client().await.unwrap();
+    // The write fails at its audit entry, after the grant, and the grant must go with it.
+    db.batch_execute("alter table audit_log rename to audit_log_gone")
+        .await
+        .unwrap();
+    let (status, answer) = send(&app, "PATCH", &path, Some(s.pat), FROM_THE_CONSOLE, &body).await;
+    // It does not say the database cannot be reached, because it can: a table is gone.
+    let could_not_save = "The console could not save this change. Try again in a moment.";
+    assert_eq!(
+        (status, sentence(&answer)),
+        (StatusCode::SERVICE_UNAVAILABLE, could_not_save.to_string())
+    );
+    assert!(
+        grants_of(&store, s.wes).await.is_empty(),
+        "the grant went in without its audit entry"
+    );
+    // And when the caller cannot be read at all.
+    db.batch_execute("alter table group_bindings rename to group_bindings_gone")
+        .await
+        .unwrap();
+    let (status, answer) = send(&app, "PATCH", &path, Some(s.pat), FROM_THE_CONSOLE, &body).await;
+    assert_eq!(
+        (status, sentence(&answer)),
+        (StatusCode::SERVICE_UNAVAILABLE, could_not_save.to_string())
+    );
+}
+
+#[tokio::test]
+async fn in_kubernetes_mode_a_write_is_refused_from_another_site_415_without_json_and_404_otherwise(
+) {
+    let app = console(None);
+    let path = "/api/users/00000000-0000-4000-8000-000000000001/roles";
+    let cross_site: [&[(&str, &str)]; 3] = [
+        &[JSON, ("sec-fetch-site", "cross-site")],
+        &[JSON, ("sec-fetch-site", "same-site")],
+        &[JSON, ("origin", "https://evil.example"), HOST],
+    ];
+    for headers in cross_site {
+        let (status, body) = send(&app, "PATCH", path, None, headers, "{}").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
+        assert_eq!(
+            sentence(&body),
+            "This request came from another site, so it was refused."
+        );
+    }
+    let not_json: [&[(&str, &str)]; 3] = [
+        &[("sec-fetch-site", "same-origin")],
+        &[
+            ("content-type", "text/plain"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        &[FORM, ("origin", "https://console.example.test"), HOST],
+    ];
+    for headers in not_json {
+        let (status, body) = send(&app, "PATCH", path, None, headers, "{}").await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{headers:?}");
+        assert!(sentence(&body).contains("JSON"), "{body}");
+    }
+    // Past both, Kubernetes mode keeps no accounts to change, signed in or not. A session
+    // signed with the console's key still names no account there.
+    for (method, path) in [
+        ("PATCH", path),
+        ("PUT", "/api/group-mappings"),
+        ("DELETE", "/api/group-mappings?workspace_id=x&group=y"),
+    ] {
+        for who in [None, Some(Uuid::new_v4())] {
+            let (status, body) = send(&app, method, path, who, FROM_THE_CONSOLE, "{}").await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path} {who:?}");
+            assert_eq!(
+                sentence(&body),
+                "This console keeps no accounts: it runs without a database."
+            );
+        }
+    }
+}

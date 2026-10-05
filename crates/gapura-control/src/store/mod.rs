@@ -15,6 +15,7 @@ use tokio_postgres::NoTls;
 
 mod grants;
 mod identity;
+pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
 

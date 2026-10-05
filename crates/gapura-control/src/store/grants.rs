@@ -91,8 +91,9 @@ where
     }
 }
 
-/// The SQLSTATE Postgres answered with, when `error` is one it answered.
-fn sqlstate(error: &anyhow::Error) -> Option<&SqlState> {
+/// The SQLSTATE Postgres answered with, when `error` is one it answered. The handlers log it
+/// beside the error, and `grants_api` words its answer by it.
+pub(crate) fn sqlstate(error: &anyhow::Error) -> Option<&SqlState> {
     error
         .downcast_ref::<tokio_postgres::Error>()
         .and_then(tokio_postgres::Error::code)

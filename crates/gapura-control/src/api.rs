@@ -1,13 +1,14 @@
 //! The HTTP surface. Handlers stay thin: they resolve scope, call a reader, and serialise.
 
+use crate::grants_api::MAX_BODY;
 use crate::rows::{self, Row};
 use crate::scope::{self, Scope};
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
-    routing::{get, post},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 
@@ -23,6 +24,18 @@ pub fn router_with(state: AppState) -> Router {
         .route("/api/me", get(crate::access_api::me))
         .route("/api/users", get(crate::access_api::users))
         .route("/api/roles", get(crate::access_api::roles))
+        // The two that read a body cap it, so a caller who has not been checked yet cannot make
+        // the console buffer more than `MAX_BODY` of it.
+        .route(
+            "/api/users/{id}/roles",
+            patch(crate::grants_api::set_roles).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/group-mappings",
+            put(crate::grants_api::put_mapping)
+                .layer(DefaultBodyLimit::max(MAX_BODY))
+                .delete(crate::grants_api::delete_mapping),
+        )
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
         // Explicit routes above always win a match first, so this only ever runs for a path
