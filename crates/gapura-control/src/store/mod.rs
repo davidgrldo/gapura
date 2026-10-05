@@ -28,6 +28,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_identity",
         include_str!("../../migrations/0002_identity.sql"),
     ),
+    (
+        "0003_audit_method",
+        include_str!("../../migrations/0003_audit_method.sql"),
+    ),
 ];
 
 pub struct Store {
