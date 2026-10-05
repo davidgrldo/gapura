@@ -1,0 +1,10 @@
+# The console in store mode: accounts and roles in Postgres. DATABASE_URL and the bootstrap
+# superuser come from Secrets; no users Secret, no users file, no --grant.
+console:
+  enabled: true
+  store:
+    existingSecret: gapura-console-db
+    bootstrap:
+      existingSecret: gapura-console-bootstrap
+  sessionKey:
+    existingSecret: gapura-console-session

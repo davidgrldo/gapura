@@ -52,8 +52,17 @@ Sign-in is OIDC: the provider in console.oidc.issuer, plus its Secret.
    from a reader granted nothing -- every sign-in would see an empty console with no error.
    (dex: the email claim needs the email scope; keycloak realms may require their groups scope.)
 {{- end }}
+{{- else if ((.Values.console).store).existingSecret }}
+Sign-in is local: accounts in the store, no identity provider involved.
 {{- else }}
 Sign-in is local: users from console.auth.local, no identity provider involved.
+{{- end }}
+{{- if ((.Values.console).store).existingSecret }}
+Accounts and roles live in Postgres (console.store), and the Users and Roles pages are on.
+Roles are granted in SQL for now: role_bindings and group_bindings.
+{{- if not (((.Values.console).store).bootstrap).existingSecret }}
+   No console.store.bootstrap: an empty store has no account anyone can sign in with.
+{{- end }}
 {{- end }}
 {{- end }}
 
