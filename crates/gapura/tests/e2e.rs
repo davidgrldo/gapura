@@ -322,9 +322,11 @@ async fn setup() -> (Gateway, reqwest::Client) {
     (gw, c)
 }
 
-/// True once the admin's /debug/config holds at least one listener: the same store the proxy
-/// routes from, so a "yes" means the first config swap already happened.
-async fn ready_to_serve(admin: u16) -> bool {
+/// True once the admin's /debug/config holds a listener on `http`: the same store the proxy
+/// routes from, so a "yes" means the first config swap already happened. The port pins the answer
+/// to this child: another gateway that holds this admin port serves its own config, on its own
+/// http port.
+async fn ready_to_serve(admin: u16, http: u16) -> bool {
     let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/debug/config")).await else {
         return false;
     };
@@ -333,16 +335,40 @@ async fn ready_to_serve(admin: u16) -> bool {
     };
     v.get("listeners")
         .and_then(|l| l.as_array())
-        .is_some_and(|l| !l.is_empty())
+        .is_some_and(|l| l.iter().any(|l| l["port"] == http))
+}
+
+/// The request id the readiness probe sends. Each child logs to its own stdout, so finding it in
+/// `gw.logs` means `gw` answered; no per-child id is needed.
+const PROBE_ID: &str = "harness-readiness-probe";
+
+/// True once a request to the http port has come back through this child's own access log. A TCP
+/// accept only proves that something listens there, and a gateway whose bind lost the race is
+/// still running, with the winner answering on its port. The probe matches no route, so the
+/// gateway answers it with a local 404 and never contacts an upstream. Its log line is written
+/// after the response, so it can show up on a later call rather than this one.
+async fn answers_on_http(gw: &Gateway) -> bool {
+    let _ = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{}/", gw.http))
+        .header("x-request-id", PROBE_ID)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await;
+    gw.logged(PROBE_ID).is_some()
 }
 
 /// Start the binary on ports chosen here, rendering the config once the http port is known.
 ///
-/// `free_port` drops its listener before the child binds, so another test binary running in
-/// parallel can take the same ephemeral port in between. The gateway refuses to start on an
-/// address it cannot bind, so that race shows up as an immediate clean exit; retrying with fresh
-/// ports is the fix. A child that starts but never becomes ready is a real failure, not a race,
-/// and fails the test with whatever it managed to log.
+/// `free_port` drops its listener before the child binds, so another listener in this binary -- a
+/// parallel test's gateway or upstream -- can take the same ephemeral port in between. If it does
+/// before the child starts, the gateway refuses to start on an address it cannot bind, and the
+/// race shows up as an immediate clean exit; retrying with fresh ports is the fix. If it does
+/// between that check and Pingora's own bind, Pingora logs "is in use, will try again" and retries
+/// once a second while the process stays up, and every request to the port reaches the other
+/// listener. Readiness therefore demands answers from this child on both ports, which holds off
+/// until the other listener's test ends and the retry wins. A child that starts but never becomes
+/// ready is a real failure, and fails the test with whatever it managed to log; a holder that
+/// outlived the whole wait would fail the same way, and would need a retry on fresh ports.
 async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
     start_gateway_with(render, &[]).await
 }
@@ -401,14 +427,14 @@ async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> G
             }
             if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
                 // Pingora binds each service independently: /readyz only proves the admin listener,
-                // and a TCP accept on the data port only proves its socket. Neither proves the
-                // first config swap reached the store the proxy routes from -- on a loaded runner
-                // the gap was observable as a 404 "no route" for the test's first request. The
-                // store is the same one /debug/config serves, so waiting for it to hold at least
-                // one listener is waiting for the proxy to have something to route with.
+                // and `answers_on_http` only proves the data port. Neither proves the first
+                // config swap reached the store the proxy routes from -- on a loaded runner the
+                // gap was observable as a 404 "no route" for the test's first request. The store
+                // is the same one /debug/config serves, so waiting for it to hold this child's
+                // listener is waiting for the proxy to have something to route with.
                 if r.status() == 200
-                    && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok()
-                    && ready_to_serve(admin).await
+                    && answers_on_http(&gw).await
+                    && ready_to_serve(admin, http).await
                 {
                     ready = true;
                     break;
