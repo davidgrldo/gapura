@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An EndpointSlice whose `endpoints` is null, or holds null entries, loads as a slice with no
+  endpoints instead of being dropped. The API server sends `endpoints: null` for the slice of any
+  Service with nothing behind it -- the read-replica Service CloudNativePG creates beside a
+  one-instance cluster, a Deployment scaled to zero -- and the strict sequence type rejected it
+  with a WARN (`invalid type: null, expected a sequence`) and a tick of
+  `gapura_objects_rejected_total{kind="EndpointSlice"}` for an ordinary object. Routing does not
+  change: a dropped slice and an empty one both leave a backend with no ready endpoints, answered
+  with 503 `no ready endpoints`. The same rule `ports` got in #19.
 - The chart can run the console in store mode (#97): `console.store.existingSecret` names a Secret
   holding `DATABASE_URL` (key `console.store.urlKey`, default `database-url`), and
   `console.store.bootstrap.existingSecret` one holding the first superuser's `username` and
