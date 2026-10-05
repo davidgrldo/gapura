@@ -148,9 +148,11 @@
       {:else if current}
         <!-- Keyed on the path so that switching screens builds a fresh component, which is what
              re-runs its fetch. Without the key, Svelte would reuse the instance and the reader
-             would be looking at whatever it loaded the first time. -->
+             would be looking at whatever it loaded the first time. Every screen is handed who
+             is signed in: the access screens' forms need the workspaces the reader
+             administers, and the reader's own id. -->
         {#key current.path}
-          <current.component />
+          <current.component {me} />
         {/key}
       {:else}
         <Home {me} />
