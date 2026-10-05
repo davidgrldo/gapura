@@ -20,8 +20,9 @@
 //! CORS preflight, which this server never answers, so it is a second wall behind the first.
 //!
 //! Not covered here: `GET /auth/callback`, where an identity provider returns the browser. It
-//! is a `GET` by the protocol's design, and tying its `state` to the browser that began the
-//! sign-in is the callback's own work.
+//! is a `GET` by the protocol's design, so the callback guards itself instead, by refusing a
+//! `state` that does not match the `gapura_login_state` cookie set in the browser that began
+//! the sign-in.
 
 use axum::extract::Request;
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
