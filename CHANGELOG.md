@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- The chart can run the console in store mode: `console.store.existingSecret` names a Secret
+- The chart can run the console in store mode (#97): `console.store.existingSecret` names a Secret
   holding `DATABASE_URL` (key `console.store.urlKey`, default `database-url`), and
   `console.store.bootstrap.existingSecret` one holding the first superuser's `username` and
   `password`. The URL is never a plain value, since it carries the database password. With a
