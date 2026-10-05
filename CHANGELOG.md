@@ -92,7 +92,7 @@ means what it usually does, moving from one version below to a later one. Releas
   console's mark, tokens and dark mode. They are still server-rendered with their CSS inline, so
   they keep working when `web/dist` is empty; nothing about the sign-in flow itself changed.
 
-## 0.2.0 — 2026-09-24
+## 0.2.0 — unreleased (prepared 2026-09-24)
 
 - A key a caller presents identifies it as a consumer (#87): the console issues an API key, the
   store keeps only its SHA-256, and the configuration carries that hash — never the key. A
