@@ -1,9 +1,9 @@
-// The console's one way of reaching its backend. Every screen goes through `get`, which is
-// what makes signing back in a property of this file rather than something each screen has
-// to remember: a session lasts an hour by default (gapura-control's
-// --session-lifetime-seconds), so expiry is the ordinary end of a reading session, not an
-// exceptional case, and a screen that forgot to handle it would render an error page where
-// the right answer is a sign-in.
+// The console's one way of reaching its backend. Every screen reads through `get` and every
+// form writes through `write`, which is what makes signing back in a property of this file
+// rather than something each screen has to remember: a session lasts an hour by default
+// (gapura-control's --session-lifetime-seconds), so expiry is the ordinary end of a reading
+// session, not an exceptional case, and a screen that forgot to handle it would render an error
+// page where the right answer is a sign-in.
 
 // Where the server begins sign-in: the identity provider's authorization-code flow, or the
 // console's own form, which store mode always shows first. Named once so that a screen cannot
@@ -79,12 +79,14 @@ export class SessionNotSticking extends Error {
 }
 
 /**
- * Thrown on a 403: the reader is signed in, and this is not theirs to see. Its own type so a
- * screen can say exactly that, instead of reporting it as a backend that failed.
+ * Thrown on a 403: the server refused this, usually because it is not the reader's to see or to
+ * change. Its own type so a screen can say exactly that, instead of reporting it as a backend
+ * that failed. A refused write carries the server's own sentence, which says why; a refused
+ * read keeps the general one.
  */
 export class Forbidden extends Error {
-  constructor(path) {
-    super('You do not have access to this page.')
+  constructor(path, message = 'You do not have access to this page.') {
+    super(message)
     this.name = 'Forbidden'
     this.path = path
   }
@@ -108,6 +110,31 @@ export function retrySignIn() {
 }
 
 /**
+ * What `get` and `write` both do with a 401. Being sent to sign in is the right answer to an
+ * expired session, but only the first time. A second 401 in the same tab means the round trip
+ * through the identity provider completed and changed nothing — the server is issuing a
+ * session the browser never sends back — and redirecting again would do that forever: no frame
+ * is ever rendered, and the control plane and the identity provider each take hundreds of
+ * requests a second for as long as the tab stays open. Since `replace` leaves no history, Back
+ * cannot rescue the reader either. Not knowing and knowing nothing must not look the same, so
+ * the reader is told instead.
+ */
+async function signInAgain() {
+  if (wasSentToSignIn()) {
+    throw new SessionNotSticking()
+  }
+  rememberSentToSignIn()
+  // `replace` rather than `assign` so the expired page does not stay in the history: a
+  // reader who presses Back after signing in would otherwise land on the page that just
+  // bounced them and be bounced again.
+  window.location.replace(loginUrl())
+  // Leaving the browser is not instantaneous, and the caller is waiting on this promise.
+  // Never settling leaves the screen exactly as the reader left it until the new document
+  // arrives, instead of flashing a parse error against a body that was never JSON.
+  await new Promise(() => {})
+}
+
+/**
  * GET `path` as JSON, signed in. Resolves with the parsed body, redirects the browser to the
  * sign-in flow on the first 401, throws `SessionNotSticking` on a later one, throws `Forbidden`
  * on a 403, and throws on anything else so the caller's `{:catch}` can say what went wrong.
@@ -118,28 +145,7 @@ export async function get(path) {
   // bounce straight back to the identity provider in a loop.
   const response = await fetch(path, { credentials: 'same-origin' })
 
-  if (response.status === 401) {
-    // Being sent to sign in is the right answer to an expired session, but only the first
-    // time. A second 401 in the same tab means the round trip through the identity provider
-    // completed and changed nothing — the server is issuing a session the browser never sends
-    // back — and redirecting again would do that forever: no frame is ever rendered, and the
-    // control plane and the identity provider each take hundreds of requests a second for as
-    // long as the tab stays open. Since `replace` leaves no history, Back cannot rescue the
-    // reader either. Not knowing and knowing nothing must not look the same, so the reader is
-    // told instead.
-    if (wasSentToSignIn()) {
-      throw new SessionNotSticking()
-    }
-    rememberSentToSignIn()
-    // `replace` rather than `assign` so the expired page does not stay in the history: a
-    // reader who presses Back after signing in would otherwise land on the page that just
-    // bounced them and be bounced again.
-    window.location.replace(loginUrl())
-    // Leaving the browser is not instantaneous, and the caller is waiting on this promise.
-    // Never settling leaves the screen exactly as the reader left it until the new document
-    // arrives, instead of flashing a parse error against a body that was never JSON.
-    await new Promise(() => {})
-  }
+  if (response.status === 401) await signInAgain()
 
   if (response.status === 403) {
     // A 403 proves the session works — the server knew who was asking — so the next 401 in
@@ -157,4 +163,64 @@ export async function get(path) {
   forgetSentToSignIn()
 
   return response.json()
+}
+
+// The sentence in a refused write's `{"error": …}` body, which a form shows as it is. A body
+// without one, such as a proxy's error page, is not the server's answer, and whether the change
+// was made is then unknown, so that is what the reader is told.
+async function refusal(response) {
+  try {
+    const body = await response.json()
+    if (typeof body?.error === 'string') return body.error
+  } catch {
+    // Not JSON: the sentence below says what can be said.
+  }
+  return (
+    `The console answered ${response.status} without saying why, so this change may not ` +
+    'have been saved. Check the list, then try again.'
+  )
+}
+
+/**
+ * Send `body` to `path` with `method`, as JSON and signed in: the console's writes. Resolves
+ * with nothing once the server has made the change. A 401 is answered as `get` answers it, a
+ * 403 throws `Forbidden` carrying the server's sentence, and anything else that is not a
+ * success throws an Error whose message is the server's sentence, which the form shows as it
+ * is.
+ *
+ * `Content-Type: application/json` goes on every write, a DELETE with no body included. The
+ * server refuses a write to the API without it, because a page on another site cannot send it
+ * without asking first, and the server never says yes.
+ */
+export async function write(method, path, body) {
+  let response
+  try {
+    response = await fetch(path, {
+      method,
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch (cause) {
+    // The connection failed, perhaps after the server had already committed, so the outcome
+    // is unknown. The browser's own words ("Failed to fetch", "Load failed") say neither.
+    throw new Error(
+      'The console could not be reached, so this change may not have been saved. Check the ' +
+        'list, then try again.',
+      { cause },
+    )
+  }
+
+  if (response.status === 401) await signInAgain()
+
+  // The sign-in marker is not forgotten here as `get` forgets it: a write's 403 may come from
+  // the cross-site check, before the session is looked at, so it proves nothing about the
+  // session. A write is only ever sent after a read has already cleared the marker.
+  if (response.status === 403) throw new Forbidden(path, await refusal(response))
+
+  // The server's one success is 204. Anything else, a 200 page from a proxy included, did not
+  // come from the write, so it is not taken as one.
+  if (response.status !== 204) throw new Error(await refusal(response))
+
+  forgetSentToSignIn()
 }
