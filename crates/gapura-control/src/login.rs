@@ -430,6 +430,19 @@ pub fn set_cookie(value: &str, lifetime: Duration) -> String {
     )
 }
 
+/// The cookie that ties a sign-in's `state` to the browser that began it. See `callback`.
+const LOGIN_STATE_COOKIE: &str = "gapura_login_state";
+
+/// The `Set-Cookie` value holding `state` for the callback, or clearing it when `state` is empty
+/// and `lifetime` zero. `SameSite=Lax` still sends it on the provider's redirect back, which is
+/// a top-level GET; `Path` keeps it off every request but that one.
+fn login_state_cookie(state: &str, lifetime: Duration) -> String {
+    format!(
+        "{LOGIN_STATE_COOKIE}={state}; HttpOnly; Secure; SameSite=Lax; Path=/auth/callback; Max-Age={}",
+        lifetime.as_secs()
+    )
+}
+
 /// Whether the origin this sign-in arrived on can keep a `Secure` cookie at all.
 ///
 /// The listener serves plain HTTP -- TLS is an ingress's job -- so the scheme is what the proxy
@@ -626,7 +639,16 @@ pub async fn begin(
         nonce.secret(),
         return_to,
     ));
-    Ok(Redirect::to(url.as_str()).into_response())
+    // ponytail: one cookie per browser, so of two sign-ins begun at once in one browser the
+    // earlier one's callback is refused. Name the cookie per state if that ever matters.
+    Ok((
+        [(
+            header::SET_COOKIE,
+            login_state_cookie(csrf.secret(), PENDING_LIFETIME),
+        )],
+        Redirect::to(url.as_str()),
+    )
+        .into_response())
 }
 
 /// What `/auth/login` accepts: the screen to come back to, when the reader was sent here by
@@ -968,10 +990,24 @@ pub async fn callback(
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
         return Err(StatusCode::BAD_REQUEST);
     };
-    let pending = state.pending.take(&returned_state).map_err(|_| {
+    let Ok(pending) = state.pending.take(&returned_state) else {
         tracing::warn!("a callback arrived with a state this process never issued");
-        StatusCode::UNAUTHORIZED
-    })?;
+        return Ok(stale_sign_in_page());
+    };
+    // Login CSRF: someone who began a sign-in and signed in at the provider as themselves can
+    // send another browser here with their code and state, which this process still holds the
+    // verifier and nonce for. Only the browser that began the sign-in holds the state cookie.
+    // An origin that cannot keep a Secure cookie never kept this one either; it is not checked
+    // there, because no session is issued there (below), and it would hide the page saying why.
+    let secure_origin = origin_can_keep_secure_cookie(&headers);
+    if secure_origin
+        && pending
+            .check_state(crate::api::cookie(&headers, LOGIN_STATE_COOKIE).unwrap_or_default())
+            .is_err()
+    {
+        tracing::warn!("a callback arrived in a browser that did not begin its sign-in");
+        return Ok(stale_sign_in_page());
+    }
 
     let client = state.oidc.client().await.map_err(|error| {
         tracing::warn!(%error, "cannot reach the identity provider to finish a sign-in");
@@ -1009,7 +1045,7 @@ pub async fn callback(
     // over plaintext non-localhost is a request the browser will silently refuse, and this
     // is the one place the server already knows -- before the redirect that would fail one
     // request later (#60). The sign-in itself completed; the page says so.
-    if !origin_can_keep_secure_cookie(&headers) {
+    if !secure_origin {
         tracing::warn!(
             host = ?headers.get(header::HOST).and_then(|v| v.to_str().ok()),
             "sign-in completed but the origin cannot keep a Secure cookie; refusing to issue one"
@@ -1077,7 +1113,19 @@ pub async fn callback(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     response.headers_mut().insert(header::SET_COOKIE, value);
+    // Spent with the sign-in. Appended, so the session stays the first `Set-Cookie`.
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        header::HeaderValue::from_str(&login_state_cookie("", Duration::ZERO))
+            .expect("a static cookie"),
+    );
     Ok(response)
+}
+
+/// A callback that cannot finish this browser's sign-in: its state is spent, expired, never
+/// issued, or was issued to another browser.
+fn stale_sign_in_page() -> Response {
+    refused_local("This sign-in is no longer valid — open the console again.")
 }
 
 #[cfg(test)]
@@ -1346,8 +1394,9 @@ mod against_a_stub_provider {
         response.headers()["location"].to_str().unwrap().to_string()
     }
 
-    /// Sends a browser to a login URL of our choosing and reads back the state and nonce.
-    async fn begin_at(state: &AppState, uri: &str) -> (String, String) {
+    /// Sends a browser to a login URL of our choosing and reads back the state and nonce, and
+    /// the `name=value` of the cookie the browser was handed with them.
+    async fn begin_at(state: &AppState, uri: &str) -> (String, String, String) {
         let response = get_from(state, uri).await;
         assert_eq!(
             response.status(),
@@ -1362,12 +1411,35 @@ mod against_a_stub_provider {
         (
             query.get("state").unwrap().clone(),
             query.get("nonce").unwrap().clone(),
+            cookie_pair(&response),
         )
     }
 
+    /// The `name=value` of the one cookie `response` sets, as a browser sends it back.
+    fn cookie_pair(response: &axum::response::Response) -> String {
+        let set = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("a cookie")
+            .to_str()
+            .unwrap();
+        set.split(';').next().unwrap().to_string()
+    }
+
+    /// The browser coming back from the provider with `csrf`, carrying `cookie`.
+    async fn come_back(state: &AppState, csrf: &str, cookie: &str) -> axum::response::Response {
+        get_from_with(
+            state,
+            &format!("/auth/callback?code=a-code&state={csrf}"),
+            &[("x-forwarded-proto", "https"), ("cookie", cookie)],
+        )
+        .await
+    }
+
     /// Sends a browser to `/auth/login` and reads back the state and nonce the provider
-    /// would have been handed, which is how the stub learns which nonce to echo.
-    async fn begin_a_login(state: &AppState) -> (String, String) {
+    /// would have been handed, which is how the stub learns which nonce to echo, and the
+    /// cookie the browser was handed with them.
+    async fn begin_a_login(state: &AppState) -> (String, String, String) {
         let response = get_from(state, "/auth/login").await;
         assert_eq!(
             response.status(),
@@ -1384,7 +1456,11 @@ mod against_a_stub_provider {
             Some("S256"),
             "the authorization request must carry a PKCE challenge"
         );
-        (query["state"].clone(), query["nonce"].clone())
+        (
+            query["state"].clone(),
+            query["nonce"].clone(),
+            cookie_pair(&response),
+        )
     }
 
     /// A store with nothing in it, when there is one to test against: the variable and the rule
@@ -1416,9 +1492,9 @@ mod against_a_stub_provider {
     /// One OIDC sign-in through the stub, as far as the callback's answer. `sso=1` because in
     /// store mode the form comes first.
     async fn sign_in_through(state: &AppState, provider: &Provider) -> axum::response::Response {
-        let (csrf, nonce) = begin_at(state, "/auth/login?sso=1").await;
+        let (csrf, nonce, cookie) = begin_at(state, "/auth/login?sso=1").await;
         *provider.nonce.lock().unwrap() = Some(nonce);
-        get_from(state, &format!("/auth/callback?code=a-code&state={csrf}")).await
+        come_back(state, &csrf, &cookie).await
     }
 
     fn session_of(response: &axum::response::Response) -> Session {
@@ -1480,9 +1556,9 @@ mod against_a_stub_provider {
         *provider.groups.lock().unwrap() = serde_json::json!(["team-a", "team-b"]);
         let state = state(&stub(provider.clone()).await);
 
-        let (csrf, nonce) = begin_a_login(&state).await;
+        let (csrf, nonce, cookie) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some(nonce);
-        let response = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        let response = come_back(&state, &csrf, &cookie).await;
 
         assert_eq!(
             response.status(),
@@ -1525,12 +1601,99 @@ mod against_a_stub_provider {
 
         let response = get_from(&state, "/auth/callback?code=a-code&state=not-one-of-ours").await;
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(
             !*provider.saw_verifier.lock().unwrap(),
             "an unknown state must not reach the token endpoint at all"
         );
+        assert_no_longer_valid(response).await;
+    }
+
+    /// The page a callback that cannot be this browser's sign-in ends on, and no cookie with it.
+    async fn assert_no_longer_valid(response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("This sign-in is no longer valid"),
+            "got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn beginning_a_sign_in_ties_its_state_to_this_browser() {
+        // The callback is a GET any site can send a browser to, so its state has to be matched
+        // against something only the browser that began the sign-in holds.
+        let state = state(&stub(Arc::new(Provider::default())).await);
+        let response = get_from(&state, "/auth/login").await;
+        let url = openidconnect::url::Url::parse(&location(&response)).unwrap();
+        let (_, csrf) = url.query_pairs().find(|(k, _)| k == "state").unwrap();
+
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(
+            cookie.starts_with(&format!("gapura_login_state={csrf};")),
+            "got {cookie}"
+        );
+        assert!(cookie.contains("HttpOnly"), "got {cookie}");
+        assert!(cookie.contains("Secure"), "got {cookie}");
+        // Lax, not Strict: the provider sends the browser back with a top-level GET from its
+        // own site, and Strict would leave the cookie off exactly that request.
+        assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
+        assert!(cookie.contains("Path=/auth/callback"), "got {cookie}");
+        assert!(
+            cookie.contains(&format!("Max-Age={}", PENDING_LIFETIME.as_secs())),
+            "got {cookie}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_callback_opened_in_a_browser_that_did_not_begin_the_sign_in_is_refused() {
+        // Login CSRF. The attacker begins a sign-in on their own machine, signs in at the
+        // provider as themselves, and stops before following the redirect back. Then they make
+        // the victim's browser open it. The state is one this process issued and still holds
+        // the verifier and nonce for, so the exchange would succeed and sign the victim in as
+        // the attacker; only the cookie tells the two browsers apart.
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        // A victim with a sign-in of their own in flight holds a state cookie, just not this one.
+        let (_, _, victims_own) = begin_a_login(&state).await;
+
+        for victims_cookie in [None, Some(victims_own.as_str())] {
+            let (csrf, nonce, _attackers_cookie) = begin_a_login(&state).await;
+            *provider.nonce.lock().unwrap() = Some(nonce);
+
+            let response = match victims_cookie {
+                None => get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await,
+                Some(cookie) => come_back(&state, &csrf, cookie).await,
+            };
+
+            assert!(
+                !*provider.saw_verifier.lock().unwrap(),
+                "with {victims_cookie:?}, the attacker's code must not reach the token endpoint"
+            );
+            assert_no_longer_valid(response).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_that_completes_spends_its_state_cookie() {
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        let response = sign_in_through(&state, &provider).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let spent = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|c| c.starts_with("gapura_login_state=;"))
+            .expect("the state cookie is cleared");
+        // A browser only replaces the cookie if the path matches the one it was set with.
+        assert!(spent.contains("Path=/auth/callback"), "got {spent}");
+        assert!(spent.contains("Max-Age=0"), "got {spent}");
     }
 
     #[tokio::test]
@@ -1541,9 +1704,9 @@ mod against_a_stub_provider {
         *provider.groups.lock().unwrap() = serde_json::json!(["team-a"]);
         let state = state(&stub(provider.clone()).await);
 
-        let (csrf, _) = begin_a_login(&state).await;
+        let (csrf, _, cookie) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some("a nonce from somewhere else".to_string());
-        let response = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        let response = come_back(&state, &csrf, &cookie).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get(header::SET_COOKIE).is_none());
@@ -1555,9 +1718,9 @@ mod against_a_stub_provider {
         *provider.groups.lock().unwrap() = serde_json::json!([]);
         let state = state(&stub(provider.clone()).await);
 
-        let (csrf, nonce) = begin_a_login(&state).await;
+        let (csrf, nonce, cookie) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some(nonce);
-        let response = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        let response = come_back(&state, &csrf, &cookie).await;
 
         assert_eq!(
             response.status(),
@@ -1589,9 +1752,10 @@ mod against_a_stub_provider {
         // screen the reader was on travels through the flow and back.
         let provider = Arc::new(Provider::default());
         let state = state(&stub(provider.clone()).await);
-        let (csrf, nonce) = begin_at(&state, "/auth/login?return_to=/routes%3Ffilter%3Drefs").await;
+        let (csrf, nonce, cookie) =
+            begin_at(&state, "/auth/login?return_to=/routes%3Ffilter%3Drefs").await;
         *provider.nonce.lock().unwrap() = Some(nonce);
-        let signed_in = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        let signed_in = come_back(&state, &csrf, &cookie).await;
         assert_eq!(signed_in.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             location(&signed_in),
@@ -1606,9 +1770,9 @@ mod against_a_stub_provider {
         // not a same-origin path is an open redirect, and the overview is the fallback.
         let provider = Arc::new(Provider::default());
         let state = state(&stub(provider.clone()).await);
-        let (csrf, nonce) = begin_at(&state, "/auth/login?return_to=//evil.example").await;
+        let (csrf, nonce, cookie) = begin_at(&state, "/auth/login?return_to=//evil.example").await;
         *provider.nonce.lock().unwrap() = Some(nonce);
-        let signed_in = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        let signed_in = come_back(&state, &csrf, &cookie).await;
         assert_eq!(location(&signed_in), "/", "protocol-relative is refused");
     }
 
@@ -1627,9 +1791,9 @@ mod against_a_stub_provider {
                 .await,
         ));
 
-        let (csrf, nonce) = begin_a_login(&state).await;
+        let (csrf, nonce, cookie) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some(nonce);
-        let signed_in = get_from(&state, &format!("/auth/callback?code=a-code&state={csrf}")).await;
+        let signed_in = come_back(&state, &csrf, &cookie).await;
         let cookie = signed_in.headers()[header::SET_COOKIE].to_str().unwrap();
 
         let response = crate::api::router_with(state.clone())
@@ -1657,7 +1821,9 @@ mod against_a_stub_provider {
         // later; it now answers with a page that says the sign-in completed.
         let provider = Arc::new(Provider::default());
         let state = state(&stub(provider.clone()).await);
-        let (csrf, nonce) = begin_a_login(&state).await;
+        // The state cookie `begin` set is Secure too, so this browser never kept it and comes
+        // back without one. That must not hide the explanation behind a stale-sign-in page.
+        let (csrf, nonce, _) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some(nonce);
 
         let response = get_from_with(

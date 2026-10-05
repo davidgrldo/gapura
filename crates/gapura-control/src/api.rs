@@ -36,22 +36,27 @@ pub fn router_with(state: AppState) -> Router {
 /// cookie, no signature, a bad signature, an expired session — collapses to `None`;
 /// the caller turns that into a uniform 401 rather than leaking which case it was.
 pub(crate) fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Session> {
-    // Every `cookie` field, not just the first: HTTP/2 lets a client or an intermediary
-    // split the cookies across several of them (RFC 9113 section 8.2.3) and hyper leaves
-    // them as it found them, so a session that landed in the second field would otherwise
-    // be invisible and the caller refused while holding a valid one.
-    let value = headers
-        .get_all("cookie")
-        .iter()
-        .filter_map(|field| field.to_str().ok())
-        .flat_map(|field| field.split(';'))
-        .filter_map(|c| c.trim().strip_prefix(crate::login::COOKIE_NAME))
-        .find_map(|rest| rest.strip_prefix('='))?;
+    let value = cookie(headers, crate::login::COOKIE_NAME)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
     crate::session::decode(value, key, now).ok()
+}
+
+/// The value of the cookie called `name`, if the request carries one.
+pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    // Every `cookie` field, not just the first: HTTP/2 lets a client or an intermediary
+    // split the cookies across several of them (RFC 9113 section 8.2.3) and hyper leaves
+    // them as it found them, so a cookie that landed in the second field would otherwise
+    // be invisible and the caller refused while holding a valid one.
+    headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|field| field.to_str().ok())
+        .flat_map(|field| field.split(';'))
+        .filter_map(|c| c.trim().strip_prefix(name))
+        .find_map(|rest| rest.strip_prefix('='))
 }
 
 /// Drop every row outside the caller's namespaces.

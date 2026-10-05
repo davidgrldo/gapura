@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's OIDC callback only finishes a sign-in in the browser that began it. Before, the
+  `state` it checked was held by the server alone, so someone could begin a sign-in, sign in at
+  the identity provider as themselves, and send another person's browser to the callback with
+  their code, signing that browser in to the console as them. `GET /auth/login` now also sets a
+  `gapura_login_state` cookie (HttpOnly, Secure, SameSite=Lax, path `/auth/callback`, ten
+  minutes) holding the state, and the callback refuses a state that does not match it, with the
+  "This sign-in is no longer valid" page that an unknown or expired state now gets too, where
+  before it was a bare 401. Of two sign-ins begun at once in one browser, only the later one
+  completes.
 - An EndpointSlice whose `endpoints` is null, or holds null entries, loads as a slice with no
   endpoints instead of being dropped (#98). The API server sends `endpoints: null` for the slice of any
   Service with nothing behind it -- the read-replica Service CloudNativePG creates beside a
