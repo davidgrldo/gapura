@@ -15,14 +15,24 @@
   // save, in place as on the Users page, so Held by and Seen follow the change.
   let answer = $state(undefined)
   let failed = $state(undefined)
+  // Which fetch is the latest. A save fetches again while an earlier fetch may still be on its
+  // way, and whichever finished last would win, the older one included.
+  let latest = 0
 
+  // The promise settles once the answer has been taken, or the failure noted, and never
+  // rejects: the sheets wait on it to see where focus ended up after a row went.
   function load() {
-    get('/api/roles').then(
+    const mine = ++latest
+    return get('/api/roles').then(
       (roles) => {
+        if (mine !== latest) return
         answer = roles
         failed = undefined
       },
-      (error) => (failed = error),
+      (error) => {
+        if (mine !== latest) return
+        failed = error
+      },
     )
   }
   load()
@@ -30,8 +40,12 @@
   // Named regions that scroll sideways on a phone, as the Overview table does.
   const region = (label) => ({ tabindex: 0, role: 'region', 'aria-label': label })
 
-  // Where focus goes once a removed mapping's row, and the Remove button in it, are gone.
+  // Where focus goes once a mapping's row, and the buttons in it, are gone and focus has fallen
+  // to the page: after a removal, or after a table fetched again that no longer has the row, which
+  // a refused edit can lead to as readily as a removal.
   let heading = $state(undefined)
+
+  const focusHeading = () => heading?.focus()
 
   // "No one yet" beside a new mapping is the quickest sign that its group name does not match
   // what the identity provider sends. Counted from each enabled account's groups at its last
@@ -44,11 +58,21 @@
 
 <h1 class="mb-4 text-2xl font-semibold tracking-tight">Roles</h1>
 
-{#if failed}
+{#if failed && answer === undefined}
   <Failure error={failed} what="the roles" />
 {:else if answer === undefined}
   <p class="text-muted-foreground">Reading roles…</p>
 {:else}
+  {#if failed}
+    <!-- A fetch after a save, or after a sheet that showed a refusal was closed, failed. The
+         tables already on screen are kept, and the reader is told what they are: wiping them
+         would take away the row whose sheet just closed, and with it the button focus returned
+         to, over an error that says nothing about them. -->
+    <div class="mb-4 space-y-2" role="status">
+      <Failure error={failed} what="the roles" />
+      <p class="text-sm text-muted-foreground">The tables below are as they were last read.</p>
+    </div>
+  {/if}
   <!-- Plain sections: each table's scrolling region is already a named landmark, and naming the
        section too would list every name twice. The headings carry the navigation. -->
   <section>
@@ -101,7 +125,7 @@
 
   <section class="mt-8">
     <div class="mb-1 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-      <!-- tabindex -1: focus is put here after a removal, never reached by Tab. -->
+      <!-- tabindex -1: focus is put here when a row has gone, never reached by Tab. -->
       <h2 bind:this={heading} tabindex="-1" class="text-base font-semibold outline-none">Group mappings</h2>
       {#if me.grantable.length > 0}
         <MappingSheet mode="create" {me} mappings={answer.mappings} onsaved={load} />
@@ -135,8 +159,8 @@
                 <Table.Cell class={mapping.seen === 0 ? 'text-muted-foreground' : 'tabular-nums'}>{seen(mapping.seen)}</Table.Cell>
                 <Table.Cell>
                   <div class="flex justify-end gap-1">
-                    <MappingSheet mode="edit" {mapping} {me} onsaved={load} />
-                    <MappingSheet mode="remove" {mapping} {me} onsaved={load} onremoved={() => heading?.focus()} />
+                    <MappingSheet mode="edit" {mapping} {me} onsaved={load} onremoved={focusHeading} />
+                    <MappingSheet mode="remove" {mapping} {me} onsaved={load} onremoved={focusHeading} />
                   </div>
                 </Table.Cell>
               </Table.Row>
