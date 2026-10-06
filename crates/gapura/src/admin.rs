@@ -129,9 +129,12 @@ fn redact(v: &mut serde_json::Value) {
             }
         }
     }
-    if let Some(creds) = v.get_mut("credentials") {
-        let n = creds.as_object().map_or(0, |m| m.len());
-        *creds = format!("{REDACTED}: {n} keys").into();
+    // Keyed by the same hashes, so the same treatment: how many, never which.
+    for field in ["credentials", "credential_workspaces"] {
+        if let Some(creds) = v.get_mut(field) {
+            let n = creds.as_object().map_or(0, |m| m.len());
+            *creds = format!("{REDACTED}: {n} keys").into();
+        }
     }
 }
 
@@ -186,6 +189,7 @@ mod tests {
             ports: Default::default(),
             clusters: Default::default(),
             credentials: [(KEY_HASH.to_string(), "team-x".to_string())].into(),
+            credential_workspaces: [(KEY_HASH.to_string(), "orders".to_string())].into(),
         };
         let mut v = serde_json::to_value(&config).unwrap();
         redact(&mut v);
@@ -259,6 +263,7 @@ mod tests {
                 ports: Default::default(),
                 clusters: Default::default(),
                 credentials: Default::default(),
+                credential_workspaces: Default::default(),
             },
             Vec::new(),
         );
