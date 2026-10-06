@@ -84,6 +84,11 @@ means what it usually does, moving from one version below to a later one. Releas
   release published -- read from the run's name, `release <version>` -- instead of the newest
   tag, which after every RC re-tested the previous release; it also orders prereleases correctly,
   so `0.1.0` sorts after `0.1.0-rc.3`.
+- The console runs at most two password checks at once. The limit was the core count, which in
+  a pod with a memory limit and no CPU limit -- the chart's default -- is the node's: each argon2id
+  check holds 19 MiB, so on a node with seven or more cores seven anonymous sign-ins at once
+  exceeded the 128Mi limit and the pod was OOM-killed, repeatedly. A compile-time check now keeps
+  the cap within half the chart's limit.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running

@@ -42,9 +42,21 @@ pub static DUMMY: LazyLock<String> = LazyLock::new(|| {
 /// How many password checks may run at once. Each holds 19 MiB for about 20 ms, and the sign-in
 /// form answers anyone, so without a bound a burst of attempts would run as many of them as the
 /// blocking pool has threads -- 512 by default, gigabytes of memory from an unauthenticated form.
-static CHECKING: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
-    tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()))
-});
+///
+/// A fixed number, not the core count. In a pod with a memory limit and no CPU limit -- the chart's
+/// default, 128Mi -- `available_parallelism` is the node's core count, so on a node with seven or
+/// more cores seven anonymous sign-ins at once exceed the limit and the pod is OOM-killed, over and
+/// over. Two checks at a time is 38 MiB, and still two sign-ins every 20 ms, far more than people
+/// signing in ever need; an attacker gets a queue instead of a restart.
+const MAX_CONCURRENT_CHECKS: usize = 2;
+
+// 19 MiB per check (m=19456 KiB); the chart limits the console to 128 MiB, which also has to hold
+// the process itself, so concurrent checks get at most half. Raising the cap past that, or the
+// memory cost per check, fails the build here rather than OOM-killing a pod in production.
+const _: () = assert!(MAX_CONCURRENT_CHECKS * 19 <= 128 / 2);
+
+static CHECKING: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_CHECKS));
 
 /// Verifies `password` against `stored`, or against `DUMMY` when there is no account, off the
 /// async workers and a bounded number at a time.
@@ -140,6 +152,12 @@ pub fn check_password(username: &str, password: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_check_semaphore_has_the_fixed_size() {
+        assert_eq!(CHECKING.available_permits(), MAX_CONCURRENT_CHECKS);
+    }
+
     use super::*;
 
     /// The parameters every hash this build writes carries. Pinned, so lowering them -- to make
