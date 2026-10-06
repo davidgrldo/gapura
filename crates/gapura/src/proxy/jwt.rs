@@ -125,6 +125,19 @@ pub fn verify(policy: &JwtPolicy, keys: &JwtKeys, token: Option<&str>) -> Result
             Some(aud) => validation.set_audience(&[aud]),
             None => validation.validate_aud = false,
         }
+        // `set_issuer` and `set_audience` only say which values are acceptable when the claim
+        // is there; `jsonwebtoken` skips the check for a token that leaves the claim out. A
+        // policy that names an issuer or an audience means the claim is required, so say so.
+        let mut required = vec!["exp"];
+        if policy.issuer.is_some() {
+            required.push("iss");
+        }
+        if policy.audience.is_some() {
+            required.push("aud");
+        }
+        validation.set_required_spec_claims(&required);
+        // Off by default in `jsonwebtoken`; a token that says it is not valid yet is not.
+        validation.validate_nbf = true;
         match jsonwebtoken::decode::<serde_json::Value>(token, key, &validation) {
             Ok(_) => return Ok(()),
             Err(e) => {
@@ -299,5 +312,52 @@ mod tests {
         assert_eq!(bearer(Some("Basic abc")), None);
         assert_eq!(bearer(Some("abc")), None);
         assert_eq!(bearer(None), None);
+    }
+
+    #[test]
+    fn a_policy_that_names_an_audience_refuses_a_token_without_one() {
+        let p = policy(jwks(Some("k1")));
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove("aud");
+        let t = token(Some("k1"), claims);
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Err(Refusal::Claims));
+    }
+
+    #[test]
+    fn a_policy_that_names_an_issuer_refuses_a_token_without_one() {
+        let p = policy(jwks(Some("k1")));
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove("iss");
+        let t = token(Some("k1"), claims);
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Err(Refusal::Claims));
+    }
+
+    #[test]
+    fn a_policy_that_names_neither_does_not_require_them() {
+        let mut p = policy(jwks(Some("k1")));
+        p.issuer = None;
+        p.audience = None;
+        let t = token(Some("k1"), json!({"exp": 4102444800u64}));
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
+    }
+
+    #[test]
+    fn a_token_that_is_not_valid_yet_is_refused() {
+        let p = policy(jwks(Some("k1")));
+        let mut claims = good_claims();
+        claims["nbf"] = json!(4102444000u64); // still in the future in 2100's terms
+        let t = token(Some("k1"), claims);
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Err(Refusal::Claims));
+    }
+
+    #[test]
+    fn the_algorithm_comes_from_the_key_not_the_token() {
+        // A token claiming RS256 against an HS256 key is refused rather than verified with the
+        // key read as something it is not.
+        let p = policy(jwks(Some("k1")));
+        let mut header = Header::new(Algorithm::HS384);
+        header.kid = Some("k1".into());
+        let t = encode(&header, &good_claims(), &EncodingKey::from_secret(SECRET)).unwrap();
+        assert!(verify(&p, &keys_for(&p), Some(&t)).is_err());
     }
 }
