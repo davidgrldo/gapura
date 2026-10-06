@@ -76,6 +76,14 @@ means what it usually does, moving from one version below to a later one. Releas
   the template read `.Values.accessLog.query` bare, which is a nil-pointer error when the section
   is missing. `hack/chart-render.sh` now fails on any two-level `.Values` access without a nil
   guard, so the next section added cannot reintroduce it.
+- A dispatched release may only publish a prerelease (`v0.2.0-rc.9`); a release is published by
+  pushing its tag. Dispatch builds whatever the dispatched branch holds, so dispatching `v0.2.0` by
+  mistake published the GA image and chart from `main`, and the later tag push silently overwrote
+  both. The dispatch input now reaches shell through the environment rather than template
+  interpolation. The quickstart workflow that runs after a release now installs the version that
+  release published -- read from the run's name, `release <version>` -- instead of the newest
+  tag, which after every RC re-tested the previous release; it also orders prereleases correctly,
+  so `0.1.0` sorts after `0.1.0-rc.3`.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running

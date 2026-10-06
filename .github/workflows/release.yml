@@ -1,19 +1,42 @@
 name: release
+# The version in the run's name is how the quickstart workflow, triggered by this run finishing,
+# knows which version to install: a dispatched prerelease has no tag for it to find.
+run-name: release ${{ github.event.inputs.tag || github.ref_name }}
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Version to build, e.g. v0.1.0
+        description: >-
+          Prerelease version to publish from the dispatched branch, e.g. v0.2.0-rc.9. Only a
+          prerelease: a release is published by pushing its tag, so it is built from that tag.
         required: true
 permissions:
   contents: read
   packages: write
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # The dispatch input reaches shell through the environment, never by template interpolation
+  # into a script, where a value containing quotes would be code.
+  DISPATCHED_TAG: ${{ github.event.inputs.tag }}
 jobs:
+  # A dispatch builds whatever the dispatched branch holds, so it may only publish a prerelease.
+  # Without this, dispatching v0.2.0 instead of v0.2.0-rc.9 published the GA image and chart from
+  # main, and the later tag push overwrote both, since ghcr tags are mutable.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: A dispatch publishes prereleases only
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$DISPATCHED_TAG" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+$'; then
+            echo "::error::dispatch publishes prereleases only (e.g. v0.2.0-rc.9), got '$DISPATCHED_TAG'; publish a release by pushing its tag"
+            exit 1
+          fi
   build:
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +133,7 @@ jobs:
         # on a tag push it duplicates the semver one, which imagetools create applies idempotently.
         run: |
           version="${GITHUB_REF_NAME#v}"
-          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          if [ -n "$DISPATCHED_TAG" ]; then version="${DISPATCHED_TAG#v}"; fi
           echo "version=$version" >> "$GITHUB_ENV"
       - id: meta
         uses: docker/metadata-action@v6
@@ -153,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          if [ -n "$DISPATCHED_TAG" ]; then version="${DISPATCHED_TAG#v}"; fi
           helm package charts/gapura --version "$version" --app-version "$version"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           # helm push appends the chart name, so the remote is the parent path.
@@ -178,7 +201,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          if [ -n "$DISPATCHED_TAG" ]; then version="${DISPATCHED_TAG#v}"; fi
           body="$(awk -v v="$version" '
             !p && $0 ~ "^## "v"([[:space:]]|$)" {p=1; next}
             p && /^## / {exit}
@@ -211,7 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          if [ -n "${{ github.event.inputs.tag }}" ]; then version="${{ github.event.inputs.tag }}"; version="${version#v}"; fi
+          if [ -n "$DISPATCHED_TAG" ]; then version="${DISPATCHED_TAG#v}"; fi
           tag="v${version}"
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --verify-tag --title "gapura v${version}" --notes-file /tmp/notes.md
