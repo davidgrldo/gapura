@@ -370,6 +370,7 @@ fn route_parents<'a>(t: &'a Translation, namespace: &str, name: &str) -> &'a [Ro
                 namespace: ns,
                 name: n,
                 parents,
+                ..
             } if ns == namespace && n == name => Some(parents.as_slice()),
             _ => None,
         })
