@@ -34,6 +34,16 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:8081", requires = "database_url")]
     pub listen_config: std::net::SocketAddr,
 
+    /// PEM certificate chain for `--listen-config`. With `--config-tls-key`, the configuration
+    /// endpoint is served over TLS; without them, in plain text, and the private keys every
+    /// response carries cross the network readable unless a sidecar or a mesh encrypts them.
+    #[arg(long, requires_all = ["config_tls_key", "database_url"])]
+    pub config_tls_cert: Option<std::path::PathBuf>,
+
+    /// PEM private key for `--config-tls-cert`.
+    #[arg(long, requires = "config_tls_cert")]
+    pub config_tls_key: Option<std::path::PathBuf>,
+
     /// The ports data planes bind for plain HTTP, which the compiled configuration has to name.
     /// A flag because the store has no Gateway object yet; when it does, this moves there.
     #[arg(long, value_delimiter = ',', default_value = "80")]

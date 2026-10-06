@@ -91,6 +91,13 @@ means what it usually does, moving from one version below to a later one. Releas
   so a recreated object with the same translated status was skipped for up to ten minutes and
   showed no conditions. Status patches now carry the object's UID, which the writer's cache
   compares.
+- `gapura-control` can serve its configuration endpoint over TLS itself: `--config-tls-cert` and
+  `--config-tls-key` take a PEM certificate chain and key. Every response from that endpoint
+  carries the private key of each certificate the gateway serves, and the gateway already
+  refused an `http://` control plane by default, so until now the endpoint needed a TLS sidecar
+  in front of it. Without the flags it still serves plain text, and says so at startup. The
+  certificate is read when the control plane starts, so a rotated one takes effect at the next
+  restart.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a
