@@ -1,12 +1,14 @@
 //! The HTTP surface. Handlers stay thin: they resolve scope, call a reader, and serialise.
 
+use crate::grants_api::MAX_BODY;
 use crate::rows::{self, Row};
 use crate::scope::{self, Scope};
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{
-    routing::{get, post},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 
@@ -22,6 +24,18 @@ pub fn router_with(state: AppState) -> Router {
         .route("/api/me", get(crate::access_api::me))
         .route("/api/users", get(crate::access_api::users))
         .route("/api/roles", get(crate::access_api::roles))
+        // The two that read a body cap it, so a caller who has not been checked yet cannot make
+        // the console buffer more than `MAX_BODY` of it.
+        .route(
+            "/api/users/{id}/roles",
+            patch(crate::grants_api::set_roles).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/group-mappings",
+            put(crate::grants_api::put_mapping)
+                .layer(DefaultBodyLimit::max(MAX_BODY))
+                .delete(crate::grants_api::delete_mapping),
+        )
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
         // Explicit routes above always win a match first, so this only ever runs for a path
@@ -29,7 +43,15 @@ pub fn router_with(state: AppState) -> Router {
         // that is merely missing — a typo, not yet built — 404s instead of resolving to the
         // console's document.
         .fallback(crate::assets::fallback)
+        // Added last, so it wraps every route above and the fallback: a request another site's
+        // page sent is refused before any handler reads it. See `same_origin`.
+        .layer(axum::middleware::from_fn(crate::same_origin::guard))
         .with_state(state)
+}
+
+/// An answer the console shows as it is: `status`, with `{"error": sentence}` as the body.
+pub(crate) fn refuse(status: StatusCode, sentence: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": sentence }))).into_response()
 }
 
 /// Pulls the signed session out of the `gapura_session` cookie. Any failure — no

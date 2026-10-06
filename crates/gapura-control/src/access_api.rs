@@ -5,12 +5,13 @@
 
 use crate::access::{Access, Method, Role, Rows, User};
 use crate::state::AppState;
-use crate::store::Store;
+use crate::store::{sqlstate, Store};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Serialize;
 use std::collections::BTreeSet;
+use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 /// The signed-in account in store mode, with the rows its access is computed from.
@@ -35,7 +36,13 @@ pub async fn store_caller(
         .parse()
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let rows = store.access_rows().await.map_err(|error| {
-        tracing::warn!(%error, "reading accounts from the store failed");
+        // An `anyhow::Error` shown with `%` prints only its outermost error, and for a database
+        // error that is just "db error": the chain and the SQLSTATE hold the reason.
+        tracing::warn!(
+            error = format!("{error:#}"),
+            sqlstate = sqlstate(&error).map(SqlState::code),
+            "reading accounts from the store failed"
+        );
         StatusCode::SERVICE_UNAVAILABLE
     })?;
     let me = rows
@@ -47,20 +54,22 @@ pub async fn store_caller(
     Ok(StoreCaller { rows, me })
 }
 
-/// The caller and the workspaces they administer, when they are a superuser or administer at
-/// least one. A superuser keeps these pages even with no workspaces at all, the state `waiting`
-/// already guards. Kubernetes mode has no accounts to list, so there these pages do not exist.
-async fn admin_caller(
-    state: &AppState,
+/// The store, the caller and the workspaces they administer, when they are a superuser or
+/// administer at least one. A superuser keeps these pages even with no workspaces at all, the
+/// state `waiting` already guards. Kubernetes mode has no accounts to list, so there these pages
+/// do not exist. The writes in `grants_api` start here too, so they refuse exactly whom these
+/// pages refuse, and they take the store from here rather than look for it a second time.
+pub(crate) async fn admin_caller<'a>(
+    state: &'a AppState,
     headers: &HeaderMap,
-) -> Result<(StoreCaller, BTreeSet<Uuid>), StatusCode> {
-    let store = state.store.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<(&'a Store, StoreCaller, BTreeSet<Uuid>), StatusCode> {
+    let store = state.store.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let caller = store_caller(store, headers, &state.session_key).await?;
     let within = caller.rows.grantable(&caller.me);
     if within.is_empty() && !caller.me.superuser {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok((caller, within))
+    Ok((store, caller, within))
 }
 
 #[derive(Serialize)]
@@ -69,14 +78,18 @@ pub enum Me {
     /// Enough for the console to leave out what only store mode has.
     Kubernetes,
     Store {
+        /// The account's id, as `/api/users` names it, so the console can tell the reader's own
+        /// row from everyone else's.
+        id: Uuid,
         name: String,
         method: Method,
         superuser: bool,
         waiting: bool,
         /// Every workspace where the caller holds a role, and that role.
         roles: Vec<WorkspaceRole>,
-        /// Where the caller is admin: where they may see, and later grant, other people's roles.
-        grantable: Vec<Uuid>,
+        /// Where the caller is admin, and so may see and grant other people's roles. Named, so a
+        /// form can list them without asking again, and in the order of their names.
+        grantable: Vec<WorkspaceName>,
     },
 }
 
@@ -87,6 +100,13 @@ pub struct WorkspaceRole {
     workspace_id: Uuid,
     workspace: String,
     role: Role,
+}
+
+/// A workspace, named the same way.
+#[derive(Serialize)]
+pub struct WorkspaceName {
+    workspace_id: Uuid,
+    workspace: String,
 }
 
 /// `GET /api/me`: who this is and what they hold. A waiting account gets an answer here and a
@@ -112,13 +132,26 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
                 })
         })
         .collect();
+    // Walked in the rows' order, which is by name, rather than in the set's, which is by id.
+    let within = caller.rows.grantable(&caller.me);
+    let grantable = caller
+        .rows
+        .workspaces
+        .iter()
+        .filter(|w| within.contains(&w.id))
+        .map(|w| WorkspaceName {
+            workspace_id: w.id,
+            workspace: w.name.clone(),
+        })
+        .collect();
     Ok(Json(Me::Store {
+        id: caller.me.id,
         name: caller.me.name.clone(),
         method: caller.me.method,
         superuser: caller.me.superuser,
         waiting: caller.rows.waiting(&caller.me),
         roles,
-        grantable: caller.rows.grantable(&caller.me).into_iter().collect(),
+        grantable,
     }))
 }
 
@@ -157,7 +190,7 @@ pub async fn users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<UserView>>, StatusCode> {
-    let (caller, within) = admin_caller(&state, &headers).await?;
+    let (_, caller, within) = admin_caller(&state, &headers).await?;
     let mut views: Vec<UserView> = caller
         .rows
         .users
@@ -214,6 +247,12 @@ pub struct MappingView {
     workspace_id: Uuid,
     workspace: String,
     role: Role,
+    /// How many enabled accounts were in the group at their last sign-in. Zero beside a mapping
+    /// just made is the quickest sign that its name does not match what the identity provider
+    /// sends. Each one counted is listed in `/api/users` with this group as a source in this
+    /// workspace, which the caller administers, so the number says nothing the caller could not
+    /// already see.
+    seen: usize,
 }
 
 #[derive(Serialize)]
@@ -228,7 +267,7 @@ pub async fn roles(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RolesView>, StatusCode> {
-    let (caller, within) = admin_caller(&state, &headers).await?;
+    let (_, caller, within) = admin_caller(&state, &headers).await?;
     let mut held_by = HeldBy::default();
     for user in caller.rows.users.iter().filter(|u| !u.disabled) {
         // A superuser is counted as one, not again as the admin they are everywhere.
@@ -266,6 +305,12 @@ pub async fn roles(
                 workspace_id: g.workspace,
                 workspace: workspace.name.clone(),
                 role: g.role,
+                seen: caller
+                    .rows
+                    .users
+                    .iter()
+                    .filter(|u| !u.disabled && u.groups.contains(&g.group))
+                    .count(),
             })
         })
         .collect();

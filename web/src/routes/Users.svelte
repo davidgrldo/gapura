@@ -1,15 +1,44 @@
 <script>
   import { get } from '../lib/api.js'
+  import AccessSheet from '../lib/AccessSheet.svelte'
   import Failure from '../lib/Failure.svelte'
   import Tag from '../lib/Tag.svelte'
   import { ROLE_LABEL } from '../lib/roles.js'
   import { ACCOUNT_STATUS } from '../lib/states.js'
   import CaretRight from 'phosphor-svelte/lib/CaretRight'
 
+  // Who is signed in, from App: Edit access lists the workspaces they administer, and knows
+  // their own row by its id.
+  let { me } = $props()
+
   // `/api/users` lists every account, each with its roles trimmed to the workspaces the reader
   // administers, sorted with the enabled accounts that hold no role there first; nothing here
-  // filters or sorts.
-  const users = get('/api/users')
+  // filters or sorts. It is fetched again after a save, in place: the rows stay, the opened ones
+  // stay open, and the button that opened the sheet is still there for focus to return to,
+  // where `{#await}` would put "Reading accounts…" over all of it.
+  let rows = $state(undefined)
+  let failed = $state(undefined)
+  // Which fetch is the latest. A save fetches again while an earlier fetch may still be on its
+  // way, and whichever finished last would win, the older one included.
+  let latest = 0
+
+  // The promise settles once the answer has been taken, or the failure noted, and never
+  // rejects: the sheet waits on it to see where focus ended up after the rows were rearranged.
+  function load() {
+    const mine = ++latest
+    return get('/api/users').then(
+      (answer) => {
+        if (mine !== latest) return
+        rows = answer
+        failed = undefined
+      },
+      (error) => {
+        if (mine !== latest) return
+        failed = error
+      },
+    )
+  }
+  load()
 
   // Which rows the reader has opened, keyed by account id, as on the Routes screen.
   let open = $state({})
@@ -48,9 +77,20 @@
   Every account, with its roles in the workspaces you administer.
 </p>
 
-{#await users}
+{#if failed && rows === undefined}
+  <Failure error={failed} what="the accounts" />
+{:else if rows === undefined}
   <p class="text-muted-foreground">Reading accounts…</p>
-{:then rows}
+{:else}
+  {#if failed}
+    <!-- A fetch after a save failed. The rows already on screen are kept, and the reader is told
+         what they are: wiping the list would take away the row whose sheet just closed, and
+         with it the button focus returned to, over an error that says nothing about them. -->
+    <div class="mb-4 space-y-2" role="status">
+      <Failure error={failed} what="the accounts" />
+      <p class="text-sm text-muted-foreground">The list below is as it was last read.</p>
+    </div>
+  {/if}
   <!-- The same card, rows and focus ring as Routes: role="list" because Tailwind's base styles
        take the bullets off and Safari then stops announcing a list; overflow-hidden keeps a
        row's hover inside the rounded corners, which is why the ring is inset and the detail
@@ -88,7 +128,7 @@
           <span class="hidden min-w-0 flex-wrap gap-1.5 @4xl:flex">
             {#each user.access as held (held.workspace_id)}
               <!-- Workspace names have no length limit, so a chip may wrap. -->
-              <Tag class="max-w-full whitespace-normal wrap-anywhere">{held.workspace} · {ROLE_LABEL[held.role]}</Tag>
+              <Tag class="max-w-full whitespace-normal wrap-anywhere">{held.workspace} · {ROLE_LABEL[held.role] ?? held.role}</Tag>
             {:else}
               <!-- A disabled account holds nothing anywhere, so "not in your workspaces" would
                    suggest the reader is missing something. -->
@@ -132,8 +172,13 @@
                   {#each user.access as held (held.workspace_id)}
                     <tr class="border-t">
                       <td class="py-1.5 pr-4 wrap-anywhere">{held.workspace}</td>
-                      <td class="py-1.5 pr-4 font-medium">{ROLE_LABEL[held.role]}</td>
-                      <td class="py-1.5 wrap-anywhere">{held.sources.map(source).join(', ')}</td>
+                      <td class="py-1.5 pr-4 font-medium">{ROLE_LABEL[held.role] ?? held.role}</td>
+                      <!-- Each grant with the role it gives. One below the role that applies is
+                           muted: it changes nothing while the higher one stands, and it is what
+                           is left when that one goes. -->
+                      <td class="py-1.5 wrap-anywhere">
+                        {#each held.sources as s, i (i)}{#if i > 0}{', '}{/if}<span class={s.role && s.role !== held.role ? 'text-muted-foreground' : undefined}>{source(s)}{#if s.role}: {ROLE_LABEL[s.role] ?? s.role}{/if}</span>{/each}
+                      </td>
                     </tr>
                   {/each}
                 </tbody>
@@ -142,11 +187,18 @@
                 <p class="mt-2 text-muted-foreground">Groups are as of this account's last sign-in.</p>
               {/if}
             {/if}
+            <!-- Any enabled account may be given a role, a waiting one or a superuser included.
+                 Not a disabled one, from here: a disabled account holds nothing, so its grants
+                 are not in /api/users, and the form would open saying No access everywhere
+                 whatever it holds. -->
+            {#if me.grantable.length > 0 && user.status !== 'disabled'}
+              <div class="mt-3">
+                <AccessSheet {user} {me} onsaved={load} />
+              </div>
+            {/if}
           </div>
         {/if}
       </li>
     {/each}
   </ul>
-{:catch error}
-  <Failure {error} what="the accounts" />
-{/await}
+{/if}

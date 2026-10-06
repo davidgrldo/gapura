@@ -13,7 +13,10 @@ use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService,
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
+mod grants;
 mod identity;
+pub(crate) use grants::sqlstate;
+pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
 
 /// Applied in order, recorded in `_migrations`. Schema migration is permanent work;
@@ -27,6 +30,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0002_identity",
         include_str!("../../migrations/0002_identity.sql"),
+    ),
+    (
+        "0003_audit_method",
+        include_str!("../../migrations/0003_audit_method.sql"),
     ),
 ];
 

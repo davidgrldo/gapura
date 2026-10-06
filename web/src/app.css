@@ -86,6 +86,9 @@
     --warning-soft: oklch(0.3 0.05 75);
     --danger: oklch(0.73 0.15 25);
     --danger-soft: oklch(0.3 0.07 25);
+    /* The generated destructive button draws this as text over a tint of itself; the light
+       value is too dark to read on this background, so dark mode gets shadcn's own. */
+    --destructive: oklch(0.704 0.191 22.216);
 
     --sidebar: oklch(0.15 0.01 257);
     --sidebar-accent: oklch(0.235 0.012 257);

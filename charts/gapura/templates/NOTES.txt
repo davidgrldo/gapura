@@ -59,7 +59,7 @@ Sign-in is local: users from console.auth.local, no identity provider involved.
 {{- end }}
 {{- if ((.Values.console).store).existingSecret }}
 Accounts and roles live in Postgres (console.store), and the Users and Roles pages are on.
-Roles are granted in SQL for now: role_bindings and group_bindings.
+Superusers and workspace admins grant roles and map groups on those pages.
 {{- if not (((.Values.console).store).bootstrap).existingSecret }}
    No console.store.bootstrap: an empty store has no account anyone can sign in with.
 {{- end }}

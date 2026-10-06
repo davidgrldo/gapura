@@ -30,9 +30,20 @@ import tailwindcss from '@tailwindcss/vite'
 // kubernetes persona is the console with no store at all. Overview and Routes are served to
 // every persona, where the server keeps them for superusers in store mode, but the console only
 // asks for them when its navigation offers them.
+//
+// The console's writes — a change to an account's roles, a group mapping put or removed —
+// answer 204 and store nothing, for every persona. That is enough to look at the forms and at
+// what follows a save. What a write does is proven against Postgres by the Rust tests, and by a
+// pass against a real server. Each answers only the method the server serves it on, so a form
+// that sends the wrong one fails here as it would there.
 function stubApi() {
   const shared = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
   const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
+  const writes = [
+    ['PATCH', /^\/api\/users\/[^/]+\/roles$/],
+    ['PUT', /^\/api\/group-mappings$/],
+    ['DELETE', /^\/api\/group-mappings$/],
+  ]
   return {
     name: 'gapura-stub-api',
     apply: 'serve',
@@ -52,6 +63,10 @@ function stubApi() {
         if (url === '/auth/logout') {
           res.statusCode = 303
           res.setHeader('location', '/')
+          return res.end()
+        }
+        if (writes.some(([method, pattern]) => req.method === method && pattern.test(url))) {
+          res.statusCode = 204
           return res.end()
         }
         const file = shared[url]
