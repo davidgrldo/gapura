@@ -9,9 +9,10 @@
 //!
 //! - `Sec-Fetch-Site`, which current browsers send to an HTTPS origin and no page can set, must
 //!   say `same-origin`. `same-site`, a sibling subdomain, is refused like `cross-site`.
-//! - Without it, `Origin` must name this host and port. That covers Safari before 16.4, which
-//!   does not send `Sec-Fetch-Site`, and so it relies on a proxy in front of the console keeping
-//!   `Host` as the browser sent it. `Origin: null`, which a sandboxed frame or a redirect from
+//! - Without it, `Origin` must name the host and port the browser asked for: `Host`, or
+//!   `X-Forwarded-Host` from a proxy that rewrites `Host` to its upstream's address, with `:443`
+//!   and `:80` taken as the default ports they are. That covers Safari before 16.4, which does
+//!   not send `Sec-Fetch-Site`. `Origin: null`, which a sandboxed frame or a redirect from
 //!   another site sends, is refused.
 //! - With neither, it came from no browser released since 2019, and is treated as a client that
 //!   chose its own cookies, so it passes.
@@ -68,21 +69,42 @@ fn from_this_origin(uri: &Uri, headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return true;
     };
+    // `null` has no `://`, so it falls out here with anything else that is not an origin.
+    let Some(named) = origin
+        .to_str()
+        .ok()
+        .and_then(|o| o.split_once("://"))
+        .map(|(_, authority)| without_default_port(authority))
+    else {
+        return false;
+    };
     // HTTP/1.1 carries the host in `Host`, and HTTP/2 in the request's authority. A proxy that
-    // rewrites `Host` breaks this comparison, but only for a browser that sends no
-    // `Sec-Fetch-Site`. The scheme is not compared: behind a proxy that ends TLS, this server
-    // cannot tell which one the browser used.
+    // rewrites it to its upstream's address names the browser's in `X-Forwarded-Host`, leftmost
+    // of a chain, which is taken as well: a page on another site cannot set that header without
+    // a CORS preflight, which this server never answers. The scheme is not compared: behind a
+    // proxy that ends TLS, this server cannot tell which one the browser used, and for the same
+    // reason neither is a default port.
+    let forwarded = headers
+        .get("x-forwarded-host")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.split(',').next());
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .or_else(|| uri.authority().map(|a| a.as_str()));
-    // `null` has no `://`, so it falls out here with anything else that is not an origin.
-    let named = origin
-        .to_str()
-        .ok()
-        .and_then(|o| o.split_once("://"))
-        .map(|(_, authority)| authority);
-    matches!((named, host), (Some(named), Some(host)) if named.eq_ignore_ascii_case(host))
+    [forwarded, host]
+        .into_iter()
+        .flatten()
+        .any(|host| without_default_port(host.trim()).eq_ignore_ascii_case(named))
+}
+
+/// `name:443` and `name:80` as plain `name`, which is how a browser writes an origin on its
+/// scheme's default port, and what a proxy may add to a `Host` that had none.
+fn without_default_port(authority: &str) -> &str {
+    authority
+        .strip_suffix(":443")
+        .or_else(|| authority.strip_suffix(":80"))
+        .unwrap_or(authority)
 }
 
 /// `application/json`, with or without parameters such as a charset, in any case.
@@ -229,6 +251,100 @@ mod tests {
             ),
             Verdict::CrossSite,
             "with no host to compare it with, an origin proves nothing"
+        );
+    }
+
+    #[test]
+    fn behind_a_proxy_that_rewrites_host_the_forwarded_host_is_compared() {
+        // Plain nginx with its default `proxy_pass` sends the upstream's address as `Host`.
+        const UPSTREAM: (&str, &str) = ("host", "gapura-control:8080");
+        let origin = ("origin", "https://console.example.test");
+        assert_eq!(
+            judge(
+                Method::POST,
+                "/auth/login",
+                &[
+                    origin,
+                    UPSTREAM,
+                    ("x-forwarded-host", "console.example.test")
+                ]
+            ),
+            Verdict::Pass
+        );
+        assert_eq!(
+            judge(
+                Method::POST,
+                "/auth/login",
+                &[
+                    origin,
+                    UPSTREAM,
+                    ("x-forwarded-host", "console.example.test, 10.0.0.7:8080")
+                ]
+            ),
+            Verdict::Pass,
+            "the host the browser asked for is the leftmost of a chain"
+        );
+        assert_eq!(
+            judge(
+                Method::POST,
+                "/auth/login",
+                &[
+                    ("origin", "https://evil.example"),
+                    UPSTREAM,
+                    ("x-forwarded-host", "console.example.test")
+                ]
+            ),
+            Verdict::CrossSite
+        );
+        assert_eq!(
+            judge(Method::POST, "/auth/login", &[origin, UPSTREAM]),
+            Verdict::CrossSite,
+            "without the header, a rewritten Host still names another host"
+        );
+    }
+
+    #[test]
+    fn a_default_port_is_the_same_as_none() {
+        for host in ["console.example.test:443", "console.example.test:80"] {
+            for origin in [
+                "https://console.example.test",
+                "http://console.example.test",
+            ] {
+                assert_eq!(
+                    judge(
+                        Method::POST,
+                        "/auth/login",
+                        &[("origin", origin), ("host", host)]
+                    ),
+                    Verdict::Pass,
+                    "{origin} against Host: {host}"
+                );
+                assert_eq!(
+                    judge(
+                        Method::POST,
+                        "/auth/login",
+                        &[
+                            ("origin", origin),
+                            ("host", "10.0.0.7:8080"),
+                            ("x-forwarded-host", host)
+                        ]
+                    ),
+                    Verdict::Pass,
+                    "{origin} against X-Forwarded-Host: {host}"
+                );
+            }
+        }
+        assert_eq!(
+            judge(
+                Method::POST,
+                "/auth/login",
+                &[
+                    ("origin", "https://console.example.test"),
+                    ("host", "console.example.test:8443")
+                ]
+            ),
+            Verdict::CrossSite,
+            "any other port is another origin"
         );
     }
 

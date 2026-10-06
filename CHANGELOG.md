@@ -24,8 +24,9 @@ means what it usually does, moving from one version below to a later one. Releas
   nullable `actor_method` column (`local` or `oidc`) that migration `0003` adds.
 - A request other than `GET` or `HEAD` from another site is refused, sign-in and sign-out
   included: `Sec-Fetch-Site` has to say `same-origin`, or, from a browser that does not send it,
-  `Origin` has to name the host the request was sent to. That fallback is for Safari before 16.4,
-  and it needs a proxy in front of the console to pass `Host` through as the browser sent it.
+  `Origin` has to name the host the request was sent to, as `Host` or a proxy's
+  `X-Forwarded-Host` gives it, with `:443` and `:80` taken as default ports. That fallback is for
+  Safari before 16.4.
   Writes to the API take JSON only, so a script that writes through it has to send `Content-Type:
   application/json`, on a `DELETE` with no body too, and must not send another site's `Origin`.
 - The console's OIDC callback only finishes a sign-in in the browser that began it. Before, the
