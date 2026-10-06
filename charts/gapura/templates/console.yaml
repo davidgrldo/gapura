@@ -178,7 +178,7 @@ spec:
         {{- if $localFile }}
         - --local-users-file=/etc/gapura-control/users.yaml
         {{- end }}
-        - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ .Values.ports.admin }}
+        - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ ((.Values.ports).admin) }}
         - --controller-name={{ .Values.controllerName }}
         - --session-lifetime-seconds={{ ((.Values.console).sessionLifetimeSeconds) }}
         - --log-level={{ ((.Values.console).logLevel) }}

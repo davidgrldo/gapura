@@ -7,6 +7,14 @@
 {{- if ne 3 (len (uniq (list (int (.Values.ports).http) (int (.Values.ports).https) (int (.Values.ports).admin)))) }}
 {{- fail (printf "ports.http, ports.https and ports.admin must all differ, got http=%d https=%d admin=%d: two services sharing a port both bind it (SO_REUSEPORT) and the kernel splits traffic between them" (int (.Values.ports).http) (int (.Values.ports).https) (int (.Values.ports).admin)) }}
 {{- end }}
+{{- $grace := int (.Values.terminationGracePeriodSeconds | default 0) }}
+{{- if lt $grace 61 }}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be at least 61: Pingora takes up to 60 s to drain in-flight requests after SIGTERM, and a pod still draining at the deadline is SIGKILLed" $grace) }}
+{{- end }}
+{{- /* The pre-stop delay comes out of the same budget, so it is cut to what the grace period
+     leaves after the drain rather than refused: a values file carrying 0.1.0's 75 s must keep
+     rendering on upgrade, with the 14 s it has room for. */ -}}
+{{- $preStop := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) }}
 {{- if not (has .Values.livenessPort (list "http" "admin")) }}
 {{- fail (printf "livenessPort must be http or admin, got %q" .Values.livenessPort) }}
 {{- end }}
@@ -18,6 +26,10 @@ metadata:
   labels: {{- include "gapura.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # A new pod counts as available only after this long Ready, so the old one is not terminated
+  # the instant its replacement passes readiness -- typically before an external load balancer has
+  # run enough health checks to send it anything.
+  minReadySeconds: {{ .Values.minReadySeconds | default 0 }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -93,7 +105,7 @@ spec:
         {{- range .Values.trustedClientHeaders }}
         - --trusted-client-header={{ . }}
         {{- end }}
-        {{- if .Values.accessLog.query }}
+        {{- if ((.Values.accessLog).query) }}
         - --access-log-query
         {{- end }}
         {{- if .Values.readOnly }}
@@ -136,6 +148,15 @@ spec:
           httpGet: { path: /healthz, port: admin }
           periodSeconds: 2
           failureThreshold: 30
+        {{- if and (gt $preStop 0) (semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version) }}
+        # Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
+        # Service's endpoints asynchronously and an external load balancer keeps sending to the
+        # node until its own health checks fail. Holding SIGTERM back keeps serving those. The
+        # sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
+        lifecycle:
+          preStop:
+            sleep: { seconds: {{ $preStop }} }
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

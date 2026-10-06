@@ -249,6 +249,10 @@ metadata:
     app.kubernetes.io/part-of: gapura
 spec:
   replicas: 2
+  # A new pod counts as available only after this long Ready, so the old one is not terminated
+  # the instant its replacement passes readiness -- typically before an external load balancer has
+  # run enough health checks to send it anything.
+  minReadySeconds: 10
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -269,7 +273,7 @@ spec:
         app.kubernetes.io/component: gateway
     spec:
       serviceAccountName: gapura
-      terminationGracePeriodSeconds: 75
+      terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -314,6 +318,13 @@ spec:
           httpGet: { path: /healthz, port: admin }
           periodSeconds: 2
           failureThreshold: 30
+        # Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
+        # Service's endpoints asynchronously and an external load balancer keeps sending to the
+        # node until its own health checks fail. Holding SIGTERM back keeps serving those. The
+        # sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
+        lifecycle:
+          preStop:
+            sleep: { seconds: 15 }
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
