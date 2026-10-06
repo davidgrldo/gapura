@@ -8,6 +8,17 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console now refuses a workspace admin's change that would leave the workspace with no
+  admin, with 409 and a sentence saying to make someone else an admin first. The console warned
+  before such a save, but only in the browser and from what the page read when it loaded, so a
+  stale tab or a request made with curl could leave a workspace that only a superuser could
+  repair. The rule covers direct grants and group mappings, counts admins through groups, and
+  orders two admins stepping down at the same moment so that one of them is refused. A
+  superuser's changes are exempt.
+- Every console response now carries a Content Security Policy that allows only the console's
+  own origin (`frame-ancestors 'none'` included), `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. Before, the console set
+  none, so another site could frame it and a response could be sniffed as a type it is not.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a
