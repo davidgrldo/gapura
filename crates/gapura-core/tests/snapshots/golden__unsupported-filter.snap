@@ -52,7 +52,7 @@ status:
         supportedKinds:
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
-        attachedRoutes: 0
+        attachedRoutes: 1
         conditions:
           - type: Accepted
             status: "True"
