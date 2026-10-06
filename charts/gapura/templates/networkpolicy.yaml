@@ -1,0 +1,42 @@
+{{- if (.Values.networkPolicy).enabled }}
+# The admin port serves /metrics and /debug/config with no authentication. Anything that can
+# reach it learns every route, backend and hostname this release serves, and the traffic ports
+# are reachable by design, so the admin port has to be closed by the network. Without this policy,
+# a tenant who can create a Service and an EndpointSlice can even route an internet hostname to
+# it. This policy lets anyone reach the traffic ports and only the release's own namespace (where
+# the console runs) and the namespaces in adminFromNamespaces (Prometheus) reach the admin port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gapura.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gapura.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gapura.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - ports:
+    - { port: {{ (.Values.ports).http }}, protocol: TCP }
+    - { port: {{ (.Values.ports).https }}, protocol: TCP }
+    {{- range .Values.extraListenHttp }}
+    - { port: {{ . }}, protocol: TCP }
+    {{- end }}
+    {{- range .Values.extraListenHttps }}
+    - { port: {{ . }}, protocol: TCP }
+    {{- end }}
+  - ports:
+    - { port: {{ (.Values.ports).admin }}, protocol: TCP }
+    from:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+          - {{ .Release.Namespace | quote }}
+          {{- range (.Values.networkPolicy).adminFromNamespaces }}
+          - {{ . | quote }}
+          {{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+# The admin-port NetworkPolicy, with a monitoring namespace and an extra listener so both the
+# from-list and the traffic-port list render more than their defaults.
+networkPolicy:
+  enabled: true
+  adminFromNamespaces: [monitoring]
+extraListenHttp: [8081]

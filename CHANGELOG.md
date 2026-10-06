@@ -16,6 +16,19 @@ means what it usually does, moving from one version below to a later one. Releas
   answer 503 naming the row, and every data plane keeps serving the last configuration it
   verified: a bad row costs new configuration, never protection. A path that does not start with
   `/` is refused the same way. An empty path list is still valid and still means every path.
+- `/debug/config` no longer serves key material besides TLS private keys. It already redacted
+  `tls.key_pem`, but every JWT policy's JWKS went out verbatim, and an `oct` key in a JWKS is the
+  HMAC signing secret: anyone who could reach the admin port could mint tokens that every JWT
+  route accepted. The JWKS is now `<redacted>`, as is the credential map (the SHA-256 of every
+  issued API key, which `/debug/config` printed in full) -- it now says only how many keys there
+  are. A test builds a config with one of each secret and fails if any value reaches the dump.
+- The chart can close the admin port with a NetworkPolicy (`networkPolicy.enabled`). The admin
+  port has no authentication, so any pod in the cluster can read the full routing map, and a
+  tenant who can create a Service with a hand-written EndpointSlice can route an internet hostname
+  to it. The policy admits anyone on the traffic ports (including `extraListenHttp/Https`) and only
+  the release namespace and `networkPolicy.adminFromNamespaces` on the admin port. Off by default
+  because turning it on stops a Prometheus in another namespace from scraping until that namespace
+  is listed; turning it on is recommended.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running

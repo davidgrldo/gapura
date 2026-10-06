@@ -172,6 +172,17 @@ metrics:
     enabled: false
     labels: {}
 
+# Close the admin port to everything but this release's namespace and adminFromNamespaces. The
+# admin port serves /metrics and /debug/config without authentication, so without a policy every
+# pod in the cluster can read the full routing map of every tenant, and a tenant who can create a
+# Service and an EndpointSlice can route an internet hostname to it. Off by default only because
+# turning it on silently stops a Prometheus in another namespace from scraping; name that
+# namespace in adminFromNamespaces and turn it on. Kubelet probes are not affected on the common
+# CNIs (Calico, Cilium, the cloud CNIs), which exempt traffic from the node.
+networkPolicy:
+  enabled: false
+  adminFromNamespaces: []
+
 # `helm test` fixture: a throwaway Gateway, HTTPRoute and echo backend, plus a curl pod that
 # proves one request routes through this release's data plane. Hook resources: created by
 # `helm test`, never at install; deleted on success, kept on failure for debugging.
