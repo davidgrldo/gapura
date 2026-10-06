@@ -37,6 +37,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
+/// nothing else sharing the database takes the same one.
+const MIGRATION_LOCK: i64 = 0x6761_7075_7261_0001;
+
 pub struct Store {
     pool: Pool,
 }
@@ -57,7 +61,26 @@ impl Store {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
+        // Two replicas starting together would both find a migration unapplied and both apply
+        // it; the loser fails its start on a duplicate. A session lock serialises them: the
+        // second waits, then finds everything recorded. It is released below, or by Postgres
+        // when the connection drops if this process dies half way.
+        client
+            .execute("select pg_advisory_lock($1)", &[&MIGRATION_LOCK])
+            .await
+            .context("taking the migration lock")?;
+        let result = self.apply_migrations(&mut client).await;
+        if let Err(e) = client
+            .execute("select pg_advisory_unlock($1)", &[&MIGRATION_LOCK])
+            .await
+        {
+            tracing::warn!(error = %e, "releasing the migration lock");
+        }
+        result
+    }
+
+    async fn apply_migrations(&self, client: &mut deadpool_postgres::Object) -> Result<()> {
         client
             .batch_execute(
                 "create table if not exists _migrations (
@@ -76,8 +99,8 @@ impl Store {
             }
             // One transaction per migration: a migration that fails half way leaves nothing
             // behind, so the next start retries it rather than finding a shape nobody designed.
-            let mut c = self.pool.get().await?;
-            let tx = c.transaction().await?;
+            // On the lock's own connection, so nothing here runs outside it.
+            let tx = client.transaction().await?;
             tx.batch_execute(sql)
                 .await
                 .with_context(|| format!("applying migration {name}"))?;

@@ -52,6 +52,16 @@ means what it usually does, moving from one version below to a later one. Releas
   tag on the last good candidate's commit, both images in the post-release checks, and what to do
   when only the `notes` job fails. The GitHub release notes now list the `gapura-control` image,
   which every release run publishes alongside the data-plane image.
+- `/v1/config`'s ETag is now a hash of the configuration it serves, not the store's version
+  counter. The counter starts again when the database is restored or recreated, and it does not
+  move when a control-plane flag or a new release changes what the same rows compile to. In each
+  case a data plane holding the old tag was told 304 and kept serving a configuration the control
+  plane no longer served. A write that leaves the served configuration byte for byte the same no
+  longer resends it either. After upgrading, every data plane fetches the configuration once,
+  because no old tag matches.
+- Control-plane replicas starting at the same time no longer race on schema migrations. Each
+  found a migration unapplied and applied it, and all but one failed to start on a duplicate.
+  Migrations now run under a Postgres advisory lock; the others wait and find them applied.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a
