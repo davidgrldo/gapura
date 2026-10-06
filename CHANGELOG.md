@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An API key now opens the `key_auth` routes of its own workspace only. Every key in the
+  configuration was accepted by every `key_auth` policy, so a consumer issued a key in one
+  workspace could call another workspace's protected routes. A store-mode `key_auth` policy now
+  carries its workspace, the configuration records each key's workspace, and a key from another
+  workspace gets the same `401` as a key never issued. Upstreams are still told the bare
+  consumer name in `X-Consumer-Username`, which is unique within a workspace. The workspace map
+  sits beside the existing credentials, so a data plane older than this release keeps accepting
+  keys unscoped until it is upgraded, rather than refusing them.
 - Workspaces in the control plane's store no longer collide. A route found its service by name
   alone, so two workspaces that each had an `orders` service could send one workspace's traffic
   to the other's upstream; and a policy attached to a route name applied to every workspace's

@@ -213,9 +213,10 @@ impl Store {
         // the bound revocation already has.
         let credentials = tx
             .query(
-                "select k.key_hash, c.username
+                "select k.key_hash, c.username, w.name as workspace
                    from consumer_keys k
                    join consumers c on c.id = k.consumer_id
+                   join workspaces w on w.id = c.workspace_id
                   where k.expires_at is null or k.expires_at > now()
                   order by k.key_hash",
                 &[],
@@ -225,6 +226,7 @@ impl Store {
             .map(|r| StoreCredential {
                 key_hash: r.get("key_hash"),
                 consumer: r.get("username"),
+                workspace: r.get("workspace"),
             })
             .collect();
 

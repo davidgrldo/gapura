@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    Cluster, Config, Filters, ListenerConfig, PathMatch, Plugin, PortEntry, Protocol,
-    ResolveTarget, RouteMatch, RouteRule, Timeouts, WeightedBackend,
+    Cluster, Config, Filters, KeyAuthPolicy, ListenerConfig, PathMatch, Plugin, PortEntry,
+    Protocol, ResolveTarget, RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -82,6 +82,9 @@ pub struct StoreCredential {
     /// The consumer's username, which is what an upstream is told. There is no consumer
     /// type here: the store has the rows, and all the data plane needs is the name.
     pub consumer: String,
+    /// The consumer's workspace. A key opens `key_auth` routes of this workspace only.
+    #[serde(default)]
+    pub workspace: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -233,6 +236,12 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .iter()
             .map(|c| (c.key_hash.clone(), c.consumer.clone()))
             .collect(),
+        credential_workspaces: snap
+            .credentials
+            .iter()
+            .filter(|c| !c.workspace.is_empty())
+            .map(|c| (c.key_hash.clone(), c.workspace.clone()))
+            .collect(),
     }
 }
 
@@ -266,7 +275,20 @@ fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
             None => chosen.push((rank, &p.plugin)),
         }
     }
-    chosen.into_iter().map(|(_, p)| p.clone()).collect()
+    chosen
+        .into_iter()
+        .map(|(_, p)| match p {
+            // A key opens the routes of its consumer's workspace and no other's: the policy
+            // carries the workspace it was written in, and the data plane checks the key's.
+            Plugin::KeyAuth(policy) if !route.workspace.is_empty() => {
+                Plugin::KeyAuth(KeyAuthPolicy {
+                    workspace: Some(route.workspace.clone()),
+                    ..policy.clone()
+                })
+            }
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// Two policies of the same kind compete; two of different kinds both run.
@@ -401,6 +423,36 @@ mod tests {
             .find(|r| r.route == route_id)
             .map(|r| r.plugins.as_slice())
             .unwrap_or_else(|| panic!("no rule {route_id}"))
+    }
+
+    #[test]
+    fn a_key_auth_policy_carries_its_workspace_and_each_key_its_own() {
+        let snap = StoreSnapshot {
+            services: vec![ws_svc("team-a", "orders", "orders.a.internal")],
+            routes: vec![ws_route("team-a", "api", "orders", "a.example")],
+            plugins: vec![key_auth("team-a", None)],
+            credentials: vec![
+                StoreCredential {
+                    key_hash: "hash-a".into(),
+                    consumer: "mobile".into(),
+                    workspace: "team-a".into(),
+                },
+                StoreCredential {
+                    key_hash: "hash-b".into(),
+                    consumer: "mobile".into(),
+                    workspace: "team-b".into(),
+                },
+            ],
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let [Plugin::KeyAuth(policy)] = plugins_on(&cfg, "team-a/api") else {
+            panic!("one key_auth policy");
+        };
+        assert_eq!(policy.workspace.as_deref(), Some("team-a"));
+        assert_eq!(cfg.credential_workspaces["hash-a"], "team-a");
+        assert_eq!(cfg.credential_workspaces["hash-b"], "team-b");
+        // The upstream is still told the bare name: within a workspace it is unique.
+        assert_eq!(cfg.credentials["hash-b"], "mobile");
     }
 
     /// Names are unique per workspace, so two workspaces may both have an `orders` service. Keyed

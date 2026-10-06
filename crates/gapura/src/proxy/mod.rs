@@ -494,7 +494,11 @@ impl ProxyHttp for GapuraProxy {
                                 .headers
                                 .get(&policy.header)
                                 .and_then(|v| v.to_str().ok());
-                            match gapura_core::credentials::identify(&rt.config, presented) {
+                            match gapura_core::credentials::identify(
+                                &rt.config,
+                                presented,
+                                policy.workspace.as_deref(),
+                            ) {
                                 // Carried on the context rather than written here: the upstream
                                 // header is set in upstream_request_filter, after the inbound one
                                 // has been removed.
