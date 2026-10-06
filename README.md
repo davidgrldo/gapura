@@ -21,7 +21,7 @@ a separate control plane is optional rather than required:
 
 - **Routing** on hostname, path (`Exact`, `PathPrefix` and `RegularExpression`), header, query
   parameter and method.
-- **Filters**: request and response header modification, `RequestRedirect`, `RequestMirror`, and
+- **Filters**: request and response header modification, `RequestRedirect`, `RequestMirror` (every request, headers only; a partial mirror is refused), and
   `URLRewrite`.
 - **TLS**: termination with the certificate chosen per SNI, and TLS to backends via
   `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.

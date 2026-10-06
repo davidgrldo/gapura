@@ -59,6 +59,11 @@ means what it usually does, moving from one version below to a later one. Releas
   idempotent, and only once. Pingora's default, which this did not override, retried any method up
   to sixteen times, replaying the body: a `POST` the backend had processed before its keep-alive
   connection died could be sent again.
+- A `RequestMirror` asking for a share of the traffic is refused instead of mirroring all of it.
+  `percent` and `fraction` were not read, and unknown fields are ignored, so `percent: 1` -- or
+  `percent: 0`, the usual way to pause a mirror -- mirrored every request while the route reported
+  `Accepted=True`. A partial mirror now gets `Accepted=False` with reason `UnsupportedValue` until
+  the data plane can sample; `percent: 100` or a whole fraction is accepted, being what happens.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running

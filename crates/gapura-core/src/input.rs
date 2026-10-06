@@ -212,6 +212,19 @@ pub struct HttpRouteFilter {
 #[serde(default, rename_all = "camelCase")]
 pub struct HTTPRequestMirrorFilter {
     pub backend_ref: HttpBackendRef,
+    /// Mirror only this percentage of requests. Read so it can be refused: ignoring it, as every
+    /// unknown field is ignored, turned a 1% mirror into a 100% one with `Accepted=True`.
+    pub percent: Option<i32>,
+    /// The same as `percent`, as a fraction.
+    pub fraction: Option<Fraction>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Fraction {
+    pub numerator: i32,
+    /// Defaults to 100 in the CRD.
+    pub denominator: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
