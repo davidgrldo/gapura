@@ -11,6 +11,10 @@ name: quickstart
 # credential is in play anywhere, so green here is a fact about the packages, not about us.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version to install, e.g. 0.2.0-rc.9. Empty means the newest tag.
+        required: false
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
   workflow_run:
@@ -40,14 +44,33 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
+      # After a release run, the version that run published: a dispatched prerelease has no tag,
+      # so "the newest tag" re-tested the previous release after every RC. The release run is
+      # named "release <version>" for exactly this. Otherwise the input, else the newest tag.
+      # Ordering maps "-" to "~", which GNU sort -V puts before anything, so 0.1.0 sorts after
+      # 0.1.0-rc.3 rather than before it.
       - name: Resolve the version under test
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          tag="$(git tag --list 'v*' | sort -V | tail -1)"
-          test -n "$tag" || { echo "no tags in this checkout" >&2; exit 1; }
-          version="${tag#v}"
+          version="${INPUT_VERSION#v}"
+          if [ -z "$version" ] && [ -n "$RUN_TITLE" ]; then
+            version="${RUN_TITLE#release }"
+            version="${version#v}"
+            echo "sha=sha-$RUN_SHA" >> "$GITHUB_ENV"
+          fi
+          if [ -z "$version" ]; then
+            tag="$(git tag --list 'v*' | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')"
+            test -n "$tag" || { echo "no tags in this checkout" >&2; exit 1; }
+            version="${tag#v}"
+          fi
+          printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
+            || { echo "not a version: '$version'" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_ENV"
-          echo "testing $tag"
+          echo "testing v$version"
       # The fast, unmistakable signal: an anonymous chart pull fails in seconds if the package is
       # private, where the full install below would burn its whole --wait budget on it.
       - name: Anonymous chart fetch (RELEASING 5.3)
@@ -65,11 +88,12 @@ jobs:
       - name: Anonymous console image fetch (RELEASING 5.3)
         run: |
           set -euo pipefail
-          if [ "$(printf '%s\n0.1.0-rc.3\n' "$version" | sort -V | head -1)" != "0.1.0-rc.3" ]; then
+          if [ "$(printf '%s\n0.1.0~rc.3\n' "$(printf '%s' "$version" | sed 's/-/~/')" | sort -V | head -1)" != "0.1.0~rc.3" ]; then
             echo "skipping: $version predates the console image (first published 0.1.0-rc.3)"
             exit 0
           fi
-          sha="sha-$(git rev-parse "v${version}")"
+          # A dispatched prerelease has no tag to resolve; its commit came with the release run.
+          sha="${sha:-sha-$(git rev-parse "v${version}")}"
           tok=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:davidgrldo/gapura-control:pull" | jq -r .token)
           code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
             -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
