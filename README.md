@@ -279,7 +279,11 @@ LoadBalancer addresses of `--publish-service namespace/name` into Gateway status
 
 A third config source exists besides files (`--config-dir`, above) and the cluster: `--control-plane`
 polls the configuration endpoint `gapura-control` serves and keeps a disk cache, so a control-plane
-outage costs new configuration, not traffic. The chart does not expose it yet.
+outage costs new configuration, not traffic. The chart does not expose it yet. The URL must be
+`https://`: every configuration carries the private key of each certificate the gateway serves.
+`gapura-control` does not terminate TLS on that endpoint itself yet, so put it behind something
+that does and pass that CA with `--control-plane-ca`; `--control-plane-insecure-http` exists only
+for a control plane on loopback or behind a TLS sidecar in the same pod.
 
 TLS to backends: attach a `BackendTLSPolicy` (CA from a ConfigMap `ca.crt`, or
 `wellKnownCACertificates: System`) to a Service, or annotate the Service with
