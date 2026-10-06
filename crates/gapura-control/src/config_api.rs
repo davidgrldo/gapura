@@ -30,6 +30,94 @@ pub struct ConfigApi {
     pub settings: StoreSettings,
 }
 
+/// A TLS acceptor for the configuration endpoint from a PEM certificate chain and its key.
+///
+/// ponytail: read once, at start. A rotated certificate (cert-manager renews well before expiry)
+/// takes effect at the next restart; a resolver that re-reads the files on change is the upgrade
+/// if restarts on rotation become a burden.
+pub fn tls_acceptor(cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    use anyhow::{anyhow, Context};
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let chain = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("reading the configuration endpoint's certificate: {e:?}"))?;
+    anyhow::ensure!(
+        !chain.is_empty(),
+        "the configuration endpoint's certificate file holds no PEM certificate"
+    );
+    let key = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| anyhow!("reading the configuration endpoint's key: {e:?}"))?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .context("the configuration endpoint's certificate and key do not match")?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Serves `router` over TLS on `listener` until the listener fails.
+///
+/// A handshake that has not finished in ten seconds is dropped, so a client that opens a
+/// connection and sends nothing holds a task for that long and no longer.
+pub async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    acceptor: tokio_rustls::TlsAcceptor,
+) -> std::io::Result<()> {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::service::TowerToHyperService;
+    loop {
+        let (tcp, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            // Out of file descriptors and the like: the next accept may succeed once some close.
+            Err(e) if is_transient(&e) => {
+                tracing::warn!(error = %e, "accepting a configuration connection");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let acceptor = acceptor.clone();
+        let service = TowerToHyperService::new(router.clone());
+        tokio::spawn(async move {
+            let tls = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                acceptor.accept(tcp),
+            )
+            .await
+            {
+                Ok(Ok(tls)) => tls,
+                Ok(Err(e)) => {
+                    tracing::debug!(%peer, error = %e, "TLS handshake failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!(%peer, "TLS handshake timed out");
+                    return;
+                }
+            };
+            if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await
+            {
+                tracing::debug!(%peer, error = %e, "configuration connection ended");
+            }
+        });
+    }
+}
+
+fn is_transient(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        ConnectionAborted | ConnectionReset | Interrupted | WouldBlock
+    ) || e.raw_os_error() == Some(24) // EMFILE
+        || e.raw_os_error() == Some(23) // ENFILE
+}
+
 pub fn router(api: Arc<ConfigApi>) -> Router {
     Router::new()
         .route("/v1/config", get(serve))
@@ -113,4 +201,59 @@ fn unauthorized() -> Response {
         [(header::WWW_AUTHENTICATE, "Bearer")],
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_endpoint_answers_over_tls_to_a_client_that_trusts_its_certificate() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let acceptor = tls_acceptor(
+            cert.cert.pem().as_bytes(),
+            cert.key_pair.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The handler is not what is under test, so any router shows the transport works.
+        let router = Router::new().route("/v1/config", get(|| async { "served over tls" }));
+        tokio::spawn(serve_tls(listener, router, acceptor));
+
+        let trusting = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(cert.cert.pem().as_bytes()).unwrap(),
+            )
+            .build()
+            .unwrap();
+        let body = trusting
+            .get(format!("https://localhost:{port}/v1/config"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "served over tls");
+
+        // Plain HTTP to a TLS port gets no answer it could read as a configuration.
+        let plain = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/config"))
+            .send()
+            .await;
+        assert!(plain.map(|r| !r.status().is_success()).unwrap_or(true));
+    }
+
+    #[test]
+    fn a_key_that_is_not_the_certificate_s_is_refused() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let other = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        assert!(tls_acceptor(
+            cert.cert.pem().as_bytes(),
+            other.key_pair.serialize_pem().as_bytes()
+        )
+        .is_err());
+        assert!(tls_acceptor(b"", cert.key_pair.serialize_pem().as_bytes()).is_err());
+    }
 }
