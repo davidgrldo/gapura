@@ -51,9 +51,9 @@ pub(crate) fn compile(
             .iter()
             .map(compile_match)
             .collect::<Result<Vec<_>, _>>()?;
-        let regex_matched = matches
+        let prefix_only = matches
             .iter()
-            .any(|m| matches!(m.path, PathMatch::Regex(_)));
+            .all(|m| matches!(m.path, PathMatch::Prefix(_)));
         // The mirror backendRef resolves exactly like a primary one: same error mapping into
         // ResolvedRefs=False, same cluster table. A failed mirror leaves the route unmirrored
         // (the filter is dropped) instead of failing its primary traffic.
@@ -73,7 +73,7 @@ pub(crate) fn compile(
             },
             None => None,
         };
-        let filters = compile_filters(&r.filters, regex_matched, mirror_cluster)?;
+        let filters = compile_filters(&r.filters, prefix_only, mirror_cluster)?;
         let mut backends = Vec::new();
         for b in &r.backend_refs {
             // Negative weights are rejected by the CRD schema; clamping is defense in depth, not a real path.
@@ -161,7 +161,7 @@ fn compile_match(m: &HttpRouteMatch) -> Result<RouteMatch, Unsupported> {
                 "RegularExpression" => {
                     // Validate here so an invalid pattern keeps the Unsupported path; the data
                     // plane compiles the pattern again into its per-generation side map.
-                    if let Err(e) = regex::Regex::new(&value) {
+                    if let Err(e) = crate::matcher::compile_path_regex(&value) {
                         return Err(Unsupported(format!(
                             "path match RegularExpression {value:?} does not compile: {e}"
                         )));
@@ -220,12 +220,12 @@ fn normalize_prefix(mut p: String) -> String {
     }
 }
 
-/// `regex_matched`: any match of this rule uses a RegularExpression path. Gateway API leaves the
-/// replaced prefix undefined for regex matches, so a ReplacePrefixMatch modifier (URLRewrite or
-/// RequestRedirect) combined with one is rejected here, before it could reach the data plane.
+/// `prefix_only`: every match of this rule is a PathPrefix match. Gateway API makes
+/// ReplacePrefixMatch (URLRewrite or RequestRedirect) compatible with PathPrefix only, and has a
+/// rule that mixes it with any other path type set Accepted=False, so it is rejected here.
 fn compile_filters(
     filters: &[HttpRouteFilter],
-    regex_matched: bool,
+    prefix_only: bool,
     mirror_cluster: Option<String>,
 ) -> Result<Filters, Unsupported> {
     let mut out = Filters::default();
@@ -284,7 +284,7 @@ fn compile_filters(
             "RequestRedirect and URLRewrite cannot be combined in one rule".to_string(),
         ));
     }
-    if regex_matched {
+    if !prefix_only {
         let prefix_rewrite = [
             out.rewrite.as_ref().and_then(|w| w.path.as_ref()),
             out.redirect.as_ref().and_then(|d| d.path.as_ref()),
@@ -294,8 +294,8 @@ fn compile_filters(
         .any(|p| matches!(p, PathRewrite::ReplacePrefixMatch(_)));
         if prefix_rewrite {
             return Err(Unsupported(
-                "ReplacePrefixMatch cannot be combined with a RegularExpression path match: \
-                 the prefix to replace is undefined"
+                "ReplacePrefixMatch needs every match of the rule to be a PathPrefix match: \
+                 with an Exact or RegularExpression path the prefix to replace is undefined"
                     .to_string(),
             ));
         }
@@ -521,8 +521,24 @@ spec:
             matches!(compile_first(redirect).0, Err(Unsupported(ref m)) if m.contains("ReplacePrefixMatch")),
             "the redirect path modifier shares rewrite_path, so the same guard applies"
         );
-        // The mixed case: one Exact match and one Regex match in the same rule is still rejected,
-        // because the regex match leaves the prefix-to-replace undefined.
+        // An Exact match alone is refused too: the spec allows ReplacePrefixMatch with PathPrefix
+        // only.
+        let exact = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - matches: [{ path: { type: Exact, value: /a } }]
+    filters:
+    - type: URLRewrite
+      urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: /new } }
+"#;
+        assert!(matches!(
+            compile_first(exact).0,
+            Err(Unsupported(m)) if m.contains("PathPrefix")
+        ));
+        // The mixed case: one Exact match and one Regex match in the same rule.
         let mixed = r#"
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
