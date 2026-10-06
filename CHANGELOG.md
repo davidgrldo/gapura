@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A leader that renews slowly now gives up leadership in time. Each lease step was allowed the
+  full renew deadline from when it started, and after a slow renewal the next step starts at
+  once, so a hanging step could keep a replica leader after the Lease it last wrote had
+  expired, while another replica acquired it: two status writers. A step is now bounded by
+  what is left of the deadline since the last successful renewal.
+- A Gateway, GatewayClass or HTTPRoute deleted and recreated under the same name between two
+  translations gets its status at once. The status writer remembered what it wrote by name,
+  so a recreated object with the same translated status was skipped for up to ten minutes and
+  showed no conditions. Status patches now carry the object's UID, which the writer's cache
+  compares.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a

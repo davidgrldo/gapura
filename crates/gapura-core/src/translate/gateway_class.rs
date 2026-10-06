@@ -19,6 +19,7 @@ pub(crate) fn accept(
         ours.insert(name.clone());
         status.push(StatusPatch::GatewayClass {
             name: name.clone(),
+            uid: gc.metadata.uid.clone(),
             conditions: vec![Condition::new(
                 types::ACCEPTED,
                 ConditionStatus::True,

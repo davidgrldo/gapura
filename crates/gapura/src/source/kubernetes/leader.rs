@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use k8s_openapi::jiff::Timestamp;
@@ -82,21 +84,23 @@ pub async fn run(
 ) {
     let api = Api::<Lease>::namespaced(client, &opts.namespace);
     let mut tick = tokio::time::interval(opts.renew_every);
+    // client-go's RenewDeadline: strictly below the lease duration, so leadership is dropped
+    // before another replica can acquire the expired Lease.
+    let lease = Duration::from_secs(u64::try_from(opts.lease_secs).unwrap_or(15));
+    let deadline = lease
+        .saturating_sub(opts.renew_every)
+        .max(Duration::from_secs(1));
+    // The start of the step that last renewed the Lease, which is the renewTime it wrote.
+    let mut renewed_at: Option<Instant> = None;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = shutdown.changed() => return,
         }
-        // A hung API call must not pin leadership: bound each step by the lease duration
-        // (client-go's RenewDeadline) and give up leadership when it elapses.
-        // client-go's RenewDeadline: strictly below the lease duration, so leadership is dropped
-        // before another replica can acquire the expired Lease.
-        let lease = Duration::from_secs(u64::try_from(opts.lease_secs).unwrap_or(15));
-        let deadline = lease
-            .saturating_sub(opts.renew_every)
-            .max(Duration::from_secs(1));
+        let started = Instant::now();
+        let budget = step_budget(renewed_at, *leadership.borrow(), started, deadline);
         let outcome = tokio::select! {
-            r = tokio::time::timeout(deadline, step(&api, &opts)) => r,
+            r = tokio::time::timeout(budget, step(&api, &opts)) => r,
             _ = shutdown.changed() => return,
         };
         let leader = match outcome {
@@ -106,16 +110,36 @@ pub async fn run(
                 false
             }
             Err(_) => {
-                tracing::warn!(lease = %opts.name, secs = deadline.as_secs(), "lease step timed out, not leader");
+                tracing::warn!(lease = %opts.name, secs = budget.as_secs_f32(), "lease step timed out, not leader");
                 false
             }
         };
+        renewed_at = leader.then_some(started);
         let was = *leadership.borrow();
         publish(&leadership, leader);
         METRICS.leader.set(i64::from(leader));
         if was != leader {
             tracing::info!(identity = %opts.identity, leader, "leadership changed");
         }
+    }
+}
+
+/// How long the next acquire-or-renew step may take.
+///
+/// A hung API call must not pin leadership, so every step is bounded. As leader the bound is
+/// what is left of `deadline` since the last renewal, not a fresh `deadline` per step: after a
+/// slow renewal the next tick fires at once, and a step allowed the full deadline from there
+/// would keep this replica leader past the Lease it last wrote, while another replica could
+/// already have acquired it.
+fn step_budget(
+    renewed_at: Option<Instant>,
+    leader: bool,
+    now: Instant,
+    deadline: Duration,
+) -> Duration {
+    match renewed_at {
+        Some(at) if leader => (at + deadline).saturating_duration_since(now),
+        _ => deadline,
     }
 }
 
@@ -160,6 +184,29 @@ async fn step(api: &Api<Lease>, opts: &LeaderOpts) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leader_has_only_what_is_left_since_its_last_renewal() {
+        let deadline = Duration::from_secs(10);
+        let renewed = Instant::now();
+        let at = |secs| renewed + Duration::from_secs(secs);
+        assert_eq!(
+            step_budget(Some(renewed), true, at(4), deadline),
+            Duration::from_secs(6)
+        );
+        // A slow renewal followed by a tick at once: no time left, so leadership ends now
+        // rather than a full deadline later.
+        assert_eq!(
+            step_budget(Some(renewed), true, at(12), deadline),
+            Duration::ZERO
+        );
+        // Not leader: nothing to protect, so a step gets the whole deadline.
+        assert_eq!(
+            step_budget(Some(renewed), false, at(12), deadline),
+            deadline
+        );
+        assert_eq!(step_budget(None, false, at(0), deadline), deadline);
+    }
 
     fn spec(holder: &str, renewed_secs: i64, duration: i32) -> LeaseSpec {
         LeaseSpec {

@@ -93,6 +93,10 @@ pub const SUPPORTED_FEATURES: [&str; 8] = [
 pub enum StatusPatch {
     GatewayClass {
         name: String,
+        /// The object's UID, when it has one. Never written to the API server: it lets a writer
+        /// that remembers what it wrote tell an object from one recreated under the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid: Option<String>,
         conditions: Vec<Condition>,
         /// Feature names, ascending; the writer turns them into `[{name: ...}]`.
         supported_features: Vec<String>,
@@ -100,6 +104,10 @@ pub enum StatusPatch {
     Gateway {
         namespace: String,
         name: String,
+        /// The object's UID, when it has one. Never written to the API server: it lets a writer
+        /// that remembers what it wrote tell an object from one recreated under the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid: Option<String>,
         addresses: Vec<String>,
         conditions: Vec<Condition>,
         listeners: Vec<ListenerStatus>,
@@ -108,6 +116,10 @@ pub enum StatusPatch {
     HttpRoute {
         namespace: String,
         name: String,
+        /// The object's UID, when it has one. Never written to the API server: it lets a writer
+        /// that remembers what it wrote tell an object from one recreated under the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid: Option<String>,
         parents: Vec<RouteParentStatus>,
     },
 }
@@ -165,6 +177,7 @@ mod tests {
         let p = StatusPatch::HttpRoute {
             namespace: "apps".into(),
             name: "echo".into(),
+            uid: None,
             parents: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
@@ -172,6 +185,7 @@ mod tests {
         assert_eq!(v["namespace"], "apps");
         let g = StatusPatch::GatewayClass {
             name: "gapura".into(),
+            uid: None,
             conditions: vec![],
             supported_features: vec![],
         };

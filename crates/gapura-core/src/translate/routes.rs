@@ -60,6 +60,7 @@ pub(crate) fn attach(
             status.push(StatusPatch::HttpRoute {
                 namespace: rref.namespace.clone(),
                 name: rref.name.clone(),
+                uid: route.metadata.uid.clone(),
                 parents,
             });
         }
