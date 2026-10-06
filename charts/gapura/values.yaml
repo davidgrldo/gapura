@@ -222,6 +222,10 @@ console:
     type: ClusterIP
     port: 8080
     nodePort: null
+  # Proxies (addresses or CIDRs) whose X-Forwarded-For names the client that failed sign-ins are
+  # counted against. Behind an ingress, list its pods' range: without it every sign-in comes
+  # from the ingress, and five wrong passwords for a name lock that name for everyone.
+  trustedProxies: []
   # `group=namespace` grants, e.g. ["platform=platform", "sre=*"]. The console shows a
   # namespace's routes to the groups granted it; the mapping is enforced server-side.
   grants: []

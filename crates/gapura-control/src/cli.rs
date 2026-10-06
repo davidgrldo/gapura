@@ -27,6 +27,12 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:8081", requires = "database_url")]
     pub listen_config: std::net::SocketAddr,
 
+    /// Proxies, as addresses or CIDRs, whose `X-Forwarded-For` names the client sign-in limits
+    /// count against. Behind an ingress, list it here: without it every sign-in comes from the
+    /// ingress's address, and five wrong passwords for a name lock that name for everyone.
+    #[arg(long, env = "GAPURA_TRUSTED_PROXIES", value_delimiter = ',')]
+    pub trusted_proxies: Vec<gapura_core::client_ip::Cidr>,
+
     /// The ports data planes bind for plain HTTP, which the compiled configuration has to name.
     /// A flag because the store has no Gateway object yet; when it does, this moves there.
     #[arg(long, value_delimiter = ',', default_value = "80")]

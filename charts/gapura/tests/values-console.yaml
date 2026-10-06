@@ -6,6 +6,7 @@ console:
   auth:
     mode: oidc
   grants: ["platform=platform", "sre=*"]
+  trustedProxies: ["10.0.0.0/8", "fd00::/8"]
   oidc:
     issuer: https://id.example.com/realms/engineering
     clientId: gapura-console

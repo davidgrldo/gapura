@@ -361,6 +361,7 @@ mod tests {
             pending: crate::login::PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 
@@ -568,6 +569,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         pending: crate::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(3600),
         store: None,
+        sign_in: Default::default(),
     }
 }
 
@@ -809,6 +811,7 @@ mod overview_tests {
             pending: crate::login::PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 

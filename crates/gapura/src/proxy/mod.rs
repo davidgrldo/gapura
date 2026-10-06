@@ -6,7 +6,8 @@
 //! (502/504 mapping), `logging` (access log + metrics).
 
 pub mod attrs;
-pub mod client;
+// Shared with the console, which has to answer the same question for its sign-in limits.
+pub use gapura_core::client_ip as client;
 pub mod jwt;
 pub mod rate_limit;
 pub mod select;

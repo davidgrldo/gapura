@@ -8,6 +8,17 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Failed console sign-ins are now limited. Five failures for one username from one address lock
+  that pair for fifteen minutes; ten failures from one address in a minute hold that address's
+  sign-ins, including a provider's refusals arriving on `/auth/callback`, until the minute is out.
+  The lock is on a name at an address, not on the account, so nobody can keep someone else
+  locked out from elsewhere, and names are counted whether or not an account has them, so the
+  answer, `Too many failed attempts. Try again in N minutes.` with 429 and `Retry-After`, says
+  nothing about which exist. A successful sign-in clears its pair. Before, nothing limited
+  guessing but the password hash's cost. Behind an ingress, set `--trusted-proxies`
+  (`GAPURA_TRUSTED_PROXIES`, chart `console.trustedProxies`) so the client's address is read
+  from `X-Forwarded-For`: without it every sign-in comes from the ingress. Counts are kept per
+  console replica.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a

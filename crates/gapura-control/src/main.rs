@@ -125,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
         pending: gapura_control::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
         store: store.clone(),
+        sign_in: Arc::new(gapura_control::throttle::Throttle::new(
+            args.trusted_proxies.clone(),
+        )),
     };
     // Served only when there is a store to serve it from, on its own listener: two servers in
     // one process rather than one router, so the port is the boundary and not a path prefix
@@ -147,6 +150,12 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "gapura-control listening");
-    axum::serve(listener, gapura_control::api::router_with(state)).await?;
+    // With each connection's address, which the sign-in limits count against.
+    axum::serve(
+        listener,
+        gapura_control::api::router_with(state)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
