@@ -7,14 +7,15 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use deadpool_postgres::{Config as PoolConfig, Pool, Runtime};
+use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use gapura_core::config::{JwtPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
 use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot};
 use sha2::{Digest, Sha256};
-use tokio_postgres::NoTls;
+use tokio_postgres::config::SslMode;
 
 mod grants;
 mod identity;
+mod tls;
 pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
@@ -37,19 +38,50 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
+/// nothing else sharing the database takes the same one.
+const MIGRATION_LOCK: i64 = 0x6761_7075_7261_0001;
+
 pub struct Store {
     pool: Pool,
 }
 
 impl Store {
-    /// `url` is a libpq connection string. TLS is deliberately not configured here yet: the
-    /// store is reached over a network the operator controls, and adding it half-way -- accepted
-    /// but unverified -- would be worse than the absence, which is at least visible.
+    /// `url` is a libpq connection string, in plain text unless it says `sslmode=require`.
     pub async fn connect(url: &str) -> Result<Self> {
-        let mut cfg = PoolConfig::new();
-        cfg.url = Some(url.to_string());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+        Self::connect_with(url, None).await
+    }
+
+    /// `sslmode=require` in `url` turns TLS on, and verified: the certificate has to chain to
+    /// Mozilla's roots or to `extra_ca`, and name the host. That is stricter than libpq's
+    /// `require`, which checks neither and so stops only a passive observer, and the store holds
+    /// every credential hash and every private key the gateway serves. Anything else, including
+    /// libpq's default `prefer`, connects in plain text as before: a TLS attempt that falls back
+    /// to plain text when the handshake fails protects nothing an attacker on the path cannot
+    /// strip.
+    pub async fn connect_with(url: &str, extra_ca: Option<&[u8]>) -> Result<Self> {
+        let mut pg: tokio_postgres::Config = url.parse().context("parsing DATABASE_URL")?;
+        if pg.get_ssl_mode() == SslMode::Require {
+            tracing::info!("the store connection uses TLS, verified");
+        } else {
+            anyhow::ensure!(
+                extra_ca.is_none(),
+                "a database CA file is set, but DATABASE_URL has no sslmode=require, so it \
+                 would never be used"
+            );
+            pg.ssl_mode(SslMode::Disable);
+            tracing::warn!(
+                "the store connection is not encrypted (fine for a Unix socket or a local \
+                 proxy); add sslmode=require to DATABASE_URL to encrypt and verify it"
+            );
+        }
+        let manager = Manager::from_config(
+            pg,
+            tls::MakeRustls::new(extra_ca)?,
+            ManagerConfig::default(),
+        );
+        let pool = Pool::builder(manager)
+            .build()
             .context("building the Postgres pool")?;
         // Fail at startup rather than on the first data plane's call.
         let _probe = pool.get().await.context("connecting to Postgres")?;
@@ -57,7 +89,26 @@ impl Store {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
+        // Two replicas starting together would both find a migration unapplied and both apply
+        // it; the loser fails its start on a duplicate. A session lock serialises them: the
+        // second waits, then finds everything recorded. It is released below, or by Postgres
+        // when the connection drops if this process dies half way.
+        client
+            .execute("select pg_advisory_lock($1)", &[&MIGRATION_LOCK])
+            .await
+            .context("taking the migration lock")?;
+        let result = self.apply_migrations(&mut client).await;
+        if let Err(e) = client
+            .execute("select pg_advisory_unlock($1)", &[&MIGRATION_LOCK])
+            .await
+        {
+            tracing::warn!(error = %e, "releasing the migration lock");
+        }
+        result
+    }
+
+    async fn apply_migrations(&self, client: &mut deadpool_postgres::Object) -> Result<()> {
         client
             .batch_execute(
                 "create table if not exists _migrations (
@@ -76,8 +127,8 @@ impl Store {
             }
             // One transaction per migration: a migration that fails half way leaves nothing
             // behind, so the next start retries it rather than finding a shape nobody designed.
-            let mut c = self.pool.get().await?;
-            let tx = c.transaction().await?;
+            // On the lock's own connection, so nothing here runs outside it.
+            let tx = client.transaction().await?;
             tx.batch_execute(sql)
                 .await
                 .with_context(|| format!("applying migration {name}"))?;
@@ -109,7 +160,9 @@ impl Store {
 
         let services = tx
             .query(
-                "select name, protocol, host, port from services order by name",
+                "select w.name as workspace, s.name, s.protocol, s.host, s.port
+                   from services s join workspaces w on w.id = s.workspace_id
+                  order by w.name, s.name",
                 &[],
             )
             .await?
@@ -117,6 +170,7 @@ impl Store {
             .map(|r| {
                 let protocol: String = r.get("protocol");
                 StoreService {
+                    workspace: r.get("workspace"),
                     name: r.get("name"),
                     protocol: if protocol == "https" {
                         Protocol::Https
@@ -131,9 +185,12 @@ impl Store {
 
         let routes = tx
             .query(
-                "select r.name, s.name as service, r.hosts, r.methods, r.paths, r.priority
-                   from routes r join services s on s.id = r.service_id
-                  order by r.name",
+                "select w.name as workspace, r.name, s.name as service, r.hosts, r.methods,
+                        r.paths, r.priority
+                   from routes r
+                   join services s   on s.id = r.service_id
+                   join workspaces w on w.id = r.workspace_id
+                  order by w.name, r.name",
                 &[],
             )
             .await?
@@ -144,6 +201,7 @@ impl Store {
                 let paths = parse_paths(&paths)
                     .with_context(|| format!("route {name:?} has paths this binary cannot read"))?;
                 Ok(StoreRoute {
+                    workspace: r.get("workspace"),
                     name,
                     service: r.get("service"),
                     hosts: r.get("hosts"),
@@ -160,12 +218,15 @@ impl Store {
         // leaving the row out, is the safe direction.
         let plugins = tx
             .query(
-                "select p.name, p.config, r.name as route, s.name as service
+                "select w.name as workspace, p.name, p.config, r.name as route, s.name as service,
+                        coalesce(r.workspace_id <> p.workspace_id, false)
+                          or coalesce(s.workspace_id <> p.workspace_id, false) as foreign_target
                    from plugins p
+                   join workspaces w    on w.id = p.workspace_id
                    left join routes r   on r.id = p.route_id
                    left join services s on s.id = p.service_id
                   where p.enabled and p.consumer_id is null
-                  order by p.name",
+                  order by w.name, p.name, p.id",
                 &[],
             )
             .await?
@@ -173,12 +234,23 @@ impl Store {
             .map(|r| {
                 let name: String = r.get("name");
                 let config: serde_json::Value = r.get("config");
+                let workspace: String = r.get("workspace");
                 let route: Option<String> = r.get("route");
                 let service: Option<String> = r.get("service");
+                // The foreign keys allow a policy to name another workspace's route or service.
+                // Compiled, it would attach to a same-named route in its own workspace instead --
+                // the wrong target, silently -- so it fails the snapshot like any unreadable row.
+                if r.get::<_, bool>("foreign_target") {
+                    anyhow::bail!(
+                        "policy {name:?} in workspace {workspace:?} names a route or service of \
+                         another workspace"
+                    );
+                }
                 let plugin = parse_plugin(&name, config).with_context(|| {
                     format!("policy {name:?} on route {route:?} service {service:?} cannot be read")
                 })?;
                 Ok(StorePlugin {
+                    workspace,
                     route,
                     service,
                     plugin,
@@ -384,7 +456,13 @@ fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
             match e.get("type").and_then(|t| t.as_str()) {
                 Some("exact") => Ok(PathMatch::Exact(value)),
                 Some("prefix") => Ok(PathMatch::Prefix(value)),
-                Some("regex") => Ok(PathMatch::Regex(value)),
+                Some("regex") => {
+                    // Refused here rather than skipped by the data plane, where a pattern that
+                    // does not compile would leave its route matching nothing.
+                    gapura_core::matcher::compile_path_regex(&value)
+                        .with_context(|| format!("path regex {value:?} does not compile"))?;
+                    Ok(PathMatch::Regex(value))
+                }
                 other => {
                     anyhow::bail!("path type {other:?} is not one of exact, prefix, regex: {e}")
                 }

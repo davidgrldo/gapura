@@ -21,11 +21,28 @@ pub struct Args {
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     pub database_url: Option<String>,
 
+    /// A PEM file of CA certificates to trust for the store's TLS, besides the public web
+    /// roots. Needs `sslmode=require` in DATABASE_URL, which is what turns TLS on. Managed
+    /// Postgres services such as RDS and Cloud SQL sign with a CA of their own; this is where
+    /// their bundle goes.
+    #[arg(long, env = "DATABASE_CA_FILE", requires = "database_url")]
+    pub database_ca_file: Option<std::path::PathBuf>,
+
     /// Where data planes fetch their configuration. Its own port and not `--listen`, because
     /// that response carries the gateway's private keys: an operator publishing the console
     /// through an ingress must not publish these with it.
     #[arg(long, default_value = "0.0.0.0:8081", requires = "database_url")]
     pub listen_config: std::net::SocketAddr,
+
+    /// PEM certificate chain for `--listen-config`. With `--config-tls-key`, the configuration
+    /// endpoint is served over TLS; without them, in plain text, and the private keys every
+    /// response carries cross the network readable unless a sidecar or a mesh encrypts them.
+    #[arg(long, requires_all = ["config_tls_key", "database_url"])]
+    pub config_tls_cert: Option<std::path::PathBuf>,
+
+    /// PEM private key for `--config-tls-cert`.
+    #[arg(long, requires = "config_tls_cert")]
+    pub config_tls_key: Option<std::path::PathBuf>,
 
     /// Proxies, as addresses or CIDRs, whose `X-Forwarded-For` names the client sign-in limits
     /// count against. Behind an ingress, list it here: without it every sign-in comes from the

@@ -18,6 +18,7 @@ pub(crate) type Rejection = (&'static str, String);
 
 pub(crate) struct GatewayBuild {
     pub r#ref: ObjectRef,
+    pub uid: Option<String>,
     pub generation: Option<i64>,
     pub listeners: Vec<ListenerBuild>,
     /// Set when the Gateway itself is refused, whatever its listeners say.
@@ -191,6 +192,7 @@ pub(crate) fn build(
             });
         out.push(GatewayBuild {
             r#ref: r.clone(),
+            uid: gw.metadata.uid.clone(),
             generation: gw.metadata.generation,
             listeners,
             rejected,

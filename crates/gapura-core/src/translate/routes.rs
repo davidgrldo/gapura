@@ -60,6 +60,7 @@ pub(crate) fn attach(
             status.push(StatusPatch::HttpRoute {
                 namespace: rref.namespace.clone(),
                 name: rref.name.clone(),
+                uid: route.metadata.uid.clone(),
                 parents,
             });
         }
@@ -106,13 +107,14 @@ fn attach_to_gateway(
             continue; // no hostname intersection
         };
         outcome.hostname_ok += 1;
-        if let Some(c) = compiled {
-            let key = format!("{gw_id}/{}", l.name);
-            if attached.insert(key) {
-                l.attached_routes += 1;
-                if l.programmed() {
-                    l.add_route(&c.rules, &hosts);
-                }
+        // Counted whether or not the route compiled: the spec has attachedRoutes count every
+        // attached route, including one whose own Accepted condition is False. Only a route that
+        // compiled contributes rules.
+        let key = format!("{gw_id}/{}", l.name);
+        if attached.insert(key) {
+            l.attached_routes += 1;
+            if let Some(c) = compiled.filter(|_| l.programmed()) {
+                l.add_route(&c.rules, &hosts);
             }
         }
     }

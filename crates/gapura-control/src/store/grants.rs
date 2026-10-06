@@ -105,6 +105,55 @@ fn settled_by_retrying(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether an enabled account other than a superuser is an admin of the workspace `$1`,
+/// directly or through a group it signed in with last.
+const AN_ADMIN_IS_LEFT: &str = "select exists (
+    select 1 from users u
+     where u.disabled_at is null and not u.superuser
+       and (exists (select 1 from role_bindings b
+                     where b.user_id = u.id and b.workspace_id = $1 and b.role = 'admin')
+            or exists (select 1 from group_bindings g
+                        where g.workspace_id = $1 and g.role = 'admin'
+                          and g.group_name = any(u.oidc_groups))))";
+
+/// Step 4, for a caller who is not a superuser: refuse a write that leaves any workspace it
+/// touched with no admin. Only a superuser could give that workspace one back, and the caller,
+/// who was an admin there a moment ago, is the one person who certainly did not mean to need
+/// that. The console warns before such a save; this is the rule, for a save from a stale tab or
+/// from curl. A superuser is trusted to leave a workspace to superusers, and is not counted as
+/// its admin, or the bootstrap account would make this never refuse.
+///
+/// Two admins demoting themselves at once would each still see the other and both commit. The
+/// lock orders them: the second waits for the first to finish, then counts what it committed.
+/// It is taken after the changes and in workspace order, and nothing else takes it, so it
+/// cannot close a cycle with the row locks above.
+async fn keeps_an_admin<'a>(
+    tx: &Transaction<'_>,
+    actor: &User,
+    workspaces: impl IntoIterator<Item = &'a Uuid>,
+) -> Result<(), WriteError> {
+    if actor.superuser {
+        return Ok(());
+    }
+    for workspace in workspaces {
+        tx.execute(
+            "select pg_advisory_xact_lock(hashtextextended(($1::uuid)::text, 0))",
+            &[workspace],
+        )
+        .await?;
+        let left: bool = tx.query_one(AN_ADMIN_IS_LEFT, &[workspace]).await?.get(0);
+        if !left {
+            return Err(Refusal::Conflict(
+                "This would leave the workspace with no admin, and only a superuser could \
+                 give it one back. Make someone else an admin first."
+                    .into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// The caller as their row stands inside the transaction, and the names of the workspaces the
 /// write concerns, which the audit entries carry.
 struct Authorised {
@@ -355,6 +404,7 @@ impl Store {
             )
             .await?;
         }
+        keeps_an_admin(&tx, &allowed.actor, allowed.workspaces.keys()).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -450,6 +500,7 @@ impl Store {
             },
         )
         .await?;
+        keeps_an_admin(&tx, &allowed.actor, [&workspace]).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -1438,6 +1438,41 @@ mod against_a_stub_provider {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn every_console_response_carries_the_security_headers() {
+        let state = state("http://127.0.0.1:1");
+        let refused = crate::api::router_with(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/logout")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for response in [
+            get_from(&state, "/healthz").await,
+            get_from(&state, "/api/me").await,
+            get_from(&state, "/").await,
+            refused,
+        ] {
+            let h = response.headers();
+            assert!(
+                h["content-security-policy"]
+                    .to_str()
+                    .unwrap()
+                    .contains("frame-ancestors 'none'"),
+                "{:?}",
+                response.status()
+            );
+            assert_eq!(h["x-frame-options"], "DENY");
+            assert_eq!(h["x-content-type-options"], "nosniff");
+            assert_eq!(h["referrer-policy"], "no-referrer");
+        }
+    }
+
     fn location(response: &axum::response::Response) -> String {
         response.headers()["location"].to_str().unwrap().to_string()
     }

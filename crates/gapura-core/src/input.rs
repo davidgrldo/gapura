@@ -11,6 +11,9 @@ pub struct ObjectMeta {
     pub name: String,
     pub namespace: Option<String>,
     pub generation: Option<i64>,
+    /// Tells an object from one recreated under the same name; see `StatusPatch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
     /// RFC 3339 string as emitted by the API server, e.g. `2026-09-01T10:00:00Z`.
     pub creation_timestamp: Option<String>,
     pub labels: BTreeMap<String, String>,

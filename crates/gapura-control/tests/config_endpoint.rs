@@ -133,7 +133,7 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
         },
         &RegexMap::default(),
     );
-    assert_eq!(hit.expect("a match").rule.route, "orders-api");
+    assert_eq!(hit.expect("a match").rule.route, "default/orders-api");
     // The data plane resolves this itself; the control plane could not.
     let cluster = &config.clusters["orders.internal:8080"];
     assert!(cluster.endpoints.is_empty());
@@ -144,12 +144,10 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
     assert_eq!(status, StatusCode::NOT_MODIFIED);
     assert!(body.is_empty());
 
-    // A write moves the version, and the same conditional request now gets the replacement.
+    // A write that changes what is served moves the tag, and the same conditional request now
+    // gets the replacement.
     client
-        .execute(
-            "update routes set priority = 5 where name = 'orders-api'",
-            &[],
-        )
+        .execute("update services set port = 8081 where name = 'orders'", &[])
         .await
         .unwrap();
     let (status, new_etag, _) = get(&app, &token, Some(&etag)).await;
@@ -157,8 +155,22 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
     assert_ne!(
         new_etag.unwrap(),
         etag,
-        "the version has to move with the rows"
+        "the tag has to move with what is served"
     );
+
+    // A write that changes nothing served does not: priority only orders rules, and there is
+    // one. The tag is the content, so the data plane is not sent the same configuration again.
+    let (_, current, _) = get(&app, &token, None).await;
+    let current = current.unwrap();
+    client
+        .execute(
+            "update routes set priority = 5 where name = 'orders-api'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let (status, _, _) = get(&app, &token, Some(&current)).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
 }
 
 #[tokio::test]
@@ -236,4 +248,55 @@ async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
         plugins.as_slice(),
         [gapura_core::config::Plugin::KeyAuth(_)]
     ));
+}
+
+#[tokio::test]
+async fn replicas_migrating_at_once_all_start() {
+    let Some((store, _, _guard)) = fixture().await else {
+        return;
+    };
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "drop schema public cascade; create schema public;
+             grant all on schema public to public;",
+        )
+        .await
+        .unwrap();
+    let url = std::env::var("GAPURA_TEST_DATABASE_URL").unwrap();
+    let (a, b, c) = tokio::join!(
+        Store::connect(&url),
+        Store::connect(&url),
+        Store::connect(&url)
+    );
+    let (a, b, c) = (a.unwrap(), b.unwrap(), c.unwrap());
+    // Without the migration lock, more than one finds 0001 unapplied and the losers fail on a
+    // duplicate: a replica that cannot start.
+    let (ra, rb, rc) = tokio::join!(a.migrate(), b.migrate(), c.migrate());
+    ra.expect("first replica");
+    rb.expect("second replica");
+    rc.expect("third replica");
+}
+
+#[tokio::test]
+async fn a_changed_setting_moves_the_tag_though_no_row_changed() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.issue_token("edge-1").await.unwrap();
+    let (_, etag, _) = get(&app, &token, None).await;
+    let etag = etag.unwrap();
+    // Same rows, same store version, a control plane started with other flags: what it compiles
+    // is different, and a data plane holding the old tag must be sent it, not told 304.
+    let other = router(Arc::new(ConfigApi {
+        store: store.clone(),
+        settings: StoreSettings {
+            http_ports: vec![8080],
+        },
+    }));
+    let (status, new_etag, _) = get(&other, &token, Some(&etag)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(new_etag.unwrap(), etag);
 }
