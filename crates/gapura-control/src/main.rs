@@ -3,6 +3,7 @@
 
 mod cli;
 
+use anyhow::Context;
 use clap::Parser;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -103,7 +104,15 @@ async fn main() -> anyhow::Result<()> {
     let source = Arc::new(gapura_control::kube_source::Source::from_environment().await?);
     let store = match &args.database_url {
         Some(url) => {
-            let store = Arc::new(gapura_control::store::Store::connect(url).await?);
+            let ca =
+                match &args.database_ca_file {
+                    Some(path) => Some(std::fs::read(path).with_context(|| {
+                        format!("reading the database CA file {}", path.display())
+                    })?),
+                    None => None,
+                };
+            let store =
+                Arc::new(gapura_control::store::Store::connect_with(url, ca.as_deref()).await?);
             store.migrate().await?;
             gapura_control::bootstrap::run(&store).await?;
             // Made now rather than by the first unknown name to sign in, which would otherwise
