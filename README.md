@@ -5,18 +5,19 @@
   </picture>
 </h1>
 
-The Rust API gateway. Kubernetes Gateway API-native, one binary, no database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
+The Rust API gateway. Kubernetes Gateway API-native, one binary, nothing in the request path touches a database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
 Status: v0.1.0 is the latest published release: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI, everything the quickstart below installs. The tree is ahead of that release, the console, consumer API keys, and JWT policies among it, none of it in a stable release yet; [CHANGELOG.md](CHANGELOG.md) lists what changed. The Gateway API GATEWAY-HTTP conformance suite passes all 37 core tests plus the four extended tests it claims; the report is in [conformance/](conformance/).
 
 - Release notes, and what changes for operators on upgrade: [CHANGELOG.md](CHANGELOG.md)
 - Contributing, security policy, and code of conduct: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- Diagrams: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
+- Diagrams of the data plane and its Kubernetes controller: [docs/diagrams/](docs/diagrams/) (open the HTML files in a browser)
 - The mark, its variants, and how to use them: [assets/logo/](assets/logo/)
 
 ## What it does
 
-Gateway API core, served out of one binary with no database and no separate control plane:
+Gateway API core, served out of one binary. Nothing in the request path touches a database, and
+a separate control plane is optional rather than required:
 
 - **Routing** on hostname, path (`Exact`, `PathPrefix` and `RegularExpression`), header, query
   parameter and method.
@@ -24,20 +25,24 @@ Gateway API core, served out of one binary with no database and no separate cont
   `URLRewrite`.
 - **TLS**: termination with the certificate chosen per SNI, and TLS to backends via
   `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.
-- **Traffic**: per-rule request and backend timeouts, and one retry against a second endpoint when a
-  connection fails.
+- **Traffic**: per-rule request and backend timeouts, one retry against a second endpoint when a
+  connection fails, and per-route rate limits from a Service annotation, counted per replica.
 - **Consumer credentials**: a rule can require an API key or a JWT. The key travels through the
   configuration only as its SHA-256 hash, so a stolen config cache yields nothing to replay, and
   the presented key maps straight to the consumer it was issued to; a token that does not verify
   is refused with `401` and a `WWW-Authenticate` challenge before the request goes upstream.
-- **Operations**: Prometheus metrics, a JSON access log carrying trace context, a Grafana dashboard
-  and example alerts, status written only by the replica holding the Lease, and hot reload by atomic
-  config swap so in-flight requests finish on the config they started with.
+- **Operations**: Prometheus metrics, a JSON access log carrying trace context and the client
+  address as seen behind trusted proxies, a Grafana dashboard and example alerts, status written
+  only by the replica holding the Lease, an address per Gateway when one shared address is not
+  enough (`gatewayAddresses`), and hot reload by atomic config swap so in-flight requests finish
+  on the config they started with.
 - **Console**: off by default. `console.enabled` deploys `gapura-control` in its own Deployment
   and Service with read-only RBAC: sign-in from a local users file or OIDC, and routes scoped to
   the namespaces each group is granted. The stock install stays one binary with no database;
-  store mode (`console.store`) keeps accounts and roles in a Postgres you bring -- the chart
-  never ships one.
+  store mode (`console.store`) keeps what the console owns -- accounts, roles, the audit trail,
+  and the configuration it serves to data planes running in `--control-plane` mode -- in a
+  Postgres you bring. The chart never ships one, and the data plane never opens a connection to
+  it: it polls `gapura-control` and keeps a disk cache.
 
 ## The name
 
@@ -48,8 +53,9 @@ is mark where one place ends and another begins, and make everything crossing
 that line take one known path.
 
 That is the whole job of this program. It does not hold your traffic, it does
-not store it, and there is nothing behind the wall for it to guard -- no
-database, no separate control plane, no edition you have to buy. It stands where
+not store it, and there is nothing behind the wall for it to guard: nothing in
+the request path touches a database, the control plane is optional, and there is
+no edition you have to buy. It stands where
 the cluster meets everything else and gives what arrives a single legible way
 in. The mark sets that gate inside the hexagon Kubernetes tooling is drawn in,
 in a rust that is both the language and the colour of temple brick.
@@ -269,7 +275,7 @@ The controller watches GatewayClass, Gateway, HTTPRoute, ReferenceGrant, Backend
 Namespace, Service, EndpointSlice, TLS Secrets, and ConfigMaps (`ca.crt` only), writes status as
 the holder of the `gapura-leader` Lease, and publishes `--publish-address` values and the
 LoadBalancer addresses of `--publish-service namespace/name` into Gateway status.
-`hack/kind-e2e.sh` runs the control-plane e2e against a local kind cluster.
+`hack/kind-e2e.sh` runs the Kubernetes controller's end-to-end test against a local kind cluster.
 
 A third config source exists besides files (`--config-dir`, above) and the cluster: `--control-plane`
 polls the configuration endpoint `gapura-control` serves and keeps a disk cache, so a control-plane
@@ -284,7 +290,7 @@ Per-route request limits come from the backend Service too: `gapura.dev/rate-lim
 answered past the cap with `429`, `Retry-After`, `X-RateLimit-Limit` and
 `X-RateLimit-Remaining: 0`. `gapura.dev/rate-limit-by: ip` is the only keying (the default;
 any other value disables the pair), the counter is per replica — with N replicas the effective
-allowance is N × the limit, the honest shape for a gateway with no database — and rejections are
+allowance is N × the limit, the honest shape when replicas share no store — and rejections are
 counted in `gapura_rate_limited_total{route}`.
 
 `gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The Kubernetes controller lives in the `gapura` binary, packaged by the Dockerfile and the chart in [charts/gapura](charts/gapura).
