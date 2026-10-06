@@ -36,6 +36,8 @@ pub enum Refusal {
     /// caller was found to administer the workspaces concerned, so a refused request says
     /// nothing about what exists.
     NotFound(String),
+    /// The change is allowed but would leave a workspace with no admin.
+    Conflict(String),
 }
 
 impl Refusal {
@@ -45,13 +47,17 @@ impl Refusal {
             Refusal::Invalid(_) => StatusCode::BAD_REQUEST,
             Refusal::Forbidden(_) => StatusCode::FORBIDDEN,
             Refusal::NotFound(_) => StatusCode::NOT_FOUND,
+            Refusal::Conflict(_) => StatusCode::CONFLICT,
         }
     }
 
     /// The sentence the console shows.
     pub fn sentence(&self) -> &str {
         match self {
-            Refusal::Invalid(s) | Refusal::Forbidden(s) | Refusal::NotFound(s) => s,
+            Refusal::Invalid(s)
+            | Refusal::Forbidden(s)
+            | Refusal::NotFound(s)
+            | Refusal::Conflict(s) => s,
         }
     }
 
