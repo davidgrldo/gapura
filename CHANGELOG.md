@@ -25,6 +25,15 @@ means what it usually does, moving from one version below to a later one. Releas
   guessing. A store route's id now carries its workspace, `default/orders` rather than `orders`,
   which is what the access log and the `route` metrics label show; dashboards keyed on the bare
   name need the new value. Kubernetes mode is unchanged.
+- A `key_auth` route no longer forwards the caller's API key to the upstream. The key is the
+  gateway's to check; the upstream learns who called from `X-Consumer-Username`, and before this
+  it also received the key itself, so every upstream's logs and every service it called on with
+  the same headers held a working credential for every other `key_auth` route. The header named
+  by the policy is now removed once the key is accepted. An upstream that read the key directly
+  must switch to `X-Consumer-Username`.
+- Request mirroring no longer follows redirects. A mirror backend that answered 3xx made the
+  gateway send a second copy of the request to wherever the `Location` header pointed, from the
+  gateway's own network position. The mirror's answer is still discarded either way.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a
