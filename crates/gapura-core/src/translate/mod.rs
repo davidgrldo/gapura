@@ -302,6 +302,7 @@ fn assemble(
         clusters,
         // Consumers live in the store; the Kubernetes path has none.
         credentials: BTreeMap::new(),
+        credential_workspaces: Default::default(),
     }
 }
 

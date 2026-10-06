@@ -32,6 +32,14 @@ pub struct Config {
     /// for the SQL side and for showing an operator which key is which; neither is needed here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, String>,
+    /// The workspace each credential's consumer belongs to, keyed like `credentials`. A
+    /// `key_auth` policy that names a workspace accepts only keys listed here under that name.
+    ///
+    /// A map beside `credentials` rather than a change to its values, so either side can run a
+    /// release behind the other: a data plane that predates it ignores it, and a control plane
+    /// that predates it sends none, while the policies that would read it name no workspace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_workspaces: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,12 +182,18 @@ pub struct KeyAuthPolicy {
     /// Where to read the key from. Named rather than fixed because deployments migrating from
     /// another gateway arrive with a header their callers already send.
     pub header: String,
+    /// Set by the store from the policy's own workspace: only keys issued to that workspace's
+    /// consumers are accepted. `None` accepts any key in the configuration, which is what a
+    /// configuration without workspaces means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl Default for KeyAuthPolicy {
     fn default() -> Self {
         Self {
             header: "x-api-key".to_string(),
+            workspace: None,
         }
     }
 }
@@ -360,6 +374,7 @@ mod tests {
                 },
             )]),
             credentials: BTreeMap::from([("abc123".to_string(), "team-orders".to_string())]),
+            credential_workspaces: Default::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();

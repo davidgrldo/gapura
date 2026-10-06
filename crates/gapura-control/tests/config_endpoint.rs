@@ -206,12 +206,19 @@ async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
              insert into consumers (workspace_id, username)
                select id, 'team-orders' from workspaces limit 1;
              insert into plugins (workspace_id, name, config)
-               select id, 'key_auth', '{\"header\":\"x-api-key\"}' from workspaces limit 1;",
+               select id, 'key_auth', '{\"header\":\"x-api-key\"}' from workspaces limit 1;
+             insert into workspaces (name) values ('payments');
+             insert into consumers (workspace_id, username)
+               select id, 'team-payments' from workspaces where name = 'payments';",
         )
         .await
         .expect("seeding");
 
     let key = store.issue_key("team-orders").await.expect("issuing a key");
+    let elsewhere = store
+        .issue_key("team-payments")
+        .await
+        .expect("issuing a key in another workspace");
 
     let (status, _, body) = get(&app, &token, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -223,17 +230,23 @@ async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
         "a configuration must never carry a presentable credential"
     );
 
+    // The policy reached the rule that needs it, carrying its workspace.
+    let plugins = &config.listeners[0].rules[0].plugins;
+    let [gapura_core::config::Plugin::KeyAuth(policy)] = plugins.as_slice() else {
+        panic!("one key_auth policy, got {plugins:?}");
+    };
+    assert_eq!(policy.workspace.as_deref(), Some("default"));
+
     // And the data plane, given the real key, names the consumer.
+    let scope = policy.workspace.as_deref();
     assert_eq!(
-        gapura_core::credentials::identify(&config, Some(&key)),
+        gapura_core::credentials::identify(&config, Some(&key), scope),
         Ok("team-orders")
     );
-    assert!(gapura_core::credentials::identify(&config, Some("gpak_wrong")).is_err());
-
-    // The policy reached the rule that needs it.
-    let plugins = &config.listeners[0].rules[0].plugins;
-    assert!(matches!(
-        plugins.as_slice(),
-        [gapura_core::config::Plugin::KeyAuth(_)]
-    ));
+    assert!(gapura_core::credentials::identify(&config, Some("gpak_wrong"), scope).is_err());
+    // A key issued in another workspace is real, and still does not open this route.
+    assert!(
+        gapura_core::credentials::identify(&config, Some(&elsewhere), scope).is_err(),
+        "a key opens its own workspace's routes only"
+    );
 }
