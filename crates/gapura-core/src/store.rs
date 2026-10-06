@@ -20,6 +20,11 @@ use crate::config::{
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreService {
+    /// The workspace this row belongs to. Names are unique only within a workspace, so every
+    /// lookup in [`compile`] is by workspace and name together. Empty for a snapshot that has no
+    /// workspaces, which is then one workspace.
+    #[serde(default)]
+    pub workspace: String,
     pub name: String,
     pub protocol: Protocol,
     pub host: String,
@@ -30,6 +35,11 @@ pub struct StoreService {
 /// hosts, any of the paths and any of the methods, and an empty list means "any".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreRoute {
+    /// The workspace this row belongs to. Names are unique only within a workspace, so every
+    /// lookup in [`compile`] is by workspace and name together. Empty for a snapshot that has no
+    /// workspaces, which is then one workspace.
+    #[serde(default)]
+    pub workspace: String,
     pub name: String,
     /// [`StoreService::name`]. A route naming a service that does not exist is dropped.
     pub service: String,
@@ -50,6 +60,9 @@ pub struct StoreRoute {
 /// because it is a rule that has to hold for every write path that will ever exist.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorePlugin {
+    /// The workspace this policy belongs to; it applies to routes of that workspace only.
+    #[serde(default)]
+    pub workspace: String,
     /// [`StoreRoute::name`], when this is attached to one route.
     #[serde(default)]
     pub route: Option<String>,
@@ -101,8 +114,14 @@ impl Default for StoreSettings {
 /// the store has no Gateway object yet, so a route is reachable on every port the process bound.
 /// When Gateways become store objects this is where that changes.
 pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
-    let services: BTreeMap<&str, &StoreService> =
-        snap.services.iter().map(|s| (s.name.as_str(), s)).collect();
+    // Keyed by workspace and name together: names are unique only within a workspace, and keyed
+    // by name alone two workspaces' `orders` services collapsed into one -- whichever row came
+    // last -- so a route in one workspace could be sent to the other's upstream.
+    let services: BTreeMap<(&str, &str), &StoreService> = snap
+        .services
+        .iter()
+        .map(|s| ((s.workspace.as_str(), s.name.as_str()), s))
+        .collect();
 
     // A route naming a service that is not there is dropped. This is load-bearing rather than
     // tidy: the lookup below indexes `services` directly, so without this filter a dangling
@@ -112,13 +131,14 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     let mut routes: Vec<&StoreRoute> = snap
         .routes
         .iter()
-        .filter(|r| services.contains_key(r.service.as_str()))
+        .filter(|r| services.contains_key(&(r.workspace.as_str(), r.service.as_str())))
         .collect();
     // Highest priority first, then by name, so the table is a function of the rows and not of
     // the order a query happened to return them.
     routes.sort_by(|a, b| {
         b.priority
             .cmp(&a.priority)
+            .then_with(|| a.workspace.cmp(&b.workspace))
             .then_with(|| a.name.cmp(&b.name))
     });
 
@@ -129,7 +149,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     let mut table: Vec<(Option<String>, RouteMatch, usize)> = Vec::new();
 
     for route in &routes {
-        let service = services[route.service.as_str()];
+        let service = services[&(route.workspace.as_str(), route.service.as_str())];
         let key = cluster_key(service);
         clusters.entry(key.clone()).or_insert_with(|| Cluster {
             // Nothing is resolved yet, which is why this is empty and not an error. The data
@@ -146,7 +166,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
         let rule_index = rules.len();
         let plugins = plugins_for(&snap.plugins, route);
         rules.push(RouteRule {
-            route: route.name.clone(),
+            route: route_id(route),
             rule_index,
             // Gateway API breaks precedence ties on creation time. The store breaks them on an
             // explicit priority, so there is nothing to put here and nothing that reads it.
@@ -227,6 +247,12 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
     let mut chosen: Vec<(u8, &Plugin)> = Vec::new();
     for p in all {
+        // A policy belongs to one workspace. Without this a policy attached to neither a route
+        // nor a service -- "every route in the workspace" -- applied to every route in every
+        // workspace, and a route-level one applied to a same-named route anywhere.
+        if p.workspace != route.workspace {
+            continue;
+        }
         let rank = match (&p.route, &p.service) {
             (Some(r), _) if *r == route.name => 2,
             (Some(_), _) => continue,
@@ -255,6 +281,17 @@ fn same_kind(a: &Plugin, b: &Plugin) -> bool {
 /// cluster, and the key says what it is instead of which row first named it.
 fn cluster_key(service: &StoreService) -> String {
     format!("{}:{}", service.host, service.port)
+}
+
+/// What a rule is called in the served configuration, its metrics and its access log:
+/// `workspace/name`, as the Kubernetes path says `namespace/name`, so two workspaces' `orders`
+/// routes are told apart. A snapshot without workspaces keeps the bare name.
+fn route_id(route: &StoreRoute) -> String {
+    if route.workspace.is_empty() {
+        route.name.clone()
+    } else {
+        format!("{}/{}", route.workspace, route.name)
+    }
 }
 
 /// Kong's OR-of-each-list into Gateway API's list-of-AND-matches: one entry per combination.
@@ -290,6 +327,7 @@ mod tests {
 
     fn svc(name: &str, host: &str, port: u16) -> StoreService {
         StoreService {
+            workspace: String::new(),
             name: name.into(),
             protocol: Protocol::Http,
             host: host.into(),
@@ -299,6 +337,7 @@ mod tests {
 
     fn route(name: &str, service: &str, path: &str, priority: i32) -> StoreRoute {
         StoreRoute {
+            workspace: String::new(),
             name: name.into(),
             service: service.into(),
             hosts: Vec::new(),
@@ -329,6 +368,123 @@ mod tests {
             &RegexMap::default(),
         )
         .map(|m| m.rule.route.as_str())
+    }
+
+    fn in_ws<T>(ws: &str, mut row: T, set: impl FnOnce(&mut T, String)) -> T {
+        set(&mut row, ws.to_string());
+        row
+    }
+
+    fn ws_svc(ws: &str, name: &str, host: &str) -> StoreService {
+        in_ws(ws, svc(name, host, 8080), |s, w| s.workspace = w)
+    }
+
+    fn ws_route(ws: &str, name: &str, service: &str, host: &str) -> StoreRoute {
+        let mut r = in_ws(ws, route(name, service, "/", 0), |r, w| r.workspace = w);
+        r.hosts = vec![host.into()];
+        r
+    }
+
+    fn key_auth(ws: &str, route: Option<&str>) -> StorePlugin {
+        StorePlugin {
+            workspace: ws.into(),
+            route: route.map(str::to_string),
+            service: None,
+            plugin: Plugin::KeyAuth(crate::config::KeyAuthPolicy::default()),
+        }
+    }
+
+    fn plugins_on<'a>(cfg: &'a Config, route_id: &str) -> &'a [Plugin] {
+        cfg.listeners[0]
+            .rules
+            .iter()
+            .find(|r| r.route == route_id)
+            .map(|r| r.plugins.as_slice())
+            .unwrap_or_else(|| panic!("no rule {route_id}"))
+    }
+
+    /// Names are unique per workspace, so two workspaces may both have an `orders` service. Keyed
+    /// by name alone they collapsed into whichever row came last, and one workspace's route was
+    /// sent to the other's upstream.
+    #[test]
+    fn two_workspaces_with_the_same_service_name_keep_their_own_upstreams() {
+        let snap = StoreSnapshot {
+            services: vec![
+                ws_svc("team-a", "orders", "orders.a.internal"),
+                ws_svc("team-b", "orders", "orders.b.internal"),
+            ],
+            routes: vec![
+                ws_route("team-a", "api", "orders", "a.example"),
+                ws_route("team-b", "api", "orders", "b.example"),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let backend_of = |id: &str| {
+            cfg.listeners[0]
+                .rules
+                .iter()
+                .find(|r| r.route == id)
+                .and_then(|r| r.backends[0].cluster.clone())
+        };
+        assert_eq!(
+            backend_of("team-a/api").as_deref(),
+            Some("orders.a.internal:8080")
+        );
+        assert_eq!(
+            backend_of("team-b/api").as_deref(),
+            Some("orders.b.internal:8080")
+        );
+        assert_eq!(hit(&cfg, 80, "a.example", "/", "GET"), Some("team-a/api"));
+        assert_eq!(hit(&cfg, 80, "b.example", "/", "GET"), Some("team-b/api"));
+    }
+
+    /// A route cannot use another workspace's service, even one with the name it asked for.
+    #[test]
+    fn a_route_does_not_reach_a_service_of_another_workspace() {
+        let snap = StoreSnapshot {
+            services: vec![ws_svc("team-b", "orders", "orders.b.internal")],
+            routes: vec![ws_route("team-a", "api", "orders", "a.example")],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(hit(&cfg, 80, "a.example", "/", "GET"), None);
+    }
+
+    /// A policy attached to neither a route nor a service means every route in its workspace.
+    /// It used to mean every route in every workspace, and a route-level one applied to a
+    /// same-named route anywhere.
+    #[test]
+    fn a_policy_applies_only_inside_its_workspace() {
+        let snap = StoreSnapshot {
+            services: vec![
+                ws_svc("team-a", "orders", "orders.a.internal"),
+                ws_svc("team-b", "orders", "orders.b.internal"),
+            ],
+            routes: vec![
+                ws_route("team-a", "api", "orders", "a.example"),
+                ws_route("team-b", "api", "orders", "b.example"),
+            ],
+            plugins: vec![key_auth("team-a", None)],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(plugins_on(&cfg, "team-a/api").len(), 1);
+        assert!(
+            plugins_on(&cfg, "team-b/api").is_empty(),
+            "team-a's policy leaked"
+        );
+
+        let snap = StoreSnapshot {
+            plugins: vec![key_auth("team-b", Some("api"))],
+            ..snap
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert!(
+            plugins_on(&cfg, "team-a/api").is_empty(),
+            "matched by route name alone"
+        );
+        assert_eq!(plugins_on(&cfg, "team-b/api").len(), 1);
     }
 
     /// The whole point: what comes out of `compile` has to be routable, not merely well shaped.
@@ -444,6 +600,7 @@ mod tests {
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![StoreRoute {
+                workspace: String::new(),
                 name: "api".into(),
                 service: "orders".into(),
                 hosts: vec!["a.example".into(), "b.example".into()],
@@ -494,16 +651,19 @@ mod tests {
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: None,
                     plugin: jwt("global"),
                 },
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: Some("orders".into()),
                     plugin: jwt("service"),
                 },
                 StorePlugin {
+                    workspace: String::new(),
                     route: Some("api".into()),
                     service: None,
                     plugin: jwt("route"),
@@ -524,11 +684,13 @@ mod tests {
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: None,
                     plugin: jwt("global"),
                 },
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: Some("orders".into()),
                     plugin: jwt("service"),
@@ -550,11 +712,13 @@ mod tests {
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
                 StorePlugin {
+                    workspace: String::new(),
                     route: Some("other".into()),
                     service: None,
                     plugin: jwt("wrong-route"),
                 },
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: Some("billing".into()),
                     plugin: jwt("wrong-service"),
@@ -577,11 +741,13 @@ mod tests {
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: None,
                     plugin: jwt("first"),
                 },
                 StorePlugin {
+                    workspace: String::new(),
                     route: None,
                     service: None,
                     plugin: jwt("second"),

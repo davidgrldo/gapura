@@ -133,7 +133,7 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
         },
         &RegexMap::default(),
     );
-    assert_eq!(hit.expect("a match").rule.route, "orders-api");
+    assert_eq!(hit.expect("a match").rule.route, "default/orders-api");
     // The data plane resolves this itself; the control plane could not.
     let cluster = &config.clusters["orders.internal:8080"];
     assert!(cluster.endpoints.is_empty());

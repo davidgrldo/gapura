@@ -8,6 +8,24 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Workspaces in the control plane's store no longer collide. A route found its service by name
+  alone, so two workspaces that each had an `orders` service could send one workspace's traffic
+  to the other's upstream; and a policy attached to a route name applied to every workspace's
+  route of that name. A route now resolves its service only inside its own workspace, a policy
+  applies only inside its own workspace, and a policy row that names a route or service of
+  another workspace fails the configuration (503, data planes keep their cache) instead of
+  guessing. A store route's id now carries its workspace, `default/orders` rather than `orders`,
+  which is what the access log and the `route` metrics label show; dashboards keyed on the bare
+  name need the new value. Kubernetes mode is unchanged.
+- A `key_auth` route no longer forwards the caller's API key to the upstream. The key is the
+  gateway's to check; the upstream learns who called from `X-Consumer-Username`, and before this
+  it also received the key itself, so every upstream's logs and every service it called on with
+  the same headers held a working credential for every other `key_auth` route. The header named
+  by the policy is now removed once the key is accepted. An upstream that read the key directly
+  must switch to `X-Consumer-Username`.
+- Request mirroring no longer follows redirects. A mirror backend that answered 3xx made the
+  gateway send a second copy of the request to wherever the `Location` header pointed, from the
+  gateway's own network position. The mirror's answer is still discarded either way.
 - A `RegularExpression` path now has to match the whole request path, the way Envoy and Istio
   read Gateway API's implementation-specific regex. Before, any match anywhere in the path was
   enough, so `/admin` also caught `/public/admin-notes`. **A pattern written as a prefix needs a
