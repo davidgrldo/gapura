@@ -46,6 +46,12 @@ means what it usually does, moving from one version below to a later one. Releas
 - A listener's `attachedRoutes` now counts a route that attached but was not accepted, for example
   one using an unsupported filter. Gateway API requires those to be counted; they were left out.
   None of that route's rules are served, as before.
+- `docs/RELEASING.md` is rewritten for repeat releases. It described the one-time launch of 0.1.0
+  and said the `workflow_dispatch` path was broken, which stopped being true when the `guard` job
+  and the dispatched-version handling landed. It now covers a candidate by dispatch, a release by
+  tag on the last good candidate's commit, both images in the post-release checks, and what to do
+  when only the `notes` job fails. The GitHub release notes now list the `gapura-control` image,
+  which every release run publishes alongside the data-plane image.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a
