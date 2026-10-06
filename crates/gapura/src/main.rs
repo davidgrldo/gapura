@@ -20,11 +20,12 @@ use pingora::services::listening::Service;
 
 /// The first address that cannot be bound, with the OS message.
 ///
-/// Pingora binds its listeners on a service thread and `expect`s on failure, and our panic hook
-/// only counts the panic, so a process that cannot bind :80 would otherwise keep running with no
-/// listener while every probe on the admin port stays green. Checking here turns that into a clear
-/// exit. The socket is released immediately, so a competing process could still take the port in
-/// the window between this check and Pingora's own bind; that race costs a restart, not silence.
+/// Pingora binds its listeners on a service thread, retries an address in use once a second for
+/// 30 s, and only then panics, which the panic hook turns into an exit; every probe on the admin
+/// port stays green in the meantime. Checking here turns a port that is already taken into a
+/// clear exit at once. The socket is released immediately, so a competing process could still
+/// take the port in the window between this check and Pingora's own bind; that race costs a
+/// restart 30 s late, not silence.
 /// If a future version enables Pingora's graceful upgrade (`Opt { upgrade: true }`, where the new
 /// process takes the listening sockets from the old one), this check must become conditional on
 /// that flag, or it would refuse to start for exactly the upgrade it exists to protect, the old

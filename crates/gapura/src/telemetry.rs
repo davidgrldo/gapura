@@ -270,17 +270,49 @@ pub fn init_logging(filter: &str) {
 }
 
 /// Count panics in request handling; Pingora keeps the process alive, we keep the number.
+///
+/// A service whose listeners fail to build is the exception: Pingora panics on that service's
+/// thread and the rest of the process, admin port and probes included, carries on without the
+/// listener. Exit instead, so the pod restarts rather than staying green with a port missing.
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         METRICS.handler_panics_total.inc();
         default(info);
+        // `expect` formats its message, so the payload is a String.
+        let msg = info.payload().downcast_ref::<String>();
+        if msg.is_some_and(|m| is_listener_build_failure(m)) {
+            tracing::error!("a service cannot build its listeners, exiting");
+            std::process::exit(1);
+        }
     }));
+}
+
+/// Pingora's panic message when a service cannot build its listeners (`services/listening.rs`).
+fn is_listener_build_failure(msg: &str) -> bool {
+    msg.starts_with("Failed to build listeners")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pingora_listener_build_panic_is_recognised() {
+        use pingora::services::Service as _;
+        let mut service = pingora::services::listening::Service::prometheus_http_service();
+        // Not an address, so the build fails at once instead of after 30 s of retries.
+        service.add_tcp("not an address");
+        let (_tx, shutdown) = tokio::sync::watch::channel(false);
+        let panic = tokio::spawn(async move { service.start_service(None, shutdown, 1).await })
+            .await
+            .expect_err("the listener build should panic")
+            .into_panic();
+        let msg = panic
+            .downcast_ref::<String>()
+            .expect("a formatted panic message");
+        assert!(is_listener_build_failure(msg), "{msg}");
+    }
 
     #[test]
     fn request_id_is_32_hex() {

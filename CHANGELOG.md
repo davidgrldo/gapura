@@ -8,6 +8,10 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A gateway that loses its listen port to another process between its startup bind check and
+  Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running
+  on without that listener while its probes stay green. Only a process in the same network
+  namespace can take the port in that window, which lasts milliseconds.
 - Superusers and workspace admins grant, change and remove direct roles and group mappings from
   the console: Edit access on an opened Users row, and Map a group, Edit and Remove on Roles,
   whose mappings now say how many accounts were in each group at their last sign-in. An admin does
