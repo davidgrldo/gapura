@@ -25,6 +25,99 @@ means what it usually does, moving from one version below to a later one. Releas
   guessing. A store route's id now carries its workspace, `default/orders` rather than `orders`,
   which is what the access log and the `route` metrics label show; dashboards keyed on the bare
   name need the new value. Kubernetes mode is unchanged.
+- A `key_auth` route no longer forwards the caller's API key to the upstream. The key is the
+  gateway's to check; the upstream learns who called from `X-Consumer-Username`, and before this
+  it also received the key itself, so every upstream's logs and every service it called on with
+  the same headers held a working credential for every other `key_auth` route. The header named
+  by the policy is now removed once the key is accepted. An upstream that read the key directly
+  must switch to `X-Consumer-Username`.
+- Request mirroring no longer follows redirects. A mirror backend that answered 3xx made the
+  gateway send a second copy of the request to wherever the `Location` header pointed, from the
+  gateway's own network position. The mirror's answer is still discarded either way.
+- A `RegularExpression` path now has to match the whole request path, the way Envoy and Istio
+  read Gateway API's implementation-specific regex. Before, any match anywhere in the path was
+  enough, so `/admin` also caught `/public/admin-notes`. **A pattern written as a prefix needs a
+  trailing `.*`**: `^/api/v[0-9]+/` becomes `^/api/v[0-9]+/.*`. Store-mode `regex` paths follow
+  the same rule, and one that does not compile now fails the configuration (503, data planes keep
+  their cache) instead of leaving its route matching nothing.
+- `ReplacePrefixMatch` is now refused with an `Exact` path match, not only with a
+  `RegularExpression` one. Gateway API allows it with `PathPrefix` only; before, an `Exact` rule
+  with it was accepted. The route reports `Accepted=False` with `UnsupportedValue`.
+- A listener's `attachedRoutes` now counts a route that attached but was not accepted, for example
+  one using an unsupported filter. Gateway API requires those to be counted; they were left out.
+  None of that route's rules are served, as before.
+- `docs/RELEASING.md` is rewritten for repeat releases. It described the one-time launch of 0.1.0
+  and said the `workflow_dispatch` path was broken, which stopped being true when the `guard` job
+  and the dispatched-version handling landed. It now covers a candidate by dispatch, a release by
+  tag on the last good candidate's commit, both images in the post-release checks, and what to do
+  when only the `notes` job fails. The GitHub release notes now list the `gapura-control` image,
+  which every release run publishes alongside the data-plane image.
+- `/v1/config`'s ETag is now a hash of the configuration it serves, not the store's version
+  counter. The counter starts again when the database is restored or recreated, and it does not
+  move when a control-plane flag or a new release changes what the same rows compile to. In each
+  case a data plane holding the old tag was told 304 and kept serving a configuration the control
+  plane no longer served. A write that leaves the served configuration byte for byte the same no
+  longer resends it either. After upgrading, every data plane fetches the configuration once,
+  because no old tag matches.
+- Control-plane replicas starting at the same time no longer race on schema migrations. Each
+  found a migration unapplied and applied it, and all but one failed to start on a duplicate.
+  Migrations now run under a Postgres advisory lock; the others wait and find them applied.
+- The control plane can reach its Postgres over TLS. `sslmode=require` in `DATABASE_URL` turns it
+  on, and it is always verified: the server's certificate has to chain to a public root or to the
+  bundle in the new `--database-ca-file` (`DATABASE_CA_FILE`, chart `console.store.ca`), and name
+  the host. That is stricter than libpq's `require`, which verifies nothing. Before, the store
+  spoke plain text only, so it could not use a managed Postgres that refuses plain text, which
+  recent RDS versions do by default. Without `sslmode=require` the connection stays plain text,
+  including under libpq's default `prefer`, and the control plane logs that at startup. A CA file
+  without `sslmode=require` stops the start, since it would never be used.
+- The console now refuses a workspace admin's change that would leave the workspace with no
+  admin, with 409 and a sentence saying to make someone else an admin first. The console warned
+  before such a save, but only in the browser and from what the page read when it loaded, so a
+  stale tab or a request made with curl could leave a workspace that only a superuser could
+  repair. The rule covers direct grants and group mappings, counts admins through groups, and
+  orders two admins stepping down at the same moment so that one of them is refused. A
+  superuser's changes are exempt.
+- Every console response now carries a Content Security Policy that allows only the console's
+  own origin (`frame-ancestors 'none'` included), `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. Before, the console set
+  none, so another site could frame it and a response could be sniffed as a type it is not.
+- A leader that renews slowly now gives up leadership in time. Each lease step was allowed the
+  full renew deadline from when it started, and after a slow renewal the next step starts at
+  once, so a hanging step could keep a replica leader after the Lease it last wrote had
+  expired, while another replica acquired it: two status writers. A step is now bounded by
+  what is left of the deadline since the last successful renewal.
+- A Gateway, GatewayClass or HTTPRoute deleted and recreated under the same name between two
+  translations gets its status at once. The status writer remembered what it wrote by name,
+  so a recreated object with the same translated status was skipped for up to ten minutes and
+  showed no conditions. Status patches now carry the object's UID, which the writer's cache
+  compares.
+- `gapura-control` can serve its configuration endpoint over TLS itself: `--config-tls-cert` and
+  `--config-tls-key` take a PEM certificate chain and key. Every response from that endpoint
+  carries the private key of each certificate the gateway serves, and the gateway already
+  refused an `http://` control plane by default, so until now the endpoint needed a TLS sidecar
+  in front of it. Without the flags it still serves plain text, and says so at startup. The
+  certificate is read when the control plane starts, so a rotated one takes effect at the next
+  restart.
+- Failed console sign-ins are now limited. Five failures for one username from one address lock
+  that pair for fifteen minutes; ten failures from one address in a minute hold that address's
+  sign-ins, including a provider's refusals arriving on `/auth/callback`, until the minute is out.
+  The lock is on a name at an address, not on the account, so nobody can keep someone else
+  locked out from elsewhere, and names are counted whether or not an account has them, so the
+  answer, `Too many failed attempts. Try again in N minutes.` with 429 and `Retry-After`, says
+  nothing about which exist. A successful sign-in clears its pair. Before, nothing limited
+  guessing but the password hash's cost. Behind an ingress, set `--trusted-proxies`
+  (`GAPURA_TRUSTED_PROXIES`, chart `console.trustedProxies`) so the client's address is read
+  from `X-Forwarded-For`: without it every sign-in comes from the ingress. Counts are kept per
+  console replica.
+- A console sign-in no longer has to come back to the replica that began it. The OIDC state and
+  the local form's anti-forgery state were kept in one process's memory, so with more than one
+  console replica and no sticky sessions a sign-in failed whenever the provider's redirect or the
+  form's submission reached another replica, and a restart mid-sign-in did the same. The state is
+  now a signed, expiring token, and the PKCE verifier and nonce are derived from it with the
+  session key, which every replica already shares; the verifier still never leaves the console.
+  An authorization code is still redeemed once, by the provider. The local form can now be
+  corrected and sent again within its ten minutes rather than reloaded; failed tries are what
+  the sign-in limits count.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a

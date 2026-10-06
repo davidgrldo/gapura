@@ -6,6 +6,7 @@
 //! via [`translate()`]. Request matching lives in [`matcher`].
 //! No I/O, no clock, no async: everything is deterministic and covered by golden tests.
 
+pub mod client_ip;
 pub mod config;
 pub mod credentials;
 pub mod duration;

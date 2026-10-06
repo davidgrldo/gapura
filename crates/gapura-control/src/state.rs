@@ -1,7 +1,7 @@
 //! What handlers need: the readers, and the rule about who sees what.
 
 use crate::kube_source::Source;
-use crate::login::{AuthMode, LocalUsers, Oidc, PendingLogins};
+use crate::login::{AuthMode, LocalUsers, Oidc};
 use crate::scope::Mapping;
 use crate::served::Admin;
 use crate::store::Store;
@@ -24,11 +24,11 @@ pub struct AppState {
     /// How sign-in happens and, in local mode, the users it happens against.
     pub auth_mode: AuthMode,
     pub local_users: LocalUsers,
-    /// Sign-ins sent to the identity provider and not yet heard back about.
-    pub pending: PendingLogins,
     /// How long a session minted now stays valid, in the cookie and in its `Max-Age`.
     pub session_lifetime: Duration,
     /// Set in store mode, when `DATABASE_URL` is: accounts and roles are rows there, and every
     /// request reads its caller back from it. `None` is Kubernetes mode.
     pub store: Option<Arc<Store>>,
+    /// Failed sign-ins, counted per name at an address and per address.
+    pub sign_in: Arc<crate::throttle::Throttle>,
 }

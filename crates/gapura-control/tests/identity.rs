@@ -437,9 +437,9 @@ fn console(store: Arc<Store>, auth_mode: gapura_control::login::AuthMode) -> axu
         oidc: Arc::new(gapura_control::login::Oidc::unused().unwrap()),
         auth_mode,
         local_users: Default::default(),
-        pending: Default::default(),
         session_lifetime: Duration::from_secs(3600),
         store: Some(store),
+        sign_in: Default::default(),
     })
 }
 

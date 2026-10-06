@@ -338,6 +338,8 @@ spec:
         - --oidc-groups-claim=groups
         - --oidc-scope=email
         env:
+        - name: GAPURA_TRUSTED_PROXIES
+          value: "10.0.0.0/8,fd00::/8"
         - name: GAPURA_SESSION_KEY
           valueFrom:
             secretKeyRef:

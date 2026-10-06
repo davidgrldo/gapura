@@ -222,6 +222,10 @@ console:
     type: ClusterIP
     port: 8080
     nodePort: null
+  # Proxies (addresses or CIDRs) whose X-Forwarded-For names the client that failed sign-ins are
+  # counted against. Behind an ingress, list its pods' range: without it every sign-in comes
+  # from the ingress, and five wrong passwords for a name lock that name for everyone.
+  trustedProxies: []
   # `group=namespace` grants, e.g. ["platform=platform", "sre=*"]. The console shows a
   # namespace's routes to the groups granted it; the mapping is enforced server-side.
   grants: []
@@ -281,6 +285,14 @@ console:
       existingSecret: ""
       usernameKey: username
       passwordKey: password
+    # TLS to the store is turned on by `sslmode=require` in the URL, and it is always verified:
+    # the certificate has to chain to a public root or to this bundle, and name the host. Set
+    # this for a database signed by a CA of its own, such as RDS or Cloud SQL: a Secret holding
+    # the PEM bundle under `key`. Without sslmode=require the console refuses to start with it
+    # set, since it would never be used.
+    ca:
+      existingSecret: ""
+      key: ca.crt
   # Name of an existing Secret holding the session-signing key (>= 32 bytes, base64
   # accepted). Not created by the chart: a key generated at install time would rotate on
   # every upgrade and sign every reader out of a console they were using.

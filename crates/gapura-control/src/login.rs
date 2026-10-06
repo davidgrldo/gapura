@@ -5,8 +5,9 @@
 //! provider is the only thing that can say who they are. This module runs the authorization
 //! code flow with PKCE and turns its answer into the signed cookie `session` defines.
 //!
-//! A login in flight lives in memory for a few minutes and a session lives only in the
-//! browser's cookie jar, so a control-plane restart mid-login means signing in again. In store
+//! Neither a login in flight nor a session is stored: both are signed with the session key and
+//! carried by the browser, so any replica holding that key, or the same one after a restart,
+//! finishes a sign-in another began and honours a session another issued. In store
 //! mode a sign-in also writes: it records when an account last signed in, and an account that
 //! arrives through OIDC becomes a row the first time.
 
@@ -29,9 +30,7 @@ use openidconnect::{
     StandardTokenResponse, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The cookie a session travels in. `api` reads it back out under the same name.
 pub const COOKIE_NAME: &str = "gapura_session";
@@ -59,15 +58,9 @@ fn safe_return_path(path: &str) -> bool {
     }
 }
 
-/// How long a browser has to come back from the identity provider: long enough for a
-/// password and a second factor, short enough that abandoned logins do not pile up.
+/// How long a browser has to come back from the identity provider, or to submit the form: long
+/// enough for a password and a second factor, short enough that a leaked state is soon useless.
 const PENDING_LIFETIME: Duration = Duration::from_secs(10 * 60);
-
-/// A ceiling on logins in flight. `/auth/login` is unauthenticated of necessity — it is how
-/// you stop being anonymous — so anyone at all can ask us to remember another entry, and
-/// expiry on its own bounds that only at whatever rate a flood can sustain for ten minutes.
-/// Past the ceiling the oldest entry goes, which spends abandoned logins before memory.
-const MAX_PENDING: usize = 1024;
 
 /// The identity provider is a separate system and may be slow, unreachable, or accepting
 /// connections while answering nothing. Sign-in must fail rather than hold a task open.
@@ -281,8 +274,15 @@ impl LocalUsers {
     }
 }
 
-/// One login in flight: what must be remembered between sending a browser to the provider
-/// and it coming back.
+/// One login in flight: what a callback, or the form's submission, needs from the request that
+/// began it.
+///
+/// Nothing is stored. The `state` is a signed, expiring token naming a random value and where
+/// to return; the PKCE verifier and the nonce are derived from that value with the session key.
+/// So any console replica holding the key finishes a sign-in another one began, and nothing an
+/// unauthenticated caller asks for takes memory. The verifier never travels: the `state` the
+/// provider and the browser see carries only the value it is derived from, which is worthless
+/// without the key, so PKCE still means an intercepted code cannot be redeemed.
 pub struct Pending {
     state: String,
     verifier: String,
@@ -290,31 +290,68 @@ pub struct Pending {
     /// The local path to return the reader to, validated when accepted and revalidated
     /// before it becomes a redirect target.
     return_to: Option<String>,
-    /// When this was minted, so a browser that never came back can be thrown away.
-    started: Instant,
 }
 
-/// A callback presented a state this process never issued, or issued too long ago.
+/// A presented state this console did not sign, that was altered, or that has expired.
 #[derive(Debug, PartialEq, Eq)]
 pub struct UnknownState;
 
+/// What a sign-in's `state` token carries.
+#[derive(Serialize, Deserialize)]
+struct Begun {
+    /// Random; what the verifier and the nonce are derived from.
+    r: String,
+    /// Unix seconds after which the sign-in is abandoned.
+    exp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to: Option<String>,
+}
+
+const STATE_PURPOSE: &str = "gapura login state";
+
 impl Pending {
-    pub fn new(state: &str, verifier: &str, nonce: &str, return_to: Option<String>) -> Self {
+    /// A new sign-in: a fresh state, and the verifier and nonce it implies.
+    fn begin(key: &[u8], return_to: Option<String>) -> Self {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::rng().fill_bytes(&mut bytes);
+        let begun = Begun {
+            r: hex(&bytes),
+            exp: now_seconds() + PENDING_LIFETIME.as_secs(),
+            to: return_to,
+        };
+        let state = session::seal(STATE_PURPOSE, &begun, key);
+        Self::from_begun(key, state, begun)
+    }
+
+    /// The sign-in `state` names, if this console's key signed it and it has not expired.
+    fn resume(key: &[u8], state: &str) -> Result<Self, UnknownState> {
+        Self::resume_at(key, state, now_seconds())
+    }
+
+    fn resume_at(key: &[u8], state: &str, now: u64) -> Result<Self, UnknownState> {
+        let begun: Begun = session::open(STATE_PURPOSE, state, key).map_err(|_| UnknownState)?;
+        if now >= begun.exp {
+            return Err(UnknownState);
+        }
+        Ok(Self::from_begun(key, state.to_string(), begun))
+    }
+
+    fn from_begun(key: &[u8], state: String, begun: Begun) -> Self {
         Self {
-            state: state.to_string(),
-            verifier: verifier.to_string(),
-            nonce: nonce.to_string(),
-            return_to,
-            started: Instant::now(),
+            verifier: session::derive("pkce verifier", &begun.r, key),
+            nonce: session::derive("oidc nonce", &begun.r, key),
+            return_to: begun.to,
+            state,
         }
     }
 
     /// Whether `presented` is the state this login was issued with.
     ///
     /// The comparison runs over every byte it has rather than stopping at the first
-    /// difference. This is not the timing-critical check a signature is — the state is a
-    /// single-use value, not a key — but a wrong value of the right length and a wrong
-    /// value of the wrong length should fail identically, with no branch between them.
+    /// difference. This is not the timing-critical check a signature is, but a wrong value of
+    /// the right length and a wrong value of the wrong length should fail identically, with no
+    /// branch between them.
     pub fn check_state(&self, presented: &str) -> Result<(), UnknownState> {
         let expected = self.state.as_bytes();
         let presented = presented.as_bytes();
@@ -328,69 +365,6 @@ impl Pending {
             Err(UnknownState)
         }
     }
-
-    fn is_expired(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.started) > PENDING_LIFETIME
-    }
-}
-
-/// The logins this process has sent to the provider and not yet heard back about.
-#[derive(Clone, Default)]
-pub struct PendingLogins {
-    // A blocking mutex rather than tokio's: nothing is awaited while it is held, and the
-    // critical section is a hash lookup.
-    by_state: Arc<Mutex<HashMap<String, Pending>>>,
-}
-
-impl PendingLogins {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
-        // A panic with the lock held would leave the map poisoned; the logins in it are
-        // worth nothing individually, so carrying on beats refusing every sign-in after.
-        self.by_state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn remember(&self, pending: Pending) {
-        let mut logins = self.lock();
-        forget_expired_in(&mut logins, Instant::now());
-        while logins.len() >= MAX_PENDING {
-            let Some(oldest) = logins
-                .iter()
-                .min_by_key(|(_, p)| p.started)
-                .map(|(state, _)| state.clone())
-            else {
-                break;
-            };
-            logins.remove(&oldest);
-        }
-        logins.insert(pending.state.clone(), pending);
-    }
-
-    /// The login this state belongs to, removed as it is handed over: the authorization
-    /// code a callback carries may only be redeemed once, so a replay must find nothing.
-    ///
-    /// The map lookup narrows; `check_state` is what accepts. Keeping the decision in one
-    /// tested place means rekeying this map could not quietly remove the check.
-    pub fn take(&self, state: &str) -> Result<Pending, UnknownState> {
-        let mut logins = self.lock();
-        forget_expired_in(&mut logins, Instant::now());
-        let pending = logins.remove(state).ok_or(UnknownState)?;
-        pending.check_state(state)?;
-        Ok(pending)
-    }
-
-    #[cfg(test)]
-    fn forget_expired(&self, now: Instant) {
-        forget_expired_in(&mut self.lock(), now);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.lock().len()
-    }
-}
-
-fn forget_expired_in(logins: &mut HashMap<String, Pending>, now: Instant) {
-    logins.retain(|_, pending| !pending.is_expired(now));
 }
 
 /// The groups an identity provider put in `claim`, or none at all.
@@ -612,33 +586,31 @@ pub async fn begin(
         tracing::warn!(%error, "cannot reach the identity provider to begin a sign-in");
         StatusCode::BAD_GATEWAY
     })?;
-    // PKCE: the verifier never leaves this process, so an authorization code intercepted on
-    // its way back through the browser cannot be redeemed by whoever intercepted it.
-    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, csrf, nonce) = client
-        .authorize_url(
-            CoreAuthenticationFlow::AuthorizationCode,
-            CsrfToken::new_random,
-            Nonce::new_random,
-        )
-        .add_scopes(state.oidc.scopes.iter().cloned())
-        .set_pkce_challenge(challenge)
-        .url();
-    // Where the reader was when the session ran out, carried through the provider inside
-    // this process's own pending-login state rather than in anything the provider controls.
-    // Anything that is not a local path falls back to the overview; the check runs again at
-    // the callback, which is the point a value is about to become a redirect target.
+    // Where the reader was when the session ran out, carried through the provider inside the
+    // signed state rather than in anything the provider controls. Anything that is not a local
+    // path falls back to the overview; the check runs again at the callback, which is the point
+    // a value is about to become a redirect target.
     let return_to = query
         .return_to
         .as_deref()
         .filter(|p| safe_return_path(p))
         .map(str::to_string);
-    state.pending.remember(Pending::new(
-        csrf.secret(),
-        verifier.secret(),
-        nonce.secret(),
-        return_to,
+    let pending = Pending::begin(&state.session_key, return_to);
+    // PKCE: the verifier never leaves the console, so an authorization code intercepted on its
+    // way back through the browser cannot be redeemed by whoever intercepted it.
+    let challenge = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
+        pending.verifier.clone(),
     ));
+    let (csrf_value, nonce_value) = (pending.state.clone(), pending.nonce.clone());
+    let (url, csrf, _nonce) = client
+        .authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            move || CsrfToken::new(csrf_value),
+            move || Nonce::new(nonce_value),
+        )
+        .add_scopes(state.oidc.scopes.iter().cloned())
+        .set_pkce_challenge(challenge)
+        .url();
     // ponytail: one cookie per browser, so of two sign-ins begun at once in one browser the
     // earlier one's callback is refused. Name the cookie per state if that ever matters.
     Ok((
@@ -669,10 +641,6 @@ pub struct Begin {
 /// and `return_to` rides the identical validated path, so a local sign-in lands the reader
 /// where the 401 found them exactly like an OIDC one does.
 fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
-    let login_state = hex(&bytes);
     let return_to = return_to
         .filter(|p| safe_return_path(p))
         .map(str::to_string);
@@ -696,12 +664,9 @@ fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
     } else {
         String::new()
     };
-    state.pending.remember(Pending::new(
-        &login_state,
-        "", // no verifier and no nonce for a password: nothing exchanges with a provider
-        "",
-        return_to,
-    ));
+    // The OIDC flow's own forgery protection, reused: the form is only accepted with a state
+    // this console signed in the last few minutes.
+    let login_state = Pending::begin(&state.session_key, return_to).state;
     let body = auth_page(
         "Sign in",
         &format!(
@@ -758,26 +723,64 @@ pub struct LocalLogin {
 
 pub async fn login_local(
     State(state): State<AppState>,
+    headers: header::HeaderMap,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     axum::Form(form): axum::Form<LocalLogin>,
 ) -> Response {
-    // The pending state is single-use, exactly as in the OIDC callback: a replayed form
-    // finds nothing, and a form this process never issued is refused before any password
+    // A form this console never issued, or issued too long ago, is refused before any password
     // work happens.
-    let Ok(pending) = state.pending.take(&form.state) else {
+    let Ok(pending) = Pending::resume(&state.session_key, &form.state) else {
         return refused_local("This sign-in form is no longer valid — open the console again.");
     };
-    if let Some(store) = state.store.clone() {
-        return store_login(&state, &store, form, pending.return_to).await;
+    // Before the password is looked at: a locked pair or a busy address costs no hashing.
+    let addr = client_addr(&state, &headers, peer);
+    if let Some(wait) = state.sign_in.wait(Some(&form.username), addr) {
+        return throttled(wait);
     }
-    // Only the password's verdict is logged, never the email: the users file is small, but
-    // the habit is the same one the OIDC path keeps.
-    match state.local_users.verify(&form.username, &form.password) {
-        Some(groups) => {
-            tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
-            session_response(&state, form.username, groups, pending.return_to.as_deref())
+    let name = form.username.clone();
+    let response = if let Some(store) = state.store.clone() {
+        store_login(&state, &store, form, pending.return_to).await
+    } else {
+        // Only the password's verdict is logged, never the email: the users file is small, but
+        // the habit is the same one the OIDC path keeps.
+        match state.local_users.verify(&form.username, &form.password) {
+            Some(groups) => {
+                tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
+                session_response(&state, form.username, groups, pending.return_to.as_deref())
+            }
+            None => refused_local("That email and password do not match."),
         }
-        None => refused_local("That email and password do not match."),
+    };
+    // Past the checks above, both modes answer a refused password with 401 and a session with
+    // a redirect; anything else, such as the store being down, is neither.
+    match response.status() {
+        StatusCode::UNAUTHORIZED => state.sign_in.failed(Some(&name), addr),
+        s if s.is_redirection() => state.sign_in.succeeded(&name, addr),
+        _ => {}
     }
+    response
+}
+
+/// The address `throttle` counts this request against.
+fn client_addr(
+    state: &AppState,
+    headers: &header::HeaderMap,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> std::net::IpAddr {
+    state.sign_in.client(
+        peer.map(|axum::Extension(axum::extract::ConnectInfo(a))| a.ip()),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+    )
+}
+
+/// A sign-in refused for its count, not its password.
+fn throttled(wait: std::time::Duration) -> Response {
+    let mut response = refused_local(&crate::throttle::wait_message(wait));
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    if let Ok(value) = header::HeaderValue::from_str(&wait.as_secs().max(1).to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 /// Store mode's half of `POST /auth/login`.
@@ -978,25 +981,34 @@ pub struct Callback {
 /// `GET /auth/callback`: turn the provider's answer into a session cookie.
 pub async fn callback(
     State(state): State<AppState>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Query(query): Query<Callback>,
     headers: header::HeaderMap,
 ) -> Result<Response, StatusCode> {
+    // A refusal at the provider names no account here, so it counts against the address only,
+    // and locks nothing anyone else uses.
+    let addr = client_addr(&state, &headers, peer);
+    if let Some(wait) = state.sign_in.wait(None, addr) {
+        return Ok(throttled(wait));
+    }
     // Only the provider's error code is logged, never its description: the description is
     // free text from another system and the query string it arrived in also holds a code.
     if let Some(error) = &query.error {
         tracing::info!(provider_error = %error, "the identity provider refused a sign-in");
+        state.sign_in.failed(None, addr);
         return Err(StatusCode::UNAUTHORIZED);
     }
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
         return Err(StatusCode::BAD_REQUEST);
     };
-    let Ok(pending) = state.pending.take(&returned_state) else {
-        tracing::warn!("a callback arrived with a state this process never issued");
+    let Ok(pending) = Pending::resume(&state.session_key, &returned_state) else {
+        tracing::warn!("a callback arrived with a state this console never issued, or too late");
         return Ok(stale_sign_in_page());
     };
     // Login CSRF: someone who began a sign-in and signed in at the provider as themselves can
-    // send another browser here with their code and state, which this process still holds the
-    // verifier and nonce for. Only the browser that began the sign-in holds the state cookie.
+    // send another browser here with their code and state, which this console signed and can
+    // derive the verifier and nonce from. Only the browser that began the sign-in holds the state
+    // cookie.
     // An origin that cannot keep a Secure cookie never kept this one either; it is not checked
     // there, because no session is issued there (below), and it would hide the page saying why.
     let secure_origin = origin_can_keep_secure_cookie(&headers);
@@ -1132,17 +1144,28 @@ fn stale_sign_in_page() -> Response {
 mod tests {
     use super::*;
 
+    const KEY: &[u8] = b"a key of no particular significance";
+
+    fn pending(state: &str) -> Pending {
+        Pending {
+            state: state.to_string(),
+            verifier: "the-verifier".into(),
+            nonce: "the-nonce".into(),
+            return_to: None,
+        }
+    }
+
     #[test]
     fn a_callback_without_the_state_we_issued_is_refused() {
         // Cross-site request forgery on the callback: an attacker sends the victim to our
         // callback with the attacker's code. Only a state we minted and stored is acceptable.
-        let pending = Pending::new("the-state", "the-verifier", "the-nonce", None);
+        let pending = pending("the-state");
         assert!(pending.check_state("a-different-state").is_err());
     }
 
     #[test]
     fn a_callback_with_the_state_we_issued_is_accepted() {
-        let pending = Pending::new("the-state", "the-verifier", "the-nonce", None);
+        let pending = pending("the-state");
         assert!(pending.check_state("the-state").is_ok());
     }
 
@@ -1150,7 +1173,7 @@ mod tests {
     fn state_comparison_does_not_short_circuit_on_length() {
         // Not timing-critical the way a signature is, but a same-length wrong value and a
         // different-length wrong value must both simply fail.
-        let pending = Pending::new("abcdef", "v", "n", None);
+        let pending = pending("abcdef");
         assert!(pending.check_state("abcdeX").is_err());
         assert!(pending.check_state("abc").is_err());
         assert!(pending.check_state("").is_err());
@@ -1199,32 +1222,46 @@ mod tests {
     }
 
     #[test]
-    fn a_login_nobody_ever_came_back_from_is_forgotten() {
-        let logins = PendingLogins::default();
-        logins.remember(Pending::new("the-state", "v", "n", None));
-        logins.forget_expired(Instant::now() + PENDING_LIFETIME + Duration::from_secs(1));
-        assert!(logins.take("the-state").is_err());
+    fn a_sign_in_begun_on_one_replica_is_finished_on_another() {
+        // Nothing is remembered between the two requests: another console holding the same key
+        // reads the same verifier, nonce and destination out of the state.
+        let begun = Pending::begin(KEY, Some("/routes".into()));
+        let resumed = Pending::resume(KEY, &begun.state).unwrap();
+        assert_eq!(resumed.verifier, begun.verifier);
+        assert_eq!(resumed.nonce, begun.nonce);
+        assert_eq!(resumed.return_to.as_deref(), Some("/routes"));
+        // A PKCE verifier: 43 characters of the unreserved set.
+        assert_eq!(begun.verifier.len(), 43);
+        assert!(
+            !begun.state.contains(&begun.verifier),
+            "the verifier never travels"
+        );
     }
 
     #[test]
-    fn a_state_is_accepted_once_and_not_a_second_time() {
-        // The authorization code it carries may only be redeemed once, so a replay of the
-        // same callback must find nothing rather than start another exchange.
-        let logins = PendingLogins::default();
-        logins.remember(Pending::new("the-state", "v", "n", None));
-        assert!(logins.take("the-state").is_ok());
-        assert!(logins.take("the-state").is_err());
+    fn a_state_another_key_signed_or_someone_altered_is_refused() {
+        let begun = Pending::begin(KEY, None);
+        assert!(Pending::resume(b"another console's key", &begun.state).is_err());
+        let (payload, signature) = begun.state.split_once('.').unwrap();
+        let altered = format!("{}x.{signature}", payload);
+        assert!(Pending::resume(KEY, &altered).is_err());
+        assert!(Pending::resume(KEY, "not-a-state").is_err());
     }
 
     #[test]
-    fn logins_in_flight_do_not_grow_without_bound() {
-        // `/auth/login` is unauthenticated by necessity, so anyone can ask us to remember
-        // another entry. Expiry alone bounds that only at whatever rate a flood sustains.
-        let logins = PendingLogins::default();
-        for i in 0..MAX_PENDING + 100 {
-            logins.remember(Pending::new(&format!("state-{i}"), "v", "n", None));
-        }
-        assert!(logins.len() <= MAX_PENDING, "got {}", logins.len());
+    fn a_login_nobody_came_back_from_expires() {
+        let begun = Pending::begin(KEY, None);
+        let later = now_seconds() + PENDING_LIFETIME.as_secs();
+        assert!(Pending::resume_at(KEY, &begun.state, later).is_err());
+        assert!(Pending::resume_at(KEY, &begun.state, later - 1).is_ok());
+    }
+
+    #[test]
+    fn every_sign_in_gets_its_own_verifier_and_nonce() {
+        let (a, b) = (Pending::begin(KEY, None), Pending::begin(KEY, None));
+        assert_ne!(a.verifier, b.verifier);
+        assert_ne!(a.nonce, b.nonce);
+        assert_ne!(a.verifier, a.nonce);
     }
 }
 
@@ -1243,6 +1280,8 @@ mod against_a_stub_provider {
     use chrono::Utc;
     use openidconnect::core::CoreHmacKey;
     use openidconnect::{Audience, IdToken, IdTokenClaims, StandardClaims, SubjectIdentifier};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
     const CLIENT_ID: &str = "console";
@@ -1258,6 +1297,8 @@ mod against_a_stub_provider {
         nonce: Mutex<Option<String>>,
         /// Whether the token request carried a PKCE verifier.
         saw_verifier: Mutex<bool>,
+        /// The verifier it carried, to check against the challenge the sign-in began with.
+        verifier: Mutex<Option<String>>,
         groups: Mutex<serde_json::Value>,
     }
 
@@ -1326,6 +1367,10 @@ mod against_a_stub_provider {
                     let issuer = token_issuer.clone();
                     async move {
                         *provider.saw_verifier.lock().unwrap() = body.contains("code_verifier=");
+                        *provider.verifier.lock().unwrap() = body
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("code_verifier="))
+                            .map(str::to_string);
                         Json(serde_json::json!({
                             "access_token": "an access token",
                             "token_type": "Bearer",
@@ -1363,9 +1408,9 @@ mod against_a_stub_provider {
                 )
                 .unwrap(),
             ),
-            pending: PendingLogins::default(),
             session_lifetime: Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 
@@ -1388,6 +1433,41 @@ mod against_a_stub_provider {
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_console_response_carries_the_security_headers() {
+        let state = state("http://127.0.0.1:1");
+        let refused = crate::api::router_with(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/logout")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for response in [
+            get_from(&state, "/healthz").await,
+            get_from(&state, "/api/me").await,
+            get_from(&state, "/").await,
+            refused,
+        ] {
+            let h = response.headers();
+            assert!(
+                h["content-security-policy"]
+                    .to_str()
+                    .unwrap()
+                    .contains("frame-ancestors 'none'"),
+                "{:?}",
+                response.status()
+            );
+            assert_eq!(h["x-frame-options"], "DENY");
+            assert_eq!(h["x-content-type-options"], "nosniff");
+            assert_eq!(h["referrer-policy"], "no-referrer");
+        }
     }
 
     fn location(response: &axum::response::Response) -> String {
@@ -1551,6 +1631,50 @@ mod against_a_stub_provider {
     }
 
     #[tokio::test]
+    async fn the_verifier_sent_at_the_end_matches_the_challenge_sent_at_the_start() {
+        use base64::Engine;
+        use sha2::Digest;
+        // The verifier is not stored between the two requests but derived again from the state,
+        // so this is what proves the derivation is the same both times: the provider, holding
+        // the challenge, would refuse the code otherwise.
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        let begun = get_from(&state, "/auth/login").await;
+        let url = openidconnect::url::Url::parse(&location(&begun)).unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let cookie = cookie_pair(&begun);
+        *provider.nonce.lock().unwrap() = Some(query["nonce"].clone());
+
+        let response = come_back(&state, &query["state"], &cookie).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let verifier = provider
+            .verifier
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a verifier");
+        let derived_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()));
+        assert_eq!(derived_challenge, query["code_challenge"]);
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_begun_on_one_replica_finishes_on_another() {
+        let provider = Arc::new(Provider::default());
+        let issuer = stub(provider.clone()).await;
+        // Two consoles built separately, sharing only what replicas share: the key.
+        let (first, second) = (state(&issuer), state(&issuer));
+        let (csrf, nonce, cookie) = begin_a_login(&first).await;
+        *provider.nonce.lock().unwrap() = Some(nonce);
+        let response = come_back(&second, &csrf, &cookie).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .starts_with("gapura_session="));
+    }
+
+    #[tokio::test]
     async fn a_person_who_signs_in_comes_back_with_a_session_naming_their_groups() {
         let provider = Arc::new(Provider::default());
         *provider.groups.lock().unwrap() = serde_json::json!(["team-a", "team-b"]);
@@ -1652,8 +1776,8 @@ mod against_a_stub_provider {
     async fn a_callback_opened_in_a_browser_that_did_not_begin_the_sign_in_is_refused() {
         // Login CSRF. The attacker begins a sign-in on their own machine, signs in at the
         // provider as themselves, and stops before following the redirect back. Then they make
-        // the victim's browser open it. The state is one this process issued and still holds
-        // the verifier and nonce for, so the exchange would succeed and sign the victim in as
+        // the victim's browser open it. The state is one this console signed, and the verifier and
+        // nonce follow from it, so the exchange would succeed and sign the victim in as
         // the attacker; only the cookie tells the two browsers apart.
         let provider = Arc::new(Provider::default());
         let state = state(&stub(provider.clone()).await);
@@ -2022,9 +2146,9 @@ mod local_login_flow_tests {
                 )
                 .expect("never used in local mode"),
             ),
-            pending: PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 
@@ -2113,7 +2237,51 @@ mod local_login_flow_tests {
     }
 
     #[tokio::test]
-    async fn a_wrong_password_is_refused_without_a_cookie_and_the_state_is_spent() {
+    async fn five_wrong_passwords_lock_the_name_and_even_the_right_one_waits() {
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n  \
+             - email: b@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        let attempt = |email: &'static str, password: &'static str| {
+            let state = state.clone();
+            async move {
+                let page = get(&state, "/auth/login").await;
+                let html = String::from_utf8(
+                    axum::body::to_bytes(page.into_body(), usize::MAX)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                let login_state = form_value(&html, "state");
+                post(
+                    &state,
+                    "/auth/login",
+                    format!("state={login_state}&email={email}&password={password}"),
+                )
+                .await
+            }
+        };
+        for _ in 0..5 {
+            assert_eq!(
+                attempt("a%40x", "wrong").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let locked = attempt("A%40X", "s3cret").await;
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(locked.headers().contains_key(header::RETRY_AFTER));
+        assert!(locked.headers().get(header::SET_COOKIE).is_none());
+        // Another name from the same address is not held by this one's lock.
+        assert_eq!(
+            attempt("b%40x", "s3cret").await.status(),
+            StatusCode::SEE_OTHER
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_is_refused_without_a_cookie_and_the_form_can_be_sent_again() {
         let hash = bcrypt::hash("s3cret", 4).unwrap();
         let state = local_state(&format!(
             "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
@@ -2137,18 +2305,15 @@ mod local_login_flow_tests {
         assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
         assert!(refused.headers().get(header::SET_COOKIE).is_none());
 
-        // Single use: replaying the same form, even with the right password, finds nothing.
-        let replay = post(
+        // The state proves the form came from this console in the last few minutes; it is not
+        // a count of tries, which the sign-in limits keep. So the same form, corrected, works.
+        let corrected = post(
             &state,
             "/auth/login",
             format!("state={login_state}&email=a%40x&password=s3cret"),
         )
         .await;
-        assert_eq!(
-            replay.status(),
-            StatusCode::UNAUTHORIZED,
-            "state is single-use"
-        );
+        assert_eq!(corrected.status(), StatusCode::SEE_OTHER);
     }
 }
 

@@ -267,6 +267,7 @@ fn assemble(
         status.push(StatusPatch::Gateway {
             namespace: gw.r#ref.namespace.clone(),
             name: gw.r#ref.name.clone(),
+            uid: gw.uid.clone(),
             addresses: addresses_for(settings, &gw.r#ref),
             conditions: vec![accepted, programmed],
             listeners: listener_status,
@@ -440,6 +441,7 @@ mod remap_tests {
         let status = vec![StatusPatch::Gateway {
             namespace: "infra".into(),
             name: "later".into(),
+            uid: None,
             addresses: vec![],
             conditions: vec![],
             listeners: vec![ListenerStatus {
