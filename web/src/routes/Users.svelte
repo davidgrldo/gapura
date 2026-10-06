@@ -13,9 +13,10 @@
 
   // `/api/users` lists every account, each with its roles trimmed to the workspaces the reader
   // administers, sorted with the enabled accounts that hold no role there first; nothing here
-  // filters or sorts. It is fetched again after a save, in place: the rows stay, the opened ones
-  // stay open, and the button that opened the sheet is still there for focus to return to,
-  // where `{#await}` would put "Reading accounts…" over all of it.
+  // filters or sorts. It is fetched again after a save, and once a sheet that showed a refusal is
+  // closed, in place: the rows stay, the opened ones stay open, and the button that opened the
+  // sheet is still there for focus to return to, where `{#await}` would put "Reading accounts…"
+  // over all of it.
   let rows = $state(undefined)
   let failed = $state(undefined)
   // Which fetch is the latest. A save fetches again while an earlier fetch may still be on its
@@ -39,6 +40,13 @@
     )
   }
   load()
+
+  // Where focus goes once an account's row, or the button in it, is gone and focus has fallen to
+  // the page: after a refused save whose list, fetched again, no longer has the account, or has it
+  // disabled.
+  let heading = $state(undefined)
+
+  const focusHeading = () => heading?.focus()
 
   // Which rows the reader has opened, keyed by account id, as on the Routes screen.
   let open = $state({})
@@ -72,7 +80,8 @@
   {#if seconds == null}Never{:else}<time datetime={new Date(seconds * 1000).toISOString()}>{when.format(seconds * 1000)}</time>{/if}
 {/snippet}
 
-<h1 class="mb-1 text-2xl font-semibold tracking-tight">Users</h1>
+<!-- tabindex -1: focus is put here when a row has gone, never reached by Tab. -->
+<h1 bind:this={heading} tabindex="-1" class="mb-1 text-2xl font-semibold tracking-tight outline-none">Users</h1>
 <p class="mb-4 max-w-2xl text-sm text-muted-foreground">
   Every account, with its roles in the workspaces you administer.
 </p>
@@ -193,7 +202,7 @@
                  whatever it holds. -->
             {#if me.grantable.length > 0 && user.status !== 'disabled'}
               <div class="mt-3">
-                <AccessSheet {user} {me} onsaved={load} />
+                <AccessSheet {user} {me} onsaved={load} onremoved={focusHeading} />
               </div>
             {/if}
           </div>

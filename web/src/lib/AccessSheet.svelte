@@ -3,7 +3,7 @@
   import * as Sheet from '$lib/components/ui/sheet/index.js'
   import { Button } from '$lib/components/ui/button/index.js'
   import NativeSelect from './NativeSelect.svelte'
-  import { Forbidden, write } from './api.js'
+  import { write } from './api.js'
   import { ROLES, ROLE_LABEL } from './roles.js'
 
   // Edit access for one account: a select per workspace the reader administers, holding the
@@ -12,15 +12,18 @@
   // the workspaces that changed are sent, in one request the server applies whole or not at
   // all, and grants in workspaces the reader does not administer are never part of it.
   //
-  // `user` is the account's row from /api/users, `me` the reader from /api/me, and `onsaved`
-  // fetches the list again. The trigger is a bits-ui Dialog trigger, so the sheet keeps focus
-  // inside while it is open, closes on Escape, and hands focus back to this button.
+  // `user` is the account's row from /api/users and `me` the reader from /api/me. `onsaved`
+  // fetches the list again and returns a promise that settles once the new list is on the page or
+  // the fetch has failed, and never rejects. `onremoved` is where focus goes when the new list no
+  // longer has this sheet's button: the account is gone, or was disabled in the meantime. The
+  // trigger is a bits-ui Dialog trigger, so the sheet keeps focus inside while it is open, closes
+  // on Escape, and hands focus back to this button.
   //
   // `me` is what the page read when it loaded, and the form does not read it again. A reader
   // whose admin was taken away since still sees that workspace here; saving it is refused with
   // a 403 whose sentence says why, which is shown below, and a reload brings the form back in
   // line.
-  let { user, me, onsaved } = $props()
+  let { user, me, onsaved, onremoved = undefined } = $props()
 
   const id = $props.id()
 
@@ -37,6 +40,9 @@
   let confirming = $state(false)
   // When that was, by `performance.now()`. Not state: nothing is drawn from it.
   let askedAt = 0
+  // Set when a save was refused, so that the list is fetched again once the sheet closes. Not
+  // state: nothing is drawn from it.
+  let staleOnClose = false
 
   // '' ranks below every role, so a group's role is higher than no direct grant at all.
   const rank = (role) => ROLES.indexOf(role) + 1
@@ -115,9 +121,12 @@
       // saving again asks again if it still costs them their admin.
       confirming = false
       error = failure.message
-      // A 403 here usually means the reader's own access changed since the list was read, so
-      // the list is fetched again to show what is true now.
-      if (failure instanceof Forbidden) onsaved()
+      // Not fetched again yet. Whatever refused this, a 403 because the reader's access changed,
+      // a 404 because the account is gone, or a dropped connection that leaves it unknown whether
+      // anything was saved, the list on the page is probably out of date. But the new one could
+      // drop the row this sheet lives in, and the sheet, with the sentence the reader is meant to
+      // read, would go with it. So it is fetched when they close the sheet.
+      staleOnClose = true
       // Save was disabled while the request ran, which took focus away from it; it goes back,
       // so the reader is where they were, with the refusal just above.
       await tick()
@@ -130,28 +139,52 @@
       location.reload()
       return
     }
+    // The list about to be fetched is as new as can be, so nothing is left to fetch on closing.
+    staleOnClose = false
     open = false
     // Giving a waiting account its first role moves its row, because waiting accounts sort
     // first, and a row that moves in a keyed list is taken out of the page and put back, which
     // drops focus to the page itself. Closing the sheet had put focus back on the trigger; the
     // list is fetched again and drawn before looking, and if the move took it, it goes back.
-    // Focus the reader has put somewhere else in the meantime is left where it is.
     await onsaved()
     await tick()
-    if (document.activeElement === document.body) trigger?.focus()
+    keepPlace()
+  }
+
+  // Where focus goes once a new list has been drawn under a sheet that has closed. Where it fell
+  // to the page itself, it goes back to the button that opened the sheet, or, if that has gone
+  // with its row, to where the page says. Focus the reader has put somewhere else in the meantime
+  // is left where it is.
+  function keepPlace() {
+    if (document.activeElement !== document.body) return
+    if (trigger?.isConnected) trigger.focus()
+    else onremoved?.()
+  }
+
+  // Called when the reader's own act has closed the sheet, once per close: bits-ui asks the setter
+  // below for every one of them, and the setter says whether they got their way. Closing after a
+  // refusal is when the list, left alone while the sheet was showing why, is fetched again.
+  async function closed() {
+    if (!staleOnClose) return
+    staleOnClose = false
+    await onsaved()
+    await tick()
+    keepPlace()
+  }
+
+  function setOpen(next) {
+    if (!next && saving) return
+    open = next
+    if (!next) closed()
   }
 </script>
 
 <!-- The setter refuses to close while a save is in flight, which stops Escape, a click outside,
      the corner button and Cancel alike, since bits-ui closes through it for every one of them. A
      sheet closed then could be opened again over a request that has not answered, and its
-     error would have nowhere to be read. -->
-<Sheet.Root
-  bind:open={() => open, (next) => {
-    if (next || !saving) open = next
-  }}
-  onOpenChange={(next) => next && reset()}
->
+     error would have nowhere to be read. Not `onOpenChange`, which bits-ui calls even for a close
+     the setter has refused. -->
+<Sheet.Root bind:open={() => open, setOpen} onOpenChange={(next) => next && reset()}>
   <Sheet.Trigger>
     {#snippet child({ props })}
       <Button bind:ref={trigger} variant="outline" size="sm" {...props}>Edit access</Button>
