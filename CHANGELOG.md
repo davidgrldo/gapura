@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Workspaces in the control plane's store no longer collide. A route found its service by name
+  alone, so two workspaces that each had an `orders` service could send one workspace's traffic
+  to the other's upstream; and a policy attached to a route name applied to every workspace's
+  route of that name. A route now resolves its service only inside its own workspace, a policy
+  applies only inside its own workspace, and a policy row that names a route or service of
+  another workspace fails the configuration (503, data planes keep their cache) instead of
+  guessing. A store route's id now carries its workspace, `default/orders` rather than `orders`,
+  which is what the access log and the `route` metrics label show; dashboards keyed on the bare
+  name need the new value. Kubernetes mode is unchanged.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a
