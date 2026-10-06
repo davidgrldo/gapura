@@ -52,10 +52,24 @@ pub fn encode(session: &Session, key: &[u8]) -> String {
 }
 
 pub fn decode(cookie: &str, key: &[u8], now: u64) -> Result<Session, Invalid> {
-    let (payload, signature) = cookie.split_once('.').ok_or(Invalid::Malformed)?;
+    let session: Session = open_signed(b"", cookie, key)?;
+    if now >= session.expires_at {
+        return Err(Invalid::Expired);
+    }
+    Ok(session)
+}
+
+/// The JSON in `token`, once its signature over `prefix` and the payload has verified.
+fn open_signed<T: serde::de::DeserializeOwned>(
+    prefix: &[u8],
+    token: &str,
+    key: &[u8],
+) -> Result<T, Invalid> {
+    let (payload, signature) = token.split_once('.').ok_or(Invalid::Malformed)?;
     // Verify before decoding: nothing from an unverified payload should reach a parser,
     // and `Mac::verify_slice` is the constant-time comparison we want here.
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
+    mac.update(prefix);
     mac.update(payload.as_bytes());
     // A signature field that is not even valid base64 is a structurally broken cookie, not a
     // cryptographic mismatch, so it is Malformed rather than BadSignature; only a well-formed
@@ -69,11 +83,31 @@ pub fn decode(cookie: &str, key: &[u8], now: u64) -> Result<Session, Invalid> {
     let json = URL_SAFE_NO_PAD
         .decode(payload)
         .map_err(|_| Invalid::Malformed)?;
-    let session: Session = serde_json::from_slice(&json).map_err(|_| Invalid::Malformed)?;
-    if now >= session.expires_at {
-        return Err(Invalid::Expired);
-    }
-    Ok(session)
+    serde_json::from_slice(&json).map_err(|_| Invalid::Malformed)
+}
+
+/// Signs `value` for `purpose`, in the session cookie's format. The purpose is part of what is
+/// signed, so a value sealed for one use never opens as another, nor as a session.
+pub fn seal<T: Serialize>(purpose: &str, value: &T, key: &[u8]) -> String {
+    let json = serde_json::to_vec(value).expect("a sealed value always serialises");
+    let payload = URL_SAFE_NO_PAD.encode(&json);
+    let signature = sign(format!("{purpose}.{payload}").as_bytes(), key);
+    format!("{payload}.{signature}")
+}
+
+/// The value `seal` signed for `purpose`, if `key` signed it.
+pub fn open<T: serde::de::DeserializeOwned>(
+    purpose: &str,
+    token: &str,
+    key: &[u8],
+) -> Result<T, Invalid> {
+    open_signed(format!("{purpose}.").as_bytes(), token, key)
+}
+
+/// A secret derived from `key` for `purpose` and `input`: the same on every replica that holds
+/// the key, and unguessable without it. Base64url, 43 characters.
+pub fn derive(purpose: &str, input: &str, key: &[u8]) -> String {
+    sign(format!("{purpose}\0{input}").as_bytes(), key)
 }
 
 #[cfg(test)]
@@ -125,6 +159,22 @@ mod tests {
         // forged cookie can never be told apart from an honestly stale one.
         let cookie = encode(&session(2000), b"a different key");
         assert_eq!(decode(&cookie, KEY, 2001), Err(Invalid::BadSignature));
+    }
+
+    #[test]
+    fn a_sealed_value_opens_only_for_its_purpose_and_never_as_a_session() {
+        let sealed = seal("login state", &serde_json::json!({"r": "x"}), KEY);
+        assert!(open::<serde_json::Value>("login state", &sealed, KEY).is_ok());
+        assert_eq!(
+            open::<serde_json::Value>("something else", &sealed, KEY),
+            Err(Invalid::BadSignature)
+        );
+        assert_eq!(decode(&sealed, KEY, 0), Err(Invalid::BadSignature));
+        let cookie = encode(&session(2000), KEY);
+        assert_eq!(
+            open::<Session>("login state", &cookie, KEY),
+            Err(Invalid::BadSignature)
+        );
     }
 
     #[test]

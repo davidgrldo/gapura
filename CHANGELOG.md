@@ -109,6 +109,15 @@ means what it usually does, moving from one version below to a later one. Releas
   (`GAPURA_TRUSTED_PROXIES`, chart `console.trustedProxies`) so the client's address is read
   from `X-Forwarded-For`: without it every sign-in comes from the ingress. Counts are kept per
   console replica.
+- A console sign-in no longer has to come back to the replica that began it. The OIDC state and
+  the local form's anti-forgery state were kept in one process's memory, so with more than one
+  console replica and no sticky sessions a sign-in failed whenever the provider's redirect or the
+  form's submission reached another replica, and a restart mid-sign-in did the same. The state is
+  now a signed, expiring token, and the PKCE verifier and nonce are derived from it with the
+  session key, which every replica already shares; the verifier still never leaves the console.
+  An authorization code is still redeemed once, by the provider. The local form can now be
+  corrected and sent again within its ten minutes rather than reloaded; failed tries are what
+  the sign-in limits count.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a

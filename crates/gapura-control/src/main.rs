@@ -131,7 +131,6 @@ async fn main() -> anyhow::Result<()> {
         auth_mode,
         local_users,
         oidc,
-        pending: gapura_control::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
         store: store.clone(),
         sign_in: Arc::new(gapura_control::throttle::Throttle::new(
