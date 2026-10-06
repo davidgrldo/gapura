@@ -139,21 +139,25 @@ impl Store {
             .await?
             .into_iter()
             .map(|r| {
+                let name: String = r.get("name");
                 let paths: serde_json::Value = r.get("paths");
-                StoreRoute {
-                    name: r.get("name"),
+                let paths = parse_paths(&paths)
+                    .with_context(|| format!("route {name:?} has paths this binary cannot read"))?;
+                Ok(StoreRoute {
+                    name,
                     service: r.get("service"),
                     hosts: r.get("hosts"),
                     methods: r.get("methods"),
-                    paths: parse_paths(&paths),
+                    paths,
                     priority: r.get("priority"),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         // Only the ones attached to a route or a service, or to neither. A policy scoped to a
-        // consumer needs consumers, which this phase does not have yet, and a row that cannot be
-        // honoured is better left out than half applied.
+        // consumer needs consumers, which this phase does not have yet. A row that is selected and
+        // cannot be read fails the whole snapshot: see `parse_plugin` for why that, and not
+        // leaving the row out, is the safe direction.
         let plugins = tx
             .query(
                 "select p.name, p.config, r.name as route, s.name as service
@@ -166,16 +170,21 @@ impl Store {
             )
             .await?
             .into_iter()
-            .filter_map(|r| {
+            .map(|r| {
                 let name: String = r.get("name");
                 let config: serde_json::Value = r.get("config");
-                Some(StorePlugin {
-                    route: r.get("route"),
-                    service: r.get("service"),
-                    plugin: parse_plugin(&name, config)?,
+                let route: Option<String> = r.get("route");
+                let service: Option<String> = r.get("service");
+                let plugin = parse_plugin(&name, config).with_context(|| {
+                    format!("policy {name:?} on route {route:?} service {service:?} cannot be read")
+                })?;
+                Ok(StorePlugin {
+                    route,
+                    service,
+                    plugin,
                 })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         // Expired keys are left out here rather than checked at request time: the data plane
         // holds a map, not a clock over rows, so a key that has expired is one the next
@@ -333,48 +342,128 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// A policy row into the typed thing the data plane runs.
 ///
 /// A name this binary does not know, or a configuration that does not fit the shape it names, is
-/// dropped rather than guessed at. The console should refuse the write and the enum should make
-/// the set of names visible; this is the backstop for both being wrong, and dropping is the safe
-/// direction -- a policy that half-applies is worse than one that visibly did not.
-fn parse_plugin(name: &str, config: serde_json::Value) -> Option<Plugin> {
+/// an error, never a row left out. Leaving out a policy is not the cautious choice it looks like:
+/// the route it guarded is still compiled, so a JWT or key-auth row that fails to parse becomes a
+/// route that admits everyone. An error fails the snapshot instead, `/v1/config` answers 503, and
+/// every data plane keeps serving the last configuration it verified -- a bad row costs new
+/// configuration, never protection. The same holds for a newer console writing a shape an older
+/// replica does not know during a rolling upgrade.
+fn parse_plugin(name: &str, config: serde_json::Value) -> Result<Plugin> {
     match name {
         "jwt" => serde_json::from_value::<JwtPolicy>(config)
-            .inspect_err(
-                |e| tracing::warn!(error = %e, "a jwt policy row does not fit JwtPolicy and is ignored"),
-            )
-            .ok()
-            .map(Plugin::Jwt),
+            .map(Plugin::Jwt)
+            .context("the configuration does not fit a jwt policy"),
         "key_auth" => serde_json::from_value::<KeyAuthPolicy>(config)
-            .inspect_err(
-                |e| tracing::warn!(error = %e, "a key_auth policy row does not fit KeyAuthPolicy and is ignored"),
-            )
-            .ok()
-            .map(Plugin::KeyAuth),
-        other => {
-            tracing::warn!(plugin = %other, "unknown policy name, ignored");
-            None
-        }
+            .map(Plugin::KeyAuth)
+            .context("the configuration does not fit a key_auth policy"),
+        other => anyhow::bail!("unknown policy name {other:?}"),
     }
 }
 
-/// `[{"type":"prefix","value":"/v1"}]`. An entry that is not one of the three known shapes is
-/// dropped rather than guessed at: a route that matches nothing is visible in the console, and a
-/// route that matches the wrong thing is not.
-fn parse_paths(v: &serde_json::Value) -> Vec<PathMatch> {
-    v.as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|e| {
-                    let value = e.get("value")?.as_str()?.to_string();
-                    match e.get("type")?.as_str()? {
-                        "exact" => Some(PathMatch::Exact(value)),
-                        "prefix" => Some(PathMatch::Prefix(value)),
-                        "regex" => Some(PathMatch::Regex(value)),
-                        _ => None,
-                    }
-                })
-                .collect()
+/// `[{"type":"prefix","value":"/v1"}]`. An empty list is valid and means every path.
+///
+/// An entry that is not one of the three known shapes is an error, never an entry left out.
+/// Leaving one out is not harmless: drop every entry of a route and the empty list that remains
+/// means every path, so `[{"type":"PathPrefix","value":"/admin"}]` -- the Gateway API spelling,
+/// and the obvious mistake to make -- would turn a route for `/admin` into a catch-all.
+fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
+    let entries = v
+        .as_array()
+        .with_context(|| format!("paths is not a list: {v}"))?;
+    entries
+        .iter()
+        .map(|e| {
+            let value = e
+                .get("value")
+                .and_then(|v| v.as_str())
+                .with_context(|| format!("path entry has no string value: {e}"))?
+                .to_string();
+            if !value.starts_with('/') && e.get("type").and_then(|t| t.as_str()) != Some("regex") {
+                anyhow::bail!("path {value:?} does not start with /");
+            }
+            match e.get("type").and_then(|t| t.as_str()) {
+                Some("exact") => Ok(PathMatch::Exact(value)),
+                Some("prefix") => Ok(PathMatch::Prefix(value)),
+                Some("regex") => Ok(PathMatch::Regex(value)),
+                other => {
+                    anyhow::bail!("path type {other:?} is not one of exact, prefix, regex: {e}")
+                }
+            }
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn known_path_shapes_are_read() {
+        let paths = parse_paths(&json!([
+            {"type": "exact", "value": "/a"},
+            {"type": "prefix", "value": "/b"},
+            {"type": "regex", "value": "^/c$"},
+        ]))
+        .unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                PathMatch::Exact("/a".into()),
+                PathMatch::Prefix("/b".into()),
+                PathMatch::Regex("^/c$".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_path_list_is_valid_and_means_every_path() {
+        assert!(parse_paths(&json!([])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_path_entry_is_an_error_not_a_catch_all() {
+        // Dropping these used to leave an empty list, which compiles to `PathPrefix /`.
+        for bad in [
+            json!([{"type": "PathPrefix", "value": "/admin"}]),
+            json!([{"type": "prefix"}]),
+            json!([{"value": "/admin"}]),
+            json!([{"type": "prefix", "value": 5}]),
+            json!([{"type": "prefix", "value": "admin"}]),
+            json!({"type": "prefix", "value": "/admin"}),
+            json!(null),
+        ] {
+            assert!(parse_paths(&bad).is_err(), "accepted {bad}");
+        }
+        // One bad entry among good ones still fails: a route that matches part of what was
+        // written is as wrong as one that matches all of it.
+        assert!(parse_paths(&json!([
+            {"type": "prefix", "value": "/ok"},
+            {"type": "glob", "value": "/admin/*"},
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn an_unreadable_policy_is_an_error_not_an_open_route() {
+        assert!(parse_plugin("jwt", json!({"jwks": 5})).is_err());
+        assert!(
+            parse_plugin("jwt", json!({"issuer": "x"})).is_err(),
+            "no jwks"
+        );
+        assert!(parse_plugin("key_auth", json!({"header": 7})).is_err());
+        assert!(parse_plugin("oauth2", json!({})).is_err(), "unknown name");
+    }
+
+    #[test]
+    fn readable_policies_are_read() {
+        assert!(matches!(
+            parse_plugin("jwt", json!({"jwks": "{\"keys\":[]}"})),
+            Ok(Plugin::Jwt(_))
+        ));
+        assert!(matches!(
+            parse_plugin("key_auth", json!({"header": "x-api-key"})),
+            Ok(Plugin::KeyAuth(_))
+        ));
+    }
 }

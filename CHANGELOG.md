@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store row the control plane cannot read now fails the configuration instead of being left
+  out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
+  warning while the route it guarded was still compiled, so that route admitted everyone; and a
+  path entry with an unknown `type` (Gateway API's `PathPrefix` spelling is the easy mistake) was
+  dropped, and a route left with no paths matches every path. Now either one makes `/v1/config`
+  answer 503 naming the row, and every data plane keeps serving the last configuration it
+  verified: a bad row costs new configuration, never protection. A path that does not start with
+  `/` is refused the same way. An empty path list is still valid and still means every path.
+
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running
   on without that listener while its probes stay green (#104). Only a process in the same network
