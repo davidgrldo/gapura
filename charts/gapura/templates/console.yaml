@@ -204,6 +204,10 @@ spec:
         {{- end }}
         {{- end }}
         env:
+        {{- with ((.Values.console).trustedProxies) }}
+        - name: GAPURA_TRUSTED_PROXIES
+          value: {{ join "," . | quote }}
+        {{- end }}
         - name: GAPURA_SESSION_KEY
           valueFrom:
             secretKeyRef:

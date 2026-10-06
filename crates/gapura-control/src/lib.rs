@@ -23,3 +23,4 @@ pub mod served;
 pub mod session;
 pub mod state;
 pub mod store;
+pub mod throttle;

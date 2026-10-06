@@ -758,6 +758,8 @@ pub struct LocalLogin {
 
 pub async fn login_local(
     State(state): State<AppState>,
+    headers: header::HeaderMap,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     axum::Form(form): axum::Form<LocalLogin>,
 ) -> Response {
     // The pending state is single-use, exactly as in the OIDC callback: a replayed form
@@ -766,18 +768,55 @@ pub async fn login_local(
     let Ok(pending) = state.pending.take(&form.state) else {
         return refused_local("This sign-in form is no longer valid — open the console again.");
     };
-    if let Some(store) = state.store.clone() {
-        return store_login(&state, &store, form, pending.return_to).await;
+    // Before the password is looked at: a locked pair or a busy address costs no hashing.
+    let addr = client_addr(&state, &headers, peer);
+    if let Some(wait) = state.sign_in.wait(Some(&form.username), addr) {
+        return throttled(wait);
     }
-    // Only the password's verdict is logged, never the email: the users file is small, but
-    // the habit is the same one the OIDC path keeps.
-    match state.local_users.verify(&form.username, &form.password) {
-        Some(groups) => {
-            tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
-            session_response(&state, form.username, groups, pending.return_to.as_deref())
+    let name = form.username.clone();
+    let response = if let Some(store) = state.store.clone() {
+        store_login(&state, &store, form, pending.return_to).await
+    } else {
+        // Only the password's verdict is logged, never the email: the users file is small, but
+        // the habit is the same one the OIDC path keeps.
+        match state.local_users.verify(&form.username, &form.password) {
+            Some(groups) => {
+                tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
+                session_response(&state, form.username, groups, pending.return_to.as_deref())
+            }
+            None => refused_local("That email and password do not match."),
         }
-        None => refused_local("That email and password do not match."),
+    };
+    // Past the checks above, both modes answer a refused password with 401 and a session with
+    // a redirect; anything else, such as the store being down, is neither.
+    match response.status() {
+        StatusCode::UNAUTHORIZED => state.sign_in.failed(Some(&name), addr),
+        s if s.is_redirection() => state.sign_in.succeeded(&name, addr),
+        _ => {}
     }
+    response
+}
+
+/// The address `throttle` counts this request against.
+fn client_addr(
+    state: &AppState,
+    headers: &header::HeaderMap,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> std::net::IpAddr {
+    state.sign_in.client(
+        peer.map(|axum::Extension(axum::extract::ConnectInfo(a))| a.ip()),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+    )
+}
+
+/// A sign-in refused for its count, not its password.
+fn throttled(wait: std::time::Duration) -> Response {
+    let mut response = refused_local(&crate::throttle::wait_message(wait));
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    if let Ok(value) = header::HeaderValue::from_str(&wait.as_secs().max(1).to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 /// Store mode's half of `POST /auth/login`.
@@ -978,13 +1017,21 @@ pub struct Callback {
 /// `GET /auth/callback`: turn the provider's answer into a session cookie.
 pub async fn callback(
     State(state): State<AppState>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Query(query): Query<Callback>,
     headers: header::HeaderMap,
 ) -> Result<Response, StatusCode> {
+    // A refusal at the provider names no account here, so it counts against the address only,
+    // and locks nothing anyone else uses.
+    let addr = client_addr(&state, &headers, peer);
+    if let Some(wait) = state.sign_in.wait(None, addr) {
+        return Ok(throttled(wait));
+    }
     // Only the provider's error code is logged, never its description: the description is
     // free text from another system and the query string it arrived in also holds a code.
     if let Some(error) = &query.error {
         tracing::info!(provider_error = %error, "the identity provider refused a sign-in");
+        state.sign_in.failed(None, addr);
         return Err(StatusCode::UNAUTHORIZED);
     }
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
@@ -1366,6 +1413,7 @@ mod against_a_stub_provider {
             pending: PendingLogins::default(),
             session_lifetime: Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 
@@ -2060,6 +2108,7 @@ mod local_login_flow_tests {
             pending: PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 
@@ -2144,6 +2193,50 @@ mod local_login_flow_tests {
             response.status(),
             StatusCode::OK,
             "the API did not accept its own cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn five_wrong_passwords_lock_the_name_and_even_the_right_one_waits() {
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n  \
+             - email: b@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        let attempt = |email: &'static str, password: &'static str| {
+            let state = state.clone();
+            async move {
+                let page = get(&state, "/auth/login").await;
+                let html = String::from_utf8(
+                    axum::body::to_bytes(page.into_body(), usize::MAX)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                let login_state = form_value(&html, "state");
+                post(
+                    &state,
+                    "/auth/login",
+                    format!("state={login_state}&email={email}&password={password}"),
+                )
+                .await
+            }
+        };
+        for _ in 0..5 {
+            assert_eq!(
+                attempt("a%40x", "wrong").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let locked = attempt("A%40X", "s3cret").await;
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(locked.headers().contains_key(header::RETRY_AFTER));
+        assert!(locked.headers().get(header::SET_COOKIE).is_none());
+        // Another name from the same address is not held by this one's lock.
+        assert_eq!(
+            attempt("b%40x", "s3cret").await.status(),
+            StatusCode::SEE_OTHER
         );
     }
 
