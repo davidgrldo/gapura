@@ -97,9 +97,23 @@ fn main() {
                 std::process::exit(1);
             }
         };
+        // Read and checked now, so a bad bundle stops the process with one clear line instead of
+        // every poll failing a TLS handshake for a reason the log never names.
+        let ca_pem = args.control_plane_ca.as_ref().map(|path| {
+            let pem = std::fs::read(path).unwrap_or_else(|e| {
+                tracing::error!(path = %path.display(), error = %e, "cannot read the control plane CA file, refusing to start");
+                std::process::exit(1);
+            });
+            if reqwest::Certificate::from_pem_bundle(&pem).map_or(true, |c| c.is_empty()) {
+                tracing::error!(path = %path.display(), "the control plane CA file holds no PEM certificate, refusing to start");
+                std::process::exit(1);
+            }
+            pem
+        });
         let source = source::control::ControlSource {
             url: url.clone(),
             token,
+            ca_pem,
             cache_path: args.config_cache.clone(),
             interval: std::time::Duration::from_secs(args.control_plane_interval),
             store: store.clone(),

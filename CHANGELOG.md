@@ -29,6 +29,21 @@ means what it usually does, moving from one version below to a later one. Releas
   the release namespace and `networkPolicy.adminFromNamespaces` on the admin port. Off by default
   because turning it on stops a Prometheus in another namespace from scraping until that namespace
   is listed; turning it on is recommended.
+- In `--control-plane` mode, a resolver error no longer empties a backend. The control plane sends
+  resolve-backed clusters with no addresses, and the data plane fills them; on a lookup error it
+  meant to keep the previous addresses but kept the control plane's empty list, so a CoreDNS
+  restart was a 503 for every such backend. It now keeps the addresses it is already serving for
+  that cluster, as long as the cluster still names the same host.
+- A `--control-plane` gateway that starts from its cache and is then told "nothing has changed"
+  now keeps re-resolving its backends. Before, a 304 left it with no configuration to resolve
+  from, so a pod that booted before DNS answered stayed Ready serving 503 until the control plane's
+  version changed; and `gapura_config_from_cache` stayed 1 although the control plane had just
+  confirmed the version. A 304 now clears it.
+- `--control-plane` refuses an `http://` URL. Every configuration carries the private key of each
+  certificate the gateway serves, and ADR 4 requires TLS, but the gateway accepted plain http and
+  could not trust a private CA. `--control-plane-ca` adds CA certificates to trust;
+  `--control-plane-insecure-http` allows http for a control plane on loopback or behind a TLS
+  sidecar. `gapura-control` does not yet terminate TLS on `/v1/config` itself.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running

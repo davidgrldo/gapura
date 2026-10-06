@@ -95,6 +95,18 @@ pub struct Args {
     #[arg(long)]
     pub control_plane_token_file: Option<std::path::PathBuf>,
 
+    /// PEM file of CA certificates to trust for the control plane, on top of the public roots.
+    /// An in-cluster control plane almost always presents a certificate from a private CA.
+    #[arg(long, requires = "control_plane")]
+    pub control_plane_ca: Option<std::path::PathBuf>,
+
+    /// Allow an `http://` control plane URL. Without it one is refused at startup, because every
+    /// 200 from the control plane carries the private key of each certificate this gateway
+    /// serves, and every request carries its token. For a control plane on loopback or behind a
+    /// TLS-terminating sidecar, where nothing crosses a network in clear.
+    #[arg(long, requires = "control_plane")]
+    pub control_plane_insecure_http: bool,
+
     /// Where the last configuration received is kept, so a gateway that loses the control plane
     /// keeps serving what it has rather than waking up empty. Absent disables the cache, which
     /// means a control plane that is down at startup leaves this gateway unready.
@@ -142,6 +154,23 @@ impl Args {
     /// between them, which reads as a gateway answering at random. `first_unbindable` cannot catch
     /// it either, since it releases each socket before trying the next one.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(url) = &self.control_plane {
+            let lower = url.to_ascii_lowercase();
+            if lower.starts_with("http://") {
+                if !self.control_plane_insecure_http {
+                    return Err(format!(
+                        "--control-plane {url} is plain http: the configuration it serves carries \
+                         TLS private keys and every request carries a token, so it is refused \
+                         unless --control-plane-insecure-http says nothing crosses a network in clear"
+                    ));
+                }
+            } else if !lower.starts_with("https://") {
+                return Err(format!(
+                    "--control-plane {url} is not an http:// or https:// URL"
+                ));
+            }
+        }
+
         let mut seen = std::collections::HashSet::new();
         let repeated: std::collections::BTreeSet<String> = self
             .listen_http
@@ -509,5 +538,57 @@ mod trusted_proxy_tests {
             args.trusted_client_headers,
             ["CF-Connecting-IP", "X-Real-IP"]
         );
+    }
+}
+
+#[cfg(test)]
+mod control_plane_url_tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Result<(), String> {
+        let mut argv = vec!["gapura", "--control-plane-token-file", "/run/token"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv)
+            .map_err(|e| e.to_string())?
+            .validate()
+    }
+
+    #[test]
+    fn https_is_accepted() {
+        parse(&["--control-plane", "https://control.example:8081"]).unwrap();
+    }
+
+    #[test]
+    fn plain_http_is_refused_by_default() {
+        let err = parse(&["--control-plane", "http://control.example:8081"]).unwrap_err();
+        assert!(err.contains("--control-plane-insecure-http"), "{err}");
+        // Scheme case does not slip past the check.
+        assert!(parse(&["--control-plane", "HTTP://control.example:8081"]).is_err());
+    }
+
+    #[test]
+    fn plain_http_is_allowed_when_asked_for() {
+        parse(&[
+            "--control-plane",
+            "http://127.0.0.1:8081",
+            "--control-plane-insecure-http",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn a_url_without_a_scheme_is_refused() {
+        assert!(parse(&["--control-plane", "control.example:8081"]).is_err());
+    }
+
+    #[test]
+    fn the_new_flags_need_a_control_plane() {
+        assert!(Args::try_parse_from([
+            "gapura",
+            "--config-dir",
+            "/x",
+            "--control-plane-insecure-http"
+        ])
+        .is_err());
     }
 }
