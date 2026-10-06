@@ -9,7 +9,11 @@ pub struct Extracted {
     /// Normalized host, or empty when the request has no usable host
     /// (then only hostname-less listeners can match).
     pub host: String,
+    /// The path as matched and as forwarded: see [`normalize_path`].
     pub path: String,
+    /// The path the client sent differs from `path`, so the upstream request must carry `path`
+    /// rather than the original. Matching one string and forwarding another is the bypass.
+    pub path_normalized: bool,
     pub query_string: Option<String>,
     pub method: String,
     pub headers: Vec<(String, String)>,
@@ -17,13 +21,12 @@ pub struct Extracted {
 }
 
 impl Extracted {
-    pub fn from_request(req: &RequestHeader) -> Self {
+    /// `Err` carries why the request target cannot be routed at all; the caller answers 400.
+    pub fn from_request(req: &RequestHeader) -> Result<Self, &'static str> {
         let host = host_of(req).unwrap_or_default();
-        let path = if req.uri.path().is_empty() {
-            "/".to_string()
-        } else {
-            req.uri.path().to_string()
-        };
+        let raw = req.uri.path();
+        let path = normalize_path(raw)?;
+        let path_normalized = path != raw;
         let query_string = req.uri.query().map(str::to_string);
         let query = query_string.as_deref().map(parse_query).unwrap_or_default();
         let headers = req
@@ -36,14 +39,15 @@ impl Extracted {
                 )
             })
             .collect();
-        Self {
+        Ok(Self {
             host,
             path,
+            path_normalized,
             query_string,
             method: req.method.as_str().to_string(),
             headers,
             query,
-        }
+        })
     }
 
     pub fn attrs(&self) -> RequestAttrs<'_> {
@@ -55,6 +59,61 @@ impl Extracted {
             query: &self.query,
         }
     }
+}
+
+/// The path a route is matched against, which is also the path forwarded upstream.
+///
+/// A backend normalises what it receives; a gateway that matches the raw string and forwards it
+/// unchanged lets the two disagree, and the disagreement is a policy bypass. `/public/../admin`
+/// matches a `/public` rule that carries no policy and is served as `/admin` by the backend;
+/// `/%61dmin` and `//admin` miss a `/admin` rule and fall through to a catch-all. So:
+///
+/// - The target must be an absolute path. An absolute-form target (`GET http://x/admin`) does
+///   not start with `/`, matches only a catch-all, and most backends serve it as `/admin`.
+/// - Percent-encoded unreserved characters (`A-Z a-z 0-9 - . _ ~`) are decoded, as RFC 3986
+///   section 6.2.2.2 says they are equivalent to the character. Anything else stays encoded,
+///   `%2F` included: an encoded slash is data some APIs carry on purpose, and Envoy's default
+///   is likewise to leave it.
+/// - Repeated slashes are merged.
+/// - A `.` or `..` segment, after decoding, is refused rather than resolved: a browser never
+///   sends one, and resolving it is the backend's semantics to guess at.
+pub fn normalize_path(raw: &str) -> Result<String, &'static str> {
+    if raw.is_empty() {
+        return Ok("/".to_string());
+    }
+    if !raw.starts_with('/') {
+        return Err("the request target is not an absolute path");
+    }
+    let bytes = raw.as_bytes();
+    let mut decoded = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = raw.get(i + 1..i + 3).ok_or("a truncated percent escape")?;
+            let v = u8::from_str_radix(hex, 16).map_err(|_| "an invalid percent escape")?;
+            if v.is_ascii_alphanumeric() || matches!(v, b'-' | b'.' | b'_' | b'~') {
+                decoded.push(v as char);
+            } else {
+                decoded.push('%');
+                decoded.push_str(&hex.to_ascii_uppercase());
+            }
+            i += 3;
+        } else {
+            decoded.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    let mut out = String::with_capacity(decoded.len());
+    for c in decoded.chars() {
+        if c == '/' && out.ends_with('/') {
+            continue;
+        }
+        out.push(c);
+    }
+    if out.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err("a dot segment in the path");
+    }
+    Ok(out)
 }
 
 /// Host from the request target (absolute-form) or the Host header, normalized.
@@ -159,7 +218,8 @@ mod tests {
         let e = Extracted::from_request(&req(
             "/api/v1?b=2&a=1&a=3&flag",
             Some("Echo.Example.com:80"),
-        ));
+        ))
+        .unwrap();
         assert_eq!(e.host, "echo.example.com");
         assert_eq!(e.path, "/api/v1");
         assert_eq!(e.query_string.as_deref(), Some("b=2&a=1&a=3&flag"));
@@ -185,13 +245,102 @@ mod tests {
 
     #[test]
     fn missing_or_bad_host_becomes_empty() {
-        assert_eq!(Extracted::from_request(&req("/", None)).host, "");
+        assert_eq!(Extracted::from_request(&req("/", None)).unwrap().host, "");
         assert_eq!(
-            Extracted::from_request(&req("/", Some("*.example.com"))).host,
+            Extracted::from_request(&req("/", Some("*.example.com")))
+                .unwrap()
+                .host,
             ""
         );
-        assert_eq!(Extracted::from_request(&req("", None)).path, "/");
+        assert_eq!(Extracted::from_request(&req("", None)).unwrap().path, "/");
+        // `OPTIONS *` names no resource to route; it used to match only a `/` catch-all.
         let r = RequestHeader::build("OPTIONS", b"*", None).unwrap();
-        assert_eq!(Extracted::from_request(&r).path, "*");
+        assert!(Extracted::from_request(&r).is_err());
+    }
+
+    #[test]
+    fn an_absolute_form_target_is_matched_on_its_path_or_refused() {
+        // However the request line was parsed, `http://x/admin` must never be matched as a path
+        // that misses `/admin` and falls through to a catch-all.
+        // A parsed absolute-form target arrives with the authority in the URI and the path
+        // apart from it, and is matched on that path. One that reaches us unparsed, as a path
+        // that does not start with `/`, is refused by `normalize_path` (see path_tests).
+        let mut r = RequestHeader::build("GET", b"/", None).unwrap();
+        r.set_uri("http://x/admin".parse().unwrap());
+        assert_eq!(Extracted::from_request(&r).unwrap().path, "/admin");
+    }
+
+    #[test]
+    fn the_normalised_path_is_flagged_for_forwarding() {
+        let e = Extracted::from_request(&req("//api/%61", None)).unwrap();
+        assert_eq!(e.path, "/api/a");
+        assert!(e.path_normalized);
+        assert!(
+            !Extracted::from_request(&req("/api/a", None))
+                .unwrap()
+                .path_normalized
+        );
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::normalize_path;
+
+    #[test]
+    fn ordinary_paths_pass_unchanged() {
+        for p in [
+            "/",
+            "/api",
+            "/api/v1/users",
+            "/a-b_c.d~e",
+            "/x%20y",
+            "/files/a%2Fb",
+        ] {
+            assert_eq!(normalize_path(p).unwrap(), p, "{p}");
+        }
+        assert_eq!(normalize_path("").unwrap(), "/");
+    }
+
+    #[test]
+    fn encoded_unreserved_characters_are_decoded() {
+        assert_eq!(normalize_path("/%61dmin").unwrap(), "/admin");
+        assert_eq!(normalize_path("/%7Euser").unwrap(), "/~user");
+        // Reserved and other characters stay encoded, with the hex canonicalised.
+        assert_eq!(normalize_path("/a%2fb").unwrap(), "/a%2Fb");
+        assert_eq!(normalize_path("/a%3f").unwrap(), "/a%3F");
+    }
+
+    #[test]
+    fn repeated_slashes_are_merged() {
+        assert_eq!(normalize_path("//admin").unwrap(), "/admin");
+        assert_eq!(
+            normalize_path("/api//v1///users/").unwrap(),
+            "/api/v1/users/"
+        );
+    }
+
+    #[test]
+    fn dot_segments_are_refused_encoded_or_not() {
+        for p in [
+            "/public/../admin",
+            "/public/./admin",
+            "/..",
+            "/public/%2e%2e/admin",
+            "/public/%2E%2E/admin",
+            "/public/.%2e/admin",
+            "/public/%2e/admin",
+        ] {
+            assert!(normalize_path(p).is_err(), "{p}");
+        }
+        // Dots inside a segment are just characters.
+        assert_eq!(normalize_path("/v1.2/..x/x..").unwrap(), "/v1.2/..x/x..");
+    }
+
+    #[test]
+    fn non_origin_targets_and_bad_escapes_are_refused() {
+        for p in ["http://x/admin", "*", "admin", "/a%2", "/a%zz"] {
+            assert!(normalize_path(p).is_err(), "{p}");
+        }
     }
 }

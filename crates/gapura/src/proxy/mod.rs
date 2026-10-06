@@ -77,6 +77,8 @@ pub struct Ctx {
     scheme: &'static str,
     port: u16,
     local_status: Option<u16>,
+    /// Whether the one retry after a failure on a reused upstream connection has been spent.
+    reuse_retried: bool,
     started: Instant,
     upstream_started: Option<Instant>,
     client_abort: bool,
@@ -141,8 +143,23 @@ pub fn effective_timeout(t: &Timeouts) -> Option<Duration> {
     }
 }
 
+/// RFC 9110 section 9.2.2: sending these twice has the effect of sending them once.
+fn idempotent(method: &http::Method) -> bool {
+    use http::Method;
+    [
+        Method::GET,
+        Method::HEAD,
+        Method::OPTIONS,
+        Method::TRACE,
+        Method::PUT,
+        Method::DELETE,
+    ]
+    .contains(method)
+}
+
 fn reason_phrase(code: u16) -> &'static str {
     match code {
+        400 => "bad request target",
         404 => "no route",
         500 => "no valid backend",
         502 => "bad gateway",
@@ -345,6 +362,7 @@ impl ProxyHttp for GapuraProxy {
             scheme: "http",
             port: 0,
             local_status: None,
+            reuse_retried: false,
             started: Instant::now(),
             upstream_started: None,
             client_abort: false,
@@ -369,7 +387,17 @@ impl ProxyHttp for GapuraProxy {
                 .map(str::to_string)
                 .unwrap_or_else(request_id);
             ctx.traceparent = traceparent(header_str(req, "traceparent"));
-            ctx.extracted = Some(Extracted::from_request(req));
+        }
+        match Extracted::from_request(session.req_header()) {
+            Ok(ex) => ctx.extracted = Some(ex),
+            Err(why) => {
+                // No route is consulted: a target that cannot be normalised has no path a
+                // policy could be attached to, and guessing one is the bypass this refuses.
+                tracing::debug!(reason = why, "refusing a request target");
+                ctx.local_status = Some(400);
+                write_local(session, 400, &ctx.request_id).await?;
+                return Ok(true);
+            }
         }
 
         let decision = {
@@ -629,6 +657,22 @@ impl ProxyHttp for GapuraProxy {
             upstream.insert_header(gapura_core::credentials::CONSUMER_HEADER, consumer.as_str())?;
         }
 
+        // Forward the path that was matched. Without this a normalised request would match one
+        // string and reach the backend as another, which is exactly the disagreement
+        // normalisation exists to remove. A URLRewrite below replaces it again, from `ex.path`.
+        if let Some(ex) = ctx.extracted.as_ref().filter(|ex| ex.path_normalized) {
+            let target = match &ex.query_string {
+                Some(q) => format!("{}?{q}", ex.path),
+                None => ex.path.clone(),
+            };
+            match target.parse::<http::Uri>() {
+                Ok(uri) => upstream.set_uri(uri),
+                Err(e) => {
+                    tracing::warn!(error = %e, "the normalised path is not a valid URI, keeping the original")
+                }
+            }
+        }
+
         if let Some(rewrite) = &rule.filters.rewrite {
             if let (Some(modifier), Some(matched), Some(ex)) =
                 (&rewrite.path, &ctx.matched, &ctx.extracted)
@@ -694,6 +738,32 @@ impl ProxyHttp for GapuraProxy {
             upstream_response.insert_header("X-Request-Id", ctx.request_id.clone())?;
         }
         Ok(())
+    }
+
+    /// A failure after the upstream connection was established or reused. Pingora's default
+    /// retries any request that failed on a reused connection, up to its `max_retries` (16),
+    /// whatever the method, replaying the buffered body. A pooled connection the backend already
+    /// closed is the common case and worth one retry; a `POST` the backend may have processed
+    /// before the connection died is not something to send again. So: one retry, idempotent
+    /// methods only, and never once the body no longer fits the retry buffer.
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        e: Box<Error>,
+        ctx: &mut Ctx,
+        client_reused: bool,
+    ) -> Box<Error> {
+        let mut e = e.more_context(format!("Peer: {peer}"));
+        let retry = client_reused
+            && !ctx.reuse_retried
+            && idempotent(&session.req_header().method)
+            && !session.as_ref().retry_buffer_truncated();
+        if retry {
+            ctx.reuse_retried = true;
+        }
+        e.retry.decide_reuse(retry);
+        e
     }
 
     fn fail_to_connect(
@@ -846,6 +916,24 @@ impl ProxyHttp for GapuraProxy {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_idempotent_methods_may_be_replayed() {
+        use http::Method;
+        for m in [
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::PUT,
+            Method::DELETE,
+        ] {
+            assert!(idempotent(&m), "{m}");
+        }
+        for m in [Method::POST, Method::PATCH, Method::CONNECT] {
+            assert!(!idempotent(&m), "{m}");
+        }
+    }
+
     use super::*;
 
     #[test]

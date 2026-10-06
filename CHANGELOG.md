@@ -44,6 +44,21 @@ means what it usually does, moving from one version below to a later one. Releas
   could not trust a private CA. `--control-plane-ca` adds CA certificates to trust;
   `--control-plane-insecure-http` allows http for a control plane on loopback or behind a TLS
   sidecar. `gapura-control` does not yet terminate TLS on `/v1/config` itself.
+- Routes are matched on a normalised path, and that path is what reaches the backend. The raw
+  request target used to be matched and forwarded unchanged, so the two could disagree with the
+  backend's own normalisation: `/public/../admin` matched an unguarded `/public` rule and was
+  served as `/admin`, and `/%61dmin`, `//admin` and an absolute-form `GET http://x/admin` all
+  missed a `/admin` rule carrying a JWT or key policy and fell through to a catch-all. Now
+  percent-encoded unreserved characters are decoded, repeated slashes merged, and a target that is
+  not an absolute path, or holds a `.` or `..` segment (encoded or not), is answered `400`. An
+  encoded slash (`%2F`) is left as it is, as Envoy does by default. `OPTIONS *` is now `400`.
+- A JWT policy that names an issuer or an audience requires the claim. `jsonwebtoken` only checks
+  `iss` and `aud` when the token carries them, so a correctly signed token that simply left `aud`
+  out was accepted by a policy with `audience: orders`. `nbf` is now honoured too.
+- A request is replayed after a failure on a reused upstream connection only if its method is
+  idempotent, and only once. Pingora's default, which this did not override, retried any method up
+  to sixteen times, replaying the body: a `POST` the backend had processed before its keep-alive
+  connection died could be sent again.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running
