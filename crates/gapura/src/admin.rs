@@ -79,11 +79,7 @@ impl AdminApp {
                 // Never expose key material, even on the admin port: the port is a deployment
                 // promise, not a property of this code.
                 let redacted = serde_json::to_value(&runtime.config).map(|mut v| {
-                    for listener in v["listeners"].as_array_mut().into_iter().flatten() {
-                        if let Some(key) = listener.pointer_mut("/tls/key_pem") {
-                            *key = serde_json::Value::String("<redacted>".into());
-                        }
-                    }
+                    redact(&mut v);
                     v
                 });
                 match redacted.and_then(|v| serde_json::to_vec_pretty(&v)) {
@@ -112,12 +108,98 @@ impl ServeHttp for AdminApp {
     }
 }
 
+/// Strip every field of a serialized `Config` that is a secret or stands in for one.
+///
+/// The list is the point, and it is short on purpose: a TLS private key, a JWKS (whose `oct` keys
+/// are HMAC signing secrets -- anyone holding one can mint a token every JWT route accepts), and
+/// the credential map (SHA-256 of issued API keys, which identify every key that opens a route).
+/// Adding a secret-bearing field to `Config` means adding it here, and the test below builds a
+/// config with one of each so a field that is forgotten shows up as a value in the dump.
+fn redact(v: &mut serde_json::Value) {
+    const REDACTED: &str = "<redacted>";
+    for listener in v["listeners"].as_array_mut().into_iter().flatten() {
+        if let Some(key) = listener.pointer_mut("/tls/key_pem") {
+            *key = REDACTED.into();
+        }
+        for rule in listener["rules"].as_array_mut().into_iter().flatten() {
+            for plugin in rule["plugins"].as_array_mut().into_iter().flatten() {
+                if let Some(jwks) = plugin.get_mut("jwks") {
+                    *jwks = REDACTED.into();
+                }
+            }
+        }
+    }
+    if let Some(creds) = v.get_mut("credentials") {
+        let n = creds.as_object().map_or(0, |m| m.len());
+        *creds = format!("{REDACTED}: {n} keys").into();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gapura_core::config::{ListenerConfig, Protocol, TlsBundle};
     use gapura_core::Config;
 
     use super::*;
+
+    /// One of each secret-bearing field, with values that are recognisable in a dump. A field
+    /// added to `Config` that carries a secret and is not handled in `redact` leaves its value
+    /// here, which is how the test finds it: by looking for the secrets, not for `<redacted>`.
+    #[test]
+    fn debug_config_never_carries_key_material_of_any_kind() {
+        use gapura_core::config::{Filters, JwtPolicy, KeyAuthPolicy, Plugin, RouteRule, Timeouts};
+        const TLS_KEY: &str = "TLS-PRIVATE-KEY-MATERIAL";
+        const HMAC: &str = "HMAC-SIGNING-SECRET";
+        const KEY_HASH: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let rule = RouteRule {
+            route: "apps/orders".into(),
+            rule_index: 0,
+            creation_timestamp: String::new(),
+            matches: vec![],
+            filters: Filters::default(),
+            backends: vec![],
+            timeouts: Timeouts::default(),
+            rate_limit: None,
+            plugins: vec![
+                Plugin::Jwt(JwtPolicy {
+                    issuer: Some("https://id.example".into()),
+                    audience: Some("orders".into()),
+                    jwks: format!(r#"{{"keys":[{{"kty":"oct","alg":"HS256","k":"{HMAC}"}}]}}"#),
+                }),
+                Plugin::KeyAuth(KeyAuthPolicy::default()),
+            ],
+        };
+        let config = Config {
+            listeners: vec![ListenerConfig {
+                id: "infra/main/https".into(),
+                port: 443,
+                client_port: None,
+                protocol: Protocol::Https,
+                hostname: None,
+                tls: Some(TlsBundle {
+                    secret: "infra/tls".into(),
+                    cert_pem: "CERT".into(),
+                    key_pem: TLS_KEY.into(),
+                }),
+                rules: vec![rule],
+            }],
+            ports: Default::default(),
+            clusters: Default::default(),
+            credentials: [(KEY_HASH.to_string(), "team-x".to_string())].into(),
+        };
+        let mut v = serde_json::to_value(&config).unwrap();
+        redact(&mut v);
+        let dump = v.to_string();
+        for secret in [TLS_KEY, HMAC, KEY_HASH] {
+            assert!(!dump.contains(secret), "{secret} left the process: {dump}");
+        }
+        // What is not secret stays, so the endpoint still answers its question.
+        assert!(
+            dump.contains("https://id.example") && dump.contains("CERT"),
+            "{dump}"
+        );
+        assert!(dump.contains("1 keys"), "{dump}");
+    }
 
     #[test]
     fn debug_status_serves_the_patches_of_the_last_reload() {
