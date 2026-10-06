@@ -13,6 +13,15 @@ use crate::hostname;
 /// next to the round-robin cursors and parsed TLS certs.
 pub type RegexMap = HashMap<String, Arc<regex::Regex>>;
 
+/// A path pattern must match the whole path, as Envoy and Istio treat Gateway API's
+/// RegularExpression: `/admin` matches `/admin` and not `/x/admin-y`. A pattern meant as a prefix
+/// says so with a trailing `.*`. The raw pattern is compiled first so one with an unbalanced `)`
+/// is refused instead of escaping the anchoring group.
+pub fn compile_path_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::Regex::new(pattern)?;
+    regex::Regex::new(&format!("^(?:{pattern})$"))
+}
+
 /// Compile every `PathMatch::Regex` pattern of the port tables into a side map, and report the
 /// patterns that could not be compiled (deduped like the map).
 ///
@@ -30,7 +39,7 @@ pub fn compile_regexes(config: &Config) -> (RegexMap, Vec<String>) {
             if out.contains_key(pattern) || skipped.iter().any(|s| s == pattern) {
                 continue;
             }
-            match regex::Regex::new(pattern) {
+            match compile_path_regex(pattern) {
                 Ok(re) => {
                     out.insert(pattern.clone(), Arc::new(re));
                 }
@@ -575,9 +584,17 @@ mod tests {
     }
 
     #[test]
+    fn a_path_regex_cannot_close_its_anchoring_group() {
+        // Wrapped as `^(?:a)|(b)$` this would compile and match any path starting with `a`.
+        assert!(compile_path_regex("a)|(b").is_err());
+        assert!(compile_path_regex("/a|/b").unwrap().is_match("/b"));
+        assert!(!compile_path_regex("/a|/b").unwrap().is_match("/bx"));
+    }
+
+    #[test]
     fn regex_match_hits_and_misses_against_the_raw_path() {
         let mut rx = m("/static");
-        rx.path = PathMatch::Regex("^/api/v[0-9]+/".to_string());
+        rx.path = PathMatch::Regex("^/api/v[0-9]+/.*".to_string());
         let listeners = vec![listener(
             "infra/gw/http",
             80,
@@ -615,6 +632,11 @@ mod tests {
         );
         assert_eq!(at("/static/x").as_deref(), Some("apps/static"));
         assert_eq!(
+            at("/x/api/v1/").as_deref(),
+            None,
+            "the pattern matches the whole path, not somewhere inside it"
+        );
+        assert_eq!(
             at("/api%2Fv1/x").as_deref(),
             None,
             "matching runs on the raw path, no percent-decoding"
@@ -624,9 +646,9 @@ mod tests {
     #[test]
     fn regex_loses_to_exact_and_prefix_no_matter_the_pattern_length() {
         let mut rx_long = m("/");
-        rx_long.path = PathMatch::Regex("^/api/v[0-9]+/very/long/pattern".to_string());
+        rx_long.path = PathMatch::Regex("^/api/v[0-9]+/very/long/pattern.*".to_string());
         let mut rx_short = m("/");
-        rx_short.path = PathMatch::Regex("^/api".to_string());
+        rx_short.path = PathMatch::Regex("^/api.*".to_string());
         let listeners = vec![listener(
             "infra/gw/http",
             80,

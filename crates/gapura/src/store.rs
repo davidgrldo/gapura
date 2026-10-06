@@ -384,7 +384,7 @@ mod tests {
     fn regexes_are_compiled_once_per_generation() {
         use gapura_core::config::{PathMatch, PortEntry, RouteMatch, RouteRule, Timeouts};
         let match_ = RouteMatch {
-            path: PathMatch::Regex("^/api/v[0-9]+/".into()),
+            path: PathMatch::Regex("^/api/v[0-9]+/.*".into()),
             headers: vec![],
             query: vec![],
             method: None,
@@ -428,7 +428,7 @@ mod tests {
             Vec::new(),
         );
         assert!(
-            rt.regexes().contains_key("^/api/v[0-9]+/"),
+            rt.regexes().contains_key("^/api/v[0-9]+/.*"),
             "the runtime carries compiled patterns for the data plane"
         );
     }

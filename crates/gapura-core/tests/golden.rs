@@ -555,7 +555,8 @@ fn unsupported_filter() {
         (ConditionStatus::False, "UnsupportedValue")
     );
     let (_, listeners, _) = gateway_patch(&t);
-    assert_eq!(listener(listeners, "http").attached_routes, 0);
+    // Attached though not accepted: the spec counts it, and serves none of its rules.
+    assert_eq!(listener(listeners, "http").attached_routes, 1);
     assert!(t.config.listeners[0].rules.is_empty());
     assert!(
         t.config.clusters.is_empty(),
