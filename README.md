@@ -35,7 +35,9 @@ Gateway API core, served out of one binary with no database and no separate cont
   config swap so in-flight requests finish on the config they started with.
 - **Console**: off by default. `console.enabled` deploys `gapura-control` in its own Deployment
   and Service with read-only RBAC: sign-in from a local users file or OIDC, and routes scoped to
-  the namespaces each group is granted. The stock install stays one binary with no database.
+  the namespaces each group is granted. The stock install stays one binary with no database;
+  store mode (`console.store`) keeps accounts and roles in a Postgres you bring -- the chart
+  never ships one.
 
 ## The name
 
@@ -268,6 +270,10 @@ Namespace, Service, EndpointSlice, TLS Secrets, and ConfigMaps (`ca.crt` only), 
 the holder of the `gapura-leader` Lease, and publishes `--publish-address` values and the
 LoadBalancer addresses of `--publish-service namespace/name` into Gateway status.
 `hack/kind-e2e.sh` runs the control-plane e2e against a local kind cluster.
+
+A third config source exists besides files (`--config-dir`, above) and the cluster: `--control-plane`
+polls the configuration endpoint `gapura-control` serves and keeps a disk cache, so a control-plane
+outage costs new configuration, not traffic. The chart does not expose it yet.
 
 TLS to backends: attach a `BackendTLSPolicy` (CA from a ConfigMap `ca.crt`, or
 `wellKnownCACertificates: System`) to a Service, or annotate the Service with
