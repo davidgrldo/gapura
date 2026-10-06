@@ -6,5 +6,7 @@ console:
     existingSecret: gapura-console-db
     bootstrap:
       existingSecret: gapura-console-bootstrap
+    ca:
+      existingSecret: gapura-console-db-ca
   sessionKey:
     existingSecret: gapura-console-session

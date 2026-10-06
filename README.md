@@ -20,7 +20,8 @@ Gateway API core, served out of one binary. Nothing in the request path touches 
 a separate control plane is optional rather than required:
 
 - **Routing** on hostname, path (`Exact`, `PathPrefix` and `RegularExpression`), header, query
-  parameter and method.
+  parameter and method. A `RegularExpression` path must match the whole path, as in Envoy and
+  Istio, so a pattern meant as a prefix ends in `.*`.
 - **Filters**: request and response header modification, `RequestRedirect`, `RequestMirror` (every request, headers only; a partial mirror is refused), and
   `URLRewrite`.
 - **TLS**: termination with the certificate chosen per SNI, and TLS to backends via
@@ -42,7 +43,9 @@ a separate control plane is optional rather than required:
   store mode (`console.store`) keeps what the console owns -- accounts, roles, the audit trail,
   and the configuration it serves to data planes running in `--control-plane` mode -- in a
   Postgres you bring. The chart never ships one, and the data plane never opens a connection to
-  it: it polls `gapura-control` and keeps a disk cache.
+  it: it polls `gapura-control` and keeps a disk cache. `sslmode=require` in the database URL
+  turns on TLS to it, always verified; `console.store.ca` takes the CA bundle of a service that
+  signs with its own, such as RDS or Cloud SQL.
 
 ## The name
 

@@ -17,6 +17,9 @@
 {{- end }}
 {{- end }}
 {{- $localFile := and (eq $mode "local") (not $store) }}
+{{- /* The store's CA bundle, mounted only with a store: without one there is no connection for it
+       to verify. */}}
+{{- $storeCa := and $store (((((.Values.console).store).ca).existingSecret) | default "") }}
 {{- if and $localFile (not (((.Values.console).auth).local).existingSecret) (eq (len $localUsers) 0) }}
 {{- fail "console.auth.mode local with no console.auth.local.users: a console nobody can log into is the failure this catches" }}
 {{- end }}
@@ -154,10 +157,16 @@ spec:
         app.kubernetes.io/component: console
     spec:
       serviceAccountName: {{ $fullname }}-control
-      {{- if $localFile }}
+      {{- if or $localFile $storeCa }}
       volumes:
+      {{- if $localFile }}
       - name: users
         secret: { secretName: {{ $usersSecret }} }
+      {{- end }}
+      {{- if $storeCa }}
+      - name: database-ca
+        secret: { secretName: {{ $storeCa }} }
+      {{- end }}
       {{- end }}
       securityContext:
         runAsNonRoot: true
@@ -213,6 +222,10 @@ spec:
             secretKeyRef:
               name: {{ $store }}
               key: {{ (((.Values.console).store).urlKey) | default "database-url" }}
+        {{- if $storeCa }}
+        - name: DATABASE_CA_FILE
+          value: /etc/gapura-database-ca/{{ ((((.Values.console).store).ca).key) | default "ca.crt" }}
+        {{- end }}
         {{- with (((.Values.console).store).bootstrap) }}
         {{- if .existingSecret }}
         - name: GAPURA_BOOTSTRAP_USERNAME
@@ -228,9 +241,14 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
-        {{- if $localFile }}
+        {{- if or $localFile $storeCa }}
         volumeMounts:
+        {{- if $localFile }}
         - { name: users, mountPath: /etc/gapura-control, readOnly: true }
+        {{- end }}
+        {{- if $storeCa }}
+        - { name: database-ca, mountPath: /etc/gapura-database-ca, readOnly: true }
+        {{- end }}
         {{- end }}
         ports:
         - name: http
