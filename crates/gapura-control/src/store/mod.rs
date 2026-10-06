@@ -132,7 +132,9 @@ impl Store {
 
         let services = tx
             .query(
-                "select name, protocol, host, port from services order by name",
+                "select w.name as workspace, s.name, s.protocol, s.host, s.port
+                   from services s join workspaces w on w.id = s.workspace_id
+                  order by w.name, s.name",
                 &[],
             )
             .await?
@@ -140,6 +142,7 @@ impl Store {
             .map(|r| {
                 let protocol: String = r.get("protocol");
                 StoreService {
+                    workspace: r.get("workspace"),
                     name: r.get("name"),
                     protocol: if protocol == "https" {
                         Protocol::Https
@@ -154,9 +157,12 @@ impl Store {
 
         let routes = tx
             .query(
-                "select r.name, s.name as service, r.hosts, r.methods, r.paths, r.priority
-                   from routes r join services s on s.id = r.service_id
-                  order by r.name",
+                "select w.name as workspace, r.name, s.name as service, r.hosts, r.methods,
+                        r.paths, r.priority
+                   from routes r
+                   join services s   on s.id = r.service_id
+                   join workspaces w on w.id = r.workspace_id
+                  order by w.name, r.name",
                 &[],
             )
             .await?
@@ -167,6 +173,7 @@ impl Store {
                 let paths = parse_paths(&paths)
                     .with_context(|| format!("route {name:?} has paths this binary cannot read"))?;
                 Ok(StoreRoute {
+                    workspace: r.get("workspace"),
                     name,
                     service: r.get("service"),
                     hosts: r.get("hosts"),
@@ -183,12 +190,15 @@ impl Store {
         // leaving the row out, is the safe direction.
         let plugins = tx
             .query(
-                "select p.name, p.config, r.name as route, s.name as service
+                "select w.name as workspace, p.name, p.config, r.name as route, s.name as service,
+                        coalesce(r.workspace_id <> p.workspace_id, false)
+                          or coalesce(s.workspace_id <> p.workspace_id, false) as foreign_target
                    from plugins p
+                   join workspaces w    on w.id = p.workspace_id
                    left join routes r   on r.id = p.route_id
                    left join services s on s.id = p.service_id
                   where p.enabled and p.consumer_id is null
-                  order by p.name",
+                  order by w.name, p.name, p.id",
                 &[],
             )
             .await?
@@ -196,12 +206,23 @@ impl Store {
             .map(|r| {
                 let name: String = r.get("name");
                 let config: serde_json::Value = r.get("config");
+                let workspace: String = r.get("workspace");
                 let route: Option<String> = r.get("route");
                 let service: Option<String> = r.get("service");
+                // The foreign keys allow a policy to name another workspace's route or service.
+                // Compiled, it would attach to a same-named route in its own workspace instead --
+                // the wrong target, silently -- so it fails the snapshot like any unreadable row.
+                if r.get::<_, bool>("foreign_target") {
+                    anyhow::bail!(
+                        "policy {name:?} in workspace {workspace:?} names a route or service of \
+                         another workspace"
+                    );
+                }
                 let plugin = parse_plugin(&name, config).with_context(|| {
                     format!("policy {name:?} on route {route:?} service {service:?} cannot be read")
                 })?;
                 Ok(StorePlugin {
+                    workspace,
                     route,
                     service,
                     plugin,
@@ -407,7 +428,13 @@ fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
             match e.get("type").and_then(|t| t.as_str()) {
                 Some("exact") => Ok(PathMatch::Exact(value)),
                 Some("prefix") => Ok(PathMatch::Prefix(value)),
-                Some("regex") => Ok(PathMatch::Regex(value)),
+                Some("regex") => {
+                    // Refused here rather than skipped by the data plane, where a pattern that
+                    // does not compile would leave its route matching nothing.
+                    gapura_core::matcher::compile_path_regex(&value)
+                        .with_context(|| format!("path regex {value:?} does not compile"))?;
+                    Ok(PathMatch::Regex(value))
+                }
                 other => {
                     anyhow::bail!("path type {other:?} is not one of exact, prefix, regex: {e}")
                 }

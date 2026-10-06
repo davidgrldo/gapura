@@ -8,6 +8,42 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Workspaces in the control plane's store no longer collide. A route found its service by name
+  alone, so two workspaces that each had an `orders` service could send one workspace's traffic
+  to the other's upstream; and a policy attached to a route name applied to every workspace's
+  route of that name. A route now resolves its service only inside its own workspace, a policy
+  applies only inside its own workspace, and a policy row that names a route or service of
+  another workspace fails the configuration (503, data planes keep their cache) instead of
+  guessing. A store route's id now carries its workspace, `default/orders` rather than `orders`,
+  which is what the access log and the `route` metrics label show; dashboards keyed on the bare
+  name need the new value. Kubernetes mode is unchanged.
+- A `key_auth` route no longer forwards the caller's API key to the upstream. The key is the
+  gateway's to check; the upstream learns who called from `X-Consumer-Username`, and before this
+  it also received the key itself, so every upstream's logs and every service it called on with
+  the same headers held a working credential for every other `key_auth` route. The header named
+  by the policy is now removed once the key is accepted. An upstream that read the key directly
+  must switch to `X-Consumer-Username`.
+- Request mirroring no longer follows redirects. A mirror backend that answered 3xx made the
+  gateway send a second copy of the request to wherever the `Location` header pointed, from the
+  gateway's own network position. The mirror's answer is still discarded either way.
+- A `RegularExpression` path now has to match the whole request path, the way Envoy and Istio
+  read Gateway API's implementation-specific regex. Before, any match anywhere in the path was
+  enough, so `/admin` also caught `/public/admin-notes`. **A pattern written as a prefix needs a
+  trailing `.*`**: `^/api/v[0-9]+/` becomes `^/api/v[0-9]+/.*`. Store-mode `regex` paths follow
+  the same rule, and one that does not compile now fails the configuration (503, data planes keep
+  their cache) instead of leaving its route matching nothing.
+- `ReplacePrefixMatch` is now refused with an `Exact` path match, not only with a
+  `RegularExpression` one. Gateway API allows it with `PathPrefix` only; before, an `Exact` rule
+  with it was accepted. The route reports `Accepted=False` with `UnsupportedValue`.
+- A listener's `attachedRoutes` now counts a route that attached but was not accepted, for example
+  one using an unsupported filter. Gateway API requires those to be counted; they were left out.
+  None of that route's rules are served, as before.
+- `docs/RELEASING.md` is rewritten for repeat releases. It described the one-time launch of 0.1.0
+  and said the `workflow_dispatch` path was broken, which stopped being true when the `guard` job
+  and the dispatched-version handling landed. It now covers a candidate by dispatch, a release by
+  tag on the last good candidate's commit, both images in the post-release checks, and what to do
+  when only the `notes` job fails. The GitHub release notes now list the `gapura-control` image,
+  which every release run publishes alongside the data-plane image.
 - `/v1/config`'s ETag is now a hash of the configuration it serves, not the store's version
   counter. The counter starts again when the database is restored or recreated, and it does not
   move when a control-plane flag or a new release changes what the same rows compile to. In each
