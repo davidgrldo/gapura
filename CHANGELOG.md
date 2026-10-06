@@ -8,6 +8,18 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A `RegularExpression` path now has to match the whole request path, the way Envoy and Istio
+  read Gateway API's implementation-specific regex. Before, any match anywhere in the path was
+  enough, so `/admin` also caught `/public/admin-notes`. **A pattern written as a prefix needs a
+  trailing `.*`**: `^/api/v[0-9]+/` becomes `^/api/v[0-9]+/.*`. Store-mode `regex` paths follow
+  the same rule, and one that does not compile now fails the configuration (503, data planes keep
+  their cache) instead of leaving its route matching nothing.
+- `ReplacePrefixMatch` is now refused with an `Exact` path match, not only with a
+  `RegularExpression` one. Gateway API allows it with `PathPrefix` only; before, an `Exact` rule
+  with it was accepted. The route reports `Accepted=False` with `UnsupportedValue`.
+- A listener's `attachedRoutes` now counts a route that attached but was not accepted, for example
+  one using an unsupported filter. Gateway API requires those to be counted; they were left out.
+  None of that route's rules are served, as before.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a

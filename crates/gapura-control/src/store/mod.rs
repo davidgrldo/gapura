@@ -384,7 +384,13 @@ fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
             match e.get("type").and_then(|t| t.as_str()) {
                 Some("exact") => Ok(PathMatch::Exact(value)),
                 Some("prefix") => Ok(PathMatch::Prefix(value)),
-                Some("regex") => Ok(PathMatch::Regex(value)),
+                Some("regex") => {
+                    // Refused here rather than skipped by the data plane, where a pattern that
+                    // does not compile would leave its route matching nothing.
+                    gapura_core::matcher::compile_path_regex(&value)
+                        .with_context(|| format!("path regex {value:?} does not compile"))?;
+                    Ok(PathMatch::Regex(value))
+                }
                 other => {
                     anyhow::bail!("path type {other:?} is not one of exact, prefix, regex: {e}")
                 }
