@@ -439,6 +439,7 @@ fn console(store: Arc<Store>, auth_mode: gapura_control::login::AuthMode) -> axu
         local_users: Default::default(),
         session_lifetime: Duration::from_secs(3600),
         store: Some(store),
+        sign_in: Default::default(),
     })
 }
 

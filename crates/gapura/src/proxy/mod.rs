@@ -6,7 +6,8 @@
 //! (502/504 mapping), `logging` (access log + metrics).
 
 pub mod attrs;
-pub mod client;
+// Shared with the console, which has to answer the same question for its sign-in limits.
+pub use gapura_core::client_ip as client;
 pub mod jwt;
 pub mod rate_limit;
 pub mod select;
@@ -87,6 +88,10 @@ pub struct Ctx {
     /// rather than written straight onto the request, because the upstream header can only be
     /// set after the inbound one is removed, and that happens later.
     consumer: Option<String>,
+    /// The headers that carried an API key a key_auth policy accepted. The key is the gateway's
+    /// to check, not the upstream's to see: it is removed before forwarding, the way the caller's
+    /// name replaces it.
+    key_headers: Vec<String>,
 }
 
 impl Ctx {
@@ -322,7 +327,14 @@ fn fire_mirror(rt: &Arc<Runtime>, mirror: &Mirror, upstream: &RequestHeader, ctx
     let route = ctx.route_label().to_string();
     let method = upstream.method.clone();
     let (url, headers) = mirror_parts(upstream, endpoint);
-    let client = MIRROR_CLIENT.get_or_init(reqwest::Client::new);
+    // No redirects: a mirror is fire-and-forget, and following a 3xx would send a copy of the
+    // request wherever the mirror backend's Location pointed, from the gateway's own network.
+    let client = MIRROR_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("a client with no TLS settings builds, as reqwest::Client::new assumes")
+    });
     let request = client.request(method, url).headers(headers);
     ctx.mirrored = true;
     tokio::spawn(async move {
@@ -368,6 +380,7 @@ impl ProxyHttp for GapuraProxy {
             client_abort: false,
             mirrored: false,
             consumer: None,
+            key_headers: Vec::new(),
         }
     }
 
@@ -500,6 +513,7 @@ impl ProxyHttp for GapuraProxy {
                                 // has been removed.
                                 Ok(consumer) => {
                                     ctx.consumer = Some(consumer.to_string());
+                                    ctx.key_headers.push(policy.header.clone());
                                     None
                                 }
                                 Err(r) => Some((
@@ -655,6 +669,9 @@ impl ProxyHttp for GapuraProxy {
         upstream.remove_header(gapura_core::credentials::CONSUMER_HEADER);
         if let Some(consumer) = &ctx.consumer {
             upstream.insert_header(gapura_core::credentials::CONSUMER_HEADER, consumer.as_str())?;
+        }
+        for header in &ctx.key_headers {
+            upstream.remove_header(header.as_str());
         }
 
         // Forward the path that was matched. Without this a normalised request would match one

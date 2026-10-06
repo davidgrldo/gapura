@@ -241,8 +241,10 @@ impl Writer {
                     if changed.is_err() { return; }
                 }
                 _ = tick.tick() => {
-                    // Every 10 minutes forget what was written: an object deleted and recreated
-                    // with an identical translation would otherwise never get its status back.
+                    // Every 10 minutes forget what was written, so a status someone else changed
+                    // or cleared is put back. A recreated object needs no wait: its UID is part of
+                    // the patch, so its hash differs from the one written for the object it
+                    // replaced.
                     ticks += 1;
                     if ticks.is_multiple_of(120) {
                         self.written.clear();
@@ -378,6 +380,20 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_recreated_object_is_written_again_though_its_status_is_the_same() {
+        let route = |uid: &str| StatusPatch::HttpRoute {
+            namespace: "apps".into(),
+            name: "echo".into(),
+            uid: Some(uid.into()),
+            parents: vec![],
+        };
+        // Same name, so the same cache entry; a different object, so a different hash, and the
+        // writer does not take the old object's status for the new one's.
+        assert_eq!(target_of(&route("a")), target_of(&route("b")));
+        assert_ne!(hash_of(&route("a")), hash_of(&route("b")));
+    }
+
     fn cond(type_: &str, status: ConditionStatus) -> Condition {
         Condition::new(type_, status, "R", "m", Some(3))
     }
@@ -390,6 +406,7 @@ mod tests {
         ] });
         let p = StatusPatch::GatewayClass {
             name: "g".into(),
+            uid: None,
             conditions: vec![
                 cond("Accepted", ConditionStatus::True),
                 cond("Programmed", ConditionStatus::True),
@@ -421,6 +438,7 @@ mod tests {
     fn gateway_class_body_carries_supported_features_as_objects() {
         let p = StatusPatch::GatewayClass {
             name: "gapura".into(),
+            uid: None,
             conditions: vec![cond("Accepted", ConditionStatus::True)],
             supported_features: vec!["Gateway".into(), "HTTPRoute".into()],
         };
@@ -439,6 +457,7 @@ mod tests {
         let p = StatusPatch::Gateway {
             namespace: "infra".into(),
             name: "main".into(),
+            uid: None,
             addresses: vec!["203.0.113.7".into(), "lb.example.com".into()],
             conditions: vec![cond("Accepted", ConditionStatus::True)],
             listeners: vec![ListenerStatus {
@@ -474,6 +493,7 @@ mod tests {
         let p = StatusPatch::HttpRoute {
             namespace: "apps".into(),
             name: "echo".into(),
+            uid: None,
             parents: vec![RouteParentStatus {
                 parent_ref: ParentReference {
                     name: "main".into(),
@@ -502,11 +522,13 @@ mod tests {
     fn hash_changes_with_content() {
         let a = StatusPatch::GatewayClass {
             name: "g".into(),
+            uid: None,
             conditions: vec![cond("Accepted", ConditionStatus::True)],
             supported_features: vec![],
         };
         let b = StatusPatch::GatewayClass {
             name: "g".into(),
+            uid: None,
             conditions: vec![cond("Accepted", ConditionStatus::False)],
             supported_features: vec![],
         };

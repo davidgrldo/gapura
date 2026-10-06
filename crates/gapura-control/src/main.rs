@@ -3,6 +3,7 @@
 
 mod cli;
 
+use anyhow::Context;
 use clap::Parser;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -103,7 +104,15 @@ async fn main() -> anyhow::Result<()> {
     let source = Arc::new(gapura_control::kube_source::Source::from_environment().await?);
     let store = match &args.database_url {
         Some(url) => {
-            let store = Arc::new(gapura_control::store::Store::connect(url).await?);
+            let ca =
+                match &args.database_ca_file {
+                    Some(path) => Some(std::fs::read(path).with_context(|| {
+                        format!("reading the database CA file {}", path.display())
+                    })?),
+                    None => None,
+                };
+            let store =
+                Arc::new(gapura_control::store::Store::connect_with(url, ca.as_deref()).await?);
             store.migrate().await?;
             gapura_control::bootstrap::run(&store).await?;
             // Made now rather than by the first unknown name to sign in, which would otherwise
@@ -124,6 +133,9 @@ async fn main() -> anyhow::Result<()> {
         oidc,
         session_lifetime: std::time::Duration::from_secs(args.session_lifetime_seconds),
         store: store.clone(),
+        sign_in: Arc::new(gapura_control::throttle::Throttle::new(
+            args.trusted_proxies.clone(),
+        )),
     };
     // Served only when there is a store to serve it from, on its own listener: two servers in
     // one process rather than one router, so the port is the boundary and not a path prefix
@@ -135,17 +147,57 @@ async fn main() -> anyhow::Result<()> {
                 http_ports: args.data_plane_http_ports.clone(),
             },
         });
-        let listener = tokio::net::TcpListener::bind(args.listen_config).await?;
-        tracing::info!(addr = %listener.local_addr()?, "configuration endpoint listening");
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, gapura_control::config_api::router(api)).await {
-                tracing::error!(error = %e, "the configuration endpoint stopped");
+        // Read before binding, so a bad certificate stops the start instead of a listener
+        // that refuses every handshake.
+        let acceptor = match (&args.config_tls_cert, &args.config_tls_key) {
+            (Some(cert), Some(key)) => {
+                let read = |p: &std::path::PathBuf| {
+                    std::fs::read(p).with_context(|| format!("reading {}", p.display()))
+                };
+                Some(gapura_control::config_api::tls_acceptor(
+                    &read(cert)?,
+                    &read(key)?,
+                )?)
             }
-        });
+            _ => None,
+        };
+        let listener = tokio::net::TcpListener::bind(args.listen_config).await?;
+        let router = gapura_control::config_api::router(api);
+        match acceptor {
+            Some(acceptor) => {
+                tracing::info!(addr = %listener.local_addr()?, "configuration endpoint listening, TLS");
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        gapura_control::config_api::serve_tls(listener, router, acceptor).await
+                    {
+                        tracing::error!(error = %e, "the configuration endpoint stopped");
+                    }
+                });
+            }
+            None => {
+                tracing::warn!(
+                    addr = %listener.local_addr()?,
+                    "configuration endpoint listening in plain text: every response carries \
+                     private keys; set --config-tls-cert and --config-tls-key, or keep it \
+                     behind a sidecar or mesh that encrypts it"
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, router).await {
+                        tracing::error!(error = %e, "the configuration endpoint stopped");
+                    }
+                });
+            }
+        }
     }
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "gapura-control listening");
-    axum::serve(listener, gapura_control::api::router_with(state)).await?;
+    // With each connection's address, which the sign-in limits count against.
+    axum::serve(
+        listener,
+        gapura_control::api::router_with(state)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

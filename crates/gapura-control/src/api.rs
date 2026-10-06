@@ -5,7 +5,7 @@ use crate::rows::{self, Row};
 use crate::scope::{self, Scope};
 use crate::state::AppState;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
     routing::{get, patch, post, put},
@@ -46,7 +46,38 @@ pub fn router_with(state: AppState) -> Router {
         // Added last, so it wraps every route above and the fallback: a request another site's
         // page sent is refused before any handler reads it. See `same_origin`.
         .layer(axum::middleware::from_fn(crate::same_origin::guard))
+        // Outermost, so a refusal from the guard carries them too.
+        .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
+}
+
+/// What every console response tells the browser, the document and the API alike. The console
+/// loads nothing from anywhere else (`web/check.mjs` fails a build that does), so the policy can
+/// be `'self'` throughout. Styles allow inline because Svelte and the component library set
+/// `style` attributes. No HSTS: whether the console is only ever reached over HTTPS is the
+/// ingress's to know, and a wrong guess pins a host for a year.
+const SECURITY_HEADERS: [(header::HeaderName, &str); 4] = [
+    (
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; \
+         base-uri 'none'; frame-ancestors 'none'",
+    ),
+    // Older browsers ignore frame-ancestors; this is their way of hearing the same thing.
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    // The OIDC callback URL carries the authorization code, and nothing it links to needs it.
+    (header::REFERRER_POLICY, "no-referrer"),
+];
+
+async fn security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    for (name, value) in SECURITY_HEADERS {
+        headers
+            .entry(name)
+            .or_insert(header::HeaderValue::from_static(value));
+    }
+    response
 }
 
 /// An answer the console shows as it is: `status`, with `{"error": sentence}` as the body.
@@ -360,6 +391,7 @@ mod tests {
             oidc: std::sync::Arc::new(test_oidc()),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 
@@ -566,6 +598,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         oidc: Arc::new(tests::test_oidc()),
         session_lifetime: std::time::Duration::from_secs(3600),
         store: None,
+        sign_in: Default::default(),
     }
 }
 
@@ -806,6 +839,7 @@ mod overview_tests {
             oidc: Arc::new(tests::test_oidc()),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
+            sign_in: Default::default(),
         }
     }
 

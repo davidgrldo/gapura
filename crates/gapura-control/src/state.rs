@@ -29,4 +29,6 @@ pub struct AppState {
     /// Set in store mode, when `DATABASE_URL` is: accounts and roles are rows there, and every
     /// request reads its caller back from it. `None` is Kubernetes mode.
     pub store: Option<Arc<Store>>,
+    /// Failed sign-ins, counted per name at an address and per address.
+    pub sign_in: Arc<crate::throttle::Throttle>,
 }
