@@ -136,10 +136,11 @@ impl Args {
     /// Cross-argument checks clap cannot express.
     ///
     /// A port listed under both `--listen-http` and `--listen-https` would make Pingora fail the
-    /// second bind at startup. An address listed twice is worse than a failed bind: Pingora sets
-    /// `SO_REUSEPORT`, so both services bind it and the kernel splits new connections between
-    /// them, which reads as a gateway answering at random. `first_unbindable` cannot catch it
-    /// either, since it releases each socket before trying the next one.
+    /// second bind at startup. An address listed twice is worse than a failed bind: Pingora keeps
+    /// one table of listening sockets per process, keyed by address, so the second service finds
+    /// the first one's socket there and accepts on it too, and the kernel splits new connections
+    /// between them, which reads as a gateway answering at random. `first_unbindable` cannot catch
+    /// it either, since it releases each socket before trying the next one.
     pub fn validate(&self) -> Result<(), String> {
         let mut seen = std::collections::HashSet::new();
         let repeated: std::collections::BTreeSet<String> = self
