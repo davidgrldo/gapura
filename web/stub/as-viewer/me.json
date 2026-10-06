@@ -5,6 +5,6 @@
   "method": "oidc",
   "superuser": false,
   "waiting": false,
-  "roles": [{ "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "viewer" }],
+  "roles": [{ "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "viewer", "sources": [{ "kind": "group", "name": "storefront-readers", "role": "viewer" }] }],
   "grantable": []
 }

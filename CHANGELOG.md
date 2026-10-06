@@ -15,17 +15,20 @@ means what it usually does, moving from one version below to a later one. Releas
 - Superusers and workspace admins grant, change and remove direct roles and group mappings from
   the console: Edit access on an opened Users row, and Map a group, Edit and Remove on Roles,
   whose mappings now say how many accounts were in each group at their last sign-in. An admin does
-  so in the workspaces they administer, up to and including admin and their own grant. The check
-  is made again inside the transaction that writes, so a demotion that races the write is ordered,
-  never interleaved. `/api/me` gains the account's `id` and names the workspaces in `grantable`,
-  and every source in `/api/users` names the role it gives. Workspaces are listed by name in byte
-  order, the same on every deployment, so `Zeta` comes before `alpha`.
+  so in the workspaces they administer, up to and including admin and their own grant, and the
+  console asks first when a change would leave them no longer admin there, through a group
+  mapping as well as a direct grant. The check is made again inside the transaction that writes,
+  so a demotion that races the write is ordered, never interleaved. `/api/me` gains the account's
+  `id`, names the workspaces in `grantable`, and lists in each of its `roles` the `sources` that
+  give it, as `/api/users` does; every source in `/api/users` names the role it gives. Workspaces
+  are listed by name in byte order, the same on every deployment, so `Zeta` comes before `alpha`.
 - Every such change is an `audit_log` entry naming who made it and how they signed in, in the
   nullable `actor_method` column (`local` or `oidc`) that migration `0003` adds.
 - A request other than `GET` or `HEAD` from another site is refused, sign-in and sign-out
   included: `Sec-Fetch-Site` has to say `same-origin`, or, from a browser that does not send it,
-  `Origin` has to name the host the request was sent to. That fallback is for Safari before 16.4,
-  and it needs a proxy in front of the console to pass `Host` through as the browser sent it.
+  `Origin` has to name the host the request was sent to, as `Host` or a proxy's
+  `X-Forwarded-Host` gives it, with `:443` and `:80` taken as default ports. That fallback is for
+  Safari before 16.4.
   Writes to the API take JSON only, so a script that writes through it has to send `Content-Type:
   application/json`, on a `DELETE` with no body too, and must not send another site's `Origin`.
 - The console's OIDC callback only finishes a sign-in in the browser that began it. Before, the

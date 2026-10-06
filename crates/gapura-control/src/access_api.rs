@@ -85,24 +85,18 @@ pub enum Me {
         method: Method,
         superuser: bool,
         waiting: bool,
-        /// Every workspace where the caller holds a role, and that role.
-        roles: Vec<WorkspaceRole>,
+        /// Every workspace where the caller holds a role, that role, and every grant that gives
+        /// them one there, as `/api/users` lists them: what a change to one of those grants would
+        /// leave the caller holding is the console's to say before it is made.
+        roles: Vec<AccessView>,
         /// Where the caller is admin, and so may see and grant other people's roles. Named, so a
         /// form can list them without asking again, and in the order of their names.
         grantable: Vec<WorkspaceName>,
     },
 }
 
-/// A workspace and a role in it, named the way `/api/users` and `/api/roles` name them, so the
-/// console reads one shape.
-#[derive(Serialize)]
-pub struct WorkspaceRole {
-    workspace_id: Uuid,
-    workspace: String,
-    role: Role,
-}
-
-/// A workspace, named the same way.
+/// A workspace, named the way `/api/users` and `/api/roles` name them, so the console reads one
+/// shape.
 #[derive(Serialize)]
 pub struct WorkspaceName {
     workspace_id: Uuid,
@@ -125,10 +119,10 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
             caller
                 .rows
                 .effective(&caller.me, w.id)
-                .map(|a| WorkspaceRole {
+                .map(|access| AccessView {
                     workspace_id: w.id,
                     workspace: w.name.clone(),
-                    role: a.role,
+                    access,
                 })
         })
         .collect();

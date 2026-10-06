@@ -2,9 +2,15 @@
   "mode": "store",
   "id": "10000000-0000-4000-8000-000000000008",
   "name": "sari.dewi",
-  "method": "local",
+  "method": "oidc",
   "superuser": false,
   "waiting": false,
-  "roles": [{ "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin" }],
-  "grantable": [{ "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments" }]
+  "roles": [
+    { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "direct", "role": "admin" }] },
+    { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "admin", "sources": [{ "kind": "group", "name": "storefront-admins", "role": "admin" }] }
+  ],
+  "grantable": [
+    { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments" },
+    { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront" }
+  ]
 }

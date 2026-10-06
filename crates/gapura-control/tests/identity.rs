@@ -636,6 +636,21 @@ async fn me_tells_each_account_what_it_holds() {
     let wes = json(&call(&app, "/api/me", Some(s.wes)).await.1);
     assert_eq!(wes["waiting"], true);
     assert_eq!(wes["roles"], serde_json::json!([]));
+
+    let oli = json(&call(&app, "/api/me", Some(s.oli)).await.1);
+    assert_eq!(
+        oli["roles"],
+        serde_json::json!([{
+            "workspace_id": s.payments,
+            "workspace": "payments",
+            "role": "editor",
+            "sources": [
+                {"kind": "direct", "role": "viewer"},
+                {"kind": "group", "name": "payments-dev", "role": "editor"}
+            ]
+        }]),
+        "every grant behind a role, so the console can tell what changing one would leave"
+    );
 }
 
 #[tokio::test]

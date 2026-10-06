@@ -6,9 +6,9 @@
   "superuser": true,
   "waiting": false,
   "roles": [
-    { "workspace_id": "00000000-0000-4000-8000-000000000001", "workspace": "default", "role": "admin" },
-    { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin" },
-    { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "admin" }
+    { "workspace_id": "00000000-0000-4000-8000-000000000001", "workspace": "default", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] },
+    { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] },
+    { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] }
   ],
   "grantable": [
     { "workspace_id": "00000000-0000-4000-8000-000000000001", "workspace": "default" },

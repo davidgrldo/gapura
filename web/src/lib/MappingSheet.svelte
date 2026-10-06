@@ -14,6 +14,7 @@
   // - `edit` changes the role only, because another group or another workspace is another
   //   mapping;
   // - `remove` asks first, because members lose the role at their next request.
+  // Any of the three asks again before a save that would take the reader's own admin away.
   //
   // `mapping` is the row being edited or removed, `me` the reader from /api/me, and `mappings`
   // the table as last read, so Map a group can say when that pair is mapped already. `onsaved`
@@ -40,6 +41,10 @@
   let error = $state(undefined)
   // When the sheet was opened, by `performance.now()`. Not state: nothing is drawn from it.
   let openedAt = 0
+  // Set once the reader has been shown what this save costs them, as in Edit access.
+  let confirming = $state(false)
+  // When that was, by `performance.now()`. Not state: nothing is drawn from it.
+  let askedAt = 0
   // Set when a request was refused, so that the table is fetched again once the sheet closes.
   // Not state: nothing is drawn from it.
   let staleOnClose = false
@@ -52,6 +57,7 @@
     role = mapping?.role ?? 'viewer'
     saving = false
     error = undefined
+    confirming = false
     openedAt = performance.now()
   }
 
@@ -69,6 +75,27 @@
   // mapping just saved in it, and the note would flash up as a fresh status on a sheet on its way
   // out.
   const existing = $derived(open ? mapped : undefined)
+
+  // The mapping this save changes or removes: the row's, or, for Map a group, the one already
+  // there for that group and workspace, which saving replaces.
+  const target = $derived(mode === 'create' ? mapped : mapping)
+
+  // Whether this save takes the reader's own admin away in the target's workspace with nothing
+  // else keeping it: the group gives admin there, the reader is in it, and no other grant of
+  // theirs gives admin there, a superuser's included. The server allows it, because an admin may
+  // change any mapping in their workspace. The sheet asks first, as Edit access does, because the
+  // next thing they might try there is to undo it, and by then they cannot. `me` is as the page
+  // read it, with the reader's groups as of their last sign-in.
+  const losing = $derived.by(() => {
+    if (target?.role !== 'admin' || (mode !== 'remove' && role === 'admin')) return false
+    const sources = me.roles.find((r) => r.workspace_id === target.workspace_id)?.sources ?? []
+    const through = (s) => s.kind === 'group' && s.name === target.group
+    return sources.some(through) && !sources.some((s) => !through(s) && s.role === 'admin')
+  })
+
+  // Whether the warning is up: `confirming` alone could outlive what it was asked about, if the
+  // fields changed under it.
+  const asking = $derived(confirming && losing)
 
   // Save waits for something to save: a role that differs from the mapping's, or a new mapping
   // with a name. It stays disabled while the pair is already mapped at the chosen role, since
@@ -94,6 +121,14 @@
       cancel?.focus()
       return
     }
+    if (losing && !confirming) {
+      confirming = true
+      askedAt = performance.now()
+      return
+    }
+    // A double-click sends its second submit long before the warning could have been read, as
+    // in Edit access, so for half a second after it appears a submit is ignored.
+    if (confirming && performance.now() - askedAt < 500) return
     // Where focus is as the request goes: the Group field if Enter sent the form from there, and
     // the button otherwise. Read now, because disabling the fields below takes focus away.
     const from = document.activeElement
@@ -110,6 +145,8 @@
       }
     } catch (failure) {
       saving = false
+      // A refused save is not the one that was asked about: saving again asks again.
+      confirming = false
       error = failure.message
       // Not fetched again yet. Whatever refused this, a 403 because the reader's access changed,
       // a 404 because the mapping is already gone, or a dropped connection that leaves it unknown
@@ -124,6 +161,12 @@
       await tick()
       const back = from?.form?.id === `${id}-form` ? from : submit
       back?.focus()
+      return
+    }
+    if (losing) {
+      // The reader's own access changed, and with it the navigation App built from /api/me, which
+      // still offers this page. A reload asks again.
+      location.reload()
       return
     }
     // The table about to be fetched is as new as can be, so nothing is left to fetch on closing.
@@ -235,7 +278,12 @@
     <!-- The form scrolls on its own, so a tall form on a short screen never pushes the buttons off
          the bottom of the sheet. The remove sheet has nothing to fill in, so its form is empty,
          there for the button below to submit. -->
-    <form id="{id}-form" class="grid gap-5 overflow-y-auto px-4" onsubmit={save}>
+    <form
+      id="{id}-form"
+      class="grid gap-5 overflow-y-auto px-4"
+      onsubmit={save}
+      oninput={() => (confirming = false)}
+    >
       {#if mode === 'create'}
         <div class="grid gap-1.5">
           <label for="{id}-group" class="font-medium">Group</label>
@@ -293,6 +341,16 @@
           </p>
         {/if}
       </div>
+      {#if asking}
+        <p
+          id="{id}-confirm"
+          role="alert"
+          class="rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 wrap-anywhere"
+        >
+          Only this group makes you admin in {target.workspace}, so you will no longer be able to
+          grant roles there.
+        </p>
+      {/if}
       {#if error}
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
           {error}
@@ -309,11 +367,15 @@
         type="submit"
         form="{id}-form"
         onkeydown={(event) => event.repeat && event.preventDefault()}
-        variant={mode === 'remove' ? 'destructive' : 'default'}
+        variant={mode === 'remove' || asking ? 'destructive' : 'default'}
         disabled={!ready || saving}
-        aria-describedby={existing ? `${id}-existing` : undefined}
+        aria-describedby={[existing && `${id}-existing`, asking && `${id}-confirm`].filter(Boolean).join(' ') || undefined}
       >
-        {#if mode === 'remove'}{saving ? 'Removing…' : 'Remove'}{:else}{saving ? 'Saving…' : 'Save'}{/if}
+        {#if mode === 'remove'}
+          {saving ? 'Removing…' : asking ? 'Remove anyway' : 'Remove'}
+        {:else}
+          {saving ? 'Saving…' : asking ? 'Save anyway' : 'Save'}
+        {/if}
       </Button>
       <Sheet.Close disabled={saving}>
         {#snippet child({ props })}
