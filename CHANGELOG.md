@@ -64,6 +64,18 @@ means what it usually does, moving from one version below to a later one. Releas
   `percent: 0`, the usual way to pause a mirror -- mirrored every request while the route reported
   `Accepted=True`. A partial mirror now gets `Accepted=False` with reason `UnsupportedValue` until
   the data plane can sample; `percent: 100` or a whole fraction is accepted, being what happens.
+- Rollouts and node drains no longer refuse connections. On SIGTERM Pingora closes its listeners at
+  once, while the pod leaves the Service endpoints asynchronously and a cloud load balancer keeps
+  sending to the node until its health checks fail, so every `helm upgrade` refused new
+  connections for that window. The chart now holds SIGTERM back for `preStopDelaySeconds` (15)
+  with a `sleep` pre-stop action, applied on Kubernetes 1.30+ since the image has no shell, and
+  sets `minReadySeconds` (10) so an old pod is not terminated the moment its replacement is Ready.
+  `terminationGracePeriodSeconds` goes from 75 to 90 to fit both. A values file that still says
+  75 keeps rendering, with the delay shortened to what fits; below 61 the chart refuses to render.
+- `helm upgrade --reuse-values` from 0.1.0 renders again. `accessLog` did not exist in 0.1.0, and
+  the template read `.Values.accessLog.query` bare, which is a nil-pointer error when the section
+  is missing. `hack/chart-render.sh` now fails on any two-level `.Values` access without a nil
+  guard, so the next section added cannot reintroduce it.
 
 - A gateway that loses its listen port to another process between its startup bind check and
   Pingora's own bind now exits once Pingora gives up on the port, 30 s later, instead of running
