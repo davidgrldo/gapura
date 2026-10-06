@@ -19,7 +19,8 @@
   { "id": "10000000-0000-4000-8000-000000000007", "name": "rini.wulandari", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790600000, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "viewer", "sources": [{ "kind": "group", "name": "storefront-readers", "role": "viewer" }] }
   ] },
-  { "id": "10000000-0000-4000-8000-000000000008", "name": "sari.dewi", "method": "local", "superuser": false, "status": "active", "last_sign_in_at": 1790800000, "access": [
-    { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "direct", "role": "admin" }] }
+  { "id": "10000000-0000-4000-8000-000000000008", "name": "sari.dewi", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790800000, "access": [
+    { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "direct", "role": "admin" }] },
+    { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "admin", "sources": [{ "kind": "group", "name": "storefront-admins", "role": "admin" }] }
   ] }
 ]
