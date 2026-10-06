@@ -358,7 +358,6 @@ mod tests {
             admin: std::sync::Arc::new(crate::served::Admin::new("http://127.0.0.1:1")),
             controller_name: std::sync::Arc::new("gapura.dev/controller".to_string()),
             oidc: std::sync::Arc::new(test_oidc()),
-            pending: crate::login::PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
         }
@@ -565,7 +564,6 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         admin: Arc::new(crate::served::Admin::new(gateway_admin)),
         controller_name: Arc::new("gapura.dev/controller".to_string()),
         oidc: Arc::new(tests::test_oidc()),
-        pending: crate::login::PendingLogins::default(),
         session_lifetime: std::time::Duration::from_secs(3600),
         store: None,
     }
@@ -806,7 +804,6 @@ mod overview_tests {
             admin: Arc::new(crate::served::Admin::new(gateway_admin)),
             controller_name: Arc::new("gapura.dev/controller".to_string()),
             oidc: Arc::new(tests::test_oidc()),
-            pending: crate::login::PendingLogins::default(),
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
         }

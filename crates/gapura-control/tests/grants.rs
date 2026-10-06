@@ -112,7 +112,6 @@ fn console(store: Option<Arc<Store>>) -> axum::Router {
         oidc: Arc::new(gapura_control::login::Oidc::unused().unwrap()),
         auth_mode: gapura_control::login::AuthMode::Local,
         local_users: Default::default(),
-        pending: Default::default(),
         session_lifetime: Duration::from_secs(3600),
         store,
     })
