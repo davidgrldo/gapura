@@ -38,6 +38,10 @@ reqwest = { workspace = true }
 # lets a console rebuilt after `cargo build` show up without recompiling the server.
 rust-embed = "8"
 deadpool-postgres = { workspace = true }
+# TLS to the store, on the rustls stack reqwest and kube already compile; see store/tls.rs.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = "1"
 gapura-core = { path = "../gapura-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -55,3 +59,4 @@ uuid = { workspace = true }
 # `openidconnect` already pulls it in, so it costs the build nothing new.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tower = { workspace = true }
+rcgen = { workspace = true }

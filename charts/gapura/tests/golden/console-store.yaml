@@ -315,6 +315,9 @@ spec:
         app.kubernetes.io/component: console
     spec:
       serviceAccountName: gapura-control
+      volumes:
+      - name: database-ca
+        secret: { secretName: gapura-console-db-ca }
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -341,6 +344,8 @@ spec:
             secretKeyRef:
               name: gapura-console-db
               key: database-url
+        - name: DATABASE_CA_FILE
+          value: /etc/gapura-database-ca/ca.crt
         - name: GAPURA_BOOTSTRAP_USERNAME
           valueFrom:
             secretKeyRef:
@@ -351,6 +356,8 @@ spec:
             secretKeyRef:
               name: gapura-console-bootstrap
               key: password
+        volumeMounts:
+        - { name: database-ca, mountPath: /etc/gapura-database-ca, readOnly: true }
         ports:
         - name: http
           containerPort: 8080

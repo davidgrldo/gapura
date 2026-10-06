@@ -62,6 +62,14 @@ means what it usually does, moving from one version below to a later one. Releas
 - Control-plane replicas starting at the same time no longer race on schema migrations. Each
   found a migration unapplied and applied it, and all but one failed to start on a duplicate.
   Migrations now run under a Postgres advisory lock; the others wait and find them applied.
+- The control plane can reach its Postgres over TLS. `sslmode=require` in `DATABASE_URL` turns it
+  on, and it is always verified: the server's certificate has to chain to a public root or to the
+  bundle in the new `--database-ca-file` (`DATABASE_CA_FILE`, chart `console.store.ca`), and name
+  the host. That is stricter than libpq's `require`, which verifies nothing. Before, the store
+  spoke plain text only, so it could not use a managed Postgres that refuses plain text, which
+  recent RDS versions do by default. Without `sslmode=require` the connection stays plain text,
+  including under libpq's default `prefer`, and the control plane logs that at startup. A CA file
+  without `sslmode=require` stops the start, since it would never be used.
 - A store row the control plane cannot read now fails the configuration instead of being left
   out. Before, a `jwt` or `key_auth` policy whose configuration did not parse was dropped with a
   warning while the route it guarded was still compiled, so that route admitted everyone; and a

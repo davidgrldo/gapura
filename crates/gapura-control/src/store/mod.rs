@@ -7,14 +7,15 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use deadpool_postgres::{Config as PoolConfig, Pool, Runtime};
+use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use gapura_core::config::{JwtPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
 use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot};
 use sha2::{Digest, Sha256};
-use tokio_postgres::NoTls;
+use tokio_postgres::config::SslMode;
 
 mod grants;
 mod identity;
+mod tls;
 pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
@@ -46,14 +47,41 @@ pub struct Store {
 }
 
 impl Store {
-    /// `url` is a libpq connection string. TLS is deliberately not configured here yet: the
-    /// store is reached over a network the operator controls, and adding it half-way -- accepted
-    /// but unverified -- would be worse than the absence, which is at least visible.
+    /// `url` is a libpq connection string, in plain text unless it says `sslmode=require`.
     pub async fn connect(url: &str) -> Result<Self> {
-        let mut cfg = PoolConfig::new();
-        cfg.url = Some(url.to_string());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+        Self::connect_with(url, None).await
+    }
+
+    /// `sslmode=require` in `url` turns TLS on, and verified: the certificate has to chain to
+    /// Mozilla's roots or to `extra_ca`, and name the host. That is stricter than libpq's
+    /// `require`, which checks neither and so stops only a passive observer, and the store holds
+    /// every credential hash and every private key the gateway serves. Anything else, including
+    /// libpq's default `prefer`, connects in plain text as before: a TLS attempt that falls back
+    /// to plain text when the handshake fails protects nothing an attacker on the path cannot
+    /// strip.
+    pub async fn connect_with(url: &str, extra_ca: Option<&[u8]>) -> Result<Self> {
+        let mut pg: tokio_postgres::Config = url.parse().context("parsing DATABASE_URL")?;
+        if pg.get_ssl_mode() == SslMode::Require {
+            tracing::info!("the store connection uses TLS, verified");
+        } else {
+            anyhow::ensure!(
+                extra_ca.is_none(),
+                "a database CA file is set, but DATABASE_URL has no sslmode=require, so it \
+                 would never be used"
+            );
+            pg.ssl_mode(SslMode::Disable);
+            tracing::warn!(
+                "the store connection is not encrypted (fine for a Unix socket or a local \
+                 proxy); add sslmode=require to DATABASE_URL to encrypt and verify it"
+            );
+        }
+        let manager = Manager::from_config(
+            pg,
+            tls::MakeRustls::new(extra_ca)?,
+            ManagerConfig::default(),
+        );
+        let pool = Pool::builder(manager)
+            .build()
             .context("building the Postgres pool")?;
         // Fail at startup rather than on the first data plane's call.
         let _probe = pool.get().await.context("connecting to Postgres")?;

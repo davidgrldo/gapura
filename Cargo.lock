@@ -1446,18 +1446,22 @@ dependencies = [
  "mime_guess",
  "openidconnect",
  "rand 0.9.5",
+ "rcgen",
  "reqwest",
  "rust-embed",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.10.9",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]
