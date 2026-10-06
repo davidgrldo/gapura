@@ -222,6 +222,7 @@ jobs:
             echo "## Packages"
             echo
             echo "- Image: ghcr.io/davidgrldo/gapura:${version} (linux/amd64, linux/arm64)"
+            echo "- Control plane and console: ghcr.io/davidgrldo/gapura-control:${version} (linux/amd64, linux/arm64)"
             echo "- Chart: oci://ghcr.io/davidgrldo/charts/gapura, version ${version}"
             echo
             echo "Verify the install the way a stranger would, with no ghcr credentials: the"

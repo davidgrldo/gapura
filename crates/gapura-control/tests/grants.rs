@@ -756,6 +756,11 @@ async fn an_admin_may_lower_their_own_role_and_then_cannot_raise_it_again() {
         return;
     };
     let s = seed(&store).await;
+    // Another admin, so lowering the caller's own role leaves the workspace one.
+    store
+        .set_direct_roles(s.pat, s.vic, &roles(&[(s.payments, Some(Role::Admin))]))
+        .await
+        .unwrap();
     store
         .set_direct_roles(s.pat, s.pat, &roles(&[(s.payments, Some(Role::Viewer))]))
         .await
@@ -1675,4 +1680,120 @@ async fn in_kubernetes_mode_a_write_is_refused_from_another_site_415_without_jso
             );
         }
     }
+}
+
+#[tokio::test]
+async fn the_last_admin_cannot_lower_or_remove_their_own_role() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    for change in [Some(Role::Editor), None] {
+        let refused = store
+            .set_direct_roles(s.pat, s.pat, &roles(&[(s.payments, change)]))
+            .await;
+        assert!(
+            matches!(refused, Err(WriteError::Refused(Refusal::Conflict(_)))),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        grants_of(&store, s.pat).await,
+        [(s.payments, "admin".to_string())],
+        "nothing was written"
+    );
+    assert!(audit(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_admin_through_a_group_counts_and_the_last_one_keeps_the_mapping() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let db = store.client().await.unwrap();
+    db.execute(
+        "insert into group_bindings (group_name, workspace_id, role) values ('payments-admins', $1, 'admin')",
+        &[&s.payments],
+    )
+    .await
+    .unwrap();
+    let oli: Uuid = db
+        .query_one(
+            "insert into users (oidc_issuer, oidc_subject, display_name, oidc_groups)
+             values ('https://idp.example', 'oli', 'Oli', '{payments-admins}') returning id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    // Oli is an admin through the group, so Pat may step down.
+    store
+        .set_direct_roles(s.pat, s.pat, &roles(&[(s.payments, None)]))
+        .await
+        .unwrap();
+    // Now the mapping is the workspace's only way to an admin, and Oli's only way in.
+    let refused = store
+        .delete_group_mapping(oli, s.payments, "payments-admins")
+        .await;
+    assert!(
+        matches!(refused, Err(WriteError::Refused(Refusal::Conflict(_)))),
+        "{refused:?}"
+    );
+    let refused = store
+        .put_group_mapping(oli, s.payments, "payments-admins", Role::Editor)
+        .await;
+    assert!(
+        matches!(refused, Err(WriteError::Refused(Refusal::Conflict(_)))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_superuser_may_leave_a_workspace_to_superusers() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .set_direct_roles(s.root, s.pat, &roles(&[(s.payments, None)]))
+        .await
+        .unwrap();
+    assert!(grants_of(&store, s.pat).await.is_empty());
+}
+
+#[tokio::test]
+async fn two_last_admins_stepping_down_at_once_leave_one() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .set_direct_roles(s.pat, s.vic, &roles(&[(s.payments, Some(Role::Admin))]))
+        .await
+        .unwrap();
+    let step_down = |who: Uuid| {
+        let store = store.clone();
+        let payments = s.payments;
+        tokio::spawn(async move {
+            store
+                .set_direct_roles(who, who, &roles(&[(payments, Some(Role::Viewer))]))
+                .await
+        })
+    };
+    let (pat, vic) = (step_down(s.pat), step_down(s.vic));
+    let outcomes = [pat.await.unwrap(), vic.await.unwrap()];
+    // Each alone would leave the other. Together they would leave nobody, so the second to
+    // reach the count sees the first's commit and is refused, whichever order they ran in.
+    assert_eq!(
+        outcomes.iter().filter(|o| o.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Err(WriteError::Refused(Refusal::Conflict(_))))),
+        "{outcomes:?}"
+    );
 }

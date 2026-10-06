@@ -21,6 +21,13 @@ pub struct Args {
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     pub database_url: Option<String>,
 
+    /// A PEM file of CA certificates to trust for the store's TLS, besides the public web
+    /// roots. Needs `sslmode=require` in DATABASE_URL, which is what turns TLS on. Managed
+    /// Postgres services such as RDS and Cloud SQL sign with a CA of their own; this is where
+    /// their bundle goes.
+    #[arg(long, env = "DATABASE_CA_FILE", requires = "database_url")]
+    pub database_ca_file: Option<std::path::PathBuf>,
+
     /// Where data planes fetch their configuration. Its own port and not `--listen`, because
     /// that response carries the gateway's private keys: an operator publishing the console
     /// through an ingress must not publish these with it.

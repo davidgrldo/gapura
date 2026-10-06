@@ -22,6 +22,7 @@ use axum::{
     Router,
 };
 use gapura_core::store::{compile, StoreSettings};
+use sha2::{Digest, Sha256};
 
 use crate::store::Store;
 
@@ -155,7 +156,21 @@ async fn serve(State(api): State<Arc<ConfigApi>>, headers: HeaderMap) -> Respons
         tracing::warn!(error = %e, "recording a data plane's call");
     }
 
-    let etag = format!("\"{version}\"");
+    let config = compile(&snapshot, &api.settings);
+    let body = match serde_json::to_vec(&config) {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::error!(error = %e, "serialising the configuration");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    // The tag is what is served, not the store's version counter. The counter restarts when the
+    // database is restored or recreated, and it does not move when a control-plane flag or a new
+    // release changes what the same rows compile to; in each case a data plane holding an old
+    // tag would be told 304 and keep a configuration that is no longer the one served. The
+    // snapshot is read on every call anyway, so this costs CPU and no I/O. Config has no
+    // unordered maps, so equal configurations serialise to equal bytes.
+    let etag = format!("\"{:x}\"", Sha256::digest(&body));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -163,26 +178,18 @@ async fn serve(State(api): State<Arc<ConfigApi>>, headers: HeaderMap) -> Respons
     {
         return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
     }
-
-    let config = compile(&snapshot, &api.settings);
-    match serde_json::to_vec(&config) {
-        Ok(body) => (
-            StatusCode::OK,
-            [
-                (header::ETAG, etag),
-                (header::CONTENT_TYPE, "application/json".to_string()),
-                // The response is the gateway's private keys. No shared cache should hold it,
-                // and the conditional request is what makes caching unnecessary anyway.
-                (header::CACHE_CONTROL, "no-store".to_string()),
-            ],
-            body,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "serialising the configuration");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    (
+        StatusCode::OK,
+        [
+            (header::ETAG, etag),
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            // The response is the gateway's private keys. No shared cache should hold it,
+            // and the conditional request is what makes caching unnecessary anyway.
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {

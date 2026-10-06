@@ -38,11 +38,12 @@ reqwest = { workspace = true }
 # lets a console rebuilt after `cargo build` show up without recompiling the server.
 rust-embed = "8"
 deadpool-postgres = { workspace = true }
-# The configuration endpoint's TLS server, on the rustls stack reqwest and kube already compile;
-# axum already compiles hyper-util.
+# TLS on the rustls stack reqwest and kube already compile: to the store (store/tls.rs) and for
+# the configuration endpoint's own server; axum already compiles hyper-util.
 hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+webpki-roots = "1"
 gapura-core = { path = "../gapura-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
