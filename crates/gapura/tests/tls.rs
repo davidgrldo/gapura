@@ -3,8 +3,10 @@
 //! Hostnames use a two-label base (`gw.test`) because rustls-webpki, like NSS, refuses to match a
 //! wildcard with fewer than two labels after `*.` (`*.test` would never validate for `x.test`).
 
+use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -140,6 +142,8 @@ data: {{ tls.crt: {w_crt}, tls.key: {w_key} }}
 struct Gateway {
     child: Child,
     https: u16,
+    /// Access-log lines read off the gateway's stdout, in order.
+    logs: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -150,18 +154,64 @@ impl Drop for Gateway {
     }
 }
 
+/// True once the admin's /debug/config holds a listener on `http`: the same store the proxy
+/// routes from, so a "yes" means the first config swap already happened. The port pins the answer
+/// to this child: another gateway that holds this admin port serves its own config, on its own
+/// http port.
+async fn ready_to_serve(admin: u16, http: u16) -> bool {
+    let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/debug/config")).await else {
+        return false;
+    };
+    let Ok(v) = r.json::<serde_json::Value>().await else {
+        return false;
+    };
+    v.get("listeners")
+        .and_then(|l| l.as_array())
+        .is_some_and(|l| l.iter().any(|l| l["port"] == http))
+}
+
+/// The request id the readiness probe sends. Each child logs to its own stdout, so finding it in
+/// `gw.logs` means `gw` answered; no per-child id is needed.
+const PROBE_ID: &str = "harness-readiness-probe";
+
+/// True once a request to the https port, the only data port the test uses, has come back through
+/// this child's own access log. A TCP accept only proves that something listens there, and a
+/// gateway whose bind lost the race is still running, with the winner answering on its port. The
+/// client skips certificate checks because the log line, not the certificate, is the proof; its
+/// SNI still has to match a listener for the handshake to finish. The log line is written after
+/// the response, so it can show up on a later call rather than this one.
+async fn answers_on_https(gw: &Gateway) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], gw.https));
+    let _ = reqwest::Client::builder()
+        .resolve("probe.gw.test", addr)
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap()
+        .get(format!("https://probe.gw.test:{}/", gw.https))
+        .header("x-request-id", PROBE_ID)
+        .send()
+        .await;
+    gw.logs.lock().unwrap().iter().any(|l| l.contains(PROBE_ID))
+}
+
 /// Start the binary on ports chosen here, rendering the config once they are known.
 ///
 /// `free_port` drops its listener before the child binds, so anything else on the machine can take
-/// the port in between. The gateway refuses to start on an address it cannot bind, so that race
-/// shows up as an immediate clean exit; retrying on fresh ports is the fix. A child that starts but
-/// never becomes ready is a real failure, not a race.
+/// the port in between. If it does before the child starts, the gateway refuses to start on an
+/// address it cannot bind, and the race shows up as an immediate clean exit; retrying on fresh
+/// ports is the fix. If it does between that check and Pingora's own bind, Pingora logs "is in
+/// use, will try again" and retries once a second while the process stays up, and every request to
+/// the port reaches the other listener. Readiness therefore demands answers from this child on the
+/// ports the test uses, which holds off until the other listener is gone and the retry wins. A
+/// child that starts but never becomes ready is a real failure, not a race; a holder that outlived
+/// the whole wait would fail the same way, and would need a retry on fresh ports.
 async fn start(render: impl Fn(u16, u16) -> String) -> Gateway {
     for attempt in 1..=5u32 {
         let (http, https, admin) = (free_port(), free_port(), free_port());
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.yaml"), render(http, https)).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gapura"))
             .args([
                 "--config-dir",
                 dir.path().to_str().unwrap(),
@@ -174,13 +224,25 @@ async fn start(render: impl Fn(u16, u16) -> String) -> Gateway {
                 "--log-level",
                 "warn",
             ])
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        // Access logs go to stdout. Keep a thread draining the pipe: left unread it fills, and the
+        // gateway then blocks in `logging` for as long as the test runs. The thread ends on EOF,
+        // which Drop causes by killing the child.
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let sink = Arc::clone(&logs);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                sink.lock().unwrap().push(line);
+            }
+        });
         let mut gw = Gateway {
             child,
             https,
+            logs,
             _dir: dir,
         };
         let mut exited = false;
@@ -191,11 +253,13 @@ async fn start(render: impl Fn(u16, u16) -> String) -> Gateway {
                 break;
             }
             if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-                // Pingora binds each service independently: /readyz only proves the admin listener
-                // and the loaded config, so also wait for the data-plane service to accept
-                // connections. Probe the plain HTTP port of the same service: a bare connect to the
-                // TLS port would log a handshake error on every run.
-                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                // Pingora binds each service independently: /readyz only proves the admin listener,
+                // and `answers_on_https` only proves the data port. `ready_to_serve` pins the
+                // admin port to this child too, by finding its http port in the config it serves.
+                if r.status() == 200
+                    && answers_on_https(&gw).await
+                    && ready_to_serve(admin, http).await
+                {
                     ready = true;
                     break;
                 }

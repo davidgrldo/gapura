@@ -1,9 +1,10 @@
 //! End-to-end: TLS from the gateway to the backend, verified through BackendTLSPolicy or
 //! unverified through the `gapura.dev/backend-tls: insecure` annotation.
 
+use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rcgen::{BasicConstraints, Certificate, CertificateParams, DnType, IsCa, KeyPair};
@@ -201,6 +202,8 @@ struct Gateway {
     child: Child,
     http: u16,
     admin: u16,
+    /// Access-log lines read off the gateway's stdout, in order.
+    logs: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -211,18 +214,58 @@ impl Drop for Gateway {
     }
 }
 
+/// True once the admin's /debug/config holds a listener on `http`: the same store the proxy
+/// routes from, so a "yes" means the first config swap already happened. The port pins the answer
+/// to this child: another gateway that holds this admin port serves its own config, on its own
+/// http port.
+async fn ready_to_serve(admin: u16, http: u16) -> bool {
+    let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/debug/config")).await else {
+        return false;
+    };
+    let Ok(v) = r.json::<serde_json::Value>().await else {
+        return false;
+    };
+    v.get("listeners")
+        .and_then(|l| l.as_array())
+        .is_some_and(|l| l.iter().any(|l| l["port"] == http))
+}
+
+/// The request id the readiness probe sends. Each child logs to its own stdout, so finding it in
+/// `gw.logs` means `gw` answered; no per-child id is needed.
+const PROBE_ID: &str = "harness-readiness-probe";
+
+/// True once a request to the http port has come back through this child's own access log. A TCP
+/// accept only proves that something listens there, and a gateway whose bind lost the race is
+/// still running, with the winner answering on its port. The probe matches no route, so the
+/// gateway answers it with a local 404 and never contacts an upstream. Its log line is written
+/// after the response, so it can show up on a later call rather than this one.
+async fn answers_on_http(gw: &Gateway) -> bool {
+    let _ = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{}/", gw.http))
+        .header("x-request-id", PROBE_ID)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await;
+    gw.logs.lock().unwrap().iter().any(|l| l.contains(PROBE_ID))
+}
+
 /// Start the binary on ports chosen here, rendering the config once the http port is known.
 ///
 /// `free_port` drops its listener before the child binds, so anything else on the machine can take
-/// the port in between. The gateway refuses to start on an address it cannot bind, so that race
-/// shows up as an immediate clean exit; retrying on fresh ports is the fix. A child that starts but
-/// never becomes ready is a real failure, not a race.
+/// the port in between. If it does before the child starts, the gateway refuses to start on an
+/// address it cannot bind, and the race shows up as an immediate clean exit; retrying on fresh
+/// ports is the fix. If it does between that check and Pingora's own bind, Pingora logs "is in
+/// use, will try again" and retries once a second while the process stays up, and every request to
+/// the port reaches the other listener. Readiness therefore demands answers from this child on the
+/// ports the test uses, which holds off until the other listener is gone and the retry wins. A
+/// child that starts but never becomes ready is a real failure, not a race; a holder that outlived
+/// the whole wait would fail the same way, and would need a retry on fresh ports.
 async fn start(render: impl Fn(u16) -> String) -> Gateway {
     for attempt in 1..=5u32 {
         let (http, admin, https) = (free_port(), free_port(), free_port());
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.yaml"), render(http)).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gapura"))
             .args([
                 "--config-dir",
                 dir.path().to_str().unwrap(),
@@ -235,14 +278,26 @@ async fn start(render: impl Fn(u16) -> String) -> Gateway {
                 "--log-level",
                 "warn",
             ])
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        // Access logs go to stdout. Keep a thread draining the pipe: left unread it fills, and the
+        // gateway then blocks in `logging` for as long as the test runs. The thread ends on EOF,
+        // which Drop causes by killing the child.
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let sink = Arc::clone(&logs);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                sink.lock().unwrap().push(line);
+            }
+        });
         let mut gw = Gateway {
             child,
             http,
             admin,
+            logs,
             _dir: dir,
         };
         let mut exited = false;
@@ -253,7 +308,13 @@ async fn start(render: impl Fn(u16) -> String) -> Gateway {
                 break;
             }
             if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{admin}/readyz")).await {
-                if r.status() == 200 && std::net::TcpStream::connect(("127.0.0.1", http)).is_ok() {
+                // Pingora binds each service independently: /readyz only proves the admin listener,
+                // and `answers_on_http` only proves the data port. `ready_to_serve` pins the admin
+                // port to this child too, by finding its http port in the config it serves.
+                if r.status() == 200
+                    && answers_on_http(&gw).await
+                    && ready_to_serve(admin, http).await
+                {
                     ready = true;
                     break;
                 }
