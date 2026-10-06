@@ -258,6 +258,22 @@ fn compile_filters(
                             .to_string(),
                     ));
                 }
+                // The data plane mirrors every request it routes. A partial mirror is refused
+                // until it can sample: a route asking for 1% and getting 100% is the kind of
+                // surprise a mirror pointed at a load-test backend turns into an outage. 100%
+                // either way is exactly what happens, so it is accepted.
+                let whole = |n: i32, d: i32| d > 0 && n == d;
+                if m.percent.is_some_and(|p| p != 100)
+                    || m.fraction
+                        .as_ref()
+                        .is_some_and(|f| !whole(f.numerator, f.denominator.unwrap_or(100)))
+                {
+                    return Err(Unsupported(
+                        "RequestMirror percent and fraction are not supported: every request is \
+                         mirrored, so only 100% (or leaving both out) is accepted"
+                            .to_string(),
+                    ));
+                }
                 out.mirror = mirror_cluster.clone().map(|cluster| Mirror { cluster });
             }
             other => return Err(Unsupported(format!("filter type {other} is not supported"))),
@@ -649,6 +665,58 @@ spec: { ports: [{ name: http, port: 80 }] }
             matches!(compile_first(yaml).0, Err(Unsupported(m)) if m.contains("weight")),
             "a weighted mirror is meaningless: all traffic is mirrored"
         );
+    }
+
+    fn mirror_with(extra: &str) -> String {
+        format!(
+            r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {{ name: r, namespace: apps }}
+spec:
+  rules:
+  - filters:
+    - type: RequestMirror
+      requestMirror: {{ backendRef: {{ name: shadow, port: 80 }}{extra} }}
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: shadow, namespace: apps }}
+spec: {{ ports: [{{ name: http, port: 80 }}] }}
+"#
+        )
+    }
+
+    #[test]
+    fn a_partial_mirror_is_refused_rather_than_mirrored_in_full() {
+        // Ignoring these, as unknown fields are ignored, made a 1% mirror a 100% one.
+        for extra in [
+            ", percent: 1",
+            ", percent: 0",
+            ", fraction: { numerator: 1, denominator: 10 }",
+            ", fraction: { numerator: 5 }",
+            ", fraction: { numerator: 0, denominator: 0 }",
+        ] {
+            assert!(
+                matches!(compile_first(&mirror_with(extra)).0, Err(Unsupported(m)) if m.contains("percent")),
+                "accepted{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_mirror_written_out_is_accepted() {
+        for extra in [
+            "",
+            ", percent: 100",
+            ", fraction: { numerator: 100 }",
+            ", fraction: { numerator: 3, denominator: 3 }",
+        ] {
+            assert!(
+                compile_first(&mirror_with(extra)).0.is_ok(),
+                "refused{extra}"
+            );
+        }
     }
 
     #[test]
