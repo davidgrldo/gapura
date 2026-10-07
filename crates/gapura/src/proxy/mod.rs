@@ -148,9 +148,10 @@ pub fn effective_timeout(t: &Timeouts) -> Option<Duration> {
     }
 }
 
-/// The connect timeout for `t`'s rule: its own, or the default when it sets none.
+/// The connect timeout for `t`'s rule: its own, where 0 or unset means the default.
 pub fn connect_timeout(t: &Timeouts) -> Duration {
     t.connect_ms
+        .filter(|&ms| ms > 0)
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_CONNECT_TIMEOUT)
 }
@@ -654,8 +655,7 @@ impl ProxyHttp for GapuraProxy {
             .unwrap_or(Some(DEFAULT_UPSTREAM_TIMEOUT));
         peer.options.connection_timeout = Some(
             ctx.rule()
-                .map(|r| connect_timeout(&r.timeouts))
-                .unwrap_or(DEFAULT_CONNECT_TIMEOUT),
+                .map_or(DEFAULT_CONNECT_TIMEOUT, |r| connect_timeout(&r.timeouts)),
         );
         peer.options.read_timeout = timeout;
         peer.options.write_timeout = timeout;
@@ -969,7 +969,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_rule_s_connect_timeout_replaces_the_default() {
+    fn connect_timeout_is_the_rules_own_or_the_default() {
         assert_eq!(
             connect_timeout(&Timeouts::default()),
             DEFAULT_CONNECT_TIMEOUT
@@ -980,6 +980,13 @@ mod tests {
                 ..Timeouts::default()
             }),
             Duration::from_millis(250)
+        );
+        assert_eq!(
+            connect_timeout(&Timeouts {
+                connect_ms: Some(0),
+                ..Timeouts::default()
+            }),
+            DEFAULT_CONNECT_TIMEOUT
         );
     }
 
@@ -993,7 +1000,7 @@ mod tests {
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
                 backend_request_ms: None,
-                connect_ms: None
+                ..Timeouts::default()
             }),
             Some(Duration::from_millis(1500))
         );
@@ -1001,7 +1008,7 @@ mod tests {
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
                 backend_request_ms: Some(500),
-                connect_ms: None
+                ..Timeouts::default()
             }),
             Some(Duration::from_millis(500))
         );
@@ -1009,7 +1016,7 @@ mod tests {
             effective_timeout(&Timeouts {
                 request_ms: Some(0),
                 backend_request_ms: None,
-                connect_ms: None
+                ..Timeouts::default()
             }),
             None
         );
@@ -1017,7 +1024,7 @@ mod tests {
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
                 backend_request_ms: Some(0),
-                connect_ms: None
+                ..Timeouts::default()
             }),
             None
         );
