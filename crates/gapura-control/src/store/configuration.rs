@@ -1,0 +1,628 @@
+//! Services and routes as the console reads and writes them.
+//!
+//! Each write is one transaction, in the grants slice's order: re-read the caller's rights
+//! locked and decide with `configuration::allowed`; read the row it changes `FOR UPDATE`; write;
+//! leave one `audit_log` row. A refusal writes nothing. The data planes see a write through the
+//! trigger that bumps `config_state.version`.
+
+use super::grants::{audit, retrying, rights, Entry};
+use super::{Store, WriteError};
+use crate::access::User;
+use crate::configuration::{
+    self, Action, PathMatch, Protocol, Route, RouteView, Service, ServiceView,
+};
+use crate::grants::Refusal;
+use anyhow::Result;
+use std::collections::BTreeSet;
+use tokio_postgres::Transaction;
+use uuid::Uuid;
+
+/// `column`, a `timestamptz`, as the API shows it and compares it: UTC, to the microsecond, as
+/// text. Postgres keeps microseconds, so a value read back and sent again compares equal, which
+/// is what lets a stale save be told from a fresh one.
+fn updated_at(column: &str) -> String {
+    format!(r#"to_char({column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#)
+}
+
+const STALE: &str =
+    "Someone changed this since you opened it, so your change was not saved. Reload to see theirs.";
+
+/// The advisory lock every route write takes before it reads other workspaces' hosts, so two
+/// workspaces claiming the same host at the same moment are ordered and the second sees the
+/// first's.
+const ROUTE_HOSTS_LOCK: &str = "select pg_advisory_xact_lock(hashtext('gapura route hosts'))";
+
+/// The schema's check allows only these two, so anything else cannot be read back.
+fn protocol(name: &str) -> Protocol {
+    if name == "https" {
+        Protocol::Https
+    } else {
+        Protocol::Http
+    }
+}
+
+fn service_from(row: &tokio_postgres::Row) -> Service {
+    Service {
+        name: row.get("name"),
+        protocol: protocol(row.get("protocol")),
+        host: row.get("host"),
+        port: row.get("port"),
+        connect_timeout_ms: row.get("connect_timeout_ms"),
+        read_timeout_ms: row.get("read_timeout_ms"),
+    }
+}
+
+/// A route row as the API shows it. A `paths` value this binary cannot read is an error, not an
+/// empty list, which would read as "every path".
+fn route_from(row: &tokio_postgres::Row) -> Result<Route> {
+    let paths: serde_json::Value = row.get("paths");
+    let paths: Vec<PathMatch> = serde_json::from_value(paths)
+        .map_err(|e| anyhow::anyhow!("a route's paths do not read: {e}"))?;
+    Ok(Route {
+        name: row.get("name"),
+        service: row.get("service"),
+        hosts: row.get("hosts"),
+        paths,
+        methods: row.get("methods"),
+        priority: row.get("priority"),
+    })
+}
+
+/// Step 1 of every write: may `caller` do `action` in `workspace`, decided over rows locked here.
+/// `allowed` also refuses a disabled caller, which `rights` leaves to it.
+async fn decide(
+    tx: &Transaction<'_>,
+    caller: Uuid,
+    workspace: Uuid,
+    action: Action,
+) -> Result<User, WriteError> {
+    let (actor, rows) = rights(tx, caller, &BTreeSet::from([workspace])).await?;
+    configuration::allowed(&rows, &actor, workspace, action)?;
+    Ok(actor)
+}
+
+/// May `actor` route `hosts` from `workspace`: a route for any host only as a superuser, a
+/// wildcard over a single label only as a superuser, and never a host another workspace already
+/// routes. Hosts belong to one workspace, so one workspace's editor cannot take another's
+/// traffic. Only other workspaces are read, so a route never conflicts with itself or with its
+/// own workspace's routes, whose order the priority settles.
+async fn may_route(
+    tx: &Transaction<'_>,
+    actor: &User,
+    workspace: Uuid,
+    hosts: &[String],
+) -> Result<(), WriteError> {
+    if hosts.is_empty() {
+        configuration::may_route_any_host(actor)?;
+    }
+    for host in hosts {
+        configuration::may_claim_wildcard(actor, host)?;
+    }
+    tx.execute(ROUTE_HOSTS_LOCK, &[]).await?;
+    let taken: Vec<String> = tx
+        .query(
+            "select h from routes, unnest(hosts) as h where workspace_id <> $1",
+            &[&workspace],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    // The other workspace is not named: a caller may hold no role there, and the answer would
+    // tell them it exists.
+    if let Some(host) = hosts
+        .iter()
+        .find(|host| taken.iter().any(|t| configuration::hosts_overlap(host, t)))
+    {
+        return Err(
+            Refusal::Conflict(format!("{host} is already routed by another workspace.")).into(),
+        );
+    }
+    Ok(())
+}
+
+fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).expect("a validated row always serialises")
+}
+
+impl Store {
+    /// A workspace's services, by name, each with how many routes use it.
+    pub async fn services(&self, workspace: Uuid) -> Result<Vec<ServiceView>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "select s.name, s.protocol, s.host, s.port, s.connect_timeout_ms,
+                            s.read_timeout_ms, {} as updated_at,
+                            (select count(*) from routes r where r.service_id = s.id) as routes
+                       from services s where s.workspace_id = $1 order by s.name",
+                    updated_at("s.updated_at")
+                ),
+                &[&workspace],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ServiceView {
+                service: service_from(r),
+                routes: r.get("routes"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    /// A workspace's routes, in the order the data plane matches them: priority, then name. A
+    /// route with no service, which only SQL written by hand can make, is not listed, just as
+    /// the compiler does not serve it.
+    pub async fn routes(&self, workspace: Uuid) -> Result<Vec<RouteView>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "select r.name, s.name as service, r.hosts, r.methods, r.paths, r.priority,
+                            {} as updated_at
+                       from routes r join services s on s.id = r.service_id
+                      where r.workspace_id = $1 order by r.priority desc, r.name",
+                    updated_at("r.updated_at")
+                ),
+                &[&workspace],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(RouteView {
+                    route: route_from(r)?,
+                    updated_at: r.get("updated_at"),
+                })
+            })
+            .collect()
+    }
+
+    /// Creates `s` in `workspace` as `caller`, who needs the editor role there.
+    pub async fn create_service(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        s: &Service,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_create_service(caller, workspace, s)).await
+    }
+
+    async fn try_create_service(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        s: &Service,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let Some(row) = tx
+            .query_opt(
+                "insert into services (workspace_id, name, protocol, host, port,
+                                       connect_timeout_ms, read_timeout_ms)
+                 values ($1, $2, $3, $4, $5, $6, $7)
+                 on conflict (workspace_id, name) do nothing returning id",
+                &[
+                    &workspace,
+                    &s.name,
+                    &s.protocol.as_str(),
+                    &s.host,
+                    &s.port,
+                    &s.connect_timeout_ms,
+                    &s.read_timeout_ms,
+                ],
+            )
+            .await?
+        else {
+            return Err(Refusal::Conflict(format!(
+                "A service named {} already exists in this workspace.",
+                s.name
+            ))
+            .into());
+        };
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "create",
+                object_kind: "service",
+                object_id: Some(row.get("id")),
+                workspace,
+                before: None,
+                after: Some(json(s)),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Replaces the service called `current`, which may rename it, when `seen` is its
+    /// `updated_at` as last read. Its routes follow it, since they hold its id, not its name.
+    pub async fn replace_service(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        current: &str,
+        s: &Service,
+        seen: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_replace_service(caller, workspace, current, s, seen)).await
+    }
+
+    async fn try_replace_service(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        current: &str,
+        s: &Service,
+        seen: &str,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let Some(row) = tx
+            .query_opt(
+                &format!(
+                    "select id, name, protocol, host, port, connect_timeout_ms, read_timeout_ms,
+                            {} as updated_at
+                       from services where workspace_id = $1 and name = $2 for update",
+                    updated_at("updated_at")
+                ),
+                &[&workspace, &current],
+            )
+            .await?
+        else {
+            return Err(Refusal::NotFound(format!(
+                "There is no service named {current} in this workspace."
+            ))
+            .into());
+        };
+        if row.get::<_, &str>("updated_at") != seen {
+            return Err(Refusal::Conflict(STALE.into()).into());
+        }
+        let id: Uuid = row.get("id");
+        if s.name != current
+            && tx
+                .query_opt(
+                    "select 1 from services where workspace_id = $1 and name = $2",
+                    &[&workspace, &s.name],
+                )
+                .await?
+                .is_some()
+        {
+            return Err(Refusal::Conflict(format!(
+                "A service named {} already exists in this workspace.",
+                s.name
+            ))
+            .into());
+        }
+        let before = service_from(&row);
+        tx.execute(
+            "update services set name = $2, protocol = $3, host = $4, port = $5,
+                    connect_timeout_ms = $6, read_timeout_ms = $7, updated_at = now()
+              where id = $1",
+            &[
+                &id,
+                &s.name,
+                &s.protocol.as_str(),
+                &s.host,
+                &s.port,
+                &s.connect_timeout_ms,
+                &s.read_timeout_ms,
+            ],
+        )
+        .await?;
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "update",
+                object_kind: "service",
+                object_id: Some(id),
+                workspace,
+                before: Some(json(&before)),
+                after: Some(json(s)),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deletes the service called `name`, which needs the admin role, and only while no route
+    /// uses it: deleting it would leave them pointing nowhere.
+    pub async fn delete_service(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_delete_service(caller, workspace, name)).await
+    }
+
+    async fn try_delete_service(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Delete).await?;
+        let Some(row) = tx
+            .query_opt(
+                "select id, name, protocol, host, port, connect_timeout_ms, read_timeout_ms
+                   from services where workspace_id = $1 and name = $2 for update",
+                &[&workspace, &name],
+            )
+            .await?
+        else {
+            return Err(Refusal::NotFound(format!(
+                "There is no service named {name} in this workspace."
+            ))
+            .into());
+        };
+        let id: Uuid = row.get("id");
+        // Route writes hold the service `for share`, so none can start using it between this
+        // count and the delete: the `for update` above waits for them, and they for it.
+        let used: i64 = tx
+            .query_one("select count(*) from routes where service_id = $1", &[&id])
+            .await?
+            .get(0);
+        if used > 0 {
+            let routes = if used == 1 {
+                "1 route uses".to_string()
+            } else {
+                format!("{used} routes use")
+            };
+            return Err(Refusal::Conflict(format!(
+                "{routes} this service. Point them at another service or delete them first."
+            ))
+            .into());
+        }
+        tx.execute("delete from services where id = $1", &[&id])
+            .await?;
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "delete",
+                object_kind: "service",
+                object_id: Some(id),
+                workspace,
+                before: Some(json(&service_from(&row))),
+                after: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    // Routes follow the same three shapes. The differences: the service is looked up by name in
+    // the same workspace (`for share`, so it cannot be deleted under the write), a missing one
+    // is a 400 naming it, and the hosts are checked against every other workspace's.
+
+    /// Creates `r` in `workspace` as `caller`, who needs the editor role there.
+    pub async fn create_route(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        r: &Route,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_write_route(caller, workspace, None, r, None)).await
+    }
+
+    /// Replaces the route called `current`, which may rename it, when `seen` is its
+    /// `updated_at` as last read.
+    pub async fn replace_route(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        current: &str,
+        r: &Route,
+        seen: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_write_route(caller, workspace, Some(current), r, Some(seen)))
+            .await
+    }
+
+    /// Creates `r` when `current` is `None`, and otherwise replaces the route called `current`
+    /// when `seen` is its `updated_at`.
+    async fn try_write_route(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        current: Option<&str>,
+        r: &Route,
+        seen: Option<&str>,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        // On a replace as well as a create, so a save that keeps `hosts: []` is checked too.
+        may_route(&tx, &actor, workspace, &r.hosts).await?;
+        let Some(service) = tx
+            .query_opt(
+                "select id from services where workspace_id = $1 and name = $2 for share",
+                &[&workspace, &r.service],
+            )
+            .await?
+        else {
+            return Err(Refusal::Invalid(format!(
+                "There is no service named {} in this workspace.",
+                r.service
+            ))
+            .into());
+        };
+        let service_id: Uuid = service.get("id");
+        let paths = json(&r.paths);
+        match current {
+            None => {
+                let Some(row) = tx
+                    .query_opt(
+                        "insert into routes (workspace_id, service_id, name, hosts, methods,
+                                             paths, priority)
+                         values ($1, $2, $3, $4, $5, $6, $7)
+                         on conflict (workspace_id, name) do nothing returning id",
+                        &[
+                            &workspace,
+                            &service_id,
+                            &r.name,
+                            &r.hosts,
+                            &r.methods,
+                            &paths,
+                            &r.priority,
+                        ],
+                    )
+                    .await?
+                else {
+                    return Err(Refusal::Conflict(format!(
+                        "A route named {} already exists in this workspace.",
+                        r.name
+                    ))
+                    .into());
+                };
+                audit(
+                    &tx,
+                    &actor,
+                    Entry {
+                        action: "create",
+                        object_kind: "route",
+                        object_id: Some(row.get("id")),
+                        workspace,
+                        before: None,
+                        after: Some(json(r)),
+                    },
+                )
+                .await?;
+            }
+            Some(current) => {
+                let Some(row) = tx
+                    .query_opt(
+                        &format!(
+                            "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths,
+                                    r.priority, {} as updated_at
+                               from routes r join services s on s.id = r.service_id
+                              where r.workspace_id = $1 and r.name = $2 for update of r",
+                            updated_at("r.updated_at")
+                        ),
+                        &[&workspace, &current],
+                    )
+                    .await?
+                else {
+                    return Err(Refusal::NotFound(format!(
+                        "There is no route named {current} in this workspace."
+                    ))
+                    .into());
+                };
+                if Some(row.get::<_, &str>("updated_at")) != seen {
+                    return Err(Refusal::Conflict(STALE.into()).into());
+                }
+                let id: Uuid = row.get("id");
+                if r.name != current
+                    && tx
+                        .query_opt(
+                            "select 1 from routes where workspace_id = $1 and name = $2",
+                            &[&workspace, &r.name],
+                        )
+                        .await?
+                        .is_some()
+                {
+                    return Err(Refusal::Conflict(format!(
+                        "A route named {} already exists in this workspace.",
+                        r.name
+                    ))
+                    .into());
+                }
+                let before = route_from(&row).map_err(WriteError::Store)?;
+                tx.execute(
+                    "update routes set service_id = $2, name = $3, hosts = $4, methods = $5,
+                            paths = $6, priority = $7, updated_at = now()
+                      where id = $1",
+                    &[
+                        &id,
+                        &service_id,
+                        &r.name,
+                        &r.hosts,
+                        &r.methods,
+                        &paths,
+                        &r.priority,
+                    ],
+                )
+                .await?;
+                audit(
+                    &tx,
+                    &actor,
+                    Entry {
+                        action: "update",
+                        object_kind: "route",
+                        object_id: Some(id),
+                        workspace,
+                        before: Some(json(&before)),
+                        after: Some(json(r)),
+                    },
+                )
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deletes the route called `name`, which needs the admin role.
+    pub async fn delete_route(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_delete_route(caller, workspace, name)).await
+    }
+
+    async fn try_delete_route(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Delete).await?;
+        let Some(row) = tx
+            .query_opt(
+                "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths, r.priority
+                   from routes r join services s on s.id = r.service_id
+                  where r.workspace_id = $1 and r.name = $2 for update of r",
+                &[&workspace, &name],
+            )
+            .await?
+        else {
+            return Err(Refusal::NotFound(format!(
+                "There is no route named {name} in this workspace."
+            ))
+            .into());
+        };
+        let id: Uuid = row.get("id");
+        let before = route_from(&row).map_err(WriteError::Store)?;
+        tx.execute("delete from routes where id = $1", &[&id])
+            .await?;
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "delete",
+                object_kind: "route",
+                object_id: Some(id),
+                workspace,
+                before: Some(json(&before)),
+                after: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
