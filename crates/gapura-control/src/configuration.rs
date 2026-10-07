@@ -374,6 +374,42 @@ fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError>
     if value.contains(['?', '#']) {
         return Err(field(at, "A path has no query string or fragment."));
     }
+    // The data plane normalises a request's path before matching it (`normalize_path` in the
+    // gateway's proxy): it collapses `//`, refuses `.` and `..` segments, and decodes an escaped
+    // letter, digit or `- . _ ~`. A route path written any of those ways could never match.
+    if value.contains("//") {
+        return Err(field(
+            at,
+            "A path has no empty segments: the gateway collapses // in requests.",
+        ));
+    }
+    if value
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(field(
+            at,
+            "A path has no . or .. segments: the gateway refuses requests that do.",
+        ));
+    }
+    let bytes = value.as_bytes();
+    for (i, _) in value.match_indices('%') {
+        let escape = bytes
+            .get(i + 1..i + 3)
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match escape {
+            None => {
+                return Err(field(at, "A % starts an escape of two hexadecimal digits."));
+            }
+            Some(b) if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') => {
+                return Err(field(
+                    at,
+                    "Write letters, digits and - . _ ~ as they are: the gateway decodes them before matching.",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     let mut value = value.to_string();
     if kind == "prefix" {
         while value.len() > 1 && value.ends_with('/') {
@@ -740,7 +776,6 @@ mod tests {
         let input = route_with_paths(vec![
             path("prefix", "/api/"),
             path("prefix", "/"),
-            path("prefix", "//"),
             path("exact", "/api/"),
         ]);
         let (r, _) = route(input, Write::Replace).unwrap();
@@ -787,6 +822,21 @@ mod tests {
             ),
             ("/orders?x=1", "A path has no query string or fragment."),
             ("/a#b", "A path has no query string or fragment."),
+            (
+                "//orders",
+                "A path has no empty segments: the gateway collapses // in requests.",
+            ),
+            (
+                "/a/../b",
+                "A path has no . or .. segments: the gateway refuses requests that do.",
+            ),
+            ("/a/.", "A path has no . or .. segments: the gateway refuses requests that do."),
+            ("/a%2", "A % starts an escape of two hexadecimal digits."),
+            ("/a%zz", "A % starts an escape of two hexadecimal digits."),
+            (
+                "/%41pi",
+                "Write letters, digits and - . _ ~ as they are: the gateway decodes them before matching.",
+            ),
         ];
         for kind in ["prefix", "exact"] {
             for (value, sentence) in cases {
