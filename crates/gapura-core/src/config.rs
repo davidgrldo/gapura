@@ -270,6 +270,11 @@ pub struct WeightedBackend {
 pub struct Timeouts {
     pub request_ms: Option<u64>,
     pub backend_request_ms: Option<u64>,
+    /// How long connecting to an upstream may take. Set from a store service; Gateway API has no
+    /// such field, so Kubernetes mode leaves it `None`, which keeps the data plane's default. Absent
+    /// on the wire when unset, so a data plane older than it reads the same configuration as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
 }
 
 /// TLS towards the backend. `None` on the cluster means plain HTTP.
