@@ -17,8 +17,19 @@
   // fetches the list again and returns a promise that settles once it is drawn or has failed, and
   // never rejects. `onremoved` is where focus goes when the new list no longer has the row this
   // sheet's button was in, which takes the button with it: after a delete, a rename, or a row
-  // removed by someone else.
-  let { mode, route = undefined, services, workspace, role, onsaved, onremoved = undefined } = $props()
+  // removed by someone else. `superuser` is whether the signed-in account is one: only a superuser
+  // may leave a route's hosts empty, so everyone else is stopped before a request that would be
+  // refused.
+  let {
+    mode,
+    route = undefined,
+    services,
+    workspace,
+    role,
+    superuser = false,
+    onsaved,
+    onremoved = undefined,
+  } = $props()
 
   const id = $props.id()
   const editable = $derived(mode === 'create' || can.write(role))
@@ -73,6 +84,7 @@
   function target(field) {
     if (typeof field !== 'string') return undefined
     if (field === 'name' || field === 'service' || field === 'priority') return `${id}-${field}`
+    if (field === 'hosts') return `${id}-add-host`
     if (field === 'paths') return `${id}-add-path`
     if (field === 'methods' || /^methods\[\d+\]$/.test(field)) return `${id}-method-${METHODS[0]}`
     const host = /^hosts\[(\d+)\]$/.exec(field)
@@ -126,21 +138,38 @@
     else onremoved?.()
   }
 
-  function save(event) {
+  async function save(event) {
     event.preventDefault()
     // Enter in a field while the delete question is up must not save over it.
     if (!editable || saving || deleting) return
     // Empty rows are left out rather than refused: an unfilled Add host is not a host. The
     // indexes the server names are then of what was sent, which is what these rows show once
     // the empty ones are gone, so they are taken out of the form too.
-    hosts = hosts.map((h) => h.trim()).filter(Boolean)
+    const sent = hosts.map((h) => h.trim()).filter(Boolean)
     paths = paths.map((p) => ({ type: p.type, value: p.value.trim() })).filter((p) => p.value !== '')
+    // The server refuses these for anyone but a superuser (403), after the reader's rows have been
+    // compacted away; say so here, beside the row, and keep one row to type in.
+    const wildcard = superuser ? -1 : sent.findIndex((h) => /^\*\.[^.]+$/.test(h))
+    if (!superuser && (sent.length === 0 || wildcard >= 0)) {
+      hosts = sent.length === 0 ? [''] : sent
+      error =
+        sent.length === 0
+          ? { sentence: 'Name at least one host; only a superuser may route any host.', field: 'hosts[0]' }
+          : {
+              sentence: 'A wildcard needs at least two labels after *. unless a superuser routes it.',
+              field: `hosts[${wildcard}]`,
+            }
+      await tick()
+      document.getElementById(target(error.field))?.focus()
+      return
+    }
+    hosts = sent
     const body = {
       name: name.trim(),
       service,
       // A cleared number input binds to null, which Number() would turn into 0 silently. 0 is the
       // server's default priority, so an empty field is sent as exactly that, on purpose.
-      priority: priority == null || String(priority).trim() === '' ? 0 : Number(priority),
+      priority: priority == null ? 0 : Number(priority),
       hosts,
       paths,
       methods: METHODS.filter((m) => checked[m]),
@@ -151,12 +180,16 @@
 
   // Removing a row takes the button that was pressed with it when it was the last, so focus goes
   // to the row now at that place, or to Add when none is left.
+  // A refusal's mark is on a row by its index, and the rows below the one removed move up, so a
+  // mark on any row of the list goes with it rather than stay on a row it was not made for.
   async function dropHost(i) {
+    if (error?.field?.startsWith('hosts[')) error = undefined
     hosts.splice(i, 1)
     await tick()
     document.getElementById(hosts.length > 0 ? `${id}-host-${Math.min(i, hosts.length - 1)}` : `${id}-add-host`)?.focus()
   }
   async function dropPath(i) {
+    if (error?.field?.startsWith('paths[')) error = undefined
     paths.splice(i, 1)
     await tick()
     document.getElementById(paths.length > 0 ? `${id}-path-${Math.min(i, paths.length - 1)}-value` : `${id}-add-path`)?.focus()
@@ -250,7 +283,7 @@
           </div>
           <div class="grid gap-1.5">
             <label for="{id}-priority" class="font-medium">Priority</label>
-            <Input id="{id}-priority" type="number" step="1" bind:value={priority} aria-invalid={invalid('priority')} aria-describedby={described('priority')} />
+            <Input id="{id}-priority" type="number" step="1" min="-2147483648" max="2147483647" bind:value={priority} aria-invalid={invalid('priority')} aria-describedby={described('priority')} />
           </div>
         </div>
         {@render problem('name')}
@@ -274,10 +307,11 @@
             </div>
             {@render problem(`hosts[${i}]`)}
           {/each}
-          <Button id="{id}-add-host" variant="outline" size="sm" class="justify-self-start" onclick={() => hosts.push('')}><Plus aria-hidden="true" />Add host</Button>
+          <Button id="{id}-add-host" variant="outline" size="sm" class="justify-self-start" onclick={() => hosts.push('')} aria-invalid={invalid('hosts')} aria-describedby={described('hosts')}><Plus aria-hidden="true" />Add host</Button>
+          {@render problem('hosts')}
           <p class="text-xs text-muted-foreground">
             At least one host; only a superuser may route any host.
-            {#if hosts.length === 0}No hosts: any host.{/if}
+            {#if superuser && hosts.length === 0}No hosts: any host.{/if}
           </p>
         </fieldset>
 
@@ -297,7 +331,7 @@
             {@render problem(`paths[${i}].value`)}
           {/each}
           {@render problem('paths')}
-          <Button id="{id}-add-path" variant="outline" size="sm" class="justify-self-start" onclick={() => paths.push({ type: 'prefix', value: '/' })} aria-invalid={invalid('paths')} aria-describedby={described('paths')}><Plus aria-hidden="true" />Add path</Button>
+          <Button id="{id}-add-path" variant="outline" size="sm" class="justify-self-start" onclick={() => paths.push({ type: 'prefix', value: '' })} aria-invalid={invalid('paths')} aria-describedby={described('paths')}><Plus aria-hidden="true" />Add path</Button>
           <p class="text-xs text-muted-foreground">
             A prefix matches whole segments: /api matches /api/x, not /apix. A regex must match
             the whole path; end it with .* to match a prefix. No paths: every path.
@@ -307,9 +341,9 @@
         <fieldset class="grid gap-2" aria-describedby={described('methods')}>
           <legend class="mb-1.5 font-medium">Methods</legend>
           <div class="flex flex-wrap gap-x-4 gap-y-2">
-            {#each METHODS as m (m)}
+            {#each METHODS as m, k (m)}
               <label class="flex items-center gap-1.5 font-mono text-sm">
-                <input id="{id}-method-{m}" type="checkbox" bind:checked={checked[m]} />{m}
+                <input id="{id}-method-{m}" type="checkbox" bind:checked={checked[m]} aria-invalid={k === 0 ? invalid('methods') : undefined} aria-describedby={k === 0 ? described('methods') : undefined} />{m}
               </label>
             {/each}
           </div>

@@ -78,13 +78,15 @@
       Which requests go to which service in {workspace}, in the order the gateway tries them.
     </p>
     {#if can.write(role) && answer.services.length > 0}
-      <RouteSheet mode="create" services={answer.services} {workspace} {role} onsaved={load} onremoved={focusHeading} />
+      <RouteSheet mode="create" services={answer.services} {workspace} {role} superuser={me.superuser} onsaved={load} onremoved={focusHeading} />
     {/if}
   </div>
   {#if answer.services.length === 0}
     <p class="text-muted-foreground">
       Routes send traffic to a service, and {workspace} has none yet.
-      <a class="underline" href="/services">Create one on the Services page.</a>
+      {#if can.write(role)}
+        <a class="underline" href="/services">Create one on the Services page.</a>
+      {/if}
     </p>
   {:else if answer.routes.length === 0}
     <p class="text-muted-foreground">No routes yet.</p>
@@ -112,7 +114,7 @@
               <Table.Cell class="font-mono">{anyOf(r.methods)}</Table.Cell>
               <Table.Cell class="text-right tabular-nums">{r.priority}</Table.Cell>
               <Table.Cell class="text-right">
-                <RouteSheet mode="edit" route={r} services={answer.services} {workspace} {role} onsaved={load} onremoved={focusHeading} />
+                <RouteSheet mode="edit" route={r} services={answer.services} {workspace} {role} superuser={me.superuser} onsaved={load} onremoved={focusHeading} />
               </Table.Cell>
             </Table.Row>
           {/each}
