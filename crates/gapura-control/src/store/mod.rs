@@ -37,6 +37,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_audit_method",
         include_str!("../../migrations/0003_audit_method.sql"),
     ),
+    (
+        "0004_routes_service_index",
+        include_str!("../../migrations/0004_routes_service_index.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as

@@ -66,7 +66,9 @@ const ATTEMPTS: u32 = 3;
 ///   outage.
 /// - A unique violation. Two writes gave one account a grant in one workspace, or made one
 ///   mapping, when neither existed yet, and the second insert lost. Run again, it reads the
-///   first one's row as what it is changing, and its audit entry says so.
+///   first one's row as what it is changing, and its audit entry says so. Renaming a service or
+///   route meets the same way when another write takes the new name at the same moment: run
+///   again, the rename sees the name taken and is refused as a conflict.
 pub(super) async fn retrying<F, Fut>(mut attempt: F) -> Result<(), WriteError>
 where
     F: FnMut() -> Fut,

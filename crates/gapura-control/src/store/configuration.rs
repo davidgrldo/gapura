@@ -2,8 +2,16 @@
 //!
 //! Each write is one transaction, in the grants slice's order: re-read the caller's rights
 //! locked and decide with `configuration::allowed`; read the row it changes `FOR UPDATE`; write;
-//! leave one `audit_log` row. A refusal writes nothing. The data planes see a write through the
-//! trigger that bumps `config_state.version`.
+//! leave one `audit_log` row. A refusal writes nothing, and neither does a replace that changes
+//! nothing. The data planes see a write through the trigger that bumps `config_state.version`.
+//!
+//! A route write also takes one advisory lock before it reads other workspaces' hosts, so two
+//! workspaces claiming one host at the same moment are ordered. Every write takes its locks in
+//! one order: the caller's grant rows `FOR SHARE`; on a replace, the route `FOR UPDATE`, so a
+//! missing or stale one answers before anything else is weighed; the hosts advisory lock; the
+//! route's service `FOR SHARE`; the row written; `config_state`, through the trigger. A writer
+//! that holds the advisory lock waits only on locks later in that order, so the lock cannot close
+//! a cycle, and a deadlock between two writes elsewhere is settled by `retrying`.
 
 use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
@@ -86,6 +94,10 @@ async fn decide(
 /// routes. Hosts belong to one workspace, so one workspace's editor cannot take another's
 /// traffic. Only other workspaces are read, so a route never conflicts with itself or with its
 /// own workspace's routes, whose order the priority settles.
+///
+/// A route with no hosts neither claims a host nor is blocked by one: it takes whatever no named
+/// host matches, so a superuser's catch-all is exempt from the overlap rule, and a workspace that
+/// names a host the catch-all would also serve is not refused for it.
 async fn may_route(
     tx: &Transaction<'_>,
     actor: &User,
@@ -123,6 +135,36 @@ async fn may_route(
 
 fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).expect("a validated row always serialises")
+}
+
+/// Refuses a delete while policies hang off the row. They go with it by `on delete cascade`, and
+/// that would drop a route's key-auth or JWT policy unseen: delete and create again, and the route
+/// answers without asking for credentials, with no audit entry saying the policy went. `column`
+/// is `route_id` or `service_id`, `kind` the word for the row.
+async fn no_policies(
+    tx: &Transaction<'_>,
+    column: &str,
+    id: Uuid,
+    kind: &str,
+) -> Result<(), WriteError> {
+    let attached: i64 = tx
+        .query_one(
+            &format!("select count(*) from plugins where {column} = $1"),
+            &[&id],
+        )
+        .await?
+        .get(0);
+    match attached {
+        0 => Ok(()),
+        1 => Err(Refusal::Conflict(format!(
+            "1 policy is attached to this {kind}. Remove it first."
+        ))
+        .into()),
+        n => Err(Refusal::Conflict(format!(
+            "{n} policies are attached to this {kind}. Remove them first."
+        ))
+        .into()),
+    }
 }
 
 impl Store {
@@ -299,6 +341,10 @@ impl Store {
             .into());
         }
         let before = service_from(&row);
+        // Nothing to write, so nothing to audit and nothing for the data planes to reload.
+        if before == *s {
+            return Ok(());
+        }
         tx.execute(
             "update services set name = $2, protocol = $3, host = $4, port = $5,
                     connect_timeout_ms = $6, read_timeout_ms = $7, updated_at = now()
@@ -332,7 +378,7 @@ impl Store {
     }
 
     /// Deletes the service called `name`, which needs the admin role, and only while no route
-    /// uses it: deleting it would leave them pointing nowhere.
+    /// uses it, since they would point nowhere, and no policy is attached to it.
     pub async fn delete_service(
         &self,
         caller: Uuid,
@@ -382,6 +428,7 @@ impl Store {
             ))
             .into());
         }
+        no_policies(&tx, "service_id", id, "service").await?;
         tx.execute("delete from services where id = $1", &[&id])
             .await?;
         audit(
@@ -412,7 +459,7 @@ impl Store {
         workspace: Uuid,
         r: &Route,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_write_route(caller, workspace, None, r, None)).await
+        retrying(move || self.try_write_route(caller, workspace, None, r)).await
     }
 
     /// Replaces the route called `current`, which may rename it, when `seen` is its
@@ -425,23 +472,51 @@ impl Store {
         r: &Route,
         seen: &str,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_write_route(caller, workspace, Some(current), r, Some(seen)))
-            .await
+        retrying(move || self.try_write_route(caller, workspace, Some((current, seen)), r)).await
     }
 
-    /// Creates `r` when `current` is `None`, and otherwise replaces the route called `current`
-    /// when `seen` is its `updated_at`.
+    /// Creates `r` when `replacing` is `None`, and otherwise replaces the route it names when
+    /// the `updated_at` beside the name is the route's own.
     async fn try_write_route(
         &self,
         caller: Uuid,
         workspace: Uuid,
-        current: Option<&str>,
+        replacing: Option<(&str, &str)>,
         r: &Route,
-        seen: Option<&str>,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        // The route being replaced is read first, so a save to one that is gone or was changed
+        // meanwhile answers that, not some other refusal its new contents would earn.
+        let existing = match replacing {
+            None => None,
+            Some((current, seen)) => {
+                let Some(row) = tx
+                    .query_opt(
+                        &format!(
+                            "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths,
+                                    r.priority, {} as updated_at
+                               from routes r join services s on s.id = r.service_id
+                              where r.workspace_id = $1 and r.name = $2 for update of r",
+                            updated_at("r.updated_at")
+                        ),
+                        &[&workspace, &current],
+                    )
+                    .await?
+                else {
+                    return Err(Refusal::NotFound(format!(
+                        "There is no route named {current} in this workspace."
+                    ))
+                    .into());
+                };
+                if row.get::<_, &str>("updated_at") != seen {
+                    return Err(Refusal::Conflict(STALE.into()).into());
+                }
+                let before = route_from(&row).map_err(WriteError::Store)?;
+                Some((row.get::<_, Uuid>("id"), before))
+            }
+        };
         // On a replace as well as a create, so a save that keeps `hosts: []` is checked too.
         may_route(&tx, &actor, workspace, &r.hosts).await?;
         let Some(service) = tx
@@ -459,7 +534,7 @@ impl Store {
         };
         let service_id: Uuid = service.get("id");
         let paths = json(&r.paths);
-        match current {
+        match existing {
             None => {
                 let Some(row) = tx
                     .query_opt(
@@ -499,30 +574,8 @@ impl Store {
                 )
                 .await?;
             }
-            Some(current) => {
-                let Some(row) = tx
-                    .query_opt(
-                        &format!(
-                            "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths,
-                                    r.priority, {} as updated_at
-                               from routes r join services s on s.id = r.service_id
-                              where r.workspace_id = $1 and r.name = $2 for update of r",
-                            updated_at("r.updated_at")
-                        ),
-                        &[&workspace, &current],
-                    )
-                    .await?
-                else {
-                    return Err(Refusal::NotFound(format!(
-                        "There is no route named {current} in this workspace."
-                    ))
-                    .into());
-                };
-                if Some(row.get::<_, &str>("updated_at")) != seen {
-                    return Err(Refusal::Conflict(STALE.into()).into());
-                }
-                let id: Uuid = row.get("id");
-                if r.name != current
+            Some((id, before)) => {
+                if r.name != before.name
                     && tx
                         .query_opt(
                             "select 1 from routes where workspace_id = $1 and name = $2",
@@ -537,7 +590,11 @@ impl Store {
                     ))
                     .into());
                 }
-                let before = route_from(&row).map_err(WriteError::Store)?;
+                // Checked like any other save, then nothing to write, so nothing to audit and
+                // nothing for the data planes to reload.
+                if before == *r {
+                    return Ok(());
+                }
                 tx.execute(
                     "update routes set service_id = $2, name = $3, hosts = $4, methods = $5,
                             paths = $6, priority = $7, updated_at = now()
@@ -572,7 +629,8 @@ impl Store {
         Ok(())
     }
 
-    /// Deletes the route called `name`, which needs the admin role.
+    /// Deletes the route called `name`, which needs the admin role, and only while no policy is
+    /// attached to it.
     pub async fn delete_route(
         &self,
         caller: Uuid,
@@ -606,6 +664,7 @@ impl Store {
             .into());
         };
         let id: Uuid = row.get("id");
+        no_policies(&tx, "route_id", id, "route").await?;
         let before = route_from(&row).map_err(WriteError::Store)?;
         tx.execute("delete from routes where id = $1", &[&id])
             .await?;
