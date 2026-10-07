@@ -8,6 +8,28 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The control plane has an API for store-mode services and routes:
+  `/api/workspaces/{workspace}/services` and `/routes`, with list, create, replace (renames
+  included) and delete. ADR 5's roles apply per workspace: a viewer reads, an editor creates and
+  changes, an admin deletes. Every write is checked against the compiler's own rules and names the
+  field it refuses, refuses an edit made from a stale read with 409, leaves one audit entry, and
+  writes nothing when nothing changed. A service that routes still use, or a route or service with
+  a policy attached, is not deleted: the policy would otherwise go with it, silently. The console's
+  pages for them come next.
+- Hosts belong to one workspace. Every workspace's store routes share the data plane's ports, so a
+  route may not name a host that another workspace's route already names, or one a `*.` wildcard of
+  theirs covers (409). A route for any host, and a wildcard with a single label after `*.`, are a
+  superuser's to create. Without this an editor could take every workspace's traffic.
+- A store service's `https` is honoured. It was compiled as plain HTTP; it is now TLS verified
+  against the system trust store, with the host as SNI, in a cluster keyed `https://host:port` of its
+  own. An `https` service therefore needs a host name, not an address. The service's `tls_verify`,
+  `tls_ca_pem` and `tls_sni` columns are not read yet.
+- A store route now sends its service's host upstream as `Host` (with the port when it is not the
+  protocol's default), as Kong does by default, instead of the client's; the client's still arrives
+  as `X-Forwarded-Host`. Every existing store configuration's ETag changes once because of it.
+- A store service's connect and read timeouts reach its routes. The data plane gains an optional
+  per-rule connect timeout, which Kubernetes mode never sets; for a TLS upstream it bounds the TCP
+  connect and the handshake separately.
 - An API key now opens the `key_auth` routes of its own workspace only. Every key in the
   configuration was accepted by every `key_auth` policy, so a consumer issued a key in one
   workspace could call another workspace's protected routes. A store-mode `key_auth` policy now
