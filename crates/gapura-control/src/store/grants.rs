@@ -67,7 +67,7 @@ const ATTEMPTS: u32 = 3;
 /// - A unique violation. Two writes gave one account a grant in one workspace, or made one
 ///   mapping, when neither existed yet, and the second insert lost. Run again, it reads the
 ///   first one's row as what it is changing, and its audit entry says so.
-async fn retrying<F, Fut>(mut attempt: F) -> Result<(), WriteError>
+pub(super) async fn retrying<F, Fut>(mut attempt: F) -> Result<(), WriteError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(), WriteError>>,
@@ -161,18 +161,15 @@ struct Authorised {
     workspaces: BTreeMap<Uuid, String>,
 }
 
-/// Step 1: read again, locked, what `caller`'s right to write in `concerned` rests on, and
-/// decide with the function the handler used.
-///
-/// A caller whose row is gone, or disabled since their session was read, administers nothing.
-/// A workspace that does not exist is simply missing from what is read, so it is refused like
-/// one the caller does not administer. Rows come back in a fixed order, so two writes that lock
-/// the same rows take them the same way round.
-async fn authorise_again(
+/// What `caller`'s rights in `concerned` rest on, read again inside `tx` and locked `FOR SHARE`:
+/// their own row, the workspaces, their direct grants there and the group mappings their groups
+/// match. Each write decides over these with its own rule. A caller whose row is gone is refused
+/// in the words a workspace outside their reach gets.
+pub(super) async fn rights(
     tx: &Transaction<'_>,
     caller: Uuid,
     concerned: &BTreeSet<Uuid>,
-) -> Result<Authorised, WriteError> {
+) -> Result<(User, Rows), WriteError> {
     // This bounds each wait for a lock, not the whole write: a write queued behind a transaction
     // that never ends answers with an error after ten seconds instead of holding its connection,
     // and the request, for as long as that one runs. A write that waits at several rows, or is
@@ -260,6 +257,22 @@ async fn authorise_again(
         grants: direct,
         group_grants: mapped,
     };
+    Ok((actor, rows))
+}
+
+/// Step 1: read again, locked, what `caller`'s right to write in `concerned` rests on, with
+/// `rights`, and decide with the function the handler used, `grants::authorise`.
+///
+/// A caller whose row is gone, or disabled since their session was read, administers nothing.
+/// A workspace that does not exist is simply missing from what is read, so it is refused like
+/// one the caller does not administer. Rows come back in a fixed order, so two writes that lock
+/// the same rows take them the same way round.
+async fn authorise_again(
+    tx: &Transaction<'_>,
+    caller: Uuid,
+    concerned: &BTreeSet<Uuid>,
+) -> Result<Authorised, WriteError> {
+    let (actor, rows) = rights(tx, caller, concerned).await?;
     grants::authorise(&rows, &actor, concerned)?;
     Ok(Authorised {
         workspaces: rows
@@ -284,18 +297,22 @@ fn known(name: &str) -> Result<Role, WriteError> {
 }
 
 /// One `audit_log` row.
-struct Entry {
-    action: &'static str,
-    object_kind: &'static str,
-    object_id: Option<Uuid>,
-    workspace: Uuid,
-    before: Option<serde_json::Value>,
-    after: Option<serde_json::Value>,
+pub(super) struct Entry {
+    pub(super) action: &'static str,
+    pub(super) object_kind: &'static str,
+    pub(super) object_id: Option<Uuid>,
+    pub(super) workspace: Uuid,
+    pub(super) before: Option<serde_json::Value>,
+    pub(super) after: Option<serde_json::Value>,
 }
 
 /// Step 3: the audit entry for one binding that changed, naming who changed it and how they
 /// signed in. In store mode an account signs in one way only, so its method is the session's.
-async fn audit(tx: &Transaction<'_>, actor: &User, entry: Entry) -> Result<(), WriteError> {
+pub(super) async fn audit(
+    tx: &Transaction<'_>,
+    actor: &User,
+    entry: Entry,
+) -> Result<(), WriteError> {
     tx.execute(
         "insert into audit_log (actor_user_id, actor_name, actor_method, action, object_kind,
                                 object_id, workspace_id, before, after)
