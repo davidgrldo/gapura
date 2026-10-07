@@ -36,6 +36,32 @@ pub fn router_with(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_BODY))
                 .delete(crate::grants_api::delete_mapping),
         )
+        // Store-mode configuration, per workspace. The ones that read a body cap it as the
+        // grants writes do.
+        .route(
+            "/api/workspaces/{ws}/services",
+            get(crate::configuration_api::list_services)
+                .post(crate::configuration_api::create_service)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}/services/{name}",
+            put(crate::configuration_api::replace_service)
+                .delete(crate::configuration_api::delete_service)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}/routes",
+            get(crate::configuration_api::list_routes)
+                .post(crate::configuration_api::create_route)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}/routes/{name}",
+            put(crate::configuration_api::replace_route)
+                .delete(crate::configuration_api::delete_route)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
         // Explicit routes above always win a match first, so this only ever runs for a path
