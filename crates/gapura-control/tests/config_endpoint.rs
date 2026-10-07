@@ -174,6 +174,50 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
 }
 
 #[tokio::test]
+async fn a_service_s_timeouts_and_https_reach_the_served_configuration() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.issue_token("edge-1").await.expect("issuing a token");
+    let client = store.client().await.unwrap();
+    client
+        .batch_execute(
+            "insert into services (workspace_id, name, protocol, host, port,
+                                   connect_timeout_ms, read_timeout_ms)
+               select id, 'secure', 'https', 'api.internal', 8443, 2000, 15000
+                 from workspaces limit 1;
+             insert into routes (workspace_id, service_id, name, paths, priority)
+               select w.id, s.id, 'secure-api', '[{\"type\":\"prefix\",\"value\":\"/s\"}]', 0
+                 from workspaces w, services s limit 1;",
+        )
+        .await
+        .expect("seeding");
+
+    let (status, _, body) = get(&app, &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let config: Config = serde_json::from_slice(&body).expect("a Config");
+
+    let rules = &config.listeners[0].rules;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].timeouts.connect_ms, Some(2000));
+    assert_eq!(rules[0].timeouts.backend_request_ms, Some(15000));
+    assert_eq!(
+        rules[0]
+            .filters
+            .rewrite
+            .as_ref()
+            .and_then(|r| r.hostname.as_deref()),
+        Some("api.internal:8443")
+    );
+    let tls = config.clusters["https://api.internal:8443"]
+        .tls
+        .as_ref()
+        .expect("an https service is reached over TLS");
+    assert_eq!(tls.sni, "api.internal");
+    assert!(!tls.insecure);
+}
+
+#[tokio::test]
 async fn a_token_that_was_never_issued_gets_nothing() {
     let Some((_store, app, _guard)) = fixture().await else {
         return;

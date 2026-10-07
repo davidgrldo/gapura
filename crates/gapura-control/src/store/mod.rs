@@ -182,10 +182,10 @@ impl Store {
                     port: r.get::<_, i32>("port") as u16,
                     connect_timeout_ms: r
                         .get::<_, Option<i32>>("connect_timeout_ms")
-                        .map(|ms| ms as u32),
+                        .and_then(|ms| u32::try_from(ms).ok()),
                     read_timeout_ms: r
                         .get::<_, Option<i32>>("read_timeout_ms")
-                        .map(|ms| ms as u32),
+                        .and_then(|ms| u32::try_from(ms).ok()),
                 }
             })
             .collect();

@@ -270,8 +270,9 @@ pub struct WeightedBackend {
 pub struct Timeouts {
     pub request_ms: Option<u64>,
     pub backend_request_ms: Option<u64>,
-    /// How long the TCP connect to an upstream may take, per attempt (the TLS handshake is not
-    /// included). Set from a store service; Gateway API has no such field, so Kubernetes mode
+    /// How long connecting to an upstream may take, per attempt. For a TLS cluster Pingora applies
+    /// the same value separately to the TCP connect and to the TLS handshake, so connecting can
+    /// take up to about twice this. Set from a store service; Gateway API has no such field, so Kubernetes mode
     /// leaves it `None`, which keeps the data plane's default. Omitted from the wire when unset, so
     /// a configuration without it serialises byte-for-byte as before and its ETag does not change.
     #[serde(default, skip_serializing_if = "Option::is_none")]

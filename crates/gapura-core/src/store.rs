@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{
     Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, ListenerConfig, PathMatch, Plugin,
-    PortEntry, Protocol, ResolveTarget, RouteMatch, RouteRule, Timeouts, WeightedBackend,
+    PortEntry, Protocol, ResolveTarget, Rewrite, RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -167,6 +167,10 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             // Verified against the process trust store, as a `BackendTLSPolicy` naming the
             // system CAs is: an `https` service that answered with any certificate at all would
             // be no different from plain HTTP to anyone on the path.
+            //
+            // The service's `tls_verify`, `tls_ca_pem` and `tls_sni` columns are not honoured
+            // yet; that is a later slice. When they are, the cluster key must cover them too,
+            // because clusters are shared first-wins across services and workspaces.
             tls: (service.protocol == Protocol::Https).then(|| ClusterTls {
                 sni: service.host.clone(),
                 ca_pem: None,
@@ -188,7 +192,15 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             // explicit priority, so there is nothing to put here and nothing that reads it.
             creation_timestamp: String::new(),
             matches: matches.clone(),
-            filters: Filters::default(),
+            // Kong's default (`preserve_host = false`): the upstream is addressed by the
+            // service's own host, not by whatever name the client used to reach the gateway.
+            filters: Filters {
+                rewrite: Some(Rewrite {
+                    hostname: Some(upstream_authority(service)),
+                    path: None,
+                }),
+                ..Filters::default()
+            },
             backends: vec![WeightedBackend {
                 cluster: Some(key),
                 weight: 1,
@@ -327,6 +339,20 @@ fn cluster_key(service: &StoreService) -> String {
     }
 }
 
+/// The `Host` an upstream is sent: the service's host, with the port only when it is not the
+/// protocol's default, as a browser would write it.
+fn upstream_authority(service: &StoreService) -> String {
+    let default_port = match service.protocol {
+        Protocol::Https => 443,
+        Protocol::Http => 80,
+    };
+    if service.port == default_port {
+        service.host.clone()
+    } else {
+        format!("{}:{}", service.host, service.port)
+    }
+}
+
 /// What a rule is called in the served configuration, its metrics and its access log:
 /// `workspace/name`, as the Kubernetes path says `namespace/name`, so two workspaces' `orders`
 /// routes are told apart. A snapshot without workspaces keeps the bare name.
@@ -450,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn a_service_s_timeouts_reach_every_rule_of_its_routes() {
+    fn timeouts_of_a_service_reach_every_rule_of_its_routes() {
         let mut orders = svc("orders", "orders.internal", 8080);
         orders.connect_timeout_ms = Some(2000);
         orders.read_timeout_ms = Some(15000);
@@ -460,12 +486,34 @@ mod tests {
             ..Default::default()
         };
         let cfg = compile(&snap, &StoreSettings::default());
-        assert!(!cfg.listeners[0].rules.is_empty());
+        assert_eq!(cfg.listeners[0].rules.len(), 2);
         for rule in &cfg.listeners[0].rules {
             assert_eq!(rule.timeouts.connect_ms, Some(2000));
             assert_eq!(rule.timeouts.backend_request_ms, Some(15000));
             assert_eq!(rule.timeouts.request_ms, None);
         }
+    }
+
+    #[test]
+    fn the_upstream_is_sent_the_service_s_host_with_a_port_only_when_it_is_not_the_default() {
+        let orders = svc("orders", "orders.internal", 8080);
+        let mut secure = svc("secure", "api.internal", 443);
+        secure.protocol = Protocol::Https;
+        let snap = StoreSnapshot {
+            services: vec![orders, secure],
+            routes: vec![route("o", "orders", "/o", 0), route("s", "secure", "/s", 0)],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let host_of = |id: &str| {
+            let rule = cfg.listeners[0].rules.iter().find(|r| r.route == id);
+            let rewrite = rule.expect("rule").filters.rewrite.as_ref();
+            let rewrite = rewrite.expect("a rewrite");
+            assert!(rewrite.path.is_none());
+            rewrite.hostname.clone()
+        };
+        assert_eq!(host_of("o").as_deref(), Some("orders.internal:8080"));
+        assert_eq!(host_of("s").as_deref(), Some("api.internal"));
     }
 
     #[test]
