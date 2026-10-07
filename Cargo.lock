@@ -1448,6 +1448,7 @@ dependencies = [
  "openidconnect",
  "rand 0.9.5",
  "rcgen",
+ "regex",
  "reqwest",
  "rust-embed",
  "rustls",

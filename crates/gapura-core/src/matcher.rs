@@ -17,21 +17,10 @@ pub type RegexMap = HashMap<String, Arc<regex::Regex>>;
 /// RegularExpression: `/admin` matches `/admin` and not `/x/admin-y`. A pattern meant as a prefix
 /// says so with a trailing `.*`. The raw pattern is compiled first so one with an unbalanced `)`
 /// is refused instead of escaping the anchoring group.
-///
-/// The compiled program may not exceed `PATH_REGEX_SIZE_LIMIT` bytes, so a pattern such as
-/// `a{1000}{1000}` is refused instead of costing memory on every generation.
 pub fn compile_path_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    let build = |p: &str| {
-        regex::RegexBuilder::new(p)
-            .size_limit(PATH_REGEX_SIZE_LIMIT)
-            .build()
-    };
-    build(pattern)?;
-    build(&format!("^(?:{pattern})$"))
+    regex::Regex::new(pattern)?;
+    regex::Regex::new(&format!("^(?:{pattern})$"))
 }
-
-/// The most a compiled path pattern may take, in bytes.
-pub const PATH_REGEX_SIZE_LIMIT: usize = 256 * 1024;
 
 /// Compile every `PathMatch::Regex` pattern of the port tables into a side map, and report the
 /// patterns that could not be compiled (deduped like the map).
@@ -600,12 +589,6 @@ mod tests {
         assert!(compile_path_regex("a)|(b").is_err());
         assert!(compile_path_regex("/a|/b").unwrap().is_match("/b"));
         assert!(!compile_path_regex("/a|/b").unwrap().is_match("/bx"));
-    }
-
-    #[test]
-    fn a_path_regex_that_compiles_to_a_huge_program_is_refused() {
-        assert!(compile_path_regex("a{1000}{1000}").is_err());
-        assert!(compile_path_regex("/v[0-9]{1,3}/.*").is_ok());
     }
 
     #[test]

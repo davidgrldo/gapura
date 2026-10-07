@@ -327,6 +327,36 @@ fn regex_reason(error: &impl std::fmt::Display) -> String {
     reason.chars().take(200).collect()
 }
 
+/// The most a console regex may compile to, in bytes. Generous, since Unicode classes such as
+/// `\w` are large, and well under what `a{1000}{1000}` costs. It applies to what the console
+/// writes only: the shared `compile_path_regex` stays as every reader of a snapshot has it.
+const REGEX_SIZE_LIMIT: usize = 4 * 1024 * 1024;
+
+/// A console regex: it must pass the data plane's own rules, and also fit `REGEX_SIZE_LIMIT`.
+fn console_regex(value: &str) -> Result<(), String> {
+    gapura_core::matcher::compile_path_regex(value).map_err(|e| regex_reason(&e))?;
+    regex::RegexBuilder::new(&format!("^(?:{value})$"))
+        .size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .map(drop)
+        .map_err(|e| regex_reason(&e))
+}
+
+/// A route host that names every name under a single label, such as `*.com`, takes more than one
+/// workspace's share of the data plane's ports. Only a superuser may route one; a wildcard needs
+/// at least two labels after `*.`. The store asks this for each host of a route.
+pub fn may_claim_wildcard(caller: &User, host: &str) -> Result<(), Refusal> {
+    let Some(suffix) = host.strip_prefix("*.") else {
+        return Ok(());
+    };
+    if caller.superuser || suffix.contains('.') {
+        return Ok(());
+    }
+    Err(Refusal::Forbidden(format!(
+        "{host} would claim every name under one label for this workspace; only a superuser may route it."
+    )))
+}
+
 /// One prefix or exact path value: visible ASCII, no query string or fragment, starting with `/`.
 /// A prefix loses its trailing slashes, as the data plane's own prefix rule does, because that
 /// rule only matches at a `/` boundary.
@@ -424,13 +454,10 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
             ));
         }
         let value = if path.kind == "regex" {
-            if let Err(e) = gapura_core::matcher::compile_path_regex(&path.value) {
+            if let Err(reason) = console_regex(&path.value) {
                 return Err(field(
                     at,
-                    format!(
-                        "This regular expression does not compile: {}",
-                        regex_reason(&e)
-                    ),
+                    format!("This regular expression does not compile: {reason}"),
                 ));
             }
             path.value
@@ -1029,5 +1056,41 @@ mod tests {
                 "Only a superuser may create a route for any host: it would take other workspaces' traffic. Name at least one host.".into()
             ))
         );
+    }
+
+    #[test]
+    fn ordinary_unicode_patterns_are_accepted_and_a_huge_one_is_not() {
+        for ok in [r"/users/[\w-]{1,64}", "/[^/]{1,255}"] {
+            let r = route(route_with_paths(vec![path("regex", ok)]), Write::Replace);
+            assert!(r.is_ok(), "{ok}: {:?}", r.err());
+        }
+        let err = route(
+            route_with_paths(vec![path("regex", "a{1000}{1000}")]),
+            Write::Replace,
+        )
+        .unwrap_err();
+        assert_eq!(err.field, "paths[0].value");
+        assert!(err.sentence.contains("size limit"), "{}", err.sentence);
+    }
+
+    #[test]
+    fn a_wildcard_needs_two_labels_unless_a_superuser_routes_it() {
+        let editor = person(2, false);
+        let root = person(1, true);
+        for host in [
+            "*.example.com",
+            "*.a.example.com",
+            "example.com",
+            "api.example.com",
+        ] {
+            assert!(may_claim_wildcard(&editor, host).is_ok(), "{host}");
+        }
+        assert_eq!(
+            may_claim_wildcard(&editor, "*.com"),
+            Err(Refusal::Forbidden(
+                "*.com would claim every name under one label for this workspace; only a superuser may route it.".into()
+            ))
+        );
+        assert!(may_claim_wildcard(&root, "*.com").is_ok());
     }
 }
