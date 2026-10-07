@@ -14,8 +14,10 @@
   // - `edit` shows one service, read-only for a viewer, editable for an editor, and with Delete
   //   for an admin. Delete asks first, in the footer, as the access sheets do.
   // `onsaved` fetches the list again and returns a promise that settles once it is drawn or has
-  // failed, and never rejects.
-  let { mode, service = undefined, workspace, role, onsaved } = $props()
+  // failed, and never rejects. `onremoved` is where focus goes when the new list no longer has the
+  // row this sheet's button was in, which takes the button with it: after a delete, a rename, or
+  // a row removed by someone else.
+  let { mode, service = undefined, workspace, role, onsaved, onremoved = undefined } = $props()
 
   const id = $props.id()
   const editable = $derived(mode === 'create' || can.write(role))
@@ -23,6 +25,13 @@
   let open = $state(false)
   // The button that opened the sheet, so focus can go back to it after a save.
   let trigger = $state(null)
+  // Save, where focus goes after a refusal that names no field: disabling it while saving drops
+  // focus.
+  let submit = $state(null)
+  // The delete question's buttons: it opens on Keep it, so an Enter meant for Delete service
+  // cannot answer it, and Keep it hands focus back to Delete service.
+  let keep = $state(null)
+  let del = $state(null)
   let name = $state('')
   let protocol = $state('http')
   let host = $state('')
@@ -52,10 +61,24 @@
     deleting = false
   }
 
+  // The fields this form draws, and the ids of their inputs. A refusal naming anything else
+  // (`updated_at`) has no input to sit beside, so its sentence goes in the footer.
+  const INPUT = {
+    name: 'name',
+    protocol: 'protocol',
+    host: 'host',
+    port: 'port',
+    connect_timeout_ms: 'connect',
+    read_timeout_ms: 'read',
+  }
+  const shown = $derived(Object.hasOwn(INPUT, error?.field ?? ''))
+
   const invalid = (field) => error?.field === field
   const described = (field) => (invalid(field) ? `${id}-${field}-error` : undefined)
   const here = () => `${base(workspace, 'services')}/${encodeURIComponent(service.name)}`
-  const optional = (value) => (String(value).trim() === '' ? null : Number(value))
+  // A number input that has been cleared binds to null, not '', and 0 is a value the server
+  // refuses, so both mean "use the default".
+  const optional = (value) => (value == null || String(value).trim() === '' ? null : Number(value))
 
   async function send(method, url, body) {
     saving = true
@@ -70,18 +93,35 @@
         stale: failure.status === 409 && failure.message.includes('Reload'),
       }
       staleOnClose = true
+      // The fields were disabled while the request ran, which took focus away. It goes to the
+      // input the server named, whose sentence is then read through aria-describedby, or else to
+      // the button that was pressed.
+      await tick()
+      const input = shown ? document.getElementById(`${id}-${INPUT[error.field]}`) : undefined
+      ;(input ?? (deleting ? keep : submit))?.focus()
       return
     }
     staleOnClose = false
     open = false
     await onsaved()
     await tick()
-    if (document.activeElement === document.body && trigger?.isConnected) trigger.focus()
+    keepPlace()
+  }
+
+  // Where focus goes once a new list has been drawn under a sheet that has closed. Closing handed
+  // it back to the button that opened the sheet, but a row that goes, or is renamed since rows
+  // are keyed by name, takes its buttons with it and focus falls to the page; then it goes to
+  // where the page says. Focus the reader has put elsewhere in the meantime is left alone.
+  function keepPlace() {
+    if (document.activeElement !== document.body) return
+    if (trigger?.isConnected) trigger.focus()
+    else onremoved?.()
   }
 
   function save(event) {
     event.preventDefault()
-    if (!editable || saving) return
+    // Enter in a field while the delete question is up must not save over it.
+    if (!editable || saving || deleting) return
     const body = {
       name: name.trim(),
       protocol,
@@ -94,28 +134,43 @@
     else send('POST', base(workspace, 'services'), body)
   }
 
-  function remove() {
+  async function remove() {
     if (saving) return
     if (!deleting) {
       deleting = true
       askedAt = performance.now()
+      await tick()
+      keep?.focus()
       return
     }
     if (performance.now() - askedAt < 500) return
     send('DELETE', here())
   }
 
+  async function dismiss() {
+    deleting = false
+    await tick()
+    del?.focus()
+  }
+
+  // A key held down repeats, and a repeat must not answer the delete question or drop it.
+  const once = (event) => event.repeat && event.preventDefault()
+
   // The stale-edit refusal's way out: close, and draw the list as it is now.
   async function reload() {
     staleOnClose = false
     open = false
     await onsaved()
+    await tick()
+    keepPlace()
   }
 
   async function closed() {
     if (!staleOnClose) return
     staleOnClose = false
     await onsaved()
+    await tick()
+    keepPlace()
   }
 
   // Refuses to close while a request is in flight, for the reason MappingSheet gives.
@@ -167,7 +222,7 @@
         <div class="grid grid-cols-[7rem_1fr_6rem] gap-2">
           <div class="grid gap-1.5">
             <label for="{id}-protocol" class="font-medium">Protocol</label>
-            <NativeSelect id="{id}-protocol" bind:value={protocol}>
+            <NativeSelect id="{id}-protocol" bind:value={protocol} aria-invalid={invalid('protocol')} aria-describedby={described('protocol')}>
               <option value="http">http</option>
               <option value="https">https</option>
             </NativeSelect>
@@ -203,22 +258,24 @@
       </fieldset>
     </form>
     <Sheet.Footer>
-      {#if error && !error.field}
-        <p class="text-sm text-danger" role="alert">{error.sentence}</p>
+      {#if error && !shown}
+        <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
+          {error.sentence}
+        </p>
       {/if}
       {#if error?.stale}
         <Button variant="outline" onclick={reload}>Reload</Button>
       {/if}
       {#if deleting}
         <p class="text-sm" role="alert">Delete {service.name}? Routes can no longer use it.</p>
-        <Button variant="destructive" onclick={remove} disabled={saving}>Delete</Button>
-        <Button variant="outline" onclick={() => (deleting = false)} disabled={saving}>Keep it</Button>
+        <Button variant="destructive" onclick={remove} onkeydown={once} disabled={saving}>Delete</Button>
+        <Button bind:ref={keep} variant="outline" onclick={dismiss} onkeydown={once} disabled={saving}>Keep it</Button>
       {:else}
         {#if editable}
-          <Button type="submit" form="{id}-form" disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button bind:ref={submit} type="submit" form="{id}-form" onkeydown={once} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
         {/if}
         {#if mode === 'edit' && can.delete(role)}
-          <Button variant="ghost" class="text-danger" onclick={remove} disabled={saving}>Delete service</Button>
+          <Button bind:ref={del} variant="ghost" class="text-danger" onclick={remove} onkeydown={once} disabled={saving}>Delete service</Button>
         {/if}
         <Sheet.Close disabled={saving}>
           {#snippet child({ props })}

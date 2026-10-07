@@ -30,11 +30,14 @@
   }
   // Starts again from nothing on a new workspace, so another workspace's rows are never shown
   // under this one's name.
-  $effect(() => { workspace; answer = undefined; load() })
+  $effect(() => { workspace; answer = undefined; failed = undefined; load() })
+  // Where focus goes when a saved list no longer has the row a sheet's button was in.
+  let heading = $state(undefined)
+  const focusHeading = () => heading?.focus()
   const region = (label) => ({ tabindex: 0, role: 'region', 'aria-label': label })
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold tracking-tight">Services</h1>
+<h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Services</h1>
 <WorkspacePicker roles={me.roles} bind:value={workspace} />
 
 {#if !workspace}
@@ -44,9 +47,17 @@
 {:else if answer === undefined}
   <p class="text-muted-foreground">Reading services…</p>
 {:else}
+  {#if failed}
+    <!-- A fetch after a save failed. The table on screen is kept, and the reader is told what it
+         is, as on the Roles page: wiping it would take away the row focus returned to. -->
+    <div class="mb-4 space-y-2" role="status">
+      <Failure error={failed} what="the services" />
+      <p class="text-sm text-muted-foreground">The services below are as they were last read.</p>
+    </div>
+  {/if}
   <div class="mb-3 flex items-center justify-between gap-4">
     <p class="text-sm text-muted-foreground">The upstreams routes in {workspace} send traffic to.</p>
-    {#if can.write(role)}<ServiceSheet mode="create" {workspace} {role} onsaved={load} />{/if}
+    {#if can.write(role)}<ServiceSheet mode="create" {workspace} {role} onsaved={load} onremoved={focusHeading} />{/if}
   </div>
   {#if answer.length === 0}
     <p class="text-muted-foreground">No services yet.</p>
@@ -70,7 +81,7 @@
               <Table.Cell>{ms(s.read_timeout_ms)}</Table.Cell>
               <Table.Cell class="text-right tabular-nums">{s.routes}</Table.Cell>
               <Table.Cell class="text-right">
-                <ServiceSheet mode="edit" service={s} {workspace} {role} onsaved={load} />
+                <ServiceSheet mode="edit" service={s} {workspace} {role} onsaved={load} onremoved={focusHeading} />
               </Table.Cell>
             </Table.Row>
           {/each}
