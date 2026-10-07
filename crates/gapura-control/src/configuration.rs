@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const MAX_NAME_CHARS: usize = 63;
+pub const MAX_HOSTS: usize = 32;
 pub const MAX_PATHS: usize = 32;
+/// The most host, path and method combinations one route may expand to. An empty list counts as
+/// one, since it means any.
+pub const MAX_COMBINATIONS: usize = 1024;
 pub const MAX_PATH_CHARS: usize = 1024;
 pub const MAX_TIMEOUT_MS: i32 = 3_600_000;
 /// The methods a route may name. `web/check.mjs` reads this list, so the console offers exactly
@@ -60,18 +64,15 @@ pub fn allowed(
     if access.role >= action.needs() {
         return Ok(access.role);
     }
-    Err(Refusal::Forbidden(
-        match action {
-            Action::Read => unreachable!("every role reads"),
-            Action::Write => {
-                "Changing services and routes needs the editor role in this workspace."
-            }
-            Action::Delete => {
-                "Deleting services and routes needs the admin role in this workspace."
-            }
-        }
-        .into(),
-    ))
+    let verb = match action {
+        Action::Read => "Reading",
+        Action::Write => "Changing",
+        Action::Delete => "Deleting",
+    };
+    let needs = action.needs().as_str();
+    Err(Refusal::Forbidden(format!(
+        "{verb} services and routes needs the {needs} role in this workspace."
+    )))
 }
 
 /// A refusal of one field, which the console shows beside it.
@@ -214,9 +215,14 @@ fn updated_at(kind: Write, value: Option<String>) -> Result<Option<String>, Fiel
     }
 }
 
-/// Letters, digits and `. _ ~ -`, 1 to 63 of them.
+/// Letters, digits and `. _ ~ -`, 1 to 63 of them, starting with a letter or a digit. A name is
+/// a URL path segment, so `.` and `..` would be normalised away and the row could never be
+/// addressed again.
 pub fn name(value: &str, at: &str) -> Result<String, FieldError> {
-    let ok = !value.is_empty()
+    let ok = value
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && value.chars().count() <= MAX_NAME_CHARS
         && value
             .chars()
@@ -226,13 +232,18 @@ pub fn name(value: &str, at: &str) -> Result<String, FieldError> {
     } else {
         Err(field(
             at,
-            "Use 1 to 63 letters, digits, dots, underscores, tildes or hyphens.",
+            format!(
+                "Use 1 to {MAX_NAME_CHARS} letters, digits, dots, underscores, tildes or hyphens, \
+                 starting with a letter or a digit."
+            ),
         ))
     }
 }
 
 /// A DNS name: labels of letters, digits and hyphens, 1 to 63 long, not starting or ending with a
-/// hyphen, 253 characters in all.
+/// hyphen, 253 characters in all, whose last label starts with a letter. That last rule keeps
+/// anything that resolvers read as an IPv4 address in some spelling (`1.2.3`, `2130706433`,
+/// `0x7f.1`) from passing as a name.
 fn dns_name(value: &str) -> bool {
     value.len() <= 253
         && value.split('.').all(|label| {
@@ -242,14 +253,17 @@ fn dns_name(value: &str) -> bool {
                 && !label.ends_with('-')
                 && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         })
+        && value
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.starts_with(|c: char| c.is_ascii_alphabetic()))
 }
 
 /// A DNS name or an IPv4 address. The data plane joins `host:port` without brackets, so an IPv6
 /// literal would be ambiguous and is refused.
 fn upstream_host(value: &str) -> Result<String, FieldError> {
     let lowered = value.to_ascii_lowercase();
-    let ipv4 = value.parse::<std::net::Ipv4Addr>().is_ok();
-    if ipv4 || (value.parse::<std::net::IpAddr>().is_err() && dns_name(&lowered)) {
+    if value.parse::<std::net::Ipv4Addr>().is_ok() || dns_name(&lowered) {
         Ok(lowered)
     } else {
         Err(field(
@@ -265,22 +279,23 @@ fn timeout(value: Option<i64>, at: &str) -> Result<Option<i32>, FieldError> {
         Some(ms) if (1..=i64::from(MAX_TIMEOUT_MS)).contains(&ms) => Ok(Some(ms as i32)),
         Some(_) => Err(field(
             at,
-            "Use a number of milliseconds from 1 to 3600000, or leave it empty.",
+            format!("Use a number of milliseconds from 1 to {MAX_TIMEOUT_MS}, or leave it empty."),
         )),
     }
 }
 
 /// A service request, checked, and the `updated_at` it carried.
 pub fn service(input: ServiceInput, kind: Write) -> Result<(Service, Option<String>), FieldError> {
+    let service_name = name(&input.name, "name")?;
     let protocol = match input.protocol.as_str() {
         "http" => Protocol::Http,
         "https" => Protocol::Https,
         _ => return Err(field("protocol", "Use http or https.")),
     };
-    let port = if (1..=65535).contains(&input.port) {
+    let port = if (1..=i64::from(u16::MAX)).contains(&input.port) {
         input.port as i32
     } else {
-        return Err(field("port", "Use a port from 1 to 65535."));
+        return Err(field("port", format!("Use a port from 1 to {}.", u16::MAX)));
     };
     let host = upstream_host(&input.host)?;
     if protocol == Protocol::Https && host.parse::<std::net::IpAddr>().is_ok() {
@@ -290,7 +305,7 @@ pub fn service(input: ServiceInput, kind: Write) -> Result<(Service, Option<Stri
         ));
     }
     let service = Service {
-        name: name(&input.name, "name")?,
+        name: service_name,
         protocol,
         host,
         port,
@@ -300,9 +315,54 @@ pub fn service(input: ServiceInput, kind: Write) -> Result<(Service, Option<Stri
     Ok((service, updated_at(kind, input.updated_at)?))
 }
 
+/// The regular expression's own reason, one line, at most 200 characters.
+fn regex_reason(error: &impl std::fmt::Display) -> String {
+    let text = error.to_string();
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    let reason = last.strip_prefix("error: ").unwrap_or(last).trim();
+    reason.chars().take(200).collect()
+}
+
+/// One prefix or exact path value: visible ASCII, no query string or fragment, starting with `/`.
+/// A prefix loses its trailing slashes, as the data plane's own prefix rule does, because that
+/// rule only matches at a `/` boundary.
+fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError> {
+    if !value.starts_with('/') {
+        return Err(field(at, "A prefix or exact path starts with /."));
+    }
+    if !value.chars().all(|c| ('\u{21}'..='\u{7e}').contains(&c)) {
+        return Err(field(
+            at,
+            "Percent-encode characters outside visible ASCII, as clients send them.",
+        ));
+    }
+    if value.contains(['?', '#']) {
+        return Err(field(at, "A path has no query string or fragment."));
+    }
+    let mut value = value.to_string();
+    if kind == "prefix" {
+        while value.len() > 1 && value.ends_with('/') {
+            value.pop();
+        }
+    }
+    Ok(value)
+}
+
 /// A route request, checked, and the `updated_at` it carried. Hosts are lowercased and methods
 /// uppercased; a value given twice is kept once.
 pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), FieldError> {
+    let route_name = name(&input.name, "name")?;
+    let service_name = name(&input.service, "service")?;
+    if input.hosts.len() > MAX_HOSTS {
+        return Err(field(
+            "hosts",
+            format!("A route takes at most {MAX_HOSTS} hosts."),
+        ));
+    }
     let mut hosts: Vec<String> = Vec::new();
     for (i, host) in input.hosts.iter().enumerate() {
         let lowered = host.to_ascii_lowercase();
@@ -318,9 +378,12 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
         }
     }
     if input.paths.len() > MAX_PATHS {
-        return Err(field("paths", "A route takes at most 32 paths."));
+        return Err(field(
+            "paths",
+            format!("A route takes at most {MAX_PATHS} paths."),
+        ));
     }
-    let mut paths = Vec::new();
+    let mut paths: Vec<PathMatch> = Vec::new();
     for (i, path) in input.paths.into_iter().enumerate() {
         if !PATH_TYPES.contains(&path.kind.as_str()) {
             return Err(field(
@@ -330,19 +393,32 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
         }
         let at = format!("paths[{i}].value");
         if path.value.is_empty() || path.value.chars().count() > MAX_PATH_CHARS {
-            return Err(field(at, "Use a path of 1 to 1024 characters."));
+            return Err(field(
+                at,
+                format!("Use a path of 1 to {MAX_PATH_CHARS} characters."),
+            ));
         }
-        if path.kind == "regex" {
-            if gapura_core::matcher::compile_path_regex(&path.value).is_err() {
-                return Err(field(at, "This regular expression does not compile."));
+        let value = if path.kind == "regex" {
+            if let Err(e) = gapura_core::matcher::compile_path_regex(&path.value) {
+                return Err(field(
+                    at,
+                    format!(
+                        "This regular expression does not compile: {}",
+                        regex_reason(&e)
+                    ),
+                ));
             }
-        } else if !path.value.starts_with('/') {
-            return Err(field(at, "A prefix or exact path starts with /."));
-        }
-        paths.push(PathMatch {
+            path.value
+        } else {
+            plain_path(&path.kind, &path.value, at)?
+        };
+        let entry = PathMatch {
             kind: path.kind,
-            value: path.value,
-        });
+            value,
+        };
+        if !paths.contains(&entry) {
+            paths.push(entry);
+        }
     }
     let mut methods: Vec<String> = Vec::new();
     for (i, method) in input.methods.iter().enumerate() {
@@ -357,9 +433,19 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
             methods.push(upper);
         }
     }
+    let combinations = hosts.len().max(1) * paths.len().max(1) * methods.len().max(1);
+    if combinations > MAX_COMBINATIONS {
+        return Err(field(
+            "paths",
+            format!(
+                "This route expands to more than {MAX_COMBINATIONS} host, path and method \
+                 combinations; split it into several routes."
+            ),
+        ));
+    }
     let route = Route {
-        name: name(&input.name, "name")?,
-        service: name(&input.service, "service")?,
+        name: route_name,
+        service: service_name,
         hosts,
         paths,
         methods,
@@ -580,5 +666,302 @@ mod tests {
         input.methods.clear();
         let (r, _) = route(input, Write::Replace).unwrap();
         assert!(r.hosts.is_empty() && r.paths.is_empty() && r.methods.is_empty());
+    }
+
+    fn path(kind: &str, value: &str) -> PathInput {
+        PathInput {
+            kind: kind.into(),
+            value: value.into(),
+        }
+    }
+
+    fn route_with_paths(paths: Vec<PathInput>) -> RouteInput {
+        RouteInput {
+            paths,
+            ..route_input()
+        }
+    }
+
+    #[test]
+    fn a_prefix_loses_its_trailing_slash_and_an_exact_path_keeps_it() {
+        let input = route_with_paths(vec![
+            path("prefix", "/api/"),
+            path("prefix", "/"),
+            path("prefix", "//"),
+            path("exact", "/api/"),
+        ]);
+        let (r, _) = route(input, Write::Replace).unwrap();
+        let values: Vec<_> = r
+            .paths
+            .iter()
+            .map(|p| (p.kind.as_str(), p.value.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [("prefix", "/api"), ("prefix", "/"), ("exact", "/api/")]
+        );
+    }
+
+    #[test]
+    fn a_path_given_twice_after_normalising_is_kept_once() {
+        let input = route_with_paths(vec![
+            path("prefix", "/api"),
+            path("prefix", "/api/"),
+            path("exact", "/api"),
+        ]);
+        let (r, _) = route(input, Write::Replace).unwrap();
+        assert_eq!(
+            r.paths.len(),
+            2,
+            "the same value of another type is a different match"
+        );
+    }
+
+    #[test]
+    fn a_path_is_visible_ascii_without_query_or_fragment() {
+        let cases = [
+            (
+                "/a b",
+                "Percent-encode characters outside visible ASCII, as clients send them.",
+            ),
+            (
+                "/caf\u{e9}",
+                "Percent-encode characters outside visible ASCII, as clients send them.",
+            ),
+            (
+                "/a\tb",
+                "Percent-encode characters outside visible ASCII, as clients send them.",
+            ),
+            ("/orders?x=1", "A path has no query string or fragment."),
+            ("/a#b", "A path has no query string or fragment."),
+        ];
+        for kind in ["prefix", "exact"] {
+            for (value, sentence) in cases {
+                let err =
+                    route(route_with_paths(vec![path(kind, value)]), Write::Replace).unwrap_err();
+                assert_eq!(err.field, "paths[0].value", "{kind} {value:?}");
+                assert_eq!(err.sentence, sentence, "{kind} {value:?}");
+            }
+        }
+        // A regex is the author's own pattern and may use any of these.
+        assert!(route(
+            route_with_paths(vec![path("regex", "/a b|/c#")]),
+            Write::Replace
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_regex_refusal_carries_the_compilers_reason_on_one_line() {
+        let err = route(
+            route_with_paths(vec![path("regex", "[unclosed")]),
+            Write::Replace,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "This regular expression does not compile: unclosed character class"
+        );
+        let err = route(
+            route_with_paths(vec![path("regex", "a{1000}{1000}")]),
+            Write::Replace,
+        )
+        .unwrap_err();
+        assert_eq!(err.field, "paths[0].value");
+        assert!(err.sentence.contains("size limit"), "{}", err.sentence);
+        assert!(!err.sentence.contains('\n') && err.sentence.chars().count() < 260);
+    }
+
+    #[test]
+    fn a_route_takes_at_most_32_hosts() {
+        let hosts = |n: usize| {
+            (0..n)
+                .map(|i| format!("h{i}.example.com"))
+                .collect::<Vec<_>>()
+        };
+        let input = RouteInput {
+            hosts: hosts(32),
+            paths: vec![],
+            methods: vec![],
+            ..route_input()
+        };
+        assert!(route(input, Write::Replace).is_ok());
+        let input = RouteInput {
+            hosts: hosts(33),
+            ..route_input()
+        };
+        let err = route(input, Write::Replace).unwrap_err();
+        assert_eq!(err.field, "hosts");
+        assert_eq!(err.sentence, "A route takes at most 32 hosts.");
+    }
+
+    #[test]
+    fn a_route_may_not_expand_past_1024_combinations() {
+        let hosts = |n: usize| {
+            (0..n)
+                .map(|i| format!("h{i}.example.com"))
+                .collect::<Vec<_>>()
+        };
+        let paths = (0..32)
+            .map(|i| path("exact", &format!("/{i}")))
+            .collect::<Vec<_>>();
+        // 32 hosts x 32 paths x any method is exactly the limit.
+        let at_limit = RouteInput {
+            hosts: hosts(32),
+            paths: paths.clone(),
+            methods: vec![],
+            ..route_input()
+        };
+        assert!(route(at_limit, Write::Replace).is_ok());
+        // 11 x 32 x 3 is 1056.
+        let over = RouteInput {
+            hosts: hosts(11),
+            paths,
+            methods: vec!["GET".into(), "POST".into(), "PUT".into()],
+            ..route_input()
+        };
+        let err = route(over, Write::Replace).unwrap_err();
+        assert_eq!(err.field, "paths");
+        assert_eq!(
+            err.sentence,
+            "This route expands to more than 1024 host, path and method combinations; split it into several routes."
+        );
+    }
+
+    #[test]
+    fn a_host_that_a_resolver_reads_as_an_address_is_not_a_name() {
+        for host in [
+            "1.2.3",
+            "2130706433",
+            "010.0.0.1",
+            "0x7f.1",
+            "1.2.3.4.5",
+            "orders.1",
+        ] {
+            let mut input = service_input();
+            input.host = host.into();
+            assert_eq!(
+                service(input, Write::Create).unwrap_err().field,
+                "host",
+                "{host}"
+            );
+        }
+        for host in [
+            "10.0.0.1",
+            "*.10.0.0.1",
+            "1.2.3",
+            "2130706433",
+            "0x7f.1",
+            "*.0x7f.1",
+        ] {
+            let input = RouteInput {
+                hosts: vec![host.into()],
+                ..route_input()
+            };
+            assert_eq!(
+                route(input, Write::Replace).unwrap_err().field,
+                "hosts[0]",
+                "{host}"
+            );
+        }
+        for host in ["orders", "orders-1.internal", "a.b.c1x", "x1"] {
+            let mut input = service_input();
+            input.host = host.into();
+            assert!(service(input, Write::Create).is_ok(), "{host}");
+        }
+    }
+
+    #[test]
+    fn a_name_starts_with_a_letter_or_a_digit() {
+        for bad in [".", "..", "-x", "_x", "~x", ".hidden"] {
+            let mut input = service_input();
+            input.name = bad.into();
+            assert_eq!(
+                service(input, Write::Create).unwrap_err().field,
+                "name",
+                "{bad}"
+            );
+            let input = RouteInput {
+                name: bad.into(),
+                ..route_input()
+            };
+            assert_eq!(
+                route(input, Write::Replace).unwrap_err().field,
+                "name",
+                "{bad}"
+            );
+            let input = RouteInput {
+                service: bad.into(),
+                ..route_input()
+            };
+            assert_eq!(
+                route(input, Write::Replace).unwrap_err().field,
+                "service",
+                "{bad}"
+            );
+        }
+        for good in ["a", "7", "a.b_c~d-e", "9lives"] {
+            assert!(name(good, "name").is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn the_name_is_checked_before_anything_else() {
+        let mut input = service_input();
+        input.name = "..".into();
+        input.protocol = "ftp".into();
+        input.port = 0;
+        assert_eq!(service(input, Write::Create).unwrap_err().field, "name");
+        let input = RouteInput {
+            name: "..".into(),
+            hosts: vec!["bad host".into()],
+            methods: vec!["FETCH".into()],
+            ..route_input()
+        };
+        assert_eq!(route(input, Write::Replace).unwrap_err().field, "name");
+    }
+
+    #[test]
+    fn the_limits_themselves_are_accepted() {
+        let mut input = service_input();
+        input.name = "n".repeat(63);
+        input.port = 1;
+        input.connect_timeout_ms = Some(1);
+        input.read_timeout_ms = Some(3_600_000);
+        assert!(service(input.clone(), Write::Create).is_ok());
+        input.port = 65535;
+        assert!(service(input.clone(), Write::Create).is_ok());
+        // Four labels of 63, 63, 63 and 61 characters, and three dots: 253.
+        input.host = [63, 63, 63, 61].map(|n| "a".repeat(n)).join(".");
+        assert_eq!(input.host.len(), 253);
+        assert!(service(input.clone(), Write::Create).is_ok());
+        input.host.push('a');
+        assert_eq!(service(input, Write::Create).unwrap_err().field, "host");
+
+        let long = format!("/{}", "a".repeat(1023));
+        let input = route_with_paths(vec![path("exact", &long)]);
+        assert!(route(input, Write::Replace).is_ok());
+        let input = route_with_paths(vec![path("exact", &format!("{long}a"))]);
+        assert_eq!(
+            route(input, Write::Replace).unwrap_err().field,
+            "paths[0].value"
+        );
+    }
+
+    #[test]
+    fn a_refusal_for_too_little_role_names_the_role_needed() {
+        let (rows, me, ws) = rows(Some(Role::Viewer));
+        assert_eq!(
+            allowed(&rows, &me, ws, Action::Write),
+            Err(Refusal::Forbidden(
+                "Changing services and routes needs the editor role in this workspace.".into()
+            ))
+        );
+        assert_eq!(
+            allowed(&rows, &me, ws, Action::Delete),
+            Err(Refusal::Forbidden(
+                "Deleting services and routes needs the admin role in this workspace.".into()
+            ))
+        );
     }
 }
