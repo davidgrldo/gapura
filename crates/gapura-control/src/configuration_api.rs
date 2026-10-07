@@ -10,10 +10,11 @@
 use crate::access_api::{store_caller, StoreCaller};
 use crate::configuration::{self, Action, FieldError, Write};
 use crate::grants::Refusal;
+use crate::grants_api::{unreadable, unsaved, NOT_SAVED};
 use crate::state::AppState;
 use crate::store::{sqlstate, Store, WriteError};
 use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
+use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -24,10 +25,6 @@ use uuid::Uuid;
 /// What the console shows when another write got in the way: a lock not granted in time, a
 /// deadlock, or a duplicate, after the store has already tried again where that could settle it.
 const CONTENDED: &str = "Someone else was changing this workspace at that moment, so this change was not saved. Try again.";
-
-/// What the console shows when the store failed for any other reason. It does not say that
-/// nothing was changed, because a commit that failed on the wire may or may not have happened.
-const NOT_SAVED: &str = "The console could not save this change. Try again in a moment.";
 
 /// `store_caller`'s refusals, and a missing store, in words.
 fn early(status: StatusCode) -> Response {
@@ -64,27 +61,16 @@ fn written(result: Result<(), WriteError>) -> Response {
                 sqlstate = code.map(SqlState::code),
                 "a configuration write failed"
             );
-            let contended = code.is_some_and(|c| {
-                *c == SqlState::LOCK_NOT_AVAILABLE
-                    || *c == SqlState::T_R_DEADLOCK_DETECTED
-                    || *c == SqlState::UNIQUE_VIOLATION
-            });
-            crate::api::refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                if contended { CONTENDED } else { NOT_SAVED },
-            )
+            crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, unsaved(code, CONTENDED))
         }
     }
 }
 
-/// The store, the caller and the workspace `ws` names, when the caller may do `action` there.
-/// A workspace that does not exist is answered as one the caller holds no role in.
-async fn caller_in<'a>(
+/// The store and the caller behind `headers`, before anything about the request is looked at.
+async fn caller_of<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
-    ws: &str,
-    action: Action,
-) -> Result<(&'a Store, StoreCaller, Uuid), Response> {
+) -> Result<(&'a Store, StoreCaller), Response> {
     let store = state
         .store
         .as_deref()
@@ -92,6 +78,12 @@ async fn caller_in<'a>(
     let caller = store_caller(store, headers, &state.session_key)
         .await
         .map_err(early)?;
+    Ok((store, caller))
+}
+
+/// The workspace `ws` names, when `caller` may do `action` there. A workspace that does not
+/// exist is answered as one the caller holds no role in.
+fn workspace_in(caller: &StoreCaller, ws: &str, action: Action) -> Result<Uuid, Refusal> {
     let Some(workspace) = caller
         .rows
         .workspaces
@@ -99,31 +91,28 @@ async fn caller_in<'a>(
         .find(|w| w.name == ws)
         .map(|w| w.id)
     else {
-        return Err(configuration::no_role().into_response());
+        return Err(configuration::no_role());
     };
-    configuration::allowed(&caller.rows, &caller.me, workspace, action)
-        .map_err(IntoResponse::into_response)?;
-    Ok((store, caller, workspace))
+    configuration::allowed(&caller.rows, &caller.me, workspace, action)?;
+    Ok(workspace)
 }
 
-/// The body read into a `what`. One that is too long or cut off keeps the status axum chose for
-/// it, worded for the console; one that is not a `what` is a 400.
+/// A path that could not be read, which is a name that can never be a workspace's, so it reads
+/// as an unknown one. Answered only once the caller is known, like a body that could not be read.
+fn unnamed() -> Response {
+    configuration::no_role().into_response()
+}
+
+/// The body read into a `what` (with its article: "a service"). One that is too long or cut off
+/// keeps the status axum chose for it; one that is not a `what` is a 400.
 fn body<T: serde::de::DeserializeOwned>(
     body: Result<Bytes, BytesRejection>,
     what: &str,
 ) -> Result<T, Box<Response>> {
-    let bytes = body.map_err(|rejection| {
-        let status = rejection.status();
-        let sentence = if status == StatusCode::PAYLOAD_TOO_LARGE {
-            format!("That request is too large to be a {what}.")
-        } else {
-            "The request could not be read.".to_string()
-        };
-        Box::new(crate::api::refuse(status, &sentence))
-    })?;
+    let bytes = body.map_err(|rejection| Box::new(unreadable(&rejection, what)))?;
     serde_json::from_slice(&bytes).map_err(|_| {
         Refusal::Invalid(format!(
-            "The request is not a {what} this console understands."
+            "The request is not {what} this console understands."
         ))
         .into_response()
         .into()
@@ -136,12 +125,12 @@ fn unavailable(error: &anyhow::Error) -> Response {
     early(StatusCode::SERVICE_UNAVAILABLE)
 }
 
-/// What a replace needs `updated_at` for; `configuration` has already refused a replace without
-/// one, so this is never taken.
+/// What a replace without `updated_at` is told. `configuration` has already refused one, so this
+/// is never taken; it says what `configuration` does.
 fn unseen() -> Response {
     field_error(FieldError {
         field: "updated_at".into(),
-        sentence: "Send the updated_at you last read.".into(),
+        sentence: configuration::UNSEEN.into(),
     })
 }
 
@@ -149,14 +138,20 @@ fn unseen() -> Response {
 pub async fn list_services(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(ws): Path<String>,
+    ws: Result<Path<String>, PathRejection>,
 ) -> Response {
-    match caller_in(&state, &headers, &ws, Action::Read).await {
-        Ok((store, _, workspace)) => match store.services(workspace).await {
-            Ok(list) => Json(list).into_response(),
-            Err(e) => unavailable(&e),
-        },
-        Err(r) => r,
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(r) => return r,
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Read) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    match store.services(workspace).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => unavailable(&e),
     }
 }
 
@@ -164,14 +159,19 @@ pub async fn list_services(
 pub async fn create_service(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(ws): Path<String>,
+    ws: Result<Path<String>, PathRejection>,
     raw: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (store, caller, workspace) = match caller_in(&state, &headers, &ws, Action::Write).await {
+    let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
         Err(r) => return r,
     };
-    let input = match body(raw, "service") {
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let input = match body(raw, "a service") {
         Ok(i) => i,
         Err(r) => return *r,
     };
@@ -190,14 +190,21 @@ pub async fn create_service(
 pub async fn replace_service(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((ws, name)): Path<(String, String)>,
+    path: Result<Path<(String, String)>, PathRejection>,
     raw: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (store, caller, workspace) = match caller_in(&state, &headers, &ws, Action::Write).await {
+    let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
         Err(r) => return r,
     };
-    let input = match body(raw, "service") {
+    let Ok(Path((ws, name))) = path else {
+        return unnamed();
+    };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let input = match body(raw, "a service") {
         Ok(i) => i,
         Err(r) => return *r,
     };
@@ -212,32 +219,45 @@ pub async fn replace_service(
     }
 }
 
-/// `DELETE /api/workspaces/{ws}/services/{name}`: delete a service no route uses.
+/// `DELETE /api/workspaces/{ws}/services/{name}`: delete a service. One that routes use, or
+/// that policies are attached to, is refused.
 pub async fn delete_service(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((ws, name)): Path<(String, String)>,
+    path: Result<Path<(String, String)>, PathRejection>,
 ) -> Response {
-    match caller_in(&state, &headers, &ws, Action::Delete).await {
-        Ok((store, caller, workspace)) => {
-            written(store.delete_service(caller.me.id, workspace, &name).await)
-        }
-        Err(r) => r,
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(r) => return r,
+    };
+    let Ok(Path((ws, name))) = path else {
+        return unnamed();
+    };
+    match workspace_in(&caller, &ws, Action::Delete) {
+        Ok(workspace) => written(store.delete_service(caller.me.id, workspace, &name).await),
+        Err(r) => r.into_response(),
     }
 }
 
-/// `GET /api/workspaces/{ws}/routes`: the workspace's routes, by name.
+/// `GET /api/workspaces/{ws}/routes`: the workspace's routes, highest priority first, then by
+/// name.
 pub async fn list_routes(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(ws): Path<String>,
+    ws: Result<Path<String>, PathRejection>,
 ) -> Response {
-    match caller_in(&state, &headers, &ws, Action::Read).await {
-        Ok((store, _, workspace)) => match store.routes(workspace).await {
-            Ok(list) => Json(list).into_response(),
-            Err(e) => unavailable(&e),
-        },
-        Err(r) => r,
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(r) => return r,
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Read) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    match store.routes(workspace).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => unavailable(&e),
     }
 }
 
@@ -245,14 +265,19 @@ pub async fn list_routes(
 pub async fn create_route(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(ws): Path<String>,
+    ws: Result<Path<String>, PathRejection>,
     raw: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (store, caller, workspace) = match caller_in(&state, &headers, &ws, Action::Write).await {
+    let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
         Err(r) => return r,
     };
-    let input = match body(raw, "route") {
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let input = match body(raw, "a route") {
         Ok(i) => i,
         Err(r) => return *r,
     };
@@ -267,14 +292,21 @@ pub async fn create_route(
 pub async fn replace_route(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((ws, name)): Path<(String, String)>,
+    path: Result<Path<(String, String)>, PathRejection>,
     raw: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (store, caller, workspace) = match caller_in(&state, &headers, &ws, Action::Write).await {
+    let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
         Err(r) => return r,
     };
-    let input = match body(raw, "route") {
+    let Ok(Path((ws, name))) = path else {
+        return unnamed();
+    };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let input = match body(raw, "a route") {
         Ok(i) => i,
         Err(r) => return *r,
     };
@@ -293,12 +325,17 @@ pub async fn replace_route(
 pub async fn delete_route(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((ws, name)): Path<(String, String)>,
+    path: Result<Path<(String, String)>, PathRejection>,
 ) -> Response {
-    match caller_in(&state, &headers, &ws, Action::Delete).await {
-        Ok((store, caller, workspace)) => {
-            written(store.delete_route(caller.me.id, workspace, &name).await)
-        }
-        Err(r) => r,
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(r) => return r,
+    };
+    let Ok(Path((ws, name))) = path else {
+        return unnamed();
+    };
+    match workspace_in(&caller, &ws, Action::Delete) {
+        Ok(workspace) => written(store.delete_route(caller.me.id, workspace, &name).await),
+        Err(r) => r.into_response(),
     }
 }

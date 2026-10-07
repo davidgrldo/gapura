@@ -201,6 +201,10 @@ pub enum Write {
     Replace,
 }
 
+/// What a replace without `updated_at` is told.
+pub(crate) const UNSEEN: &str =
+    "Send the updated_at you last read, so a change made meanwhile is not overwritten.";
+
 fn updated_at(kind: Write, value: Option<String>) -> Result<Option<String>, FieldError> {
     match (kind, value) {
         (Write::Create, None) => Ok(None),
@@ -208,10 +212,7 @@ fn updated_at(kind: Write, value: Option<String>) -> Result<Option<String>, Fiel
             Err(field("updated_at", "A new row has no updated_at to send."))
         }
         (Write::Replace, Some(v)) => Ok(Some(v)),
-        (Write::Replace, None) => Err(field(
-            "updated_at",
-            "Send the updated_at you last read, so a change made meanwhile is not overwritten.",
-        )),
+        (Write::Replace, None) => Err(field("updated_at", UNSEEN)),
     }
 }
 

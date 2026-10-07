@@ -38,7 +38,7 @@ const CONTENDED: &str = "Someone else was changing the same roles at that moment
 /// What the console shows when the store failed for any other reason: unreachable, a table gone,
 /// a role it does not know. It does not say that nothing was changed, because a commit that
 /// failed on the wire may or may not have happened.
-const NOT_SAVED: &str = "The console could not save this change. Try again in a moment.";
+pub(crate) const NOT_SAVED: &str = "The console could not save this change. Try again in a moment.";
 
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
@@ -63,15 +63,16 @@ fn refused_early(status: StatusCode) -> Response {
     crate::api::refuse(status, sentence)
 }
 
-/// What to tell the console when the store could not make a write, by what Postgres answered.
-fn unsaved(code: Option<&SqlState>) -> &'static str {
+/// What to tell the console when the store could not make a write, by what Postgres answered:
+/// `contended` when another write got in the way, `NOT_SAVED` for anything else.
+pub(crate) fn unsaved(code: Option<&SqlState>, contended: &'static str) -> &'static str {
     match code {
         Some(code)
             if *code == SqlState::LOCK_NOT_AVAILABLE
                 || *code == SqlState::T_R_DEADLOCK_DETECTED
                 || *code == SqlState::UNIQUE_VIOLATION =>
         {
-            CONTENDED
+            contended
         }
         _ => NOT_SAVED,
     }
@@ -91,22 +92,23 @@ fn written(result: Result<(), WriteError>) -> Response {
                 sqlstate = code.map(SqlState::code),
                 "a write to the store failed"
             );
-            crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, unsaved(code))
+            crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, unsaved(code, CONTENDED))
         }
     }
 }
 
 /// A body that could not be read into memory: longer than `MAX_BODY`, or cut off. Axum's own
 /// answer to either is plain text, which the console cannot show as it is, so it is worded here,
-/// under the status axum chose: 413 for the first, 400 for the second.
-fn unreadable(rejection: &BytesRejection) -> Response {
+/// under the status axum chose: 413 for the first, 400 for the second. `what` is what the
+/// request would have been, with its article: "a change to roles".
+pub(crate) fn unreadable(rejection: &BytesRejection, what: &str) -> Response {
     let status = rejection.status();
     let sentence = if status == StatusCode::PAYLOAD_TOO_LARGE {
-        "That request is too large to be a change to roles."
+        format!("That request is too large to be {what}.")
     } else {
-        "The request could not be read."
+        "The request could not be read.".to_string()
     };
-    crate::api::refuse(status, sentence)
+    crate::api::refuse(status, &sentence)
 }
 
 /// `PATCH /api/users/{id}/roles`: give, change or remove the account's direct grants in the
@@ -123,7 +125,7 @@ pub async fn set_roles(
     };
     let body = match body {
         Ok(body) => body,
-        Err(rejection) => return unreadable(&rejection),
+        Err(rejection) => return unreadable(&rejection, "a change to roles"),
     };
     match role_changes(&caller, id, &body) {
         Ok((target, wanted)) => {
@@ -165,7 +167,7 @@ pub async fn put_mapping(
     };
     let body = match body {
         Ok(body) => body,
-        Err(rejection) => return unreadable(&rejection),
+        Err(rejection) => return unreadable(&rejection, "a change to roles"),
     };
     match mapping_to_put(&caller, &body) {
         Ok(mapping) => written(
@@ -254,7 +256,7 @@ mod tests {
             &SqlState::T_R_DEADLOCK_DETECTED,
             &SqlState::UNIQUE_VIOLATION,
         ] {
-            assert_eq!(unsaved(Some(code)), CONTENDED, "{}", code.code());
+            assert_eq!(unsaved(Some(code), CONTENDED), CONTENDED, "{}", code.code());
         }
         // A table gone, a connection lost, and an error that was never Postgres's own.
         for code in [
@@ -262,7 +264,12 @@ mod tests {
             Some(&SqlState::CONNECTION_FAILURE),
             None,
         ] {
-            assert_eq!(unsaved(code), NOT_SAVED, "{:?}", code.map(SqlState::code));
+            assert_eq!(
+                unsaved(code, CONTENDED),
+                NOT_SAVED,
+                "{:?}",
+                code.map(SqlState::code)
+            );
         }
     }
 }
