@@ -352,6 +352,31 @@ fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError>
     Ok(value)
 }
 
+/// Whether two route hosts, normalised (lowercase, with an optional leading `*.`), can name the
+/// same request host. A host is claimed by the first workspace that routes it; another
+/// workspace's route may not name an overlapping host, because every workspace's routes share
+/// the data plane's ports.
+///
+/// Overlap is the data plane's own matching, either way round: a wildcard `*.x` matches one or
+/// more extra labels, never the bare `x`, and a wildcard overlaps a narrower wildcard that ends
+/// in its suffix.
+pub fn hosts_overlap(a: &str, b: &str) -> bool {
+    a == b || gapura_core::hostname::matches(a, b) || gapura_core::hostname::matches(b, a)
+}
+
+/// A route with no hosts takes every host on the data plane's ports, so only a superuser may
+/// write one. The store asks this when a route's hosts are empty.
+pub fn may_route_any_host(caller: &User) -> Result<(), Refusal> {
+    if caller.superuser {
+        Ok(())
+    } else {
+        Err(Refusal::Forbidden(
+            "Only a superuser may create a route for any host: it would take other workspaces' traffic. Name at least one host."
+                .into(),
+        ))
+    }
+}
+
 /// A route request, checked, and the `updated_at` it carried. Hosts are lowercased and methods
 /// uppercased; a value given twice is kept once.
 pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), FieldError> {
@@ -961,6 +986,47 @@ mod tests {
             allowed(&rows, &me, ws, Action::Delete),
             Err(Refusal::Forbidden(
                 "Deleting services and routes needs the admin role in this workspace.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn equal_hosts_overlap_and_different_names_do_not() {
+        assert!(hosts_overlap("api.example.com", "api.example.com"));
+        assert!(hosts_overlap("*.example.com", "*.example.com"));
+        assert!(!hosts_overlap("api.example.com", "www.example.com"));
+        assert!(!hosts_overlap("example.com", "example.org"));
+    }
+
+    #[test]
+    fn a_wildcard_overlaps_what_it_matches_and_not_its_bare_suffix() {
+        for (a, b) in [
+            ("*.example.com", "api.example.com"),
+            ("*.example.com", "a.b.example.com"),
+        ] {
+            assert!(hosts_overlap(a, b), "{a} {b}");
+            assert!(hosts_overlap(b, a), "{b} {a}");
+        }
+        assert!(!hosts_overlap("*.example.com", "example.com"));
+        assert!(!hosts_overlap("example.com", "*.example.com"));
+        assert!(!hosts_overlap("*.example.com", "notexample.com"));
+    }
+
+    #[test]
+    fn wildcards_overlap_when_one_suffix_ends_with_the_other() {
+        assert!(hosts_overlap("*.example.com", "*.api.example.com"));
+        assert!(hosts_overlap("*.api.example.com", "*.example.com"));
+        assert!(!hosts_overlap("*.a.com", "*.b.com"));
+        assert!(!hosts_overlap("*.xexample.com", "*.example.com"));
+    }
+
+    #[test]
+    fn only_a_superuser_may_route_any_host() {
+        assert!(may_route_any_host(&person(1, true)).is_ok());
+        assert_eq!(
+            may_route_any_host(&person(2, false)),
+            Err(Refusal::Forbidden(
+                "Only a superuser may create a route for any host: it would take other workspaces' traffic. Name at least one host.".into()
             ))
         );
     }
