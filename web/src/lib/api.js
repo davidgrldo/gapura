@@ -189,8 +189,9 @@ async function refusal(response) {
 
 /**
  * A refused write: the server's sentence, its status, and the field it named, if any. The
- * status lets a form tell a stale edit (409, whose sentence says to reload) from a rejected
- * input (400), and it is an `Error` so a caller that only shows `message` keeps working.
+ * status lets a form tell a conflict (409: such as an edit made from a stale read, a name
+ * already taken, or a host another workspace routes) from a rejected input (400), and it is an
+ * `Error` so a caller that only shows `message` keeps working.
  */
 export class Refused extends Error {
   constructor(status, { sentence, field }) {
