@@ -164,7 +164,13 @@ struct Authorised {
 /// What `caller`'s rights in `concerned` rest on, read again inside `tx` and locked `FOR SHARE`:
 /// their own row, the workspaces, their direct grants there and the group mappings their groups
 /// match. Each write decides over these with its own rule. A caller whose row is gone is refused
-/// in the words a workspace outside their reach gets.
+/// in the words a workspace outside their reach gets. It does not refuse a disabled caller:
+/// `actor.disabled` is for the caller's rule to check, as `grants::authorise` and
+/// `Rows::effective` do.
+///
+/// A workspace that does not exist is simply missing from what is read, so a rule sees it as one
+/// the caller holds nothing in. Rows come back in a fixed order, so two writes that lock the same
+/// rows take them the same way round.
 pub(super) async fn rights(
     tx: &Transaction<'_>,
     caller: Uuid,
@@ -264,9 +270,7 @@ pub(super) async fn rights(
 /// `rights`, and decide with the function the handler used, `grants::authorise`.
 ///
 /// A caller whose row is gone, or disabled since their session was read, administers nothing.
-/// A workspace that does not exist is simply missing from what is read, so it is refused like
-/// one the caller does not administer. Rows come back in a fixed order, so two writes that lock
-/// the same rows take them the same way round.
+/// A workspace that does not exist is refused like one the caller does not administer.
 async fn authorise_again(
     tx: &Transaction<'_>,
     caller: Uuid,
