@@ -160,7 +160,8 @@ impl Store {
 
         let services = tx
             .query(
-                "select w.name as workspace, s.name, s.protocol, s.host, s.port
+                "select w.name as workspace, s.name, s.protocol, s.host, s.port,
+                        s.connect_timeout_ms, s.read_timeout_ms
                    from services s join workspaces w on w.id = s.workspace_id
                   order by w.name, s.name",
                 &[],
@@ -179,6 +180,12 @@ impl Store {
                     },
                     host: r.get("host"),
                     port: r.get::<_, i32>("port") as u16,
+                    connect_timeout_ms: r
+                        .get::<_, Option<i32>>("connect_timeout_ms")
+                        .map(|ms| ms as u32),
+                    read_timeout_ms: r
+                        .get::<_, Option<i32>>("read_timeout_ms")
+                        .map(|ms| ms as u32),
                 }
             })
             .collect();
