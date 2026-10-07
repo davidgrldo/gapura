@@ -93,12 +93,16 @@
         stale: failure.status === 409 && failure.message.includes('Reload'),
       }
       staleOnClose = true
+      // A refused delete has had its answer: the footer goes back to the sheet's own buttons, with
+      // the refusal above them, rather than asking a question that was just refused.
+      const asked = deleting
+      deleting = false
       // The fields were disabled while the request ran, which took focus away. It goes to the
       // input the server named, whose sentence is then read through aria-describedby, or else to
       // the button that was pressed.
       await tick()
       const input = shown ? document.getElementById(`${id}-${INPUT[error.field]}`) : undefined
-      ;(input ?? (deleting ? keep : submit))?.focus()
+      ;(input ?? (asked ? del : submit))?.focus()
       return
     }
     staleOnClose = false

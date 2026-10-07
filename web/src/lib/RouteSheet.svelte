@@ -113,12 +113,16 @@
         stale: failure.status === 409 && failure.message.includes('Reload'),
       }
       staleOnClose = true
+      // A refused delete has had its answer: the footer goes back to the sheet's own buttons, with
+      // the refusal above them, rather than asking a question that was just refused.
+      const asked = deleting
+      deleting = false
       // The fields were disabled while the request ran, which took focus away. It goes to the
       // input the server named, whose sentence is then read through aria-describedby, or else to
       // the button that was pressed.
       await tick()
       const input = shown ? document.getElementById(target(error.field)) : undefined
-      ;(input ?? (deleting ? keep : submit))?.focus()
+      ;(input ?? (asked ? del : submit))?.focus()
       return
     }
     staleOnClose = false
@@ -303,11 +307,15 @@
           {#each hosts as _, i (i)}
             <div class="flex gap-2">
               <Input id="{id}-host-{i}" class="font-mono" aria-label="Host {i + 1}" bind:value={hosts[i]} placeholder="api.example.com or *.example.com" autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`hosts[${i}]`)} aria-describedby={described(`hosts[${i}]`)} />
+              {#if editable}
               <Button variant="ghost" size="sm" aria-label="Remove host {i + 1}" onclick={() => dropHost(i)}>Remove</Button>
+              {/if}
             </div>
             {@render problem(`hosts[${i}]`)}
           {/each}
+          {#if editable}
           <Button id="{id}-add-host" variant="outline" size="sm" class="justify-self-start" onclick={() => hosts.push('')} aria-invalid={invalid('hosts')} aria-describedby={described('hosts')}><Plus aria-hidden="true" />Add host</Button>
+          {/if}
           {@render problem('hosts')}
           <p class="text-xs text-muted-foreground">
             At least one host; only a superuser may route any host.
@@ -325,13 +333,17 @@
                 {/each}
               </NativeSelect>
               <Input id="{id}-path-{i}-value" class="font-mono" aria-label="Path {i + 1}" bind:value={path.value} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`paths[${i}].value`)} aria-describedby={described(`paths[${i}].value`)} />
+              {#if editable}
               <Button variant="ghost" size="sm" aria-label="Remove path {i + 1}" onclick={() => dropPath(i)}>Remove</Button>
+              {/if}
             </div>
             {@render problem(`paths[${i}].type`)}
             {@render problem(`paths[${i}].value`)}
           {/each}
           {@render problem('paths')}
+          {#if editable}
           <Button id="{id}-add-path" variant="outline" size="sm" class="justify-self-start" onclick={() => paths.push({ type: 'prefix', value: '' })} aria-invalid={invalid('paths')} aria-describedby={described('paths')}><Plus aria-hidden="true" />Add path</Button>
+          {/if}
           <p class="text-xs text-muted-foreground">
             A prefix matches whole segments: /api matches /api/x, not /apix. A regex must match
             the whole path; end it with .* to match a prefix. No paths: every path.

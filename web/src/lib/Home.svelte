@@ -25,8 +25,8 @@
     {/each}
   </ul>
   <p class="max-w-2xl text-muted-foreground">
-    The screens for a workspace's routes and services are still to come. Until then, what this
-    console shows is for superusers and workspace admins.
+    None of this console's screens is open to these roles. Ask a workspace admin or a superuser
+    if you expected one.
   </p>
 {/if}
 
