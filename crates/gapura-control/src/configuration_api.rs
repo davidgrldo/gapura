@@ -67,17 +67,14 @@ fn written(result: Result<(), WriteError>) -> Response {
 }
 
 /// The store and the caller behind `headers`, before anything about the request is looked at.
+/// A refusal is a status `early` words; returning it rather than the response keeps the error
+/// small.
 async fn caller_of<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
-) -> Result<(&'a Store, StoreCaller), Response> {
-    let store = state
-        .store
-        .as_deref()
-        .ok_or_else(|| early(StatusCode::NOT_FOUND))?;
-    let caller = store_caller(store, headers, &state.session_key)
-        .await
-        .map_err(early)?;
+) -> Result<(&'a Store, StoreCaller), StatusCode> {
+    let store = state.store.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let caller = store_caller(store, headers, &state.session_key).await?;
     Ok((store, caller))
 }
 
@@ -142,7 +139,7 @@ pub async fn list_services(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path(ws)) = ws else { return unnamed() };
     let workspace = match workspace_in(&caller, &ws, Action::Read) {
@@ -164,7 +161,7 @@ pub async fn create_service(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path(ws)) = ws else { return unnamed() };
     let workspace = match workspace_in(&caller, &ws, Action::Write) {
@@ -195,7 +192,7 @@ pub async fn replace_service(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path((ws, name))) = path else {
         return unnamed();
@@ -228,7 +225,7 @@ pub async fn delete_service(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path((ws, name))) = path else {
         return unnamed();
@@ -248,7 +245,7 @@ pub async fn list_routes(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path(ws)) = ws else { return unnamed() };
     let workspace = match workspace_in(&caller, &ws, Action::Read) {
@@ -270,7 +267,7 @@ pub async fn create_route(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path(ws)) = ws else { return unnamed() };
     let workspace = match workspace_in(&caller, &ws, Action::Write) {
@@ -297,7 +294,7 @@ pub async fn replace_route(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path((ws, name))) = path else {
         return unnamed();
@@ -329,7 +326,7 @@ pub async fn delete_route(
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(r) => return r,
+        Err(status) => return early(status),
     };
     let Ok(Path((ws, name))) = path else {
         return unnamed();
