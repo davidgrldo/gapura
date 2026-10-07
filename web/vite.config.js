@@ -31,18 +31,32 @@ import tailwindcss from '@tailwindcss/vite'
 // every persona, where the server keeps them for superusers in store mode, but the console only
 // asks for them when its navigation offers them.
 //
-// The console's writes — a change to an account's roles, a group mapping put or removed —
-// answer 204 and store nothing, for every persona. That is enough to look at the forms and at
-// what follows a save. What a write does is proven against Postgres by the Rust tests, and by a
-// pass against a real server. Each answers only the method the server serves it on, so a form
-// that sends the wrong one fails here as it would there.
+// A workspace's services and routes are the same for every persona: web/stub/workspaces/<name>/
+// holds that workspace's services.json and routes.json, as `GET /api/workspaces/<name>/services`
+// and `/routes` answer them, `updated_at` and each service's `routes` count included. The three
+// workspaces are the ones the personas hold roles in, so each persona's pages show what its
+// me.json says it may see; a workspace with no folder answers 404, as the server does for one the
+// caller holds no role in.
+//
+// The console's writes — a change to an account's roles, a group mapping put or removed, a
+// service or route created on its list, replaced or deleted by name — answer 204 and store
+// nothing, for every persona, so the lists read back as they were. That is enough to look at the
+// forms and at what follows a save. What a write does is proven against Postgres by the Rust
+// tests, and by a pass against a real server. Each answers only the method the server serves it
+// on, so a form that sends the wrong one fails here as it would there.
 function stubApi() {
   const shared = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
   const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
+  // `/api/workspaces/<name>/services` and `/routes`, and one row of either by name.
+  const lists = /^\/api\/workspaces\/([^/]+)\/(services|routes)$/
+  const rows = /^\/api\/workspaces\/[^/]+\/(services|routes)\/[^/]+$/
   const writes = [
     ['PATCH', /^\/api\/users\/[^/]+\/roles$/],
     ['PUT', /^\/api\/group-mappings$/],
     ['DELETE', /^\/api\/group-mappings$/],
+    ['POST', lists],
+    ['PUT', rows],
+    ['DELETE', rows],
   ]
   return {
     name: 'gapura-stub-api',
@@ -68,6 +82,24 @@ function stubApi() {
         if (writes.some(([method, pattern]) => req.method === method && pattern.test(url))) {
           res.statusCode = 204
           return res.end()
+        }
+        const list = req.method === 'GET' ? lists.exec(url) : null
+        if (list) {
+          // Only a plain name is looked up, so a request cannot walk out of web/stub/workspaces/.
+          let name
+          try {
+            name = decodeURIComponent(list[1])
+          } catch {
+            name = ''
+          }
+          const known = /^[\w-]+$/.test(name) && existsSync(path.join(stub, 'workspaces', name))
+          const file = path.join(stub, 'workspaces', name, `${list[2]}.json`)
+          if (!known || !existsSync(file)) {
+            res.statusCode = 404
+            return res.end()
+          }
+          res.setHeader('content-type', 'application/json')
+          return res.end(readFileSync(file))
         }
         const file = shared[url]
           ? path.join(stub, shared[url])

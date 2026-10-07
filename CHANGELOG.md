@@ -22,8 +22,7 @@ means what it usually does, moving from one version below to a later one. Releas
   changes, an admin deletes. Every write is checked against the compiler's own rules and names the
   field it refuses, refuses an edit made from a stale read with 409, leaves one audit entry, and
   writes nothing when nothing changed. A service that routes still use, or a route or service with
-  a policy attached, is not deleted: the policy would otherwise go with it, silently. The console's
-  pages for them come next.
+  a policy attached, is not deleted: the policy would otherwise go with it, silently.
 - Hosts belong to one workspace. Every workspace's store routes share the data plane's ports, so a
   route may not name a host that another workspace's route already names, or one a `*.` wildcard of
   theirs covers (409). A route for any host, and a wildcard with a single label after `*.`, are a

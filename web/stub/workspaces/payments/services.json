@@ -1,0 +1,32 @@
+[
+  {
+    "name": "gateway-api",
+    "protocol": "https",
+    "host": "api.pay-provider.example",
+    "port": 443,
+    "connect_timeout_ms": null,
+    "read_timeout_ms": 30000,
+    "routes": 1,
+    "updated_at": "2026-09-22T07:55:18.250619Z"
+  },
+  {
+    "name": "ledger",
+    "protocol": "http",
+    "host": "ledger.payments.svc",
+    "port": 8080,
+    "connect_timeout_ms": 1500,
+    "read_timeout_ms": 15000,
+    "routes": 2,
+    "updated_at": "2026-09-25T11:20:47.671203Z"
+  },
+  {
+    "name": "legacy-batch",
+    "protocol": "http",
+    "host": "batch.payments.svc",
+    "port": 9000,
+    "connect_timeout_ms": null,
+    "read_timeout_ms": null,
+    "routes": 0,
+    "updated_at": "2026-08-14T16:05:33.098374Z"
+  }
+]

@@ -75,9 +75,13 @@
 
   const invalid = (field) => error?.field === field
   const described = (field) => (invalid(field) ? `${id}-${field}-error` : undefined)
+  // Delete is not asked while routes use the service: the server refuses it, so the question
+  // would only lead to a refusal. The sentence says what to do instead.
+  const inUse = $derived(mode === 'edit' ? (service?.routes ?? 0) : 0)
   const here = () => `${base(workspace, 'services')}/${encodeURIComponent(service.name)}`
-  // A number input that has been cleared binds to null, not '', and 0 is a value the server
-  // refuses, so both mean "use the default".
+  // A number input that has been cleared binds to null, not '', and either means "use the
+  // default". Anything else is sent as it is, 0 included: the server refuses 0 and says so beside
+  // the field, which is better than quietly turning it into something else.
   const optional = (value) => (value == null || String(value).trim() === '' ? null : Number(value))
 
   async function send(method, url, body) {
@@ -90,7 +94,11 @@
       error = {
         sentence: failure.message,
         field: failure.field,
-        stale: failure.status === 409 && failure.message.includes('Reload'),
+        // A 404 on a change to this row means someone else deleted or renamed it, which is as
+        // stale as an edit made from an old read: the list is what to look at.
+        stale:
+          (failure.status === 409 && failure.message.includes('Reload')) ||
+          (failure.status === 404 && mode === 'edit'),
       }
       staleOnClose = true
       // A refused delete has had its answer: the footer goes back to the sheet's own buttons, with
@@ -147,7 +155,9 @@
       keep?.focus()
       return
     }
-    if (performance.now() - askedAt < 500) return
+    // While routes use the service the footer shows why it cannot go and offers no Delete, so
+    // this is only reached for a service that is not in use.
+    if (inUse > 0 || performance.now() - askedAt < 500) return
     send('DELETE', here())
   }
 
@@ -246,11 +256,11 @@
         <div class="grid grid-cols-2 gap-2">
           <div class="grid gap-1.5">
             <label for="{id}-connect" class="font-medium">Connect timeout (ms)</label>
-            <Input id="{id}-connect" type="number" min="1" placeholder="default" bind:value={connect} aria-invalid={invalid('connect_timeout_ms')} aria-describedby={described('connect_timeout_ms')} />
+            <Input id="{id}-connect" type="number" min="1" max="3600000" placeholder="default" bind:value={connect} aria-invalid={invalid('connect_timeout_ms')} aria-describedby={described('connect_timeout_ms')} />
           </div>
           <div class="grid gap-1.5">
             <label for="{id}-read" class="font-medium">Read timeout (ms)</label>
-            <Input id="{id}-read" type="number" min="1" placeholder="default" bind:value={read} aria-invalid={invalid('read_timeout_ms')} aria-describedby={described('read_timeout_ms')} />
+            <Input id="{id}-read" type="number" min="1" max="3600000" placeholder="default" bind:value={read} aria-invalid={invalid('read_timeout_ms')} aria-describedby={described('read_timeout_ms')} />
           </div>
         </div>
         {@render problem('connect_timeout_ms')}
@@ -271,9 +281,18 @@
         <Button variant="outline" onclick={reload}>Reload</Button>
       {/if}
       {#if deleting}
-        <p class="text-sm" role="alert">Delete {service.name}? Routes can no longer use it.</p>
-        <Button variant="destructive" onclick={remove} onkeydown={once} disabled={saving}>Delete</Button>
-        <Button bind:ref={keep} variant="outline" onclick={dismiss} onkeydown={once} disabled={saving}>Keep it</Button>
+        {#if inUse > 0}
+          <p class="text-sm" role="alert">
+            {inUse === 1
+              ? '1 route uses this service; point it at another service or delete it first.'
+              : `${inUse} routes use this service; point them at another service or delete them first.`}
+          </p>
+          <Button bind:ref={keep} variant="outline" onclick={dismiss} onkeydown={once}>Close</Button>
+        {:else}
+          <p class="text-sm" role="alert">Delete {service.name}? This cannot be undone.</p>
+          <Button variant="destructive" onclick={remove} onkeydown={once} disabled={saving}>Delete</Button>
+          <Button bind:ref={keep} variant="outline" onclick={dismiss} onkeydown={once} disabled={saving}>Keep it</Button>
+        {/if}
       {:else}
         {#if editable}
           <Button bind:ref={submit} type="submit" form="{id}-form" onkeydown={once} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>

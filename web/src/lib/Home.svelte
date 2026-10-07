@@ -2,9 +2,11 @@
   import { Button } from '$lib/components/ui/button/index.js'
   import { ROLE_LABEL } from './roles.js'
 
-  // What an account with no screens sees. There are two reasons to have none, and each gets its
-  // own words: an account nobody has granted anything yet, and one whose roles nothing on the
-  // console shows yet. A blank page would read as broken in both.
+  // What an account with no screens sees. Every account holding a role in a workspace now gets
+  // the Configuration pages, so the account with no screens is, in practice, one nobody has
+  // granted anything yet, and that is the first branch. The second, for an account holding roles
+  // with no screen to show, is defensive: it keeps the page honest if a role is ever added that
+  // opens nothing, rather than leaving a blank page that would read as broken.
   let { me } = $props()
 </script>
 

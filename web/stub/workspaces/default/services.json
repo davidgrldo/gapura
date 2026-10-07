@@ -1,0 +1,32 @@
+[
+  {
+    "name": "docs",
+    "protocol": "https",
+    "host": "docs.internal.example",
+    "port": 443,
+    "connect_timeout_ms": 2000,
+    "read_timeout_ms": null,
+    "routes": 1,
+    "updated_at": "2026-09-30T08:12:44.120031Z"
+  },
+  {
+    "name": "unused-demo",
+    "protocol": "http",
+    "host": "demo.default.svc",
+    "port": 8080,
+    "connect_timeout_ms": null,
+    "read_timeout_ms": null,
+    "routes": 0,
+    "updated_at": "2026-10-01T10:02:09.504112Z"
+  },
+  {
+    "name": "whoami",
+    "protocol": "http",
+    "host": "whoami.default.svc",
+    "port": 8080,
+    "connect_timeout_ms": 1000,
+    "read_timeout_ms": 5000,
+    "routes": 1,
+    "updated_at": "2026-09-28T14:40:31.880245Z"
+  }
+]

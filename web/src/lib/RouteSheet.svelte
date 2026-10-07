@@ -97,7 +97,7 @@
 
   const invalid = (field) =>
     error?.field === field || (field === 'methods' && target(error?.field) === `${id}-method-${METHODS[0]}`)
-  const described = (field) => (invalid(field) ? `${id}-err-${field}` : undefined)
+  const described = (field) => (invalid(field) ? `${id}-${field}-error` : undefined)
   const here = () => `${base(workspace, 'routes')}/${encodeURIComponent(route.name)}`
 
   async function send(method, url, body) {
@@ -110,7 +110,11 @@
       error = {
         sentence: failure.message,
         field: failure.field,
-        stale: failure.status === 409 && failure.message.includes('Reload'),
+        // A 404 on a change to this row means someone else deleted or renamed it, which is as
+        // stale as an edit made from an old read: the list is what to look at.
+        stale:
+          (failure.status === 409 && failure.message.includes('Reload')) ||
+          (failure.status === 404 && mode === 'edit'),
       }
       staleOnClose = true
       // A refused delete has had its answer: the footer goes back to the sheet's own buttons, with
@@ -151,6 +155,15 @@
     // the empty ones are gone, so they are taken out of the form too.
     const sent = hosts.map((h) => h.trim()).filter(Boolean)
     paths = paths.map((p) => ({ type: p.type, value: p.value.trim() })).filter((p) => p.value !== '')
+    // Rows that are all blank are not "any host": an empty list is that, and it should take
+    // removing every row on purpose, for a superuser as for anyone, rather than an unfilled row
+    // quietly becoming a route for every host.
+    if (hosts.length > 0 && sent.length === 0) {
+      error = { sentence: 'Fill in this host, or remove the row to route any host.', field: 'hosts[0]' }
+      await tick()
+      document.getElementById(target(error.field))?.focus()
+      return
+    }
     // The server refuses these for anyone but a superuser (403), after the reader's rows have been
     // compacted away; say so here, beside the row, and keep one row to type in.
     const wildcard = superuser ? -1 : sent.findIndex((h) => /^\*\.[^.]+$/.test(h))
@@ -248,7 +261,7 @@
 
 {#snippet problem(field)}
   {#if invalid(field)}
-    <p id="{id}-err-{field}" class="text-xs text-danger">{error.sentence}</p>
+    <p id="{id}-{field}-error" class="text-xs text-danger">{error.sentence}</p>
   {/if}
 {/snippet}
 
@@ -287,9 +300,10 @@
           </div>
           <div class="grid gap-1.5">
             <label for="{id}-priority" class="font-medium">Priority</label>
-            <Input id="{id}-priority" type="number" step="1" min="-2147483648" max="2147483647" bind:value={priority} aria-invalid={invalid('priority')} aria-describedby={described('priority')} />
+            <Input id="{id}-priority" type="number" step="1" min="-2147483648" max="2147483647" bind:value={priority} aria-invalid={invalid('priority')} aria-describedby="{id}-priority-help {described('priority') ?? ''}" />
           </div>
         </div>
+        <p id="{id}-priority-help" class="-mt-3 text-xs text-muted-foreground">Higher is tried first.</p>
         {@render problem('name')}
         {@render problem('priority')}
         <div class="grid gap-1.5">
@@ -319,7 +333,7 @@
           {@render problem('hosts')}
           <p class="text-xs text-muted-foreground">
             At least one host; only a superuser may route any host.
-            {#if superuser && hosts.length === 0}No hosts: any host.{/if}
+            {#if hosts.length === 0}No hosts: any host.{/if}
           </p>
         </fieldset>
 
@@ -340,17 +354,17 @@
             {@render problem(`paths[${i}].type`)}
             {@render problem(`paths[${i}].value`)}
           {/each}
-          {@render problem('paths')}
           {#if editable}
           <Button id="{id}-add-path" variant="outline" size="sm" class="justify-self-start" onclick={() => paths.push({ type: 'prefix', value: '' })} aria-invalid={invalid('paths')} aria-describedby={described('paths')}><Plus aria-hidden="true" />Add path</Button>
           {/if}
+          {@render problem('paths')}
           <p class="text-xs text-muted-foreground">
             A prefix matches whole segments: /api matches /api/x, not /apix. A regex must match
             the whole path; end it with .* to match a prefix. No paths: every path.
           </p>
         </fieldset>
 
-        <fieldset class="grid gap-2" aria-describedby={described('methods')}>
+        <fieldset class="grid gap-2">
           <legend class="mb-1.5 font-medium">Methods</legend>
           <div class="flex flex-wrap gap-x-4 gap-y-2">
             {#each METHODS as m, k (m)}
@@ -374,7 +388,7 @@
         <Button variant="outline" onclick={reload}>Reload</Button>
       {/if}
       {#if deleting}
-        <p class="text-sm" role="alert">Delete {route.name}? Its requests will no longer match it.</p>
+        <p class="text-sm" role="alert">Delete {route.name}? Requests it matched go to the next route that matches, or get no route.</p>
         <Button variant="destructive" onclick={remove} onkeydown={once} disabled={saving}>Delete</Button>
         <Button bind:ref={keep} variant="outline" onclick={dismiss} onkeydown={once} disabled={saving}>Keep it</Button>
       {:else}
