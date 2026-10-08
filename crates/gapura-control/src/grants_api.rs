@@ -40,6 +40,9 @@ const CONTENDED: &str = "Someone else was changing the same roles at that moment
 /// failed on the wire may or may not have happened.
 pub(crate) const NOT_SAVED: &str = "The console could not save this change. Try again in a moment.";
 
+/// What a route about accounts answers in Kubernetes mode, which keeps none.
+pub(crate) const NO_ACCOUNTS: &str = "This console keeps no accounts: it runs without a database.";
+
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         crate::api::refuse(self.status(), self.sentence())
@@ -55,7 +58,7 @@ fn refused_early(error: CallerError) -> Response {
     let sentence = match status {
         StatusCode::UNAUTHORIZED => "You are not signed in.",
         StatusCode::FORBIDDEN => "You do not administer any workspace.",
-        StatusCode::NOT_FOUND => "This console keeps no accounts: it runs without a database.",
+        StatusCode::NOT_FOUND => NO_ACCOUNTS,
         // The caller could not be read back from the store, and `store_caller` has logged why.
         StatusCode::SERVICE_UNAVAILABLE => NOT_SAVED,
         // `admin_caller` answers with nothing else, but a status it grows later should still

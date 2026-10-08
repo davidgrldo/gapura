@@ -345,7 +345,10 @@ async fn a_local_account_is_found_ignoring_case_and_its_sign_in_is_recorded() {
     assert_eq!(found.password_hash, "the-hash");
     assert!(!found.disabled);
     assert!(store.local_user("nobody").await.unwrap().is_none());
-    store.record_sign_in(found.id).await.unwrap();
+    assert!(store
+        .record_sign_in(found.id, &found.password_hash)
+        .await
+        .unwrap());
     let rows = store.access_rows().await.unwrap();
     assert!(rows.users[0].last_sign_in.is_some());
 }

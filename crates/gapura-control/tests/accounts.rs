@@ -609,7 +609,10 @@ async fn a_reset_signs_out_open_sessions() {
     let app = console(Some(store.clone()));
     let s = seed(&store).await;
     let ada = signed_in(&app, "ada", PASSWORD).await;
-    assert_eq!(status_of(&app, ME, &ada).await, StatusCode::OK);
+    let (status, me) = send(&app, "GET", ME, &ada, "").await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(json(&me)["roles"].as_array().unwrap().len(), 1, "{me}");
+    assert_eq!(json(&me)["grantable"].as_array().unwrap().len(), 1, "{me}");
 
     later().await;
     let reset = temporary(&app, &user_path(s.ada, "/password"), &cookie(s.root), "").await;
@@ -621,6 +624,10 @@ async fn a_reset_signs_out_open_sessions() {
     let (status, me) = send(&app, "GET", ME, &again, "").await;
     assert_eq!(status, StatusCode::OK, "{me}");
     assert_eq!(json(&me)["must_change_password"], true);
+    // Still admin of default in the store, but shown holding nothing until she has a password
+    // of her own.
+    assert_eq!(json(&me)["roles"], serde_json::json!([]), "{me}");
+    assert_eq!(json(&me)["grantable"], serde_json::json!([]), "{me}");
     let (status, body) = send(&app, "GET", SERVICES, &again, "").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(sentence(&body), CHOOSE);
@@ -756,6 +763,20 @@ async fn disable_and_enable() {
         StatusCode::UNAUTHORIZED,
         "enabling does not bring back the sessions disabling cut"
     );
+
+    // A session issued after the disable's cut-off, as a sign-in that verified just before the
+    // disable could issue one, is cut off by enabling too.
+    later().await;
+    ok(&app, "PUT", &status, &root, r#"{"disabled":true}"#).await;
+    let raced = fresh_cookie(&store, s.ada).await;
+    later().await;
+    ok(&app, "PUT", &status, &root, r#"{"disabled":false}"#).await;
+    assert_eq!(
+        status_of(&app, ME, &raced).await,
+        StatusCode::UNAUTHORIZED,
+        "enabling cuts off a session from before it"
+    );
+    signed_in(&app, "ada", PASSWORD).await;
 
     // Enabling an enabled account changes nothing and records nothing.
     let audited = audit_count(&store).await;
@@ -1078,6 +1099,49 @@ async fn a_cookie_without_issued_at_works_until_a_cut_off() {
 }
 
 #[tokio::test]
+async fn a_sign_in_that_raced_a_reset_is_not_recorded() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store).await;
+    // What the sign-in form read and verified, before a reset replaced it.
+    let verified = store
+        .local_user("ada")
+        .await
+        .unwrap()
+        .unwrap()
+        .password_hash;
+    temporary(&app, &user_path(s.ada, "/password"), &cookie(s.root), "").await;
+    let before = everything(&store).await;
+    assert!(
+        !store.record_sign_in(s.ada, &verified).await.unwrap(),
+        "a sign-in against the replaced hash is recorded"
+    );
+    let unstamped: bool = store
+        .client()
+        .await
+        .unwrap()
+        .query_one(
+            "select last_sign_in_at is null from users where id = $1",
+            &[&s.ada],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(unstamped);
+    assert_eq!(everything(&store).await, before);
+    // Against the hash the account has now, it is.
+    let current = store
+        .local_user("ada")
+        .await
+        .unwrap()
+        .unwrap()
+        .password_hash;
+    assert!(store.record_sign_in(s.ada, &current).await.unwrap());
+}
+
+#[tokio::test]
 async fn kubernetes_mode_has_none_of_it() {
     let app = console(None);
     let id = Uuid::new_v4();
@@ -1095,9 +1159,10 @@ async fn kubernetes_mode_has_none_of_it() {
     ] {
         let (status, _, answer) = request(&app, method, &path, Some(&cookie(id)), body).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {answer}");
-        assert!(
-            sentence(&answer).contains("keeps no configuration"),
-            "{answer}"
+        assert_eq!(
+            sentence(&answer),
+            "This console keeps no accounts: it runs without a database.",
+            "{method} {path}"
         );
     }
 }

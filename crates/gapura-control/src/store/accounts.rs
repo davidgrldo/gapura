@@ -27,8 +27,12 @@
 //! and `retrying` runs it again; that is rare, and run again it is ordered like any other.
 //!
 //! Creating an account changes no one who exists, so it takes only step 2. A password change by
-//! its owner locks only the owner's row, `FOR UPDATE` before `rights` shares it, for the same
+//! its owner locks only the owner's row, by its update before `rights` shares it, for the same
 //! reason as above: two saves of one person's password would otherwise deadlock each other.
+//!
+//! Every cut-off is `clock_timestamp()`, the moment the statement runs, not `now()`, which is
+//! when the transaction began: the lock waits above lie between the two, and a session issued in
+//! that gap would otherwise postdate the cut-off meant to end it.
 
 use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
@@ -45,13 +49,30 @@ async fn bound_lock_waits(tx: &Transaction<'_>) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// The PHC string for `password`, made off the async workers: argon2 takes 19 MiB and about
-/// 20 ms, which an async worker must not spend.
+/// The PHC string for `password`, made off the async workers and under the bound sign-ins are
+/// checked under: argon2 takes 19 MiB and about 20 ms each time.
 async fn hashed(password: String) -> Result<String, WriteError> {
-    tokio::task::spawn_blocking(move || crate::password::hash(&password))
+    crate::password::hash_bounded(password)
         .await
-        .map_err(|e| WriteError::Store(e.into()))?
         .map_err(WriteError::Store)
+}
+
+/// The refusal of a caller whose own account is gone: deleted by a superuser after their
+/// session was read.
+fn gone() -> Refusal {
+    Refusal::Forbidden("Your account no longer exists.".into())
+}
+
+/// The caller, read again by `rights`. Its one refusal is of a caller whose row is gone, worded
+/// for a change to roles; an account write says it about the account instead.
+async fn caller_rights(tx: &Transaction<'_>, caller: Uuid) -> Result<User, WriteError> {
+    match rights(tx, caller, &BTreeSet::new()).await {
+        Ok((actor, _)) => Ok(actor),
+        Err(WriteError::Refused(r)) if r == Refusal::outside_your_workspaces() => {
+            Err(gone().into())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Steps 1 to 3: the superusers locked and counted, the caller decided, and `target` locked and
@@ -71,7 +92,7 @@ async fn decide(
         )
         .await?
         .len();
-    let (actor, _) = rights(tx, caller, &BTreeSet::new()).await?;
+    let actor = caller_rights(tx, caller).await?;
     accounts::may_administer(&actor)?;
     // Only now, so a refused request says nothing about whether the account exists.
     let Some(row) = tx
@@ -151,7 +172,7 @@ impl Store {
     ) -> Result<Uuid, WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        let (actor, _) = rights(&tx, caller, &BTreeSet::new()).await?;
+        let actor = caller_rights(&tx, caller).await?;
         accounts::may_administer(&actor)?;
         // No conflict target: the one that matters is `users_username_lower`, an expression
         // index, so `Maya` meets `maya` here. Two creating one name at once meet here too: the
@@ -215,7 +236,7 @@ impl Store {
         let (actor, target) = decide(&tx, caller, id, Change::Reset).await?;
         tx.execute(
             "update users set password_hash = $2, must_change_password = true,
-                              sessions_valid_after = now()
+                              sessions_valid_after = clock_timestamp()
               where id = $1",
             &[&target.id, &hash],
         )
@@ -235,8 +256,8 @@ impl Store {
         Ok(())
     }
 
-    /// Disables or enables the account `id`, as a superuser. Disabling signs it out everywhere.
-    /// An account already as asked is left alone, with no audit entry.
+    /// Disables or enables the account `id`, as a superuser. Either signs it out everywhere. An
+    /// account already as asked is left alone, with no audit entry.
     pub async fn set_disabled(
         &self,
         caller: Uuid,
@@ -263,10 +284,12 @@ impl Store {
         if target.disabled == disabled {
             return Ok(());
         }
+        // Enabling cuts off too: a sign-in that verified just before the disable can still have
+        // issued its session after the disable's cut-off, and enabling must not bring it back.
         tx.execute(
             "update users set
                     disabled_at = case when $2 then now() end,
-                    sessions_valid_after = case when $2 then now() else sessions_valid_after end
+                    sessions_valid_after = clock_timestamp()
               where id = $1",
             &[&target.id, &disabled],
         )
@@ -312,7 +335,8 @@ impl Store {
         tx.execute(
             "update users set
                     superuser = $2,
-                    sessions_valid_after = case when $2 then sessions_valid_after else now() end
+                    sessions_valid_after =
+                        case when $2 then sessions_valid_after else clock_timestamp() end
               where id = $1",
             &[&target.id, &superuser],
         )
@@ -365,6 +389,11 @@ impl Store {
     /// `accounts::CURRENT`, which the handler counts as a failed attempt; a new password the
     /// rules refuse is a `WriteError::Field` on `new`.
     ///
+    /// The current password is verified, and the new one hashed, before any transaction: argon2
+    /// waits its turn under the bound sign-ins share, and no row lock is held while it does. The
+    /// write then replaces only the hash that was verified, so a password changed or reset in
+    /// between is not overwritten by one checked against the old.
+    ///
     /// The answer is the cut-off it set, in Unix milliseconds, read as `access_rows` reads it.
     /// It comes from the database's clock, and the new session from the console's: a session
     /// issued no earlier than this stands whatever the difference between the two.
@@ -378,32 +407,19 @@ impl Store {
             current: current.to_string(),
             new: new.to_string(),
         };
-        retrying(|| self.try_change_own_password(caller, &change)).await
-    }
-
-    async fn try_change_own_password(
-        &self,
-        caller: Uuid,
-        change: &PasswordChange,
-    ) -> Result<i64, WriteError> {
-        let mut client = self.pool.get().await?;
-        let tx = client.transaction().await?;
-        bound_lock_waits(&tx).await?;
-        // `FOR UPDATE` before `rights` shares the row: see the module's comment.
-        let Some(row) = tx
+        let Some(row) = self
+            .pool
+            .get()
+            .await?
             .query_opt(
-                "select username, password_hash from users where id = $1 for update",
+                "select username, password_hash from users where id = $1",
                 &[&caller],
             )
             .await?
         else {
-            return Err(Refusal::NotFound("There is no such account.".into()).into());
+            return Err(gone().into());
         };
-        let (actor, _) = rights(&tx, caller, &BTreeSet::new()).await?;
-        if actor.disabled {
-            return Err(Refusal::Forbidden("This account is disabled.".into()).into());
-        }
-        let (Some(username), Some(stored)) = (
+        let (Some(username), Some(verified)) = (
             row.get::<_, Option<String>>("username"),
             row.get::<_, Option<String>>("password_hash"),
         ) else {
@@ -414,21 +430,42 @@ impl Store {
             )
             .into());
         };
-        if !crate::password::verify_or_dummy(change.current.clone(), Some(stored)).await {
+        if !crate::password::verify_or_dummy(change.current.clone(), Some(verified.clone())).await {
             return Err(WriteError::Field(accounts::wrong_current()));
         }
-        accounts::new_password(&username, change).map_err(WriteError::Field)?;
+        accounts::new_password(&username, &change).map_err(WriteError::Field)?;
         let hash = hashed(change.new.clone()).await?;
-        let cut_off: i64 = tx
-            .query_one(
-                "update users set password_hash = $2, must_change_password = false,
-                                  sessions_valid_after = now()
-                  where id = $1
+        retrying(|| self.try_change_own_password(caller, &verified, &hash)).await
+    }
+
+    async fn try_change_own_password(
+        &self,
+        caller: Uuid,
+        verified: &str,
+        hash: &str,
+    ) -> Result<i64, WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        bound_lock_waits(&tx).await?;
+        // The update locks the row before `rights` shares it: see the module's comment.
+        let Some(row) = tx
+            .query_opt(
+                "update users set password_hash = $3, must_change_password = false,
+                                  sessions_valid_after = clock_timestamp()
+                  where id = $1 and password_hash = $2
               returning floor(extract(epoch from sessions_valid_after) * 1000)::bigint",
-                &[&caller, &hash],
+                &[&caller, &verified, &hash],
             )
             .await?
-            .get(0);
+        else {
+            // The password changed after it was verified: the one given is not current now.
+            return Err(WriteError::Field(accounts::wrong_current()));
+        };
+        let cut_off: i64 = row.get(0);
+        let actor = caller_rights(&tx, caller).await?;
+        if actor.disabled {
+            return Err(Refusal::Forbidden("This account is disabled.".into()).into());
+        }
         audit(
             &tx,
             &actor,

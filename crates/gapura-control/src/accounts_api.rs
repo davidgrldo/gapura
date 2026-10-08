@@ -11,11 +11,13 @@
 //! session, since it signs the account out everywhere. Kubernetes mode keeps no accounts in a
 //! store, so there these answer 404.
 
+use crate::access_api::CallerError;
 use crate::accounts::{self, NewAccount, PasswordChange, CURRENT};
-use crate::configuration_api::{body, caller_of, early, field_error, written};
+use crate::configuration_api::{body, caller_of, field_error};
 use crate::grants::Refusal;
+use crate::grants_api::{unsaved, NO_ACCOUNTS};
 use crate::state::AppState;
-use crate::store::WriteError;
+use crate::store::{sqlstate, WriteError};
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{ConnectInfo, Path, State};
@@ -24,7 +26,42 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use tokio_postgres::error::SqlState;
 use uuid::Uuid;
+
+/// What the console shows when another write got in the way, after the store has already tried
+/// again where that could settle it. `configuration_api`'s says "this workspace", which no
+/// account write concerns.
+const CONTENDED: &str =
+    "Someone else was changing accounts at that moment, so this change was not saved. Try again.";
+
+/// `configuration_api::early`, but a console with no store keeps no accounts, not "no
+/// configuration".
+fn early(error: CallerError) -> Response {
+    match error {
+        CallerError::Status(StatusCode::NOT_FOUND) => {
+            crate::api::refuse(StatusCode::NOT_FOUND, NO_ACCOUNTS)
+        }
+        other => crate::configuration_api::early(other),
+    }
+}
+
+/// `configuration_api::written`, with an account's words for a failure in the store, and its
+/// own label in the log.
+fn written(result: Result<(), WriteError>) -> Response {
+    match result {
+        Err(WriteError::Store(error)) => {
+            let code = sqlstate(&error);
+            tracing::warn!(
+                error = format!("{error:#}"),
+                sqlstate = code.map(SqlState::code),
+                "an account write failed"
+            );
+            crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, unsaved(code, CONTENDED))
+        }
+        other => crate::configuration_api::written(other),
+    }
+}
 
 /// What `PUT /api/users/{id}/status` sends.
 #[derive(Deserialize)]
@@ -268,4 +305,45 @@ pub async fn change_password(
         ],
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn sentence_of(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, body["error"].as_str().unwrap().to_string())
+    }
+
+    /// Nothing an account route says is about configuration or a workspace.
+    fn about_accounts(sentence: &str) {
+        for word in ["configuration", "workspace"] {
+            assert!(!sentence.contains(word), "{sentence}");
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_store_there_are_no_accounts() {
+        let (status, sentence) = sentence_of(early(StatusCode::NOT_FOUND.into())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(sentence, NO_ACCOUNTS);
+    }
+
+    #[tokio::test]
+    async fn a_failed_account_write_is_worded_for_accounts() {
+        let (status, sentence) =
+            sentence_of(written(Err(WriteError::Store(anyhow::anyhow!("down"))))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        about_accounts(&sentence);
+        assert_eq!(
+            unsaved(Some(&SqlState::LOCK_NOT_AVAILABLE), CONTENDED),
+            CONTENDED
+        );
+        about_accounts(CONTENDED);
+    }
 }

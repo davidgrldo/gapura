@@ -831,9 +831,18 @@ async fn store_login(
     let Some(account) = account.filter(|a| matches && !a.disabled) else {
         return refused_local("Wrong username or password.");
     };
-    if let Err(error) = store.record_sign_in(account.id).await {
-        // The sign-in itself is good; only the "last sign-in" column misses it.
-        tracing::warn!(%error, "recording a sign-in failed");
+    match store
+        .record_sign_in(account.id, &account.password_hash)
+        .await
+    {
+        Ok(true) => {}
+        // The hash it verified was replaced meanwhile, by a reset or a change: this password no
+        // longer opens the account, and a session issued now could postdate the cut-off.
+        Ok(false) => return refused_local("Wrong username or password."),
+        Err(error) => {
+            // The sign-in itself is good; only the "last sign-in" column misses it.
+            tracing::warn!(%error, "recording a sign-in failed");
+        }
     }
     tracing::info!(user = %account.id, "signed in");
     session_response(

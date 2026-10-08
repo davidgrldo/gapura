@@ -158,17 +158,20 @@ impl Store {
         }))
     }
 
-    /// Stamps a local account's sign-in. An OIDC sign-in is stamped by `upsert_oidc_user`, in
-    /// the statement that records it.
-    pub async fn record_sign_in(&self, id: Uuid) -> Result<()> {
+    /// Stamps a local account's sign-in, if `verified` -- the hash its password was checked
+    /// against -- is still the account's. False when it is not: a reset or a password change
+    /// committed between the read and now, so the password that signed in no longer opens the
+    /// account, and the sign-in must be refused. An OIDC sign-in is stamped by
+    /// `upsert_oidc_user`, in the statement that records it.
+    pub async fn record_sign_in(&self, id: Uuid, verified: &str) -> Result<bool> {
         let client = self.pool.get().await?;
-        client
+        let changed = client
             .execute(
-                "update users set last_sign_in_at = now() where id = $1",
-                &[&id],
+                "update users set last_sign_in_at = now() where id = $1 and password_hash = $2",
+                &[&id, &verified],
             )
             .await?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Records an OIDC sign-in: the row for (issuer, subject), created the first time, with

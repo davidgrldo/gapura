@@ -142,7 +142,8 @@ pub enum Me {
         local: bool,
         /// Every workspace where the caller holds a role, that role, and every grant that gives
         /// them one there, as `/api/users` lists them: what a change to one of those grants would
-        /// leave the caller holding is the console's to say before it is made.
+        /// leave the caller holding is the console's to say before it is made. Empty, like
+        /// `grantable`, while `must_change_password`.
         roles: Vec<AccessView>,
         /// Where the caller is admin, and so may see and grant other people's roles. Named, so a
         /// form can list them without asking again, and in the order of their names.
@@ -170,10 +171,14 @@ pub async fn me(
         return Ok(Json(Me::Kubernetes));
     };
     let caller = signed_in(store, &headers, &state.session_key).await?;
+    // A temporary password opens nothing but replacing it, so until then the answer shows no
+    // role or workspace either: what the account holds waits for a password of its own.
+    let holds = !caller.me.must_change_password;
     let roles = caller
         .rows
         .workspaces
         .iter()
+        .filter(|_| holds)
         .filter_map(|w| {
             caller
                 .rows
@@ -191,7 +196,7 @@ pub async fn me(
         .rows
         .workspaces
         .iter()
-        .filter(|w| within.contains(&w.id))
+        .filter(|w| holds && within.contains(&w.id))
         .map(|w| WorkspaceName {
             workspace_id: w.id,
             workspace: w.name.clone(),

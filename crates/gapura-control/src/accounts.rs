@@ -34,11 +34,21 @@ pub struct NewAccount {
 }
 
 /// What someone sends to change their own password.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PasswordChange {
     pub current: String,
     pub new: String,
+}
+
+/// By hand, so a `{:?}` in a log line or a panic never prints either password.
+impl std::fmt::Debug for PasswordChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordChange")
+            .field("current", &"[redacted]")
+            .field("new", &"[redacted]")
+            .finish()
+    }
 }
 
 /// The field a wrong current password is refused on. The handler counts a refusal on it as a
@@ -283,6 +293,18 @@ mod tests {
             },
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_password_change_never_shows_its_passwords() {
+        let change = PasswordChange {
+            current: "correct horse battery".into(),
+            new: "staple battery horse".into(),
+        };
+        for shown in [format!("{change:?}"), format!("{change:#?}")] {
+            assert!(!shown.contains("horse"), "{shown}");
+            assert!(shown.contains("[redacted]"), "{shown}");
+        }
     }
 
     #[test]
