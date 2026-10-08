@@ -15,6 +15,7 @@ use tokio_postgres::config::SslMode;
 
 mod configuration;
 mod consumers;
+mod data_planes;
 mod grants;
 mod identity;
 mod tls;

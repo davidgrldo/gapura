@@ -30,8 +30,10 @@ pub fn may_read(rows: &Rows, caller: &User) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// A superuser's, and an enabled one's: the store reads the caller again inside each write
+/// without refusing a disabled account, so this is where one disabled since sign-in is stopped.
 pub fn may_write(caller: &User) -> Result<(), Refusal> {
-    if caller.superuser {
+    if caller.superuser && !caller.disabled {
         return Ok(());
     }
     Err(Refusal::Forbidden(
@@ -110,6 +112,28 @@ mod tests {
                 .field,
             "name"
         );
+    }
+
+    #[test]
+    fn only_an_enabled_superuser_may_write() {
+        let mut caller = User {
+            id: uuid::Uuid::nil(),
+            name: "root".into(),
+            method: crate::access::Method::Local,
+            superuser: true,
+            disabled: false,
+            groups: Vec::new(),
+            last_sign_in: None,
+        };
+        assert!(may_write(&caller).is_ok());
+        caller.disabled = true;
+        assert!(
+            may_write(&caller).is_err(),
+            "a disabled superuser holds nothing"
+        );
+        caller.disabled = false;
+        caller.superuser = false;
+        assert!(may_write(&caller).is_err());
     }
 
     #[test]
