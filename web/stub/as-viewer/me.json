@@ -3,6 +3,8 @@
   "id": "10000000-0000-4000-8000-000000000007",
   "name": "rini.wulandari",
   "method": "oidc",
+  "local": false,
+  "must_change_password": false,
   "superuser": false,
   "waiting": false,
   "roles": [{ "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "viewer", "sources": [{ "kind": "group", "name": "storefront-readers", "role": "viewer" }] }],

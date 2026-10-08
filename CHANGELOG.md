@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's Users page creates accounts. A superuser makes a local account, is shown its
+  temporary password once, and the person chooses their own at first sign-in. In a person's sheet a
+  superuser resets a password, disables and enables, makes and removes superusers and deletes local
+  accounts, each asking first and never on their own row. Local accounts get a Change password item
+  in the sidebar, and a "Choose a new password" screen follows a reset or a new account. The Users
+  page marks such an account "Must change password".
 - The control plane has an API for accounts, a superuser's alone (ADR 5): create a local account
   (`POST /api/users`), reset a password (`POST /api/users/{id}/password`), disable and enable
   (`PUT /api/users/{id}/status`), make and remove superusers (`PUT /api/users/{id}/superuser`) and

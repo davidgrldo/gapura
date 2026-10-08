@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
@@ -56,6 +56,11 @@ import tailwindcss from '@tailwindcss/vite'
 // now, the address it called from and its tokens (a prefix and times, never the token). Registering
 // one and issuing another token answer with a made-up token, shown once like the real one; deleting a
 // data plane or revoking a token answers 204 and stores nothing.
+// Account administration answers the same way for every persona. Creating an account answers with a
+// made-up temporary password next to the new id and name, and resetting one answers with another,
+// both shown once like the real ones; changing the status or superuser flag, deleting an account
+// and changing your own password answer 204 and store nothing. web/stub/as-must-change/ is the
+// account that has just been given a temporary password and may do nothing but choose another.
 // What a write does is proven against Postgres by the Rust tests, and by a pass against a real
 // server. Each answers only the method the server serves it on, so a form that sends the wrong
 // one fails here as it would there.
@@ -77,8 +82,14 @@ function stubApi() {
   // Registering a data plane and issuing it another token both answer with a token.
   const issued = /^\/api\/data-planes(\/[^/]+\/tokens)?$/
   const dataPlaneWrites = /^\/api\/data-planes\/[^/]+(\/tokens\/[^/]+)?$/
+  // Creating an account and resetting a password both answer with a temporary password.
+  const created = /^\/api\/users$/
+  const reset = /^\/api\/users\/[^/]+\/password$/
   const writes = [
     ['PATCH', /^\/api\/users\/[^/]+\/roles$/],
+    ['PUT', /^\/api\/users\/[^/]+\/(status|superuser)$/],
+    ['DELETE', /^\/api\/users\/[^/]+$/],
+    ['POST', /^\/api\/me\/password$/],
     ['PUT', /^\/api\/group-mappings$/],
     ['DELETE', /^\/api\/group-mappings$/],
     ['POST', /^\/api\/workspaces\/[^/]+\/(services|routes|consumers)$/],
@@ -123,6 +134,25 @@ function stubApi() {
             const key = `gpak_${randomBytes(32).toString('hex')}`
             res.setHeader('content-type', 'application/json')
             res.end(JSON.stringify({ key, prefix: key.slice(0, 13), expires_at }))
+          })
+          return
+        }
+        if (req.method === 'POST' && (created.test(url) || reset.test(url))) {
+          const id = url.split('/')[3]
+          let body = ''
+          req.on('data', (chunk) => (body += chunk))
+          req.on('end', () => {
+            let username = null
+            try {
+              username = JSON.parse(body).username ?? null
+            } catch {
+              // A body that is not JSON names no account.
+            }
+            // Twenty letters and digits, without the ones that read alike: 0 O 1 l I.
+            const alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+            const password = Array.from(randomBytes(20), (b) => alphabet[b % alphabet.length]).join('')
+            res.setHeader('content-type', 'application/json')
+            res.end(JSON.stringify(id ? { password } : { id: randomUUID(), username, password }))
           })
           return
         }

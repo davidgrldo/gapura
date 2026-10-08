@@ -3,6 +3,8 @@
   "id": "10000000-0000-4000-8000-000000000005",
   "name": "nadia.putri",
   "method": "local",
+  "local": true,
+  "must_change_password": false,
   "superuser": false,
   "waiting": true,
   "roles": [],

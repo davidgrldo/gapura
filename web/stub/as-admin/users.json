@@ -1,21 +1,21 @@
 [
-  { "id": "10000000-0000-4000-8000-000000000005", "name": "nadia.putri", "method": "local", "superuser": false, "status": "waiting", "last_sign_in_at": 1790740800, "access": [] },
-  { "id": "10000000-0000-4000-8000-000000000002", "name": "ops-breakglass", "method": "local", "superuser": false, "status": "waiting", "last_sign_in_at": null, "access": [] },
-  { "id": "10000000-0000-4000-8000-000000000006", "name": "andre.kusuma", "method": "local", "superuser": false, "status": "disabled", "last_sign_in_at": 1789000000, "access": [] },
-  { "id": "10000000-0000-4000-8000-000000000001", "name": "david", "method": "local", "superuser": true, "status": "active", "last_sign_in_at": 1790812800, "access": [
+  { "id": "10000000-0000-4000-8000-000000000005", "name": "nadia.putri", "method": "local", "local": true, "must_change_password": false, "superuser": false, "status": "waiting", "last_sign_in_at": 1790740800, "access": [] },
+  { "id": "10000000-0000-4000-8000-000000000002", "name": "ops-breakglass", "method": "local", "local": true, "must_change_password": true, "superuser": false, "status": "waiting", "last_sign_in_at": null, "access": [] },
+  { "id": "10000000-0000-4000-8000-000000000006", "name": "andre.kusuma", "method": "local", "local": true, "must_change_password": false, "superuser": false, "status": "disabled", "last_sign_in_at": 1789000000, "access": [] },
+  { "id": "10000000-0000-4000-8000-000000000001", "name": "david", "method": "local", "local": true, "must_change_password": false, "superuser": true, "status": "active", "last_sign_in_at": 1790812800, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] }
   ] },
-  { "id": "10000000-0000-4000-8000-000000000009", "name": "dewi.anggraini.kusumawardhani@payments.example", "method": "oidc", "superuser": false, "status": "disabled", "last_sign_in_at": 1788000000, "access": [] },
-  { "id": "10000000-0000-4000-8000-000000000003", "name": "fikri.ramadhan", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790790000, "access": [
+  { "id": "10000000-0000-4000-8000-000000000009", "name": "dewi.anggraini.kusumawardhani@payments.example", "method": "oidc", "local": false, "must_change_password": false, "superuser": false, "status": "disabled", "last_sign_in_at": 1788000000, "access": [] },
+  { "id": "10000000-0000-4000-8000-000000000003", "name": "fikri.ramadhan", "method": "oidc", "local": false, "must_change_password": false, "superuser": false, "status": "active", "last_sign_in_at": 1790790000, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "editor", "sources": [{ "kind": "group", "name": "payments-dev", "role": "editor" }] }
   ] },
-  { "id": "10000000-0000-4000-8000-000000000004", "name": "maya.lestari", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790700000, "access": [
+  { "id": "10000000-0000-4000-8000-000000000004", "name": "maya.lestari", "method": "oidc", "local": false, "must_change_password": false, "superuser": false, "status": "active", "last_sign_in_at": 1790700000, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "editor", "sources": [{ "kind": "direct", "role": "viewer" }, { "kind": "group", "name": "payments-dev", "role": "editor" }] }
   ] },
-  { "id": "10000000-0000-4000-8000-000000000007", "name": "rini.wulandari", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790600000, "access": [
+  { "id": "10000000-0000-4000-8000-000000000007", "name": "rini.wulandari", "method": "oidc", "local": false, "must_change_password": false, "superuser": false, "status": "active", "last_sign_in_at": 1790600000, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "viewer", "sources": [{ "kind": "group", "name": "storefront-readers", "role": "viewer" }] }
   ] },
-  { "id": "10000000-0000-4000-8000-000000000008", "name": "sari.dewi", "method": "oidc", "superuser": false, "status": "active", "last_sign_in_at": 1790800000, "access": [
+  { "id": "10000000-0000-4000-8000-000000000008", "name": "sari.dewi", "method": "oidc", "local": false, "must_change_password": false, "superuser": false, "status": "active", "last_sign_in_at": 1790800000, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "direct", "role": "admin" }] },
     { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "admin", "sources": [{ "kind": "group", "name": "storefront-admins", "role": "admin" }] }
   ] }
