@@ -8,7 +8,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 
@@ -60,6 +60,32 @@ pub fn router_with(state: AppState) -> Router {
             "/api/workspaces/{ws}/routes/{name}",
             put(crate::configuration_api::replace_route)
                 .delete(crate::configuration_api::delete_route)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        // Consumers, their keys, and where a key is required, the same way.
+        .route(
+            "/api/workspaces/{ws}/consumers",
+            get(crate::consumers_api::list_consumers)
+                .post(crate::consumers_api::create_consumer)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}/consumers/{name}",
+            delete(crate::consumers_api::delete_consumer),
+        )
+        .route(
+            "/api/workspaces/{ws}/consumers/{name}/keys",
+            post(crate::consumers_api::issue_key).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}/consumers/{name}/keys/{prefix}",
+            delete(crate::consumers_api::revoke_key),
+        )
+        .route(
+            "/api/workspaces/{ws}/key-auth",
+            get(crate::consumers_api::list_key_auth)
+                .put(crate::consumers_api::put_key_auth)
+                .delete(crate::consumers_api::delete_key_auth)
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
         )
         .route("/api/routes", get(routes))
