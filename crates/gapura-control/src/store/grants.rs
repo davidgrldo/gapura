@@ -211,6 +211,8 @@ pub(super) async fn rights(
         disabled: row.get("disabled"),
         groups: row.get("oidc_groups"),
         last_sign_in: None,
+        must_change_password: false,
+        sessions_valid_after: None,
     };
     let ids: Vec<Uuid> = concerned.iter().copied().collect();
     let workspaces: Vec<Workspace> = tx

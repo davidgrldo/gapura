@@ -570,6 +570,16 @@ fn now_seconds() -> u64 {
         .as_secs()
 }
 
+/// When a session is issued, to the millisecond, which `sessions_valid_after` is compared with.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// `GET /auth/login`: the sign-in form, or, with an identity provider and no form in front of
 /// it, the redirect to the provider.
 pub async fn begin(
@@ -847,6 +857,7 @@ fn session_response(
                 subject,
                 groups,
                 expires_at: now_seconds() + state.session_lifetime.as_secs(),
+                issued_at: now_millis(),
             },
             &state.session_key,
         ),
@@ -1109,6 +1120,7 @@ pub async fn callback(
                 subject,
                 groups,
                 expires_at: now_seconds() + state.session_lifetime.as_secs(),
+                issued_at: now_millis(),
             },
             &state.session_key,
         ),

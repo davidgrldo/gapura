@@ -211,6 +211,7 @@ mod session_cookie_tests {
             subject: "alice".into(),
             groups: vec!["team-a".into()],
             expires_at: u64::MAX,
+            issued_at: 0,
         };
         format!("{}={}", crate::login::COOKIE_NAME, encode(&session, KEY))
     }
@@ -487,6 +488,7 @@ mod tests {
             subject: "alice".into(),
             groups: vec![],
             expires_at: u64::MAX,
+            issued_at: 0,
         };
         let cookie = format!(
             "{}={}",
@@ -525,6 +527,7 @@ mod tests {
             subject: "alice".into(),
             groups: vec![],
             expires_at: u64::MAX,
+            issued_at: 0,
         };
         let cookie = format!(
             "{}={}",
@@ -688,6 +691,7 @@ fn signed_in_as(groups: &[&str]) -> String {
         subject: "alice".into(),
         groups: groups.iter().map(|s| s.to_string()).collect(),
         expires_at: u64::MAX,
+        issued_at: 0,
     };
     format!("gapura_session={}", encode(&session, KEY))
 }

@@ -127,7 +127,8 @@ fn cookie(subject: &str) -> String {
             &Session {
                 subject: subject.to_string(),
                 groups: vec![],
-                expires_at: u64::MAX
+                expires_at: u64::MAX,
+                issued_at: 0,
             },
             KEY
         )

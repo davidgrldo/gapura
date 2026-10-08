@@ -14,6 +14,10 @@ pub struct Session {
     pub groups: Vec<String>,
     /// Unix seconds after which this is no longer valid.
     pub expires_at: u64,
+    /// Unix milliseconds when this was issued. Absent from cookies issued before it existed,
+    /// which read as 0: valid until their account's `sessions_valid_after` is first set.
+    #[serde(default)]
+    pub issued_at: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -121,6 +125,7 @@ mod tests {
             subject: "alice@example.test".into(),
             groups: vec!["team-a".into()],
             expires_at,
+            issued_at: 0,
         }
     }
 
@@ -129,6 +134,23 @@ mod tests {
         let original = session(2000);
         let got = decode(&encode(&original, KEY), KEY, 1000).unwrap();
         assert_eq!(got, original);
+    }
+
+    #[test]
+    fn a_cookie_issued_before_issue_times_reads_as_issued_at_zero() {
+        // Signed exactly as `encode` signs, from a payload with no `issued_at` in it: what a
+        // console that predates the field put in a browser.
+        let json = serde_json::to_vec(&serde_json::json!({
+            "subject": "alice@example.test",
+            "groups": ["team-a"],
+            "expires_at": 2000,
+        }))
+        .unwrap();
+        let payload = URL_SAFE_NO_PAD.encode(&json);
+        let cookie = format!("{payload}.{}", sign(payload.as_bytes(), KEY));
+        let got = decode(&cookie, KEY, 1000).unwrap();
+        assert_eq!(got.issued_at, 0);
+        assert_eq!(got.subject, "alice@example.test");
     }
 
     #[test]

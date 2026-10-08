@@ -40,7 +40,10 @@ impl Store {
                         superuser,
                         disabled_at is not null as disabled,
                         oidc_groups,
-                        floor(extract(epoch from last_sign_in_at))::bigint as last_sign_in
+                        floor(extract(epoch from last_sign_in_at))::bigint as last_sign_in,
+                        must_change_password,
+                        (extract(epoch from sessions_valid_after) * 1000)::bigint
+                            as sessions_valid_after
                    from users
                   order by lower(coalesce(username, display_name, oidc_subject)), id",
                 &[],
@@ -59,6 +62,8 @@ impl Store {
                 disabled: r.get("disabled"),
                 groups: r.get("oidc_groups"),
                 last_sign_in: r.get("last_sign_in"),
+                must_change_password: r.get("must_change_password"),
+                sessions_valid_after: r.get("sessions_valid_after"),
             })
             .collect();
         let workspaces = tx
