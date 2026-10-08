@@ -46,6 +46,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0005_one_policy_per_target",
         include_str!("../../migrations/0005_one_policy_per_target.sql"),
     ),
+    (
+        "0006_data_plane_health",
+        include_str!("../../migrations/0006_data_plane_health.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
@@ -310,21 +314,21 @@ impl Store {
         ))
     }
 
-    /// Returns the data plane's id when the token is one it holds.
+    /// Returns the data plane's id and the token's own id when the token is one it holds.
     ///
     /// Looked up by prefix because the stored value is a hash and a hash cannot be indexed. The
     /// hash is plain SHA-256 rather than a password KDF on purpose: a KDF exists to make
     /// guessing a low-entropy secret expensive, and these tokens are 256 bits of randomness the
     /// control plane issued. Nothing is guessing them, and the endpoint is called by every data
     /// plane every few seconds, which is the wrong place to spend a deliberately slow function.
-    pub async fn authenticate(&self, token: &str) -> Result<Option<uuid::Uuid>> {
+    pub async fn authenticate(&self, token: &str) -> Result<Option<(uuid::Uuid, uuid::Uuid)>> {
         let Some(prefix) = token.get(..PREFIX_LEN) else {
             return Ok(None);
         };
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "select data_plane_id, token_hash from data_plane_tokens
+                "select id, data_plane_id, token_hash from data_plane_tokens
                   where token_prefix = $1 and (expires_at is null or expires_at > now())",
                 &[&prefix],
             )
@@ -333,26 +337,43 @@ impl Store {
         for row in rows {
             let stored: String = row.get("token_hash");
             if constant_time_eq(stored.as_bytes(), presented.as_bytes()) {
-                return Ok(Some(row.get("data_plane_id")));
+                return Ok(Some((row.get("data_plane_id"), row.get("id"))));
             }
         }
         Ok(None)
     }
 
-    /// Liveness is the configuration call, not a second mechanism reporting the same fact.
-    pub async fn record_call(&self, id: uuid::Uuid, version: i64) -> Result<()> {
+    /// Liveness is the configuration call, not a second mechanism reporting the same fact. The
+    /// address is the connection's peer, a proxy's when one is in front; the tag is the one the
+    /// data plane sent, so `None` when it sent none.
+    pub async fn record_call(
+        &self,
+        data_plane: uuid::Uuid,
+        token: uuid::Uuid,
+        version: i64,
+        etag: Option<&str>,
+        address: Option<std::net::IpAddr>,
+    ) -> Result<()> {
+        // tokio-postgres binds no IpAddr to inet without a feature it is not built with, so the
+        // address goes over as text and the database parses it.
+        let address = address.map(|a| a.to_string());
         let client = self.pool.get().await?;
         client
             .execute(
-                "update data_planes set last_seen_at = now(), last_seen_version = $2 where id = $1",
-                &[&id, &version],
+                "with t as (update data_plane_tokens set last_used_at = now() where id = $2)
+                 update data_planes
+                    set last_seen_at = now(), last_seen_version = $3, last_seen_etag = $4,
+                        last_seen_address = $5::text::inet
+                  where id = $1",
+                &[&data_plane, &token, &version, &etag, &address],
             )
             .await?;
         Ok(())
     }
 
     /// Registers a data plane and returns its token, which is shown once and never stored.
-    pub async fn issue_token(&self, name: &str) -> Result<String> {
+    /// Writes no audit row: it is for seeding and tests, not for anything an operator does.
+    pub async fn seed_token(&self, name: &str) -> Result<String> {
         let raw: [u8; 32] = rand::random();
         let token = format!("gpdp_{}", hex(&raw));
         let prefix = &token[..PREFIX_LEN];

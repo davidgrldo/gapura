@@ -186,7 +186,13 @@ async fn main() -> anyhow::Result<()> {
                      behind a sidecar or mesh that encrypts it"
                 );
                 tokio::spawn(async move {
-                    if let Err(e) = axum::serve(listener, router).await {
+                    // With each connection's address, which the data plane's record shows.
+                    if let Err(e) = axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                    {
                         tracing::error!(error = %e, "the configuration endpoint stopped");
                     }
                 });

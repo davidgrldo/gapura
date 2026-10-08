@@ -14,12 +14,14 @@
 
 use std::sync::Arc;
 
+use std::net::SocketAddr;
+
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Extension, Router,
 };
 use gapura_core::store::{compile, StoreSettings, StoreSnapshot};
 use sha2::{Digest, Sha256};
@@ -82,7 +84,9 @@ pub async fn serve_tls(
             Err(e) => return Err(e),
         };
         let acceptor = acceptor.clone();
-        let service = TowerToHyperService::new(router.clone());
+        // The same extension `into_make_service_with_connect_info` adds on the plain listener,
+        // so the handler reads the peer one way whichever listener it came in on.
+        let service = TowerToHyperService::new(router.clone().layer(Extension(ConnectInfo(peer))));
         tokio::spawn(async move {
             let tls = match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -143,12 +147,18 @@ pub fn router(api: Arc<ConfigApi>) -> Router {
         .with_state(api)
 }
 
-async fn serve(State(api): State<Arc<ConfigApi>>, headers: HeaderMap) -> Response {
+/// `peer` is `None` only where nothing supplied it -- a test's router called directly. Both
+/// listeners `main` starts do.
+async fn serve(
+    State(api): State<Arc<ConfigApi>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+) -> Response {
     let Some(token) = bearer(&headers) else {
         return unauthorized();
     };
-    let id = match api.store.authenticate(token).await {
-        Ok(Some(id)) => id,
+    let (id, token_id) = match api.store.authenticate(token).await {
+        Ok(Some(ids)) => ids,
         Ok(None) => return unauthorized(),
         Err(e) => {
             tracing::error!(error = %e, "authenticating a data plane");
@@ -166,9 +176,16 @@ async fn serve(State(api): State<Arc<ConfigApi>>, headers: HeaderMap) -> Respons
         }
     };
 
+    let sent = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
     // Recorded before the body is built and whatever the answer turns out to be: the caller is
     // alive either way, and a 304 is the overwhelming majority of these calls.
-    if let Err(e) = api.store.record_call(id, version).await {
+    if let Err(e) = api
+        .store
+        .record_call(id, token_id, version, sent, peer.map(|p| p.0 .0.ip()))
+        .await
+    {
         // Liveness is for a human looking at a console. Losing it must not cost a data plane
         // its configuration.
         tracing::warn!(error = %e, "recording a data plane's call");
@@ -181,11 +198,7 @@ async fn serve(State(api): State<Arc<ConfigApi>>, headers: HeaderMap) -> Respons
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == etag)
-    {
+    if sent.is_some_and(|v| v == etag) {
         return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
     }
     (
@@ -234,8 +247,14 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        // The handler is not what is under test, so any router shows the transport works.
-        let router = Router::new().route("/v1/config", get(|| async { "served over tls" }));
+        // The handler is not what is under test, so any router shows the transport works -- and
+        // that the connection's peer reaches it, the way `serve` reads it.
+        let router = Router::new().route(
+            "/v1/config",
+            get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
+                format!("served over tls to {}", peer.ip())
+            }),
+        );
         tokio::spawn(serve_tls(listener, router, acceptor));
 
         let trusting = reqwest::Client::builder()
@@ -252,7 +271,7 @@ mod tests {
             .text()
             .await
             .unwrap();
-        assert_eq!(body, "served over tls");
+        assert_eq!(body, "served over tls to 127.0.0.1");
 
         // Plain HTTP to a TLS port gets no answer it could read as a configuration.
         let plain = reqwest::Client::new()
