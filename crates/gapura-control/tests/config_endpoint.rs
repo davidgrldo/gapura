@@ -458,6 +458,46 @@ async fn a_tag_too_long_to_be_one_is_answered_but_not_stored() {
     assert_eq!(etag, None);
 }
 
+/// The schema's foreign key allows a route to name another workspace's service, which only SQL
+/// written by hand can make. Sent on, the route would compile into whichever same-named service
+/// its own workspace has -- the wrong upstream, silently -- or be dropped; like a foreign
+/// policy row, it fails the snapshot instead of guessing.
+#[tokio::test]
+async fn a_route_pointing_at_another_workspace_s_service_fails_the_snapshot() {
+    let Some((store, _, _guard)) = fixture().await else {
+        return;
+    };
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "insert into workspaces (name) values ('payments');
+             insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'orders.internal', 8080
+                 from workspaces where name = 'default';
+             insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'impostor.internal', 9090
+                 from workspaces where name = 'payments';
+             insert into routes (workspace_id, service_id, name, paths, priority)
+               select w.id, s.id, 'orders-api', '[{\"type\":\"prefix\",\"value\":\"/orders\"}]', 0
+                 from workspaces w, services s
+                where w.name = 'default' and s.workspace_id <> w.id;",
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .snapshot()
+        .await
+        .err()
+        .expect("a foreign service must fail the snapshot");
+    let text = format!("{error:#}");
+    assert!(text.contains("orders-api"), "{text}");
+    assert!(text.contains("default"), "{text}");
+    assert!(text.contains("another workspace"), "{text}");
+}
+
 /// The start order the comment in `main` promises: a flag that cannot be honoured stops the
 /// process before the store is touched. The certificate and the listener of the configuration
 /// endpoint are settled only after `migrate` today, so an upgrade carrying a bad path migrates
