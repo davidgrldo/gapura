@@ -73,19 +73,45 @@ fn remap_overridden_listeners(
     overridden: &[bool],
 ) {
     let mut taken: BTreeSet<u16> = listeners.iter().map(|l| l.port).collect();
+    // One allocation per (Gateway, protocol, declared port), not per listener: Gateway API
+    // allows several listeners on one port, told apart by hostname, and a Service for the
+    // Gateway's own address can target one port per protocol -- so the whole group must land
+    // on the same target, or every listener but one is unreachable at that address. With no
+    // free port the group stays whole on the shared port.
+    let mut groups: BTreeMap<(String, bool, u16), Option<u16>> = BTreeMap::new();
     for i in 0..listeners.len() {
         if !overridden[i] {
             continue;
         }
-        let pool = match listeners[i].protocol {
-            crate::config::Protocol::Http => &settings.http_ports,
-            crate::config::Protocol::Https => &settings.https_ports,
-        };
-        if let Some(p) = pool.iter().copied().find(|p| !taken.contains(p)) {
+        let https = listeners[i].protocol == crate::config::Protocol::Https;
+        let key = (
+            gateway_of(&listeners[i].id).to_string(),
+            https,
+            listeners[i].port,
+        );
+        let target = *groups.entry(key).or_insert_with(|| {
+            let pool = if https {
+                &settings.https_ports
+            } else {
+                &settings.http_ports
+            };
+            pool.iter().copied().find(|p| !taken.contains(p))
+        });
+        if let Some(p) = target {
             listeners[i].client_port = Some(listeners[i].port);
             listeners[i].port = p;
             taken.insert(p);
         }
+    }
+}
+
+/// The "namespace/name" a listener id ("namespace/name/listener") belongs to: listeners of one
+/// Gateway share a remap target. An id without the two separators has no Gateway prefix to
+/// speak of and stands for itself.
+fn gateway_of(id: &str) -> &str {
+    match id.match_indices('/').nth(1) {
+        Some((i, _)) => &id[..i],
+        None => id,
     }
 }
 
@@ -368,6 +394,33 @@ mod remap_tests {
     }
 
     #[test]
+    fn same_port_listeners_of_an_addressed_gateway_share_one_target() {
+        // #146: a Service for the Gateway's own address can target one port per protocol, and
+        // Gateway API allows several listeners on one port, told apart by hostname. A remap
+        // that gives each listener its own port leaves all but one unreachable at that
+        // address, so the whole (Gateway, protocol, declared port) group shares one target.
+        let mut a = listener(80, "a");
+        a.hostname = Some("a.example.com".into());
+        let mut b = listener(80, "b");
+        b.hostname = Some("b.example.com".into());
+        let mut ls = vec![a, b];
+        remap_overridden_listeners(
+            &mut ls,
+            &overridden_settings(&[80, 10000, 10001], &["infra/gw"]),
+            &[true, true],
+        );
+        assert_eq!(
+            ls.iter().map(|l| l.port).collect::<Vec<_>>(),
+            vec![10000, 10000],
+            "one target port for the group, so one Service can point at it"
+        );
+        assert!(
+            ls.iter().all(|l| l.client_port == Some(80)),
+            "every listener still answers for its declared port"
+        );
+    }
+
+    #[test]
     fn every_listener_of_an_overridden_gateway_moves() {
         let mut ls = vec![
             listener(80, "http"),
@@ -382,8 +435,9 @@ mod remap_tests {
         );
         assert_eq!(
             ls.iter().map(|l| l.port).collect::<Vec<_>>(),
-            vec![10000, 10001, 8080],
-            "the first two fill free pool ports in order; the third keeps its own declared port"
+            vec![10000, 10000, 10001],
+            "one port per declared-port group: the two :80 listeners share 10000, the :8080 \
+             group takes 10001"
         );
     }
 

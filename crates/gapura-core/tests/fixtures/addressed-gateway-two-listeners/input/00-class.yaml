@@ -1,0 +1,4 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: { name: gapura, generation: 1 }
+spec: { controllerName: gapura.dev/controller }
