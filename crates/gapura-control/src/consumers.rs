@@ -136,7 +136,9 @@ pub fn header(value: Option<&str>) -> Result<String, FieldError> {
     if RESERVED_HEADERS.contains(&value.as_str()) {
         return Err(field(
             "header",
-            format!("{value} is set by the connection or the gateway. Pick another header name."),
+            format!(
+                "The {value} header is set by the connection or the gateway. Pick another name."
+            ),
         ));
     }
     Ok(value)
