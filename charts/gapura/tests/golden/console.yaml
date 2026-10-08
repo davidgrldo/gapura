@@ -295,7 +295,7 @@ metadata:
     app.kubernetes.io/part-of: gapura
 spec:
   strategy:
-    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:

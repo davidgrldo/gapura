@@ -184,8 +184,13 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
-  {{- if not ((.Values.console).updateStrategy) }}
   strategy:
+  {{- /* Setting console.updateStrategy used to suppress the default rollingUpdate and then
+         render nothing, handing the Deployment the Kubernetes default silently. Render what
+         was set. */}}
+  {{- if ((.Values.console).updateStrategy) }}
+    {{- toYaml ((.Values.console).updateStrategy) | nindent 4 }}
+  {{- else }}
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   {{- end }}
   replicas: {{ (((.Values.console).replicaCount) | default 1) }}
