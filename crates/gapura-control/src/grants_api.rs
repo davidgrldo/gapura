@@ -11,7 +11,7 @@
 //! checked, so a request that is both malformed and anonymous is 401, not a 400 that tells a
 //! stranger how the route is shaped.
 
-use crate::access_api::{admin_caller, StoreCaller};
+use crate::access_api::{admin_caller, CallerError, StoreCaller};
 use crate::grants::{self, GroupMapping, Refusal, RoleChanges};
 use crate::state::AppState;
 use crate::store::{sqlstate, WriteError};
@@ -40,6 +40,9 @@ const CONTENDED: &str = "Someone else was changing the same roles at that moment
 /// failed on the wire may or may not have happened.
 pub(crate) const NOT_SAVED: &str = "The console could not save this change. Try again in a moment.";
 
+/// What a route about accounts answers in Kubernetes mode, which keeps none.
+pub(crate) const NO_ACCOUNTS: &str = "This console keeps no accounts: it runs without a database.";
+
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         crate::api::refuse(self.status(), self.sentence())
@@ -47,11 +50,15 @@ impl IntoResponse for Refusal {
 }
 
 /// `admin_caller`'s refusals, in words.
-fn refused_early(status: StatusCode) -> Response {
+fn refused_early(error: CallerError) -> Response {
+    let status = match error {
+        CallerError::MustChangePassword => return error.into_response(),
+        CallerError::Status(status) => status,
+    };
     let sentence = match status {
         StatusCode::UNAUTHORIZED => "You are not signed in.",
         StatusCode::FORBIDDEN => "You do not administer any workspace.",
-        StatusCode::NOT_FOUND => "This console keeps no accounts: it runs without a database.",
+        StatusCode::NOT_FOUND => NO_ACCOUNTS,
         // The caller could not be read back from the store, and `store_caller` has logged why.
         StatusCode::SERVICE_UNAVAILABLE => NOT_SAVED,
         // `admin_caller` answers with nothing else, but a status it grows later should still
@@ -83,6 +90,7 @@ fn written(result: Result<(), WriteError>) -> Response {
     match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(WriteError::Refused(refusal)) => refusal.into_response(),
+        Err(WriteError::Field(error)) => crate::configuration_api::field_error(error),
         Err(WriteError::Store(error)) => {
             let code = sqlstate(&error);
             // An `anyhow::Error` shown with `%` prints only its outermost error, and for a

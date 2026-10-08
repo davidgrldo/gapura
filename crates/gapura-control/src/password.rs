@@ -39,7 +39,7 @@ pub static DUMMY: LazyLock<String> = LazyLock::new(|| {
     hash(&format!("{:032x}", rand::random::<u128>())).expect("hashing a 32-character string")
 });
 
-/// How many password checks may run at once. Each holds 19 MiB for about 20 ms, and the sign-in
+/// How many password checks, and hashes, may run at once. Each holds 19 MiB for about 20 ms, and the sign-in
 /// form answers anyone, so without a bound a burst of attempts would run as many of them as the
 /// blocking pool has threads -- 512 by default, gigabytes of memory from an unauthenticated form.
 ///
@@ -79,6 +79,22 @@ pub async fn verify_or_dummy(password: String, stored: Option<String>) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+/// The PHC string for `password`, made as `verify_or_dummy` checks one: off the async workers
+/// and under the same bound. A hash costs what a check costs, and the accounts API makes one per
+/// create, reset and change, so unbounded they would add to the memory the bound was set for.
+pub async fn hash_bounded(password: String) -> anyhow::Result<String> {
+    let permit = CHECKING
+        .acquire()
+        .await
+        .map_err(|e| anyhow::anyhow!("waiting to hash a password: {e}"))?;
+    tokio::task::spawn_blocking(move || {
+        // Held by the work, as in `verify_or_dummy`.
+        let _permit = permit;
+        hash(&password)
+    })
+    .await?
 }
 
 /// Long enough for any name a person or a team uses, and well inside what a unique index on

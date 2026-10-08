@@ -1,5 +1,6 @@
 //! The HTTP surface. Handlers stay thin: they resolve scope, call a reader, and serialise.
 
+use crate::access_api::CallerError;
 use crate::grants_api::MAX_BODY;
 use crate::rows::{self, Row};
 use crate::scope::{self, Scope};
@@ -22,10 +23,36 @@ pub fn router_with(state: AppState) -> Router {
         .route("/auth/callback", get(crate::login::callback))
         .route("/auth/logout", post(crate::login::logout))
         .route("/api/me", get(crate::access_api::me))
-        .route("/api/users", get(crate::access_api::users))
+        // Accounts. Every route that reads a body caps it, so a caller who has not been checked
+        // yet cannot make the console buffer more than `MAX_BODY` of it.
+        .route(
+            "/api/users",
+            get(crate::access_api::users)
+                .post(crate::accounts_api::create_account)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/users/{id}",
+            delete(crate::accounts_api::delete_account),
+        )
+        .route(
+            "/api/users/{id}/password",
+            post(crate::accounts_api::reset_password),
+        )
+        .route(
+            "/api/users/{id}/status",
+            put(crate::accounts_api::set_status).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/users/{id}/superuser",
+            put(crate::accounts_api::set_superuser).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/me/password",
+            post(crate::accounts_api::change_password).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         .route("/api/roles", get(crate::access_api::roles))
-        // The two that read a body cap it, so a caller who has not been checked yet cannot make
-        // the console buffer more than `MAX_BODY` of it.
+        // Grants, which cap their bodies the same way.
         .route(
             "/api/users/{id}/roles",
             patch(crate::grants_api::set_roles).layer(DefaultBodyLimit::max(MAX_BODY)),
@@ -211,6 +238,7 @@ mod session_cookie_tests {
             subject: "alice".into(),
             groups: vec!["team-a".into()],
             expires_at: u64::MAX,
+            issued_at: 0,
         };
         format!("{}={}", crate::login::COOKIE_NAME, encode(&session, KEY))
     }
@@ -276,7 +304,7 @@ mod session_cookie_tests {
 /// In store mode those screens know nothing about workspaces, so they are a superuser's until
 /// store-backed versions exist. Anyone else is refused outright, rather than shown a list
 /// filtered by a namespace mapping store mode does not have.
-async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, StatusCode> {
+async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, CallerError> {
     match &state.store {
         None => {
             let session =
@@ -289,7 +317,7 @@ async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, 
             if caller.me.superuser {
                 Ok(Scope::AllNamespaces)
             } else {
-                Err(StatusCode::FORBIDDEN)
+                Err(StatusCode::FORBIDDEN.into())
             }
         }
     }
@@ -298,7 +326,7 @@ async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, 
 async fn routes(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Row>>, StatusCode> {
+) -> Result<Json<Vec<Row>>, CallerError> {
     let visible = namespaces_for(&state, &headers).await?;
     let declared = state
         .source
@@ -368,7 +396,7 @@ struct Overview {
 async fn overview(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Overview>, StatusCode> {
+) -> Result<Json<Overview>, CallerError> {
     let visible = namespaces_for(&state, &headers).await?;
     // Same rule as `/api/routes`: a gateway that cannot be reached is not a failed request,
     // it is the answer. Collapsing the error to `None` here, rather than propagating it,
@@ -487,6 +515,7 @@ mod tests {
             subject: "alice".into(),
             groups: vec![],
             expires_at: u64::MAX,
+            issued_at: 0,
         };
         let cookie = format!(
             "{}={}",
@@ -525,6 +554,7 @@ mod tests {
             subject: "alice".into(),
             groups: vec![],
             expires_at: u64::MAX,
+            issued_at: 0,
         };
         let cookie = format!(
             "{}={}",
@@ -688,6 +718,7 @@ fn signed_in_as(groups: &[&str]) -> String {
         subject: "alice".into(),
         groups: groups.iter().map(|s| s.to_string()).collect(),
         expires_at: u64::MAX,
+        issued_at: 0,
     };
     format!("gapura_session={}", encode(&session, KEY))
 }
