@@ -1072,3 +1072,39 @@ fn two_identical_listeners_are_split_by_bind_port() {
     );
     insta::assert_yaml_snapshot!("two-gateways-same-hostname", t);
 }
+
+#[test]
+fn an_addressed_gateways_same_port_listeners_share_one_target_port() {
+    // One Gateway, two HTTP :80 listeners told apart by hostname, and --gateway-address for
+    // that Gateway: the whole (Gateway, protocol, declared port) group shares one remapped
+    // port, because a Service for the Gateway's own address can target only one port per
+    // protocol. Splitting the group across two ports (#146) left every hostname but one
+    // unreachable at 203.0.113.9:80.
+    let settings = Settings {
+        http_ports: vec![80, 10000, 10001],
+        gateway_address_overrides: [("infra/gw".to_string(), vec!["203.0.113.9".to_string()])]
+            .into_iter()
+            .collect(),
+        ..settings()
+    };
+    let t = translate(&load("addressed-gateway-two-listeners"), &settings);
+    let by_id = |id: &str| {
+        t.config
+            .listeners
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap_or_else(|| panic!("{id} is programmed"))
+    };
+    let a = by_id("infra/gw/a");
+    let b = by_id("infra/gw/b");
+    assert_eq!(a.port, 10000);
+    assert_eq!(b.port, 10000, "same group, same target port");
+    assert_eq!(a.client_port, Some(80));
+    assert_eq!(b.client_port, Some(80));
+    assert_eq!(t.config.ports[&10000].len(), 2, "both routes match on 10000");
+    assert!(
+        !t.config.ports.contains_key(&80),
+        "the group moved off the shared port together"
+    );
+    insta::assert_yaml_snapshot!("addressed-gateway-two-listeners", t);
+}
