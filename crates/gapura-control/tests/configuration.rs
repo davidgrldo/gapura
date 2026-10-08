@@ -493,6 +493,98 @@ async fn renaming_a_service_carries_its_routes() {
     assert_eq!(json(&body)[0]["service"], "orders-v2");
 }
 
+/// The service is part of what a route's reader saw: the view names it and carries the
+/// service's `updated_at`, and a rename or a re-creation moves the service's row without
+/// touching the route's own stamp. So a save that keeps the service name it read, under a name
+/// that has meanwhile gone to another row or to nothing, is a stale read and must answer 409
+/// when it carries the stamps it read -- and go through when it carries the current ones.
+#[tokio::test]
+async fn a_route_saved_with_a_service_that_changed_since_it_was_read_is_a_conflict() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    let view = row(&app, ROUTES, "orders-api", s.ed).await;
+    let at = view["updated_at"].as_str().unwrap();
+    let service_at = view["service_updated_at"].as_str().unwrap();
+    let save = |service: &str, at: &str, service_at: &str| {
+        format!(
+            r#"{{"name":"orders-api","service":"{service}","hosts":["api.example.com"],"paths":[{{"type":"prefix","value":"/orders"}}],"methods":["GET"],"priority":7,"updated_at":"{at}","service_updated_at":"{service_at}"}}"#
+        )
+    };
+    let orders_at = seen(&app, SERVICES, "orders", s.ed).await;
+    let rename = format!(
+        r#"{{"name":"orders-v1","protocol":"http","host":"orders.internal","port":8080,"read_timeout_ms":15000,"updated_at":"{orders_at}"}}"#
+    );
+
+    // Renamed, not re-created: the name the editor read no longer exists, which answered 400
+    // about the store's guess instead of the 409 the stale read deserves.
+    ok(&app, "PUT", &format!("{SERVICES}/orders"), s.ed, &rename).await;
+    let before = everything(&store).await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/orders-api"),
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &save("orders", at, service_at),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(sentence(&body).contains("Reload"), "{body}");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "a stale save writes nothing"
+    );
+
+    // And with the name created again as another row, the same save must not quietly move the
+    // route onto it.
+    ok(
+        &app,
+        "POST",
+        SERVICES,
+        s.ed,
+        r#"{"name":"orders","protocol":"http","host":"impostor.internal","port":9090}"#,
+    )
+    .await;
+    let before = everything(&store).await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/orders-api"),
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &save("orders", at, service_at),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(everything(&store).await, before);
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.ed).await["service"],
+        "orders-v1",
+        "the route stays on the service it was written against"
+    );
+
+    // A save carrying what the list shows now goes through.
+    let fresh = row(&app, ROUTES, "orders-api", s.ed).await;
+    ok(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/orders-api"),
+        s.ed,
+        &save(
+            fresh["service"].as_str().unwrap(),
+            fresh["updated_at"].as_str().unwrap(),
+            fresh["service_updated_at"].as_str().unwrap(),
+        ),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn editing_a_route_runs_its_checks_and_its_update() {
     let Some((store, _guard)) = fresh_store().await else {
@@ -1054,6 +1146,57 @@ async fn two_workspaces_claiming_one_host_at_once_get_one_each_way() {
     )
     .await;
     assert_eq!(claimed, 20, "one route per host");
+}
+
+/// A path name the database would refuse to query (`%00` decodes to a NUL byte) is a name
+/// nothing can have: answered as a missing row, not as a store failure with a warning logged.
+#[tokio::test]
+async fn a_name_with_a_nul_byte_reads_as_missing_not_unsaved() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    let service_edit = format!(
+        r#"{{"name":"orders","protocol":"http","host":"orders.internal","port":8081,"updated_at":"{}"}}"#,
+        seen(&app, SERVICES, "orders", s.ed).await
+    );
+    let route_edit = format!(
+        r#"{{"name":"orders-api","service":"orders","hosts":["api.example.com"],"priority":2,"updated_at":"{}"}}"#,
+        seen(&app, ROUTES, "orders-api", s.ed).await
+    );
+    let before = everything(&store).await;
+    for (method, path, as_, request) in [
+        (
+            "PUT",
+            "/api/workspaces/default/services/a%00b",
+            s.ed,
+            service_edit.as_str(),
+        ),
+        (
+            "DELETE",
+            "/api/workspaces/default/services/a%00b",
+            s.ada,
+            "",
+        ),
+        (
+            "PUT",
+            "/api/workspaces/default/routes/a%00b",
+            s.ed,
+            route_edit.as_str(),
+        ),
+        ("DELETE", "/api/workspaces/default/routes/a%00b", s.ada, ""),
+    ] {
+        let (status, body) = send(&app, method, path, Some(as_), FROM_THE_CONSOLE, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "none of it wrote anything"
+    );
 }
 
 #[tokio::test]

@@ -270,10 +270,12 @@ impl Store {
             .query(
                 &format!(
                     "select r.id, r.service_id, r.name, s.name as service, r.hosts, r.methods,
-                            r.paths, r.priority, {} as updated_at
+                            r.paths, r.priority, {} as updated_at,
+                            {} as service_updated_at
                        from routes r join services s on s.id = r.service_id
                       where r.workspace_id = $1 order by r.priority desc, r.name",
-                    updated_at("r.updated_at")
+                    updated_at("r.updated_at"),
+                    updated_at("s.updated_at")
                 ),
                 &[&workspace],
             )
@@ -284,6 +286,7 @@ impl Store {
                 Ok(RouteView {
                     route: route_from(r)?,
                     updated_at: r.get("updated_at"),
+                    service_updated_at: r.get("service_updated_at"),
                     key_auth: key_auths.route(r.get("id"), r.get("service_id")),
                 })
             })
@@ -533,7 +536,8 @@ impl Store {
     }
 
     /// Replaces the route called `current`, which may rename it, when `seen` is its
-    /// `updated_at` as last read.
+    /// `updated_at` as last read and `service_seen`, when sent, is the `updated_at` of the
+    /// service the route pointed at then.
     pub async fn replace_route(
         &self,
         caller: Uuid,
@@ -541,17 +545,22 @@ impl Store {
         current: &str,
         r: &Route,
         seen: &str,
+        service_seen: Option<&str>,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_write_route(caller, workspace, Some((current, seen)), r)).await
+        retrying(move || {
+            self.try_write_route(caller, workspace, Some((current, seen, service_seen)), r)
+        })
+        .await
     }
 
     /// Creates `r` when `replacing` is `None`, and otherwise replaces the route it names when
-    /// the `updated_at` beside the name is the route's own.
+    /// the `updated_at` beside the name is the route's own, and the service's -- when sent --
+    /// is the one its row had as last read.
     async fn try_write_route(
         &self,
         caller: Uuid,
         workspace: Uuid,
-        replacing: Option<(&str, &str)>,
+        replacing: Option<(&str, &str, Option<&str>)>,
         r: &Route,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
@@ -561,15 +570,16 @@ impl Store {
         // meanwhile answers that, not some other refusal its new contents would earn.
         let existing = match replacing {
             None => None,
-            Some((current, seen)) => {
+            Some((current, seen, service_seen)) => {
                 let Some(row) = tx
                     .query_opt(
                         &format!(
                             "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths,
-                                    r.priority, {} as updated_at
+                                    r.priority, {} as updated_at, {} as service_updated_at
                                from routes r join services s on s.id = r.service_id
                               where r.workspace_id = $1 and r.name = $2 for update of r",
-                            updated_at("r.updated_at")
+                            updated_at("r.updated_at"),
+                            updated_at("s.updated_at")
                         ),
                         &[&workspace, &current],
                     )
@@ -582,6 +592,17 @@ impl Store {
                 };
                 if row.get::<_, &str>("updated_at") != seen {
                     return Err(Refusal::Conflict(STALE.into()).into());
+                }
+                // The service is part of what the reader saw, and a rename or a re-creation
+                // moves the service's row without moving the route's, so the route's stamp
+                // alone calls that read fresh. When the client sent the service's stamp and it
+                // no longer matches, the save is stale whatever the name it carries now
+                // resolves to: to nothing, which used to be a 400, or to a new row of the old
+                // name, which silently moved the route onto it.
+                if let Some(seen_service) = service_seen {
+                    if row.get::<_, &str>("service_updated_at") != seen_service {
+                        return Err(Refusal::Conflict(STALE.into()).into());
+                    }
                 }
                 let before = route_from(&row).map_err(WriteError::Store)?;
                 Some((row.get::<_, Uuid>("id"), before))

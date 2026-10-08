@@ -102,6 +102,30 @@ async fn main() -> anyhow::Result<()> {
     // resolves to nothing has to stop the process before the store is migrated, not after.
     let session_key = Arc::from(gapura_control::session::session_key()?);
     let source = Arc::new(gapura_control::kube_source::Source::from_environment().await?);
+    // The configuration endpoint's certificate and port are part of "every flag" as well: the
+    // files are read and the listener bound before the store is opened, so a bad path, a
+    // mismatched pair, or a taken port stops an upgrade before a migration runs -- not after,
+    // which would leave the new schema for the old image's rollback.
+    let config_endpoint = if store_mode {
+        let acceptor = match (&args.config_tls_cert, &args.config_tls_key) {
+            (Some(cert), Some(key)) => {
+                let read = |p: &std::path::PathBuf| {
+                    std::fs::read(p).with_context(|| format!("reading {}", p.display()))
+                };
+                Some(gapura_control::config_api::tls_acceptor(
+                    &read(cert)?,
+                    &read(key)?,
+                )?)
+            }
+            _ => None,
+        };
+        // Bound after the certificate is read, so a bad one stops the start instead of leaving
+        // a listener that refuses every handshake.
+        let listener = tokio::net::TcpListener::bind(args.listen_config).await?;
+        Some((listener, acceptor))
+    } else {
+        None
+    };
     let store = match &args.database_url {
         Some(url) => {
             let ca =
@@ -151,21 +175,8 @@ async fn main() -> anyhow::Result<()> {
             store,
             settings: store_settings,
         });
-        // Read before binding, so a bad certificate stops the start instead of a listener
-        // that refuses every handshake.
-        let acceptor = match (&args.config_tls_cert, &args.config_tls_key) {
-            (Some(cert), Some(key)) => {
-                let read = |p: &std::path::PathBuf| {
-                    std::fs::read(p).with_context(|| format!("reading {}", p.display()))
-                };
-                Some(gapura_control::config_api::tls_acceptor(
-                    &read(cert)?,
-                    &read(key)?,
-                )?)
-            }
-            _ => None,
-        };
-        let listener = tokio::net::TcpListener::bind(args.listen_config).await?;
+        // Read and bound before the store was opened, for the reason beside it there.
+        let (listener, acceptor) = config_endpoint.expect("store mode read the certificate above");
         let router = gapura_control::config_api::router(api);
         match acceptor {
             Some(acceptor) => {

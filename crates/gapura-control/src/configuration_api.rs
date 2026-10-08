@@ -8,7 +8,7 @@
 //! Kubernetes mode keeps no configuration in a store, so there these answer 404.
 
 use crate::access_api::{store_caller, CallerError, StoreCaller};
-use crate::configuration::{self, Action, FieldError, Write};
+use crate::configuration::{self, Action, FieldError, RouteInput, Write};
 use crate::grants::Refusal;
 use crate::grants_api::{unreadable, unsaved, NOT_SAVED};
 use crate::state::AppState;
@@ -106,6 +106,19 @@ pub(crate) fn workspace_in(
 /// as an unknown one. Answered only once the caller is known, like a body that could not be read.
 pub(crate) fn unnamed() -> Response {
     configuration::no_role().into_response()
+}
+
+/// A path name that could be nothing's, answered as the store answers a name that does not
+/// exist but without a query, so a name the database would reject (a NUL byte) never reaches it
+/// and is not logged as a store failure. Called once the caller's role is settled, like
+/// `data_planes_api`, so a caller who may not write learns nothing about names.
+pub(crate) fn refuse_name(kind: &str, name: &str) -> Option<Response> {
+    configuration::name(name, "name").err().map(|_| {
+        Refusal::NotFound(format!(
+            "There is no {kind} named {name} in this workspace."
+        ))
+        .into_response()
+    })
 }
 
 /// The body read into a `what` (with its article: "a service"). One that is too long or cut off
@@ -209,6 +222,9 @@ pub async fn replace_service(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    if let Some(r) = refuse_name("service", &name) {
+        return r;
+    }
     let input = match body(raw, "a service") {
         Ok(i) => i,
         Err(r) => return *r,
@@ -239,7 +255,12 @@ pub async fn delete_service(
         return unnamed();
     };
     match workspace_in(&caller, &ws, Action::Delete) {
-        Ok(workspace) => written(store.delete_service(caller.me.id, workspace, &name).await),
+        Ok(workspace) => {
+            if let Some(r) = refuse_name("service", &name) {
+                return r;
+            }
+            written(store.delete_service(caller.me.id, workspace, &name).await)
+        }
         Err(r) => r.into_response(),
     }
 }
@@ -311,14 +332,25 @@ pub async fn replace_route(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
-    let input = match body(raw, "a route") {
+    if let Some(r) = refuse_name("route", &name) {
+        return r;
+    }
+    let input: RouteInput = match body(raw, "a route") {
         Ok(i) => i,
         Err(r) => return *r,
     };
+    let service_seen = input.service_updated_at.clone();
     match configuration::route(input, Write::Replace) {
         Ok((route, Some(seen))) => written(
             store
-                .replace_route(caller.me.id, workspace, &name, &route, &seen)
+                .replace_route(
+                    caller.me.id,
+                    workspace,
+                    &name,
+                    &route,
+                    &seen,
+                    service_seen.as_deref(),
+                )
                 .await,
         ),
         Ok((_, None)) => unseen(),
@@ -340,7 +372,12 @@ pub async fn delete_route(
         return unnamed();
     };
     match workspace_in(&caller, &ws, Action::Delete) {
-        Ok(workspace) => written(store.delete_route(caller.me.id, workspace, &name).await),
+        Ok(workspace) => {
+            if let Some(r) = refuse_name("route", &name) {
+                return r;
+            }
+            written(store.delete_route(caller.me.id, workspace, &name).await)
+        }
         Err(r) => r.into_response(),
     }
 }
