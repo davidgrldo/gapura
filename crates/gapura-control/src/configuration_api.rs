@@ -58,6 +58,7 @@ pub(crate) fn written(result: Result<(), WriteError>) -> Response {
     match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(WriteError::Refused(refusal)) => refusal.into_response(),
+        Err(WriteError::Field(error)) => field_error(error),
         Err(WriteError::Store(error)) => {
             let code = sqlstate(&error);
             tracing::warn!(

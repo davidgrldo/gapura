@@ -13,6 +13,7 @@ use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService,
 use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
+mod accounts;
 mod configuration;
 mod consumers;
 mod data_planes;

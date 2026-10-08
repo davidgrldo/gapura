@@ -31,6 +31,10 @@ use uuid::Uuid;
 pub enum WriteError {
     /// The rules refused it, deciding inside the transaction.
     Refused(Refusal),
+    /// One field of the request was refused, deciding inside the transaction because the
+    /// decision needs what is stored: a password change's current password is checked against
+    /// the hash. Answered as a refused field, beside which the console shows it.
+    Field(crate::configuration::FieldError),
     /// The store could not be read or written.
     Store(anyhow::Error),
 }
