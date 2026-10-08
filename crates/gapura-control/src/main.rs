@@ -122,6 +122,11 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    // One value for the endpoint and the console both, so "in sync" on a console page is computed
+    // with the settings the data planes are actually served with.
+    let store_settings = gapura_core::store::StoreSettings {
+        http_ports: args.data_plane_http_ports.clone(),
+    };
     let state = gapura_control::state::AppState {
         mapping: Arc::new(args.mapping()),
         session_key,
@@ -136,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         sign_in: Arc::new(gapura_control::throttle::Throttle::new(
             args.trusted_proxies.clone(),
         )),
+        store_settings: store_settings.clone(),
     };
     // Served only when there is a store to serve it from, on its own listener: two servers in
     // one process rather than one router, so the port is the boundary and not a path prefix
@@ -143,9 +149,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(store) = store {
         let api = Arc::new(gapura_control::config_api::ConfigApi {
             store,
-            settings: gapura_core::store::StoreSettings {
-                http_ports: args.data_plane_http_ports.clone(),
-            },
+            settings: store_settings,
         });
         // Read before binding, so a bad certificate stops the start instead of a listener
         // that refuses every handshake.
@@ -182,7 +186,13 @@ async fn main() -> anyhow::Result<()> {
                      behind a sidecar or mesh that encrypts it"
                 );
                 tokio::spawn(async move {
-                    if let Err(e) = axum::serve(listener, router).await {
+                    // With each connection's address, which the data plane's record shows.
+                    if let Err(e) = axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                    {
                         tracing::error!(error = %e, "the configuration endpoint stopped");
                     }
                 });

@@ -8,6 +8,17 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The control plane has an API for data planes: `/api/data-planes` (list, register), and
+  `/data-planes/{name}/tokens` (issue another, revoke) and `/data-planes/{name}` (delete).
+  Registering, issuing, revoking and deleting are a superuser's, because a data plane fetches every
+  workspace's configuration, private keys included; anyone with a role somewhere reads the list. A
+  token is shown once and stored as its hash and prefix, and never expires: rotate by issuing
+  another, giving it to the gateway, and revoking the old one once the list shows it unused. The
+  list says whether each data plane is connected (it called in the last two minutes), whether it
+  holds the configuration served now, the address it called from as the control plane sees it, and
+  when each token was last used. `/v1/config` records those on each call; migration 0006 adds the
+  two columns they need. `Store::issue_token`, which wrote no audit row, is now `seed_token`, for
+  seeding and tests.
 - The console has a Consumers page under Configuration, and an API-key requirement to go with it.
   Create consumers and issue them keys: a key is shown once, with a Copy button, and closing the
   dialog without copying asks first. A key may expire; revoke one, or delete the consumer. A

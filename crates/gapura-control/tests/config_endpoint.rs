@@ -8,10 +8,13 @@
 //! GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control --test config_endpoint
 //! ```
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
+use axum::Extension;
 use gapura_control::config_api::{router, ConfigApi};
 use gapura_control::store::Store;
 use gapura_core::config::Config;
@@ -99,7 +102,7 @@ async fn a_data_plane_fetches_a_routable_configuration_and_is_told_when_nothing_
     let Some((store, app, _guard)) = fixture().await else {
         return;
     };
-    let token = store.issue_token("edge-1").await.expect("issuing a token");
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
 
     // A service and a route, written the way the console will write them.
     let client = store.client().await.unwrap();
@@ -178,7 +181,7 @@ async fn a_service_s_timeouts_and_https_reach_the_served_configuration() {
     let Some((store, app, _guard)) = fixture().await else {
         return;
     };
-    let token = store.issue_token("edge-1").await.expect("issuing a token");
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
     let client = store.client().await.unwrap();
     client
         .batch_execute(
@@ -249,7 +252,7 @@ async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
     let Some((store, app, _guard)) = fixture().await else {
         return;
     };
-    let token = store.issue_token("edge-1").await.expect("issuing a token");
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
 
     let client = store.client().await.unwrap();
     client
@@ -342,7 +345,7 @@ async fn a_changed_setting_moves_the_tag_though_no_row_changed() {
     let Some((store, app, _guard)) = fixture().await else {
         return;
     };
-    let token = store.issue_token("edge-1").await.unwrap();
+    let token = store.seed_token("edge-1").await.unwrap();
     let (_, etag, _) = get(&app, &token, None).await;
     let etag = etag.unwrap();
     // Same rows, same store version, a control plane started with other flags: what it compiles
@@ -356,4 +359,101 @@ async fn a_changed_setting_moves_the_tag_though_no_row_changed() {
     let (status, new_etag, _) = get(&other, &token, Some(&etag)).await;
     assert_eq!(status, StatusCode::OK);
     assert_ne!(new_etag.unwrap(), etag);
+}
+
+#[tokio::test]
+async fn a_call_records_the_address_the_tag_sent_and_the_token_used() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    // What both listeners in main put on each request: the connection's peer.
+    let app = app.layer(Extension(ConnectInfo(
+        "10.0.3.7:5000".parse::<SocketAddr>().unwrap(),
+    )));
+    // Two live tokens for one data plane, as in the middle of a rotation.
+    let first = store.seed_token("edge-1").await.unwrap();
+    let second = store.seed_token("edge-1").await.unwrap();
+
+    let (status, _, _) = get(&app, &first, Some("\"abc\"")).await;
+    assert_eq!(status, StatusCode::OK, "a stale tag is answered in full");
+
+    let client = store.client().await.unwrap();
+    let plane = client
+        .query_one(
+            "select host(last_seen_address), last_seen_etag, last_seen_at is not null
+               from data_planes where name = 'edge-1'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        plane.get::<_, Option<String>>(0).as_deref(),
+        Some("10.0.3.7")
+    );
+    // The tag it sent, not the one it was answered with: what it holds, not what it was offered.
+    assert_eq!(
+        plane.get::<_, Option<String>>(1).as_deref(),
+        Some("\"abc\"")
+    );
+    assert!(plane.get::<_, bool>(2));
+
+    // Which token authenticated, so the one a rotation left unused is the one safe to revoke.
+    let used = |prefix: &str| {
+        if first.starts_with(prefix) {
+            "first"
+        } else {
+            assert!(second.starts_with(prefix), "a token nobody seeded");
+            "second"
+        }
+    };
+    let mut tokens: Vec<(&str, bool)> = client
+        .query(
+            "select token_prefix, last_used_at is not null from data_plane_tokens",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (used(row.get(0)), row.get(1)))
+        .collect();
+    tokens.sort();
+    assert_eq!(tokens, [("first", true), ("second", false)]);
+
+    // A call that sends no tag holds no configuration yet, and the record says so rather than
+    // keeping the tag from before.
+    let (status, _, _) = get(&app, &first, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let etag: Option<String> = client
+        .query_one(
+            "select last_seen_etag from data_planes where name = 'edge-1'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(etag, None);
+}
+
+#[tokio::test]
+async fn a_tag_too_long_to_be_one_is_answered_but_not_stored() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.seed_token("edge-1").await.unwrap();
+
+    let (status, _, _) = get(&app, &token, Some(&"a".repeat(10 * 1024))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let etag: Option<String> = store
+        .client()
+        .await
+        .unwrap()
+        .query_one(
+            "select last_seen_etag from data_planes where name = 'edge-1'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(etag, None);
 }

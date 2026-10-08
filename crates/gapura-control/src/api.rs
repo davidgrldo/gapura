@@ -88,6 +88,25 @@ pub fn router_with(state: AppState) -> Router {
                 .delete(crate::consumers_api::delete_key_auth)
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
         )
+        // Data planes and their tokens, across every workspace. Only registering reads a body.
+        .route(
+            "/api/data-planes",
+            get(crate::data_planes_api::list_data_planes)
+                .post(crate::data_planes_api::register_data_plane)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/data-planes/{name}",
+            delete(crate::data_planes_api::delete_data_plane),
+        )
+        .route(
+            "/api/data-planes/{name}/tokens",
+            post(crate::data_planes_api::issue_data_plane_token),
+        )
+        .route(
+            "/api/data-planes/{name}/tokens/{prefix}",
+            delete(crate::data_planes_api::revoke_data_plane_token),
+        )
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
         // Explicit routes above always win a match first, so this only ever runs for a path
@@ -444,6 +463,7 @@ mod tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            store_settings: Default::default(),
         }
     }
 
@@ -651,6 +671,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         session_lifetime: std::time::Duration::from_secs(3600),
         store: None,
         sign_in: Default::default(),
+        store_settings: Default::default(),
     }
 }
 
@@ -892,6 +913,7 @@ mod overview_tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            store_settings: Default::default(),
         }
     }
 

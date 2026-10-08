@@ -86,6 +86,7 @@ fn console(store: Option<Arc<Store>>) -> axum::Router {
         session_lifetime: Duration::from_secs(3600),
         store,
         sign_in: Default::default(),
+        store_settings: Default::default(),
     })
 }
 
@@ -431,7 +432,7 @@ async fn a_key_is_shown_once_and_stored_as_its_hash_only() {
     );
     let serialised = serde_json::to_string(&config).unwrap();
     assert!(!serialised.contains(secret));
-    let token = store.issue_token("edge-1").await.unwrap();
+    let token = store.seed_token("edge-1").await.unwrap();
     let served =
         gapura_control::config_api::router(Arc::new(gapura_control::config_api::ConfigApi {
             store: store.clone(),
