@@ -209,11 +209,15 @@ export class Refused extends Error {
  * success throws `Refused`, whose message is the server's sentence, which the form shows as it
  * is, and which also carries the status and the field.
  *
+ * `{ answers: true }` is for the one write that answers with a body: issuing a consumer a key,
+ * whose 200 carries the key, shown once. Its success is then 200 with JSON, and it resolves
+ * with the parsed body; everything else is refused as above.
+ *
  * `Content-Type: application/json` goes on every write, a DELETE with no body included. The
  * server refuses a write to the API without it, because a page on another site cannot send it
  * without asking first, and the server never says yes.
  */
-export async function write(method, path, body) {
+export async function write(method, path, body, { answers = false } = {}) {
   let response
   try {
     response = await fetch(path, {
@@ -239,9 +243,29 @@ export async function write(method, path, body) {
   // session. A write is only ever sent after a read has already cleared the marker.
   if (response.status === 403) throw new Forbidden(path, (await refusal(response)).sentence)
 
-  // The server's one success is 204. Anything else, a 200 page from a proxy included, did not
-  // come from the write, so it is not taken as one.
-  if (response.status !== 204) throw new Refused(response.status, await refusal(response))
+  // The server's one success is 204, or 200 for the write that answers. Anything else, a 200
+  // page from a proxy included, did not come from the write, so it is not taken as one.
+  if (response.status !== (answers ? 200 : 204)) {
+    throw new Refused(response.status, await refusal(response))
+  }
+  if (!answers) {
+    forgetSentToSignIn()
+    return
+  }
 
+  // A 200 that is not JSON is a proxy's page, not the server's answer, so it is refused like any
+  // other: whether the write happened is then unknown, which is what the sentence says.
+  let answer
+  try {
+    answer = await response.json()
+  } catch {
+    throw new Refused(response.status, {
+      sentence:
+        `The console answered ${response.status} without saying what it did, so this change ` +
+        'may not have been saved. Check the list, then try again.',
+      field: undefined,
+    })
+  }
   forgetSentToSignIn()
+  return answer
 }
