@@ -8,7 +8,7 @@
 //! Kubernetes mode keeps no configuration in a store, so there these answer 404.
 
 use crate::access_api::{store_caller, StoreCaller};
-use crate::configuration::{self, Action, FieldError, Write};
+use crate::configuration::{self, Action, FieldError, RouteInput, Write};
 use crate::grants::Refusal;
 use crate::grants_api::{unreadable, unsaved, NOT_SAVED};
 use crate::state::AppState;
@@ -307,14 +307,22 @@ pub async fn replace_route(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
-    let input = match body(raw, "a route") {
+    let input: RouteInput = match body(raw, "a route") {
         Ok(i) => i,
         Err(r) => return *r,
     };
+    let service_seen = input.service_updated_at.clone();
     match configuration::route(input, Write::Replace) {
         Ok((route, Some(seen))) => written(
             store
-                .replace_route(caller.me.id, workspace, &name, &route, &seen)
+                .replace_route(
+                    caller.me.id,
+                    workspace,
+                    &name,
+                    &route,
+                    &seen,
+                    service_seen.as_deref(),
+                )
                 .await,
         ),
         Ok((_, None)) => unseen(),

@@ -154,8 +154,15 @@ pub struct RouteInput {
     pub methods: Vec<String>,
     #[serde(default)]
     pub priority: i32,
+    /// Required on `PUT`, the value last read; refused on `POST`.
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// The `updated_at` of the service the route pointed at when it was read, which the view
+    /// carries beside the route's own. A rename or a re-creation moves the service's row
+    /// without moving the route's, so the route's stamp alone misses that part of the read
+    /// went stale. Sent when the client has it; a replace without it is checked as before.
+    #[serde(default)]
+    pub service_updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +210,9 @@ pub struct RouteView {
     #[serde(flatten)]
     pub route: Route,
     pub updated_at: String,
+    /// The service row's own stamp, which a save sends back beside `updated_at`: a rename or a
+    /// re-creation of the service moves this and not the route's.
+    pub service_updated_at: String,
     pub key_auth: Option<KeyAuthView>,
 }
 
@@ -721,6 +731,7 @@ mod tests {
             methods: vec!["get".into(), "POST".into(), "GET".into()],
             priority: 5,
             updated_at: Some("2026-10-07T03:00:00.000000Z".into()),
+            service_updated_at: Some("2026-10-07T02:00:00.000000Z".into()),
         }
     }
 
