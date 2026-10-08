@@ -60,6 +60,8 @@ Sign-in is local: users from console.auth.local, no identity provider involved.
 {{- if (((.Values.console).store).existingSecret) }}
 Accounts and roles live in Postgres (console.store), and the Users and Roles pages are on.
 Superusers and workspace admins grant roles and map groups on those pages.
+Data planes fetch their configuration from the second listener on port
+{{ (((((.Values.console).store).config).port) | default 8081) }}{{- if (((((.Values.console).store).config).tls).existingSecret) }}, served over TLS from that Secret{{- else }} -- in plain text, which a data plane's --control-plane refuses: set console.store.config.tls.existingSecret to serve TLS{{- end }}{{- if not ((((((.Values.console).store).config).service).create)) }}, and no Service exposes it yet (console.store.config.service.create){{- end }}.
 {{- if not ((((.Values.console).store).bootstrap).existingSecret) }}
    No console.store.bootstrap: an empty store has no account anyone can sign in with.
 {{- end }}

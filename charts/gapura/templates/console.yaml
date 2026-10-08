@@ -20,6 +20,15 @@
 {{- /* The store's CA bundle, mounted only with a store: without one there is no connection for it
        to verify. */}}
 {{- $storeCa := and $store (((((.Values.console).store).ca).existingSecret) | default "") }}
+{{- /* The configuration endpoint data planes poll (/v1/config). gapura-control serves it on a
+       second listener, and only with a store -- the configuration lives there -- refusing
+       --config-tls-cert without DATABASE_URL exactly as it refuses the endpoint without one;
+       the chart mirrors both refusals at render time. */}}
+{{- $configPort := int (((((.Values.console).store).config).port) | default 8081) }}
+{{- $configTls := (((((.Values.console).store).config).tls).existingSecret) | default "" }}
+{{- if and (not $store) (or $configTls (((((.Values.console).store).config).service).create)) }}
+{{- fail "console.store.config needs console.store: the configuration endpoint exists only when accounts and roles live in Postgres" }}
+{{- end }}
 {{- if and $localFile (not ((((.Values.console).auth).local).existingSecret)) (eq (len $localUsers) 0) }}
 {{- fail "console.auth.mode local with no console.auth.local.users: a console nobody can log into is the failure this catches" }}
 {{- end }}
@@ -120,6 +129,29 @@ spec:
     {{- if and (eq $serviceType "NodePort") ((((.Values.console).service).nodePort)) }}
     nodePort: {{ (((.Values.console).service).nodePort) }}
     {{- end }}
+{{- /* The configuration endpoint's own Service, and deliberately not a port on the console's
+       Service above: every /v1/config response carries private keys, so an operator publishing
+       the console must not publish this with it. ClusterIP on purpose, like the admin Service:
+       publishing this one is a decision, not a default. */}}
+{{- if and $store (((((.Values.console).store).config).service).create) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-control-config
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "gapura.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: console
+  ports:
+  - name: config
+    port: {{ $configPort }}
+    targetPort: config
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -146,7 +178,7 @@ spec:
         app.kubernetes.io/component: console
     spec:
       serviceAccountName: {{ $fullname }}-control
-      {{- if or $localFile $storeCa }}
+      {{- if or $localFile $storeCa $configTls }}
       volumes:
       {{- if $localFile }}
       - name: users
@@ -155,6 +187,10 @@ spec:
       {{- if $storeCa }}
       - name: database-ca
         secret: { secretName: {{ $storeCa }} }
+      {{- end }}
+      {{- if $configTls }}
+      - name: config-tls
+        secret: { secretName: {{ $configTls }} }
       {{- end }}
       {{- end }}
       securityContext:
@@ -173,6 +209,13 @@ spec:
         args:
         - --listen=0.0.0.0:{{ $port }}
         - --auth-mode={{ $mode }}
+        {{- if $store }}
+        - --listen-config=0.0.0.0:{{ $configPort }}
+        {{- if $configTls }}
+        - --config-tls-cert=/etc/gapura-config-tls/{{ (((((.Values.console).store).config).tls).certKey) | default "tls.crt" }}
+        - --config-tls-key=/etc/gapura-config-tls/{{ (((((.Values.console).store).config).tls).keyKey) | default "tls.key" }}
+        {{- end }}
+        {{- end }}
         {{- if $localFile }}
         - --local-users-file=/etc/gapura-control/users.yaml
         {{- end }}
@@ -234,7 +277,7 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
-        {{- if or $localFile $storeCa }}
+        {{- if or $localFile $storeCa $configTls }}
         volumeMounts:
         {{- if $localFile }}
         - { name: users, mountPath: /etc/gapura-control, readOnly: true }
@@ -242,10 +285,17 @@ spec:
         {{- if $storeCa }}
         - { name: database-ca, mountPath: /etc/gapura-database-ca, readOnly: true }
         {{- end }}
+        {{- if $configTls }}
+        - { name: config-tls, mountPath: /etc/gapura-config-tls, readOnly: true }
+        {{- end }}
         {{- end }}
         ports:
         - name: http
           containerPort: {{ $port }}
+        {{- if $store }}
+        - name: config
+          containerPort: {{ $configPort }}
+        {{- end }}
         livenessProbe:
           httpGet: { path: /healthz, port: http }
         readinessProbe:

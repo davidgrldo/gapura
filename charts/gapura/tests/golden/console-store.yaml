@@ -216,6 +216,31 @@ spec:
     port: 8080
     targetPort: http
 ---
+# Source: gapura/templates/console.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gapura-control-config
+  namespace: gapura-system
+  labels:
+    helm.sh/chart: gapura-0.2.0
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: console
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gapura
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gapura
+    app.kubernetes.io/instance: gapura
+    app.kubernetes.io/component: console
+  ports:
+  - name: config
+    port: 8081
+    targetPort: config
+---
 # Source: gapura/templates/service-admin.yaml
 # Admin port on its own ClusterIP Service: /metrics and /debug/config must never be reachable
 # from outside the cluster.
@@ -313,6 +338,8 @@ spec:
       volumes:
       - name: database-ca
         secret: { secretName: gapura-console-db-ca }
+      - name: config-tls
+        secret: { secretName: gapura-console-config-tls }
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -324,6 +351,9 @@ spec:
         args:
         - --listen=0.0.0.0:8080
         - --auth-mode=local
+        - --listen-config=0.0.0.0:8081
+        - --config-tls-cert=/etc/gapura-config-tls/tls.crt
+        - --config-tls-key=/etc/gapura-config-tls/tls.key
         - --gateway-admin=http://gapura-admin.gapura-system.svc:9090
         - --controller-name=gapura.dev/controller
         - --session-lifetime-seconds=3600
@@ -353,9 +383,12 @@ spec:
               key: password
         volumeMounts:
         - { name: database-ca, mountPath: /etc/gapura-database-ca, readOnly: true }
+        - { name: config-tls, mountPath: /etc/gapura-config-tls, readOnly: true }
         ports:
         - name: http
           containerPort: 8080
+        - name: config
+          containerPort: 8081
         livenessProbe:
           httpGet: { path: /healthz, port: http }
         readinessProbe:
