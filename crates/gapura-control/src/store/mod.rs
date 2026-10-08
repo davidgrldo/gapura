@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
 mod configuration;
+mod consumers;
 mod grants;
 mod identity;
 mod tls;
@@ -40,6 +41,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0004_routes_service_index",
         include_str!("../../migrations/0004_routes_service_index.sql"),
+    ),
+    (
+        "0005_one_policy_per_target",
+        include_str!("../../migrations/0005_one_policy_per_target.sql"),
     ),
 ];
 
@@ -378,12 +383,14 @@ impl Store {
         Ok(self.pool.get().await?)
     }
 
-    /// Issues an API key for a consumer and returns it. Shown once; only the hash is kept.
+    /// Issues an API key for a consumer named `consumer` in any workspace and returns it, with
+    /// no caller and no audit row: for seeding and tests. The console issues through
+    /// `issue_key`. Shown once; only the hash is kept.
     ///
     /// Plain SHA-256, for the reason data plane tokens use it and one more: the data
     /// plane has to compute this over a presented key and look it up directly, which a salted
     /// hash cannot be.
-    pub async fn issue_key(&self, consumer: &str) -> Result<String> {
+    pub async fn seed_key(&self, consumer: &str) -> Result<String> {
         let raw: [u8; 32] = rand::random();
         let key = format!("gpak_{}", hex(&raw));
         let client = self.pool.get().await?;

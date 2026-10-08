@@ -66,12 +66,12 @@ pub fn allowed(
     }
     let verb = match action {
         Action::Read => "Reading",
-        Action::Write => "Changing",
-        Action::Delete => "Deleting",
+        Action::Write => "Making changes",
+        Action::Delete => "Deleting things",
     };
     let needs = action.needs().as_str();
     Err(Refusal::Forbidden(format!(
-        "{verb} services and routes needs the {needs} role in this workspace."
+        "{verb} in this workspace needs the {needs} role."
     )))
 }
 
@@ -177,6 +177,15 @@ pub struct Route {
     pub priority: i32,
 }
 
+/// The key requirement that applies to a service or route, and where it comes from: the most
+/// specific of the route's own policy, its service's, and the workspace's, as the compiler picks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct KeyAuthView {
+    pub header: String,
+    /// `"route"`, `"service"` or `"workspace"`.
+    pub from: &'static str,
+}
+
 /// What the list endpoints answer with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceView {
@@ -185,6 +194,8 @@ pub struct ServiceView {
     /// How many routes use it.
     pub routes: i64,
     pub updated_at: String,
+    /// The requirement its routes inherit, unless a route has its own.
+    pub key_auth: Option<KeyAuthView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -192,6 +203,7 @@ pub struct RouteView {
     #[serde(flatten)]
     pub route: Route,
     pub updated_at: String,
+    pub key_auth: Option<KeyAuthView>,
 }
 
 /// Whether this is a create or a replace, which decides what `updated_at` must be.
@@ -1057,13 +1069,13 @@ mod tests {
         assert_eq!(
             allowed(&rows, &me, ws, Action::Write),
             Err(Refusal::Forbidden(
-                "Changing services and routes needs the editor role in this workspace.".into()
+                "Making changes in this workspace needs the editor role.".into()
             ))
         );
         assert_eq!(
             allowed(&rows, &me, ws, Action::Delete),
             Err(Refusal::Forbidden(
-                "Deleting services and routes needs the admin role in this workspace.".into()
+                "Deleting things in this workspace needs the admin role.".into()
             ))
         );
     }

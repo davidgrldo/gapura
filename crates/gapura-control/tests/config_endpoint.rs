@@ -270,9 +270,9 @@ async fn a_key_the_console_issued_identifies_its_consumer_at_the_data_plane() {
         .await
         .expect("seeding");
 
-    let key = store.issue_key("team-orders").await.expect("issuing a key");
+    let key = store.seed_key("team-orders").await.expect("issuing a key");
     let elsewhere = store
-        .issue_key("team-payments")
+        .seed_key("team-payments")
         .await
         .expect("issuing a key in another workspace");
 

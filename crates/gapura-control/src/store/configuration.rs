@@ -17,18 +17,18 @@ use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
-    self, Action, PathMatch, Protocol, Route, RouteView, Service, ServiceView,
+    self, Action, KeyAuthView, PathMatch, Protocol, Route, RouteView, Service, ServiceView,
 };
 use crate::grants::Refusal;
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use tokio_postgres::Transaction;
 use uuid::Uuid;
 
 /// `column`, a `timestamptz`, as the API shows it and compares it: UTC, to the microsecond, as
 /// text. Postgres keeps microseconds, so a value read back and sent again compares equal, which
 /// is what lets a stale save be told from a fresh one.
-fn updated_at(column: &str) -> String {
+pub(super) fn updated_at(column: &str) -> String {
     format!(r#"to_char({column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#)
 }
 
@@ -78,7 +78,7 @@ fn route_from(row: &tokio_postgres::Row) -> Result<Route> {
 
 /// Step 1 of every write: may `caller` do `action` in `workspace`, decided over rows locked here.
 /// `allowed` also refuses a disabled caller, which `rights` leaves to it.
-async fn decide(
+pub(super) async fn decide(
     tx: &Transaction<'_>,
     caller: Uuid,
     workspace: Uuid,
@@ -133,7 +133,7 @@ async fn may_route(
     Ok(())
 }
 
-fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+pub(super) fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).expect("a validated row always serialises")
 }
 
@@ -167,14 +167,79 @@ async fn no_policies(
     }
 }
 
+/// A workspace's key requirements, by what they are attached to: the policies the compiler reads,
+/// enabled `key_auth` rows with no consumer.
+#[derive(Default)]
+struct KeyAuths {
+    workspace: Option<String>,
+    services: HashMap<Uuid, String>,
+    routes: HashMap<Uuid, String>,
+}
+
+impl KeyAuths {
+    async fn read(client: &tokio_postgres::Client, workspace: Uuid) -> Result<KeyAuths> {
+        let rows = client
+            .query(
+                "select route_id, service_id, config->>'header' as header from plugins
+                  where workspace_id = $1 and name = 'key_auth' and consumer_id is null
+                    and enabled",
+                &[&workspace],
+            )
+            .await?;
+        let mut found = KeyAuths::default();
+        for row in rows {
+            // The compiler refuses such a row too, so it is an error here, not a requirement
+            // listed with no header.
+            let header: Option<String> = row.get("header");
+            let header =
+                header.ok_or_else(|| anyhow::anyhow!("a key_auth policy has no header"))?;
+            let route: Option<Uuid> = row.get("route_id");
+            let service: Option<Uuid> = row.get("service_id");
+            match (route, service) {
+                (Some(route), _) => found.routes.insert(route, header),
+                (None, Some(service)) => found.services.insert(service, header),
+                (None, None) => found.workspace.replace(header),
+            };
+        }
+        Ok(found)
+    }
+
+    fn view(header: &str, from: &'static str) -> KeyAuthView {
+        KeyAuthView {
+            header: header.to_string(),
+            from,
+        }
+    }
+
+    /// A service's own requirement, else the workspace's.
+    fn service(&self, service: Uuid) -> Option<KeyAuthView> {
+        let own = self
+            .services
+            .get(&service)
+            .map(|h| Self::view(h, "service"));
+        own.or_else(|| {
+            self.workspace
+                .as_deref()
+                .map(|h| Self::view(h, "workspace"))
+        })
+    }
+
+    /// A route's own requirement, else its service's, else the workspace's.
+    fn route(&self, route: Uuid, service: Uuid) -> Option<KeyAuthView> {
+        let own = self.routes.get(&route).map(|h| Self::view(h, "route"));
+        own.or_else(|| self.service(service))
+    }
+}
+
 impl Store {
-    /// A workspace's services, by name, each with how many routes use it.
+    /// A workspace's services, by name, each with how many routes use it and the key
+    /// requirement it carries.
     pub async fn services(&self, workspace: Uuid) -> Result<Vec<ServiceView>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
                 &format!(
-                    "select s.name, s.protocol, s.host, s.port, s.connect_timeout_ms,
+                    "select s.id, s.name, s.protocol, s.host, s.port, s.connect_timeout_ms,
                             s.read_timeout_ms, {} as updated_at,
                             (select count(*) from routes r where r.service_id = s.id) as routes
                        from services s where s.workspace_id = $1 order by s.name",
@@ -183,17 +248,20 @@ impl Store {
                 &[&workspace],
             )
             .await?;
+        let key_auths = KeyAuths::read(&client, workspace).await?;
         Ok(rows
             .iter()
             .map(|r| ServiceView {
                 service: service_from(r),
                 routes: r.get("routes"),
                 updated_at: r.get("updated_at"),
+                key_auth: key_auths.service(r.get("id")),
             })
             .collect())
     }
 
-    /// A workspace's routes, in the order the data plane matches them: priority, then name. A
+    /// A workspace's routes, in the order the data plane matches them: priority, then name, each
+    /// with the key requirement that applies to it. A
     /// route with no service, which only SQL written by hand can make, is not listed, just as
     /// the compiler does not serve it.
     pub async fn routes(&self, workspace: Uuid) -> Result<Vec<RouteView>> {
@@ -201,8 +269,8 @@ impl Store {
         let rows = client
             .query(
                 &format!(
-                    "select r.name, s.name as service, r.hosts, r.methods, r.paths, r.priority,
-                            {} as updated_at
+                    "select r.id, r.service_id, r.name, s.name as service, r.hosts, r.methods,
+                            r.paths, r.priority, {} as updated_at
                        from routes r join services s on s.id = r.service_id
                       where r.workspace_id = $1 order by r.priority desc, r.name",
                     updated_at("r.updated_at")
@@ -210,11 +278,13 @@ impl Store {
                 &[&workspace],
             )
             .await?;
+        let key_auths = KeyAuths::read(&client, workspace).await?;
         rows.iter()
             .map(|r| {
                 Ok(RouteView {
                     route: route_from(r)?,
                     updated_at: r.get("updated_at"),
+                    key_auth: key_auths.route(r.get("id"), r.get("service_id")),
                 })
             })
             .collect()
