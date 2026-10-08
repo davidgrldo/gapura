@@ -396,7 +396,7 @@
       {#if error && !shown}
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
           {error.sentence}
-          {#if error.attached && route?.key_auth?.from === 'route'}Switch the API key requirement off above first.{/if}
+          {#if error.attached && route?.key_auth?.from === 'route'}The API key requirement above counts as one: switch it off there.{/if}
         </p>
       {/if}
       {#if error?.stale}

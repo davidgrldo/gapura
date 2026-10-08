@@ -340,7 +340,10 @@
                 aria-describedby="{id}-key-once"
                 onfocus={selectAll}
                 onclick={selectAll}
-                oncopy={() => (copied = true)}
+                oncopy={() => {
+                  copied = true
+                  copyFailed = false
+                }}
               />
               <Button variant="outline" size="sm" onclick={copy} onkeydown={once}>{copied ? 'Copied' : 'Copy'}</Button>
             </div>
