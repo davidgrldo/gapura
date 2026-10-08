@@ -177,6 +177,15 @@ pub struct Route {
     pub priority: i32,
 }
 
+/// The key requirement that applies to a service or route, and where it comes from: the most
+/// specific of the route's own policy, its service's, and the workspace's, as the compiler picks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct KeyAuthView {
+    pub header: String,
+    /// `"route"`, `"service"` or `"workspace"`.
+    pub from: &'static str,
+}
+
 /// What the list endpoints answer with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceView {
@@ -185,6 +194,8 @@ pub struct ServiceView {
     /// How many routes use it.
     pub routes: i64,
     pub updated_at: String,
+    /// The requirement its routes inherit, unless a route has its own.
+    pub key_auth: Option<KeyAuthView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -192,6 +203,7 @@ pub struct RouteView {
     #[serde(flatten)]
     pub route: Route,
     pub updated_at: String,
+    pub key_auth: Option<KeyAuthView>,
 }
 
 /// Whether this is a create or a replace, which decides what `updated_at` must be.

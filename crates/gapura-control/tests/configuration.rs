@@ -316,6 +316,11 @@ async fn a_viewer_reads_an_editor_writes_and_an_admin_deletes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json(&body)[0]["host"], "orders.internal");
     assert_eq!(json(&body)[0]["routes"], 0);
+    assert_eq!(
+        json(&body)[0].get("key_auth"),
+        Some(&serde_json::Value::Null),
+        "a service with no key requirement says so"
+    );
     let (status, _) = send(
         &app,
         "DELETE",
@@ -1109,10 +1114,13 @@ async fn a_save_that_changes_nothing_writes_nothing() {
     ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
     let before = everything(&store).await;
 
-    // The route exactly as the list shows it, and the service without the count the list adds.
-    let route = row(&app, ROUTES, "orders-api", s.ed).await;
+    // Each row as the list shows it, without what the list adds: the key requirement, and the
+    // service's count of routes.
+    let mut route = row(&app, ROUTES, "orders-api", s.ed).await;
+    route.as_object_mut().unwrap().remove("key_auth");
     let mut service = row(&app, SERVICES, "orders", s.ed).await;
     service.as_object_mut().unwrap().remove("routes");
+    service.as_object_mut().unwrap().remove("key_auth");
     ok(
         &app,
         "PUT",
