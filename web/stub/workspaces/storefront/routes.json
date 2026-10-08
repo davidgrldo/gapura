@@ -1,0 +1,52 @@
+[
+  {
+    "name": "checkout",
+    "service": "checkout",
+    "hosts": [
+      "shop.example.com"
+    ],
+    "paths": [
+      {
+        "type": "prefix",
+        "value": "/checkout"
+      }
+    ],
+    "methods": [],
+    "priority": 20,
+    "updated_at": "2026-09-19T13:49:55.602317Z"
+  },
+  {
+    "name": "catalog-api",
+    "service": "catalog",
+    "hosts": [
+      "shop.example.com"
+    ],
+    "paths": [
+      {
+        "type": "prefix",
+        "value": "/api/catalog"
+      }
+    ],
+    "methods": [
+      "GET",
+      "HEAD",
+      "OPTIONS"
+    ],
+    "priority": 10,
+    "updated_at": "2026-09-18T09:33:08.215764Z"
+  },
+  {
+    "name": "catalog-assets",
+    "service": "catalog",
+    "hosts": [
+      "static.shop.example.com"
+    ],
+    "paths": [],
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "priority": 0,
+    "updated_at": "2026-09-18T09:35:41.488902Z"
+  }
+]

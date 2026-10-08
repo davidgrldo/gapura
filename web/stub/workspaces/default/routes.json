@@ -1,0 +1,30 @@
+[
+  {
+    "name": "docs",
+    "service": "docs",
+    "hosts": [
+      "docs.example.com"
+    ],
+    "paths": [
+      {
+        "type": "prefix",
+        "value": "/"
+      }
+    ],
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "priority": 10,
+    "updated_at": "2026-09-30T08:13:02.417766Z"
+  },
+  {
+    "name": "catch-all",
+    "service": "whoami",
+    "hosts": [],
+    "paths": [],
+    "methods": [],
+    "priority": 0,
+    "updated_at": "2026-09-28T14:41:12.033918Z"
+  }
+]
