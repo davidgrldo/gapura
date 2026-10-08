@@ -32,6 +32,28 @@
 {{- if and $localFile (not ((((.Values.console).auth).local).existingSecret)) (eq (len $localUsers) 0) }}
 {{- fail "console.auth.mode local with no console.auth.local.users: a console nobody can log into is the failure this catches" }}
 {{- end }}
+{{- /* The renderer cannot tell an unset provider from an empty one, and values.yaml's promise
+       that helm fails an enabled console naming no provider was just prose: --oidc-issuer=
+       rendered empty and the empty secretKeyRef names only fell over at apply, as a pod that
+       starts and signs nobody in. The same goes for a session key with no Secret behind it, in
+       either mode: GAPURA_SESSION_KEY with an empty secretKeyRef name. Say it at render time. */}}
+{{- if eq $mode "oidc" }}
+{{- if not (((.Values.console).oidc).issuer) }}
+{{- fail "console.auth.mode oidc with no console.oidc.issuer: --oidc-issuer renders empty and the console signs nobody in" }}
+{{- end }}
+{{- if not (((.Values.console).oidc).clientId) }}
+{{- fail "console.auth.mode oidc with no console.oidc.clientId: --oidc-client-id renders empty and the provider refuses every sign-in" }}
+{{- end }}
+{{- if not (((.Values.console).oidc).redirectUrl) }}
+{{- fail "console.auth.mode oidc with no console.oidc.redirectUrl: --oidc-redirect-url renders empty and the provider drops the callback" }}
+{{- end }}
+{{- if not (((.Values.console).oidc).existingSecret) }}
+{{- fail "console.auth.mode oidc with no console.oidc.existingSecret: the client secret's secretKeyRef renders an empty name the API server rejects" }}
+{{- end }}
+{{- end }}
+{{- if not (((.Values.console).sessionKey).existingSecret) }}
+{{- fail "console.sessionKey.existingSecret must name a Secret holding the session-signing key (>= 32 bytes, base64 accepted): the chart does not create one, because a key generated at install time would rotate on every upgrade" }}
+{{- end }}
 {{- $usersSecret := "" }}
 {{- if $localFile }}
 {{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" .)) }}
