@@ -3,6 +3,7 @@
   import * as Sheet from '$lib/components/ui/sheet/index.js'
   import { Button } from '$lib/components/ui/button/index.js'
   import NativeSelect from './NativeSelect.svelte'
+  import AccountSection from './AccountSection.svelte'
   import { write } from './api.js'
   import { ROLES, ROLE_LABEL } from './roles.js'
 
@@ -18,6 +19,10 @@
   // longer has this sheet's button: the account is gone, or was disabled in the meantime. The
   // trigger is a bits-ui Dialog trigger, so the sheet keeps focus inside while it is open, closes
   // on Escape, and hands focus back to this button.
+  //
+  // A superuser sees the account itself above the roles (AccountSection), and the sheet of a
+  // disabled account, which then holds only that: a disabled account holds nothing, and its grants
+  // are not in /api/users. A workspace admin sees only the roles, of enabled accounts.
   //
   // `me` is what the page read when it loaded, and the form does not read it again. A reader
   // whose admin was taken away since still sees that workspace here; saving it is refused with
@@ -43,6 +48,13 @@
   // Set when a save was refused, so that the list is fetched again once the sheet closes. Not
   // state: nothing is drawn from it.
   let staleOnClose = false
+  // The Account section, whose question and refusal this sheet's footer draws, and the footer's
+  // Keep button, which a question opens on.
+  let account = $state(null)
+  let accountQuestion = $state(null)
+  let accountError = $state(undefined)
+  let accountBusy = $state(false)
+  let keep = $state(null)
 
   // '' ranks below every role, so a group's role is higher than no direct grant at all.
   const rank = (role) => ROLES.indexOf(role) + 1
@@ -62,6 +74,9 @@
     saving = false
     error = undefined
     confirming = false
+    accountQuestion = null
+    accountError = undefined
+    accountBusy = false
   }
 
   // The body: only the workspaces whose select moved, each with a role or null for none.
@@ -75,6 +90,11 @@
   const changed = $derived(Object.keys(changes).length > 0)
 
   const self = $derived(user.id === me.id)
+  const superuser = $derived(me.superuser)
+  // The roles are not offered for a disabled account (see above), nor where there is no
+  // workspace to grant one in.
+  const roles = $derived(user.status !== 'disabled')
+  const offered = $derived(roles && me.grantable.length > 0)
 
   // Where this save would take the reader's own admin away with nothing else keeping it: no
   // group of theirs at admin there, and not a superuser. The server allows it, because an admin
@@ -141,6 +161,13 @@
     }
     // The list about to be fetched is as new as can be, so nothing is left to fetch on closing.
     staleOnClose = false
+    // A reset password still on screen and never copied keeps the sheet open: the list is
+    // fetched under it, and the footer asks whether to close without copying it.
+    if (account?.askToClose()) {
+      saving = false
+      await onsaved()
+      return
+    }
     open = false
     // Giving a waiting account its first role moves its row, because waiting accounts sort
     // first, and a row that moves in a keyed list is taken out of the page and put back, which
@@ -172,11 +199,38 @@
     keepPlace()
   }
 
+  // The sheet has to close and the list be drawn again without the account: focus then goes to
+  // where the page says.
+  async function deleted() {
+    staleOnClose = false
+    open = false
+    await onsaved()
+    await tick()
+    keepPlace()
+  }
+
+  async function asked() {
+    await tick()
+    keep?.focus()
+  }
+
+  // A close the reader confirmed over a reset password they never copied.
+  function closeAnyway() {
+    open = false
+    closed()
+  }
+
   function setOpen(next) {
-    if (!next && saving) return
+    if (!next && (saving || accountBusy || accountQuestion?.kind === 'close')) return
+    // Over a reset password that was never copied, the Account section asks first.
+    if (!next && account?.askToClose()) return
+    if (!next) accountQuestion = null
     open = next
     if (!next) closed()
   }
+
+  // A key held down repeats, and a repeat must not answer a question or drop it.
+  const once = (event) => event.repeat && event.preventDefault()
 </script>
 
 <!-- The setter refuses to close while a save is in flight, which stops Escape, a click outside,
@@ -187,7 +241,11 @@
 <Sheet.Root bind:open={() => open, setOpen} onOpenChange={(next) => next && reset()}>
   <Sheet.Trigger>
     {#snippet child({ props })}
-      <Button bind:ref={trigger} variant="outline" size="sm" {...props}>Edit access</Button>
+      {#if superuser}
+        <Button bind:ref={trigger} variant="outline" size="sm" aria-label="Manage {user.name}" {...props}>Manage</Button>
+      {:else}
+        <Button bind:ref={trigger} variant="outline" size="sm" {...props}>Edit access</Button>
+      {/if}
     {/snippet}
   </Sheet.Trigger>
   <!-- Full width on a phone, where three quarters of 375 px is too narrow for a form, and wider
@@ -195,56 +253,85 @@
   <Sheet.Content class="data-[side=right]:w-full data-[side=right]:sm:max-w-md">
     <Sheet.Header>
       <!-- pr-8 keeps a long name clear of the close button in the corner. -->
-      <Sheet.Title class="pr-8 wrap-anywhere">Edit access for {user.name}</Sheet.Title>
-      <Sheet.Description>
-        A direct grant in each workspace you administer. Grants anywhere else stay as they are.
-      </Sheet.Description>
-    </Sheet.Header>
-    <!-- The form scrolls on its own, so a long list of workspaces never pushes Save off the
-         bottom of the sheet. -->
-    <form id="{id}-form" class="grid gap-5 overflow-y-auto px-4" onsubmit={save}>
-      {#if user.superuser}
-        <p class="rounded-lg border px-3 py-2 text-muted-foreground">
-          {self ? 'You are' : `${user.name} is`} a superuser, and so admin in every workspace
-          whatever these say.
-        </p>
+      {#if superuser}
+        <Sheet.Title class="pr-8 wrap-anywhere">Manage {user.name}</Sheet.Title>
+        <Sheet.Description>The account, and its direct grant in each workspace.</Sheet.Description>
+      {:else}
+        <Sheet.Title class="pr-8 wrap-anywhere">Edit access for {user.name}</Sheet.Title>
+        <Sheet.Description>
+          A direct grant in each workspace you administer. Grants anywhere else stay as they are.
+        </Sheet.Description>
       {/if}
-      {#each me.grantable as workspace (workspace.workspace_id)}
-        {@const field = `${id}-${workspace.workspace_id}`}
-        {@const higher = (held(workspace.workspace_id)?.sources ?? []).filter(
-          (s) => s.kind === 'group' && rank(s.role) > rank(chosen[workspace.workspace_id]),
-        )}
-        <div class="grid gap-1.5">
-          <label for={field} class="font-medium wrap-anywhere">Role in {workspace.workspace}</label>
-          <NativeSelect
-            id={field}
-            bind:value={chosen[workspace.workspace_id]}
-            disabled={saving}
-            aria-describedby={higher.length > 0 ? `${field}-groups` : undefined}
-            onchange={() => (confirming = false)}
-          >
-            <option value="">No access</option>
-            {#each ROLES as role (role)}
-              <option value={role}>{ROLE_LABEL[role]}</option>
-            {/each}
-          </NativeSelect>
-          <!-- What a group gives here beyond the select, so lowering the direct grant is not
-               mistaken for lowering what the account can do. -->
-          {#if higher.length > 0}
-            <div id="{field}-groups" class="text-xs text-muted-foreground wrap-anywhere">
-              {#each higher as group (group.name)}
-                <p>Group {group.name} gives {ROLE_LABEL[group.role]} here; the highest applies.</p>
-              {/each}
-            </div>
+    </Sheet.Header>
+    <!-- The body scrolls on its own, so a long list of workspaces never pushes Save off the
+         bottom of the sheet. -->
+    <div class="grid gap-5 overflow-y-auto px-4">
+      {#if superuser}
+        <AccountSection
+          bind:this={account}
+          bind:question={accountQuestion}
+          bind:error={accountError}
+          bind:busy={accountBusy}
+          {user}
+          {me}
+          onchanged={onsaved}
+          ondeleted={deleted}
+          onasked={asked}
+          onclose={closeAnyway}
+          onrefused={() => (staleOnClose = true)}
+        />
+      {/if}
+      {#if !roles}
+        <p class="text-muted-foreground">A disabled account holds no role. Enable it to grant one.</p>
+      {:else if me.grantable.length > 0}
+        {#if superuser}
+          <h3 class="-mb-2 font-medium">Roles</h3>
+        {/if}
+        <form id="{id}-form" class="grid gap-5" onsubmit={save}>
+          {#if user.superuser}
+            <p class="rounded-lg border px-3 py-2 text-muted-foreground">
+              {self ? 'You are' : `${user.name} is`} a superuser, and so admin in every workspace
+              whatever these say.
+            </p>
           {/if}
-        </div>
-      {/each}
-    </form>
+          {#each me.grantable as workspace (workspace.workspace_id)}
+            {@const field = `${id}-${workspace.workspace_id}`}
+            {@const higher = (held(workspace.workspace_id)?.sources ?? []).filter(
+              (s) => s.kind === 'group' && rank(s.role) > rank(chosen[workspace.workspace_id]),
+            )}
+            <div class="grid gap-1.5">
+              <label for={field} class="font-medium wrap-anywhere">Role in {workspace.workspace}</label>
+              <NativeSelect
+                id={field}
+                bind:value={chosen[workspace.workspace_id]}
+                disabled={saving}
+                aria-describedby={higher.length > 0 ? `${field}-groups` : undefined}
+                onchange={() => (confirming = false)}
+              >
+                <option value="">No access</option>
+                {#each ROLES as role (role)}
+                  <option value={role}>{ROLE_LABEL[role]}</option>
+                {/each}
+              </NativeSelect>
+              <!-- What a group gives here beyond the select, so lowering the direct grant is not
+                   mistaken for lowering what the account can do. -->
+              {#if higher.length > 0}
+                <div id="{field}-groups" class="text-xs text-muted-foreground wrap-anywhere">
+                  {#each higher as group (group.name)}
+                    <p>Group {group.name} gives {ROLE_LABEL[group.role]} here; the highest applies.</p>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </form>
+      {/if}
+    </div>
     <Sheet.Footer>
       <!-- Here rather than at the end of the form: the form scrolls, and with enough workspaces
            (a superuser administers every one) these would be below the fold while Save turns
            red, so the reader would be asked to confirm something they cannot see. The footer
-           stays put. -->
+           stays put. The Account section's questions and refusals are here for the same reason. -->
       {#if asking}
         <p
           id="{id}-confirm"
@@ -259,22 +346,46 @@
           {error}
         </p>
       {/if}
-      <Button
-        bind:ref={saveButton}
-        type="submit"
-        form="{id}-form"
-        onkeydown={(event) => event.repeat && event.preventDefault()}
-        variant={asking ? 'destructive' : 'default'}
-        disabled={!changed || saving}
-        aria-describedby={asking ? `${id}-confirm` : undefined}
-      >
-        {saving ? 'Saving…' : asking ? 'Save anyway' : 'Save'}
-      </Button>
-      <Sheet.Close disabled={saving}>
-        {#snippet child({ props })}
-          <Button variant="outline" {...props}>Cancel</Button>
-        {/snippet}
-      </Sheet.Close>
+      {#if accountError}
+        <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
+          {accountError}
+        </p>
+      {/if}
+      {#if accountQuestion}
+        <!-- The Account section's question, which opens on the button that keeps things as they
+             are. -->
+        <p class="text-sm wrap-anywhere" role="alert">{accountQuestion.sentence}</p>
+        <Button
+          variant={accountQuestion.destructive ? 'destructive' : 'default'}
+          onclick={() => account?.confirm()}
+          onkeydown={once}
+          disabled={accountBusy}
+        >
+          {accountQuestion.confirm}
+        </Button>
+        <Button bind:ref={keep} variant="outline" onclick={() => account?.dismiss()} onkeydown={once} disabled={accountBusy}>
+          {accountQuestion.kind === 'close' ? 'Keep it open' : 'Keep it'}
+        </Button>
+      {:else}
+        {#if offered}
+          <Button
+            bind:ref={saveButton}
+            type="submit"
+            form="{id}-form"
+            onkeydown={once}
+            variant={asking ? 'destructive' : 'default'}
+            disabled={!changed || saving}
+            aria-describedby={asking ? `${id}-confirm` : undefined}
+          >
+            {saving ? 'Saving…' : asking ? 'Save anyway' : 'Save'}
+          </Button>
+        {/if}
+        <Sheet.Close disabled={saving || accountBusy}>
+          {#snippet child({ props })}
+            <Button variant="outline" {...props}>{offered ? 'Cancel' : 'Close'}</Button>
+          {/snippet}
+        </Sheet.Close>
+      {/if}
     </Sheet.Footer>
   </Sheet.Content>
 </Sheet.Root>
