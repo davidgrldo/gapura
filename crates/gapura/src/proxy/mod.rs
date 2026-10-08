@@ -766,9 +766,13 @@ impl ProxyHttp for GapuraProxy {
 
         // The mirror fires only on requests that reached an upstream -- redirects answered in
         // request_filter never get here -- and after every header mutation above, so it copies
-        // the final rewritten, modified header set.
+        // the final rewritten, modified header set. Once per request: pingora runs this filter
+        // on every attempt, and a retry after a reused connection failed must not send the
+        // mirror backend a second copy.
         if let Some(mirror) = &rule.filters.mirror {
-            fire_mirror(&rt, mirror, upstream, ctx);
+            if !ctx.mirrored {
+                fire_mirror(&rt, mirror, upstream, ctx);
+            }
         }
         Ok(())
     }
