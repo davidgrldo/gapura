@@ -75,14 +75,12 @@ type: Opaque
 stringData:
   users.yaml: |
     users:
-      - email: admin@example.test
-        bcrypt: $2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
-        groups:
-        - admins
-      - email: viewer@example.test
-        bcrypt: $2b$10$zyxwvutsrqponmlkjihgO9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
-        groups:
-        []
+      - email: "admin@example.test"
+        bcrypt: "$2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z"
+        groups: ["admins"]
+      - email: "viewer@example.test"
+        bcrypt: "$2b$10$zyxwvutsrqponmlkjihgO9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z"
+        groups: []
 ---
 # Source: gapura/templates/console.yaml
 apiVersion: rbac.authorization.k8s.io/v1

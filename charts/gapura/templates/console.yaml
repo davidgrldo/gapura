@@ -69,17 +69,13 @@ type: Opaque
 stringData:
   users.yaml: |
     users:
+{{- /* toJson, not bare interpolation: a group "*" renders as `- *`, an invalid YAML alias the
+      console cannot parse its users file over, and "team #1" reads as `team` with the rest
+      taken for a comment, so its grants silently never match. */}}
 {{- range $localUsers }}
-      - email: {{ .email }}
-        bcrypt: {{ .bcryptHash }}
-        groups:
-{{- if .groups }}
-{{- range .groups }}
-        - {{ . }}
-{{- end }}
-{{- else }}
-        []
-{{- end }}
+      - email: {{ .email | toJson }}
+        bcrypt: {{ .bcryptHash | toJson }}
+        groups: {{ (.groups | default list) | toJson }}
 {{- end }}
 {{- end }}
 {{- end }}

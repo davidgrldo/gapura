@@ -75,10 +75,9 @@ type: Opaque
 stringData:
   users.yaml: |
     users:
-      - email: admin@example.test
-        bcrypt: $2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z
-        groups:
-        - admins
+      - email: "admin@example.test"
+        bcrypt: "$2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z"
+        groups: ["admins"]
 ---
 # Source: gapura/templates/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
