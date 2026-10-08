@@ -343,6 +343,7 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
       - name: control
@@ -401,6 +402,9 @@ spec:
             memory: 32Mi
         securityContext:
           allowPrivilegeEscalation: false
+          # The gateway container sets both of these too; the console writes nothing to disk and
+          # it is the process holding the session key and the database URL.
+          readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
 ---
