@@ -51,11 +51,20 @@ import tailwindcss from '@tailwindcss/vite'
 // for every persona, so the lists read back as they were. Issuing a key is the one write that
 // answers with a body, as the server does: a made-up key, shown once like the real one, and the
 // expiry the request asked for. That is enough to look at the forms and at what follows a save.
+// Data planes are the same for every persona too: web/stub/data-planes.json is `GET /api/data-planes`,
+// sorted by name, one row per data plane with its status, whether it holds the configuration served
+// now, the address it called from and its tokens (a prefix and times, never the token). Registering
+// one and issuing another token answer with a made-up token, shown once like the real one; deleting a
+// data plane or revoking a token answers 204 and stores nothing.
 // What a write does is proven against Postgres by the Rust tests, and by a pass against a real
 // server. Each answers only the method the server serves it on, so a form that sends the wrong
 // one fails here as it would there.
 function stubApi() {
-  const shared = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
+  const shared = {
+    '/api/overview': 'overview.json',
+    '/api/routes': 'routes.json',
+    '/api/data-planes': 'data-planes.json',
+  }
   const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
   // `/api/workspaces/<name>/services`, `/routes`, `/consumers` and `/key-auth`, and one row of
   // the first three by name. Only the first three are created by POST; `/key-auth` is put and
@@ -65,6 +74,9 @@ function stubApi() {
   const keys = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys$/
   const revoke = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys\/[^/]+$/
   const keyAuth = /^\/api\/workspaces\/[^/]+\/key-auth$/
+  // Registering a data plane and issuing it another token both answer with a token.
+  const issued = /^\/api\/data-planes(\/[^/]+\/tokens)?$/
+  const dataPlaneWrites = /^\/api\/data-planes\/[^/]+(\/tokens\/[^/]+)?$/
   const writes = [
     ['PATCH', /^\/api\/users\/[^/]+\/roles$/],
     ['PUT', /^\/api\/group-mappings$/],
@@ -75,6 +87,7 @@ function stubApi() {
     ['DELETE', revoke],
     ['PUT', keyAuth],
     ['DELETE', keyAuth],
+    ['DELETE', dataPlaneWrites],
   ]
   return {
     name: 'gapura-stub-api',
@@ -110,6 +123,23 @@ function stubApi() {
             const key = `gpak_${randomBytes(32).toString('hex')}`
             res.setHeader('content-type', 'application/json')
             res.end(JSON.stringify({ key, prefix: key.slice(0, 13), expires_at }))
+          })
+          return
+        }
+        if (req.method === 'POST' && issued.test(url)) {
+          const name = url.split('/')[3]
+          let body = ''
+          req.on('data', (chunk) => (body += chunk))
+          req.on('end', () => {
+            let registered = name
+            try {
+              registered = name ?? JSON.parse(body).name
+            } catch {
+              // A body that is not JSON names no data plane.
+            }
+            const token = `gpdp_${randomBytes(32).toString('hex')}`
+            res.setHeader('content-type', 'application/json')
+            res.end(JSON.stringify({ name: registered ?? null, token, prefix: token.slice(0, 13) }))
           })
           return
         }

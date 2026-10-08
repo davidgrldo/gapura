@@ -10,6 +10,7 @@
   import HardDrives from 'phosphor-svelte/lib/HardDrives'
   import Path from 'phosphor-svelte/lib/Path'
   import Key from 'phosphor-svelte/lib/Key'
+  import Broadcast from 'phosphor-svelte/lib/Broadcast'
   import AppSidebar from './lib/AppSidebar.svelte'
   import Failure from './lib/Failure.svelte'
   import Home from './lib/Home.svelte'
@@ -21,6 +22,7 @@
   import Services from './routes/Services.svelte'
   import StoreRoutes from './routes/StoreRoutes.svelte'
   import Consumers from './routes/Consumers.svelte'
+  import DataPlanes from './routes/DataPlanes.svelte'
 
   // A handful of screens does not earn a router dependency. The server already answers any
   // path it does not own with index.html (see `resolve` in crates/gapura-control/src/assets.rs),
@@ -49,6 +51,7 @@
     { path: '/store-routes', label: 'Routes', icon: Path, component: StoreRoutes },
     { path: '/consumers', label: 'Consumers', icon: Key, component: Consumers },
   ]
+  const GATEWAYS = [{ path: '/data-planes', label: 'Data planes', icon: Broadcast, component: DataPlanes }]
   const ACCESS = [
     { path: '/users', label: 'Users', icon: UsersThree, component: Users },
     { path: '/roles', label: 'Roles', icon: ShieldCheck, component: Roles },
@@ -56,8 +59,9 @@
 
   // The navigation this account gets. The cluster pages read Kubernetes and the gateway's admin
   // port without knowing about workspaces, so in store mode they are a superuser's; the
-  // configuration pages are for anyone holding a role in a workspace; the access pages for
-  // superusers and anyone who administers one. The server enforces all three. This only avoids
+  // configuration pages are for anyone holding a role in a workspace; the data planes page for
+  // the same readers and superusers, though only a superuser changes it; the access pages for
+  // superusers and anyone who administers one. The server enforces all four. This only avoids
   // offering a page the server would refuse.
   const groups = $derived(
     me === undefined
@@ -65,6 +69,7 @@
       : [
           { label: store ? 'Cluster' : 'Gateway', screens: me.mode === 'kubernetes' || me.superuser ? GATEWAY : [] },
           { label: 'Configuration', screens: store && me.roles.length > 0 ? CONFIGURATION : [] },
+          { label: 'Gateways', screens: store && (me.superuser || me.roles.length > 0) ? GATEWAYS : [] },
           {
             label: 'Access',
             screens: store && (me.superuser || me.grantable.length > 0) ? ACCESS : [],

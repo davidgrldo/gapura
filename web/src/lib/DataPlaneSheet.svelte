@@ -6,27 +6,28 @@
   import SecretBox from './SecretBox.svelte'
   import Tag from './Tag.svelte'
   import { write } from './api.js'
-  import { base, when } from './configuration.js'
-  import { can } from './workspace.js'
+  import { when } from './configuration.js'
+  import { STATUS_TONE, status, sync } from './dataPlanes.js'
   import Plus from 'phosphor-svelte/lib/Plus'
 
-  // The Consumers page's one sheet:
-  // - `create` is New consumer, for editors and admins: a name, and nothing else;
-  // - `edit` shows one consumer's keys. An editor can issue a key, an admin can also revoke one
-  //   and delete the consumer; a viewer sees the keys and no controls at all.
-  // An issued key is shown once, in a box that stays until the sheet closes. Issuing and revoking
-  // fetch the list again without closing the sheet: rows are keyed by name, so this sheet stays
-  // mounted under the new list and the box with it. Questions (delete, revoke, close without
-  // copying) are asked in the footer, as ServiceSheet asks its delete question, and open on the
-  // button that keeps things as they are.
+  // The Data planes page's one sheet, built as the Consumers page's is:
+  // - `create` is Register a data plane, for superusers: a name, which the server answers with
+  //   the data plane's first token. The sheet then shows that token and stays open on it;
+  // - `edit` shows one data plane: whether it calls, from where, and its tokens. A superuser can
+  //   issue another token, revoke one and delete the data plane; anyone else sees it all and no
+  //   controls.
+  // An issued token is shown once, in a box that stays until the sheet closes. Registering,
+  // issuing and revoking fetch the list again without closing the sheet: rows are keyed by name,
+  // so this sheet stays mounted under the new list and the box with it. Questions (delete,
+  // revoke, close without copying) are asked in the footer, and open on the button that keeps
+  // things as they are.
   // `onsaved` fetches the list again and returns a promise that settles once it is drawn or has
   // failed, and never rejects. `onremoved` is where focus goes when the new list no longer has the
   // row this sheet's button was in.
-  let { mode, consumer = undefined, workspace, role, onsaved, onremoved = undefined } = $props()
+  let { mode, plane = undefined, superuser, onsaved, onremoved = undefined } = $props()
 
   const id = $props.id()
-  const issuer = $derived(mode === 'edit' && can.write(role))
-  const admin = $derived(mode === 'edit' && can.delete(role))
+  const admin = $derived(mode === 'edit' && superuser)
 
   let open = $state(false)
   // The button that opened the sheet, so focus can go back to it after a save.
@@ -37,10 +38,9 @@
   let issueButton = $state(null)
   let keep = $state(null)
   let del = $state(null)
-  let keysHeading = $state(null)
-  let keyInput = $state(null)
+  let tokensHeading = $state(null)
+  let tokenInput = $state(null)
   let name = $state('')
-  let expires = $state('')
   let saving = $state(false)
   let issuing = $state(false)
   // `{ sentence, field, stale }` from a refused write; `field` puts the sentence beside its input.
@@ -50,10 +50,9 @@
   // cannot answer it.
   let question = $state(null)
   let askedAt = 0
-  // The Revoke button that asked, which Keep it hands focus back to. Revoke buttons sit in the
-  // keys list, which the footer's question does not replace, so the element is still there.
+  // The Revoke button that asked, which Keep it hands focus back to.
   let asker = null
-  // `{ key, prefix, expires_at }`, the server's one answer that carries a key.
+  // `{ name, token, prefix }`, the server's one answer that carries a token.
   let issued = $state(null)
   let copied = $state(false)
   // A refusal leaves the list possibly out of date; it is fetched when the sheet closes, not
@@ -62,7 +61,6 @@
 
   function reset() {
     name = ''
-    expires = ''
     saving = false
     issuing = false
     error = undefined
@@ -73,13 +71,17 @@
 
   // The fields this sheet draws, and the ids of their inputs. A refusal naming anything else has
   // no input to sit beside, so its sentence goes in the footer.
-  const INPUT = $derived(mode === 'create' ? { name: 'name' } : { expires_at: 'expires' })
+  const INPUT = $derived(mode === 'create' && !issued ? { name: 'name' } : {})
   const shown = $derived(Object.hasOwn(INPUT, error?.field ?? ''))
 
   const invalid = (field) => error?.field === field
   const described = (field) => (invalid(field) ? `${id}-${field}-error` : undefined)
-  const here = () => `${base(workspace, 'consumers')}/${encodeURIComponent(consumer.name)}`
-  const keys = $derived(consumer?.keys ?? [])
+  const here = () => `/api/data-planes/${encodeURIComponent(plane.name)}`
+  const tokens = $derived(plane?.tokens ?? [])
+  const insync = $derived(plane ? sync(plane) : null)
+  // Where a gateway is told to fetch from: this control plane's own host on the port it serves
+  // data planes on by default. `hostname` keeps an IPv6 address's brackets.
+  const command = `gapura --control-plane https://${location.hostname}:8081 --control-plane-token-file /path/to/token`
 
   // One request. Resolves with `{ answer }` once the server has made the change, or with nothing
   // after a refusal, which is then on screen with focus on the input it names, or else on what
@@ -95,8 +97,8 @@
       error = {
         sentence: failure.message,
         field: failure.field,
-        // A 404 on a change to this consumer or one of its keys means someone else removed it,
-        // and the list is what to look at.
+        // A 404 on a change to this data plane or one of its tokens means someone else removed
+        // it, and the list is what to look at.
         stale:
           (failure.status === 409 && failure.message.includes('Reload')) ||
           (failure.status === 404 && mode === 'edit'),
@@ -138,35 +140,27 @@
     await tick()
   }
 
+  // Registering answers with the first token, so the sheet stays open to show it.
   async function create(event) {
     event.preventDefault()
-    if (mode !== 'create' || saving) return
-    const done = await request('POST', base(workspace, 'consumers'), { name: name.trim() }, () => submit)
-    if (done) await closeAndReload()
-  }
-
-  async function issue(event) {
-    event.preventDefault()
-    if (!issuer || saving || question) return
-    const body = {}
-    if (expires.trim() !== '') {
-      const at = new Date(expires)
-      if (Number.isNaN(at.getTime())) {
-        error = { sentence: 'Give a date and time, or leave it empty for a key that never expires.', field: 'expires_at' }
-        await tick()
-        document.getElementById(`${id}-expires`)?.focus()
-        return
-      }
-      body.expires_at = at.toISOString()
-    }
-    issuing = true
-    const done = await request('POST', `${here()}/keys`, body, () => issueButton, true)
+    if (mode !== 'create' || issued || saving) return
+    const done = await request('POST', '/api/data-planes', { name: name.trim() }, () => submit, true)
     if (!done) return
     issued = done.answer
     copied = false
-    expires = ''
     await reloadInPlace()
-    keyInput?.focus()
+    tokenInput?.focus()
+  }
+
+  async function issue() {
+    if (!admin || saving || question) return
+    issuing = true
+    const done = await request('POST', `${here()}/tokens`, undefined, () => issueButton, true)
+    if (!done) return
+    issued = done.answer
+    copied = false
+    await reloadInPlace()
+    tokenInput?.focus()
   }
 
   async function ask(next, from = null) {
@@ -194,36 +188,36 @@
     }
     const done = await request(
       'DELETE',
-      `${here()}/keys/${encodeURIComponent(asked.prefix)}`,
+      `${here()}/tokens/${encodeURIComponent(asked.prefix)}`,
       undefined,
-      () => (asker?.isConnected ? asker : keysHeading),
+      () => (asker?.isConnected ? asker : tokensHeading),
     )
     if (!done) return
     question = null
     await reloadInPlace()
-    keysHeading?.focus()
+    tokensHeading?.focus()
   }
 
   async function dismiss() {
     const asked = question
     question = null
     await tick()
-    if (asked?.kind === 'close') keyInput?.focus()
+    if (asked?.kind === 'close') tokenInput?.focus()
     else if (asked?.kind === 'delete') del?.focus()
-    else (asker?.isConnected ? asker : keysHeading)?.focus()
+    else (asker?.isConnected ? asker : tokensHeading)?.focus()
   }
 
   // A key held down repeats, and a repeat must not answer a question or drop it.
   const once = (event) => event.repeat && event.preventDefault()
 
-  // The stale refusal's way out. New consumer closes and draws the list as it is now; a consumer's
-  // sheet stays open, since it may be holding a key that is shown only once, and takes the new
-  // list as it comes. A consumer gone from it takes this sheet with it.
+  // The stale refusal's way out. Register closes and draws the list as it is now; a data plane's
+  // sheet stays open, since it may be holding a token that is shown only once, and takes the new
+  // list as it comes. A data plane gone from it takes this sheet with it.
   async function reload() {
     if (mode === 'create') return closeAndReload()
     error = undefined
     await reloadInPlace()
-    if (trigger?.isConnected) keysHeading?.focus()
+    if (trigger?.isConnected) tokensHeading?.focus()
     else keepPlace()
   }
 
@@ -235,9 +229,9 @@
     keepPlace()
   }
 
-  // Refuses to close while a request is in flight, for the reason MappingSheet gives, and asks
-  // first while a key that was never copied is on screen. While that question is up, only its own
-  // buttons answer it: an Escape held down must not.
+  // Refuses to close while a request is in flight, and asks first while a token that was never
+  // copied is on screen. While that question is up, only its own buttons answer it: an Escape
+  // held down must not.
   function setOpen(next) {
     if (next) {
       open = true
@@ -254,13 +248,13 @@
   }
 
   const sentence = $derived.by(() => {
-    if (question?.kind === 'close') return 'Close without copying the key? It cannot be shown again.'
+    if (question?.kind === 'close') return 'Close without copying the token? It cannot be shown again.'
     if (question?.kind === 'revoke') {
-      return `Revoke ${question.prefix}? Requests with this key are refused from the gateway's next poll.`
+      return `Revoke ${question.prefix}? A data plane using it is refused from its next call and keeps serving its cached configuration.`
     }
-    const n = keys.length
-    const what = n === 0 ? '' : n === 1 ? ' and its 1 key' : ` and its ${n} keys`
-    return `Delete ${consumer?.name}${what}? This cannot be undone.`
+    const n = tokens.length
+    const what = n === 0 ? '' : n === 1 ? ' and its 1 token' : ` and its ${n} tokens`
+    return `Delete ${plane?.name}${what}? Its gateway keeps serving its cached configuration but receives no more changes.`
   })
   const CONFIRM = { close: 'Close', revoke: 'Revoke', delete: 'Delete' }
 </script>
@@ -271,18 +265,26 @@
   {/if}
 {/snippet}
 
+{#snippet howTo()}
+  <div class="grid gap-1.5 text-sm">
+    <p>Save it to a file the gateway can read, then start the gateway with:</p>
+    <pre class="overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs"><code>{command}</code></pre>
+    <p class="text-xs text-muted-foreground">Adjust the address if data planes reach this control plane another way.</p>
+  </div>
+{/snippet}
+
 <Sheet.Root bind:open={() => open, setOpen} onOpenChange={(next) => next && reset()}>
   <Sheet.Trigger>
     {#snippet child({ props })}
       {#if mode === 'create'}
-        <Button bind:ref={trigger} size="sm" {...props}><Plus aria-hidden="true" />New consumer</Button>
+        <Button bind:ref={trigger} size="sm" {...props}><Plus aria-hidden="true" />Register a data plane</Button>
       {:else}
         <Button
           bind:ref={trigger}
           variant="ghost"
           size="sm"
-          aria-label="{issuer ? 'Manage' : 'View'} the consumer {consumer.name}"
-          {...props}>{issuer ? 'Manage' : 'View'}</Button
+          aria-label="{admin ? 'Manage' : 'View'} the data plane {plane.name}"
+          {...props}>{admin ? 'Manage' : 'View'}</Button
         >
       {/if}
     {/snippet}
@@ -290,78 +292,90 @@
   <Sheet.Content class="data-[side=right]:w-full data-[side=right]:sm:max-w-md">
     <Sheet.Header>
       <Sheet.Title class="pr-8">
-        {#if mode === 'create'}New consumer{:else}Consumer <span class="font-mono">{consumer.name}</span>{/if}
+        {#if mode === 'create'}Register a data plane{:else}Data plane <span class="font-mono">{plane.name}</span>{/if}
       </Sheet.Title>
       <Sheet.Description>
-        A caller of the routes in {workspace} that require an API key, known by the keys it holds.
+        A gateway that fetches its configuration from this control plane, known by the tokens it holds.
       </Sheet.Description>
     </Sheet.Header>
     <div class="grid gap-5 overflow-y-auto px-4">
       {#if mode === 'create'}
-        <form id="{id}-form" class="grid gap-5" onsubmit={create}>
-          <fieldset class="grid gap-1.5" disabled={saving}>
-            <label for="{id}-name" class="font-medium">Name</label>
-            <Input id="{id}-name" class="font-mono" bind:value={name} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('name')} aria-describedby={described('name')} />
-            {@render problem('name')}
-            <p class="text-xs text-muted-foreground">Save it first, then issue it a key.</p>
-          </fieldset>
-        </form>
-      {:else}
         {#if issued}
-          <SecretBox
-            bind:ref={keyInput}
-            bind:copied
-            secret={issued.key}
-            label="New key"
-            code={issued.prefix}
-            note={issued.expires_at ? `It expires ${when(issued.expires_at)}.` : 'It never expires.'}
-          />
-        {/if}
-        {#if issuer}
-          <form class="grid gap-2" onsubmit={issue}>
-            <fieldset class="grid gap-2" disabled={saving}>
-              <div class="grid gap-1.5">
-                <label for="{id}-expires" class="font-medium">Expires <span class="font-normal text-muted-foreground">(optional)</span></label>
-                <Input id="{id}-expires" type="datetime-local" bind:value={expires} aria-invalid={invalid('expires_at')} aria-describedby={[described('expires_at'), `${id}-expires-hint`].filter(Boolean).join(' ')} />
-                {@render problem('expires_at')}
-                <p id="{id}-expires-hint" class="text-xs text-muted-foreground">In your own time zone. Empty means the key never expires.</p>
-              </div>
-              <Button bind:ref={issueButton} type="submit" variant="outline" size="sm" class="justify-self-start" onkeydown={once}>
-                {issuing ? 'Issuing…' : 'Issue a key'}
-              </Button>
+          <SecretBox bind:ref={tokenInput} bind:copied secret={issued.token} label="Token for" code={issued.name} children={howTo} />
+        {:else}
+          <form id="{id}-form" class="grid gap-5" onsubmit={create}>
+            <fieldset class="grid gap-1.5" disabled={saving}>
+              <label for="{id}-name" class="font-medium">Name</label>
+              <Input id="{id}-name" class="font-mono" bind:value={name} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('name')} aria-describedby={described('name')} />
+              {@render problem('name')}
+              <p class="text-xs text-muted-foreground">Registering it issues its first token, shown once.</p>
             </fieldset>
           </form>
         {/if}
-        <section class="grid gap-2" aria-labelledby="{id}-keys">
-          <h3 id="{id}-keys" bind:this={keysHeading} tabindex="-1" class="font-medium outline-none">Keys</h3>
-          {#if keys.length === 0}
-            <p class="text-sm text-muted-foreground">No keys yet.</p>
+      {:else}
+        <dl class="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-2 text-sm">
+          <dt class="text-muted-foreground">Status</dt>
+          <dd><Tag tone={STATUS_TONE[plane.status] ?? 'idle'}>{status(plane)}</Tag></dd>
+          <dt class="text-muted-foreground">In sync</dt>
+          <dd>
+            {#if insync === null}
+              <span class="text-muted-foreground">—</span>
+            {:else if insync.stale}
+              <span class="text-muted-foreground">{insync.words}, as of its last call</span>
+            {:else}
+              <Tag tone={insync.tone}>{insync.words}</Tag>
+            {/if}
+          </dd>
+          <dt class="text-muted-foreground">Address</dt>
+          <dd>
+            {#if plane.last_seen_address}<span class="font-mono">{plane.last_seen_address}</span>{:else}<span class="text-muted-foreground">—</span>{/if}
+            <span class="block text-xs text-muted-foreground">As the control plane sees it.</span>
+          </dd>
+          <dt class="text-muted-foreground">Last seen</dt>
+          <dd>{plane.last_seen_at ? when(plane.last_seen_at) : 'never'}</dd>
+        </dl>
+        {#if issued}
+          <SecretBox bind:ref={tokenInput} bind:copied secret={issued.token} label="Token for" code={issued.name} children={howTo} />
+        {/if}
+        {#if admin}
+          <Button bind:ref={issueButton} variant="outline" size="sm" class="justify-self-start" onclick={issue} onkeydown={once} disabled={saving}>
+            {issuing ? 'Issuing…' : 'Issue another token'}
+          </Button>
+        {/if}
+        <section class="grid gap-2" aria-labelledby="{id}-tokens">
+          <h3 id="{id}-tokens" bind:this={tokensHeading} tabindex="-1" class="font-medium outline-none">Tokens</h3>
+          {#if tokens.length === 0}
+            <p class="text-sm text-muted-foreground">No tokens: it cannot fetch its configuration.</p>
           {:else}
             <ul class="divide-y rounded-lg border">
-              {#each keys as k (k.prefix)}
+              {#each tokens as t (t.prefix)}
                 <li class="grid gap-1 px-3 py-2">
                   <div class="flex min-h-8 items-center gap-2">
-                    <code class="font-mono">{k.prefix}</code>
-                    {#if k.expired}<Tag tone="idle">Expired</Tag>{/if}
+                    <code class="font-mono">{t.prefix}</code>
                     {#if admin}
                       <Button
                         variant="ghost"
                         size="sm"
                         class="ml-auto text-danger"
-                        aria-label="Revoke {k.prefix}"
-                        onclick={(event) => ask({ kind: 'revoke', prefix: k.prefix }, event.currentTarget)}
+                        aria-label="Revoke {t.prefix}"
+                        onclick={(event) => ask({ kind: 'revoke', prefix: t.prefix }, event.currentTarget)}
                         onkeydown={once}
                         disabled={saving}>Revoke</Button
                       >
                     {/if}
                   </div>
                   <dl class="grid grid-cols-[auto_1fr] gap-x-3 text-xs text-muted-foreground">
-                    <dt>Created</dt><dd>{when(k.created_at)}</dd>
-                    <dt>Expires</dt><dd>{k.expires_at ? when(k.expires_at) : 'never'}</dd>
+                    <dt>Created</dt><dd>{when(t.created_at)}</dd>
+                    <dt>Last used</dt><dd>{t.last_used_at ? when(t.last_used_at) : 'never'}</dd>
                   </dl>
                 </li>
               {/each}
             </ul>
+          {/if}
+          {#if admin}
+            <p class="text-xs text-muted-foreground">
+              To rotate: issue another token, give it to the gateway, and revoke the old one once the new one shows as used.
+            </p>
           {/if}
         </section>
       {/if}
@@ -384,15 +398,15 @@
           {question.kind === 'close' ? 'Keep it open' : 'Keep it'}
         </Button>
       {:else}
-        {#if mode === 'create'}
-          <Button bind:ref={submit} type="submit" form="{id}-form" onkeydown={once} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+        {#if mode === 'create' && !issued}
+          <Button bind:ref={submit} type="submit" form="{id}-form" onkeydown={once} disabled={saving}>{saving ? 'Registering…' : 'Register'}</Button>
         {/if}
         {#if admin}
-          <Button bind:ref={del} variant="ghost" class="text-danger" onclick={() => ask({ kind: 'delete' })} onkeydown={once} disabled={saving}>Delete consumer</Button>
+          <Button bind:ref={del} variant="ghost" class="text-danger" onclick={() => ask({ kind: 'delete' })} onkeydown={once} disabled={saving}>Delete data plane</Button>
         {/if}
         <Sheet.Close disabled={saving}>
           {#snippet child({ props })}
-            <Button variant="outline" {...props}>{mode === 'create' ? 'Cancel' : 'Close'}</Button>
+            <Button variant="outline" {...props}>{mode === 'create' && !issued ? 'Cancel' : 'Close'}</Button>
           {/snippet}
         </Sheet.Close>
       {/if}
