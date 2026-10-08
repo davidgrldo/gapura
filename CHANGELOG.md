@@ -8,6 +8,22 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The control plane has an API for store-mode consumers, their API keys, and the `key_auth`
+  requirement: `/api/workspaces/{workspace}/consumers` (list, create, delete),
+  `/consumers/{name}/keys` (issue, revoke) and `/key-auth` (list, require a key on the workspace, a
+  service or a route, and stop requiring it). A viewer reads; an editor creates consumers, issues
+  keys and switches the requirement on and off; an admin deletes consumers and revokes keys. A key
+  is shown once, in the answer that issues it, and stored only as its hash and prefix: never in the
+  audit log, a list or `/v1/config`. A key may expire; an expired one stays listed, marked expired,
+  and is not served. The most specific requirement applies, a route's over its service's over its
+  workspace's, and the service and route lists now say which one applies and where it comes from.
+  A refusal for a role too low now reads "Making changes in this workspace needs the editor role."
+  and "Deleting things in this workspace needs the admin role.".
+- At most one policy of a name may sit on one target (a route, a service, a consumer, or the
+  workspace itself), enforced by unique indexes. Only SQL written by hand could have made two; a
+  store holding two refuses to start at this version's migration. Find them with
+  `select workspace_id, coalesce(route_id::text, service_id::text, consumer_id::text, 'workspace'), name, count(*) from plugins group by 1, 2, 3 having count(*) > 1;`
+  and delete the extra rows.
 - The console has Services and Routes pages for store mode, under a new Configuration section that
   anyone holding a role in a workspace sees. A viewer reads them, an editor creates and changes
   services and routes, an admin deletes them, and a workspace picker appears for anyone with more
