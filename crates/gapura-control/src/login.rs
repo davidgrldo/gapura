@@ -1411,6 +1411,7 @@ mod against_a_stub_provider {
             session_lifetime: Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            store_settings: Default::default(),
         }
     }
 
@@ -2149,6 +2150,7 @@ mod local_login_flow_tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            store_settings: Default::default(),
         }
     }
 

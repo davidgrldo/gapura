@@ -31,4 +31,7 @@ pub struct AppState {
     pub store: Option<Arc<Store>>,
     /// Failed sign-ins, counted per name at an address and per address.
     pub sign_in: Arc<crate::throttle::Throttle>,
+    /// What the store's rows are compiled with, the same settings the configuration endpoint
+    /// uses, so the console can say whether a data plane holds what is served now.
+    pub store_settings: gapura_core::store::StoreSettings,
 }

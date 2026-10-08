@@ -444,6 +444,7 @@ mod tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            store_settings: Default::default(),
         }
     }
 
@@ -651,6 +652,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         session_lifetime: std::time::Duration::from_secs(3600),
         store: None,
         sign_in: Default::default(),
+        store_settings: Default::default(),
     }
 }
 
@@ -892,6 +894,7 @@ mod overview_tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            store_settings: Default::default(),
         }
     }
 

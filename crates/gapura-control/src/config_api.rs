@@ -21,7 +21,7 @@ use axum::{
     routing::get,
     Router,
 };
-use gapura_core::store::{compile, StoreSettings};
+use gapura_core::store::{compile, StoreSettings, StoreSnapshot};
 use sha2::{Digest, Sha256};
 
 use crate::store::Store;
@@ -119,6 +119,24 @@ fn is_transient(e: &std::io::Error) -> bool {
         || e.raw_os_error() == Some(23) // ENFILE
 }
 
+/// What a data plane is sent for `snapshot`: the compiled configuration's bytes and their tag.
+/// The console's "in sync" reads the tag from here too, so the two cannot disagree.
+///
+/// The tag is what is served, not the store's version counter. The counter restarts when the
+/// database is restored or recreated, and it does not move when a control-plane flag or a new
+/// release changes what the same rows compile to; in each case a data plane holding an old tag
+/// would be told 304 and keep a configuration that is no longer the one served. The snapshot is
+/// read on every call anyway, so this costs CPU and no I/O. Config has no unordered maps, so
+/// equal configurations serialise to equal bytes.
+pub fn served(
+    snapshot: &StoreSnapshot,
+    settings: &StoreSettings,
+) -> serde_json::Result<(Vec<u8>, String)> {
+    let body = serde_json::to_vec(&compile(snapshot, settings))?;
+    let etag = format!("\"{:x}\"", Sha256::digest(&body));
+    Ok((body, etag))
+}
+
 pub fn router(api: Arc<ConfigApi>) -> Router {
     Router::new()
         .route("/v1/config", get(serve))
@@ -156,21 +174,13 @@ async fn serve(State(api): State<Arc<ConfigApi>>, headers: HeaderMap) -> Respons
         tracing::warn!(error = %e, "recording a data plane's call");
     }
 
-    let config = compile(&snapshot, &api.settings);
-    let body = match serde_json::to_vec(&config) {
-        Ok(body) => body,
+    let (body, etag) = match served(&snapshot, &api.settings) {
+        Ok(served) => served,
         Err(e) => {
             tracing::error!(error = %e, "serialising the configuration");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    // The tag is what is served, not the store's version counter. The counter restarts when the
-    // database is restored or recreated, and it does not move when a control-plane flag or a new
-    // release changes what the same rows compile to; in each case a data plane holding an old
-    // tag would be told 304 and keep a configuration that is no longer the one served. The
-    // snapshot is read on every call anyway, so this costs CPU and no I/O. Config has no
-    // unordered maps, so equal configurations serialise to equal bytes.
-    let etag = format!("\"{:x}\"", Sha256::digest(&body));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
