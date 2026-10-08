@@ -12,6 +12,7 @@
   import Key from 'phosphor-svelte/lib/Key'
   import Broadcast from 'phosphor-svelte/lib/Broadcast'
   import AppSidebar from './lib/AppSidebar.svelte'
+  import ChoosePassword from './lib/ChoosePassword.svelte'
   import Failure from './lib/Failure.svelte'
   import Home from './lib/Home.svelte'
   import { get } from './lib/api.js'
@@ -32,12 +33,24 @@
 
   // Who is signed in decides which screens exist for them, so it is asked once, before any
   // screen is drawn. `get` deals with a missing session itself, by sending the browser to sign in.
+  // It is asked again once an account on a temporary password has chosen its own, and the
+  // promise settles then without rejecting.
   let me = $state(undefined)
   let failed = $state(undefined)
-  get('/api/me').then(
-    (answer) => (me = answer),
-    (error) => (failed = error),
-  )
+  function readMe() {
+    return get('/api/me').then(
+      (answer) => {
+        me = answer
+        failed = undefined
+      },
+      (error) => (failed = error),
+    )
+  }
+  readMe()
+
+  // An account on a temporary password is shown only the page that replaces it: every other
+  // store API refuses it until it has.
+  const choosing = $derived(me?.must_change_password === true)
 
   // In store mode the Kubernetes-reading pages sit beside the store's own Routes page, so they
   // are named for what they read.
@@ -64,7 +77,7 @@
   // superusers and anyone who administers one. The server enforces all four. This only avoids
   // offering a page the server would refuse.
   const groups = $derived(
-    me === undefined
+    me === undefined || choosing
       ? []
       : [
           { label: store ? 'Cluster' : 'Gateway', screens: me.mode === 'kubernetes' || me.superuser ? GATEWAY : [] },
@@ -89,7 +102,7 @@
   // a stale bookmark can name a screen this account does not have. Replaced rather than pushed, so Back
   // does not return to an address that only ever showed this same screen.
   $effect(() => {
-    if (me === undefined) return
+    if (me === undefined || choosing) return
     const shown = current?.path ?? '/'
     if (shown !== path) {
       history.replaceState(history.state, '', shown)
@@ -132,51 +145,58 @@
   }}
 />
 
-<Sidebar.Provider open={startOpen}>
-  <AppSidebar {groups} {current} {go} {me} />
-  <!-- Sidebar.Inset is the page's <main>, so what sits inside it is a <div>. -->
-  <Sidebar.Inset>
-    <header class="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/85 px-4 backdrop-blur">
-      <Sidebar.Trigger class="-ml-1" />
-      <!-- self-center on the component's own data-vertical variant, so that cn replaces the
-           generated self-stretch, which beats the header's items-center and puts a 16px line at
-           the top of the header. -->
-      <Separator orientation="vertical" decorative class="mr-2 data-vertical:h-4 data-vertical:self-center" />
-      <!-- Only once the page is known: "Home" while loading would be a guess, and on a failure
-           there is no page to name. -->
-      {#if me}
-        <Breadcrumb.Root>
-          <Breadcrumb.List>
-            <Breadcrumb.Item>
-              <Breadcrumb.Page>{current?.label ?? 'Home'}</Breadcrumb.Page>
-            </Breadcrumb.Item>
-          </Breadcrumb.List>
-        </Breadcrumb.Root>
-      {/if}
-    </header>
-    <div class="w-full max-w-7xl px-4 py-6 md:px-8 md:py-7">
-      {#if failed}
-        <Failure error={failed} what="who you are" />
-      {:else if me === undefined}
-        <!-- The shape of a screen while the answer is on its way, so the page does not jump
-             when it arrives. -->
-        <div class="space-y-3" aria-busy="true">
-          <span class="sr-only">Loading</span>
-          <Skeleton class="h-7 w-40" />
-          <Skeleton class="h-24 w-full" />
-        </div>
-      {:else if current}
-        <!-- Keyed on the path so that switching screens builds a fresh component, which is what
-             re-runs its fetch. Without the key, Svelte would reuse the instance and the reader
-             would be looking at whatever it loaded the first time. Every screen is handed who
-             is signed in: the access screens' forms need the workspaces the reader
-             administers, and the reader's own id. -->
-        {#key current.path}
-          <current.component {me} />
-        {/key}
-      {:else}
-        <Home {me} />
-      {/if}
-    </div>
-  </Sidebar.Inset>
-</Sidebar.Provider>
+<!-- Until an account on a temporary password chooses its own, it gets that page and nothing else,
+     the address bar left as it was so the screen it asked for opens after. A failure to read who
+     it is afterwards is the console's ordinary failure page. -->
+{#if choosing && !failed}
+  <ChoosePassword {me} onchosen={readMe} />
+{:else}
+  <Sidebar.Provider open={startOpen}>
+    <AppSidebar {groups} {current} {go} {me} />
+    <!-- Sidebar.Inset is the page's <main>, so what sits inside it is a <div>. -->
+    <Sidebar.Inset>
+      <header class="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/85 px-4 backdrop-blur">
+        <Sidebar.Trigger class="-ml-1" />
+        <!-- self-center on the component's own data-vertical variant, so that cn replaces the
+             generated self-stretch, which beats the header's items-center and puts a 16px line at
+             the top of the header. -->
+        <Separator orientation="vertical" decorative class="mr-2 data-vertical:h-4 data-vertical:self-center" />
+        <!-- Only once the page is known: "Home" while loading would be a guess, and on a failure
+             there is no page to name. -->
+        {#if me}
+          <Breadcrumb.Root>
+            <Breadcrumb.List>
+              <Breadcrumb.Item>
+                <Breadcrumb.Page>{current?.label ?? 'Home'}</Breadcrumb.Page>
+              </Breadcrumb.Item>
+            </Breadcrumb.List>
+          </Breadcrumb.Root>
+        {/if}
+      </header>
+      <div class="w-full max-w-7xl px-4 py-6 md:px-8 md:py-7">
+        {#if failed}
+          <Failure error={failed} what="who you are" />
+        {:else if me === undefined}
+          <!-- The shape of a screen while the answer is on its way, so the page does not jump
+               when it arrives. -->
+          <div class="space-y-3" aria-busy="true">
+            <span class="sr-only">Loading</span>
+            <Skeleton class="h-7 w-40" />
+            <Skeleton class="h-24 w-full" />
+          </div>
+        {:else if current}
+          <!-- Keyed on the path so that switching screens builds a fresh component, which is what
+               re-runs its fetch. Without the key, Svelte would reuse the instance and the reader
+               would be looking at whatever it loaded the first time. Every screen is handed who
+               is signed in: the access screens' forms need the workspaces the reader
+               administers, and the reader's own id. -->
+          {#key current.path}
+            <current.component {me} />
+          {/key}
+        {:else}
+          <Home {me} />
+        {/if}
+      </div>
+    </Sidebar.Inset>
+  </Sidebar.Provider>
+{/if}

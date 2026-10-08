@@ -2,6 +2,8 @@
   import { mergeProps } from 'bits-ui'
   import * as Sidebar from '$lib/components/ui/sidebar/index.js'
   import SignOut from 'phosphor-svelte/lib/SignOut'
+  import Password from 'phosphor-svelte/lib/Password'
+  import PasswordSheet from './PasswordSheet.svelte'
 
   // The screens in their groups, which one is open, App's navigation function, and who is
   // signed in: App owns routing and identity, this component only draws them.
@@ -92,6 +94,19 @@
             <span class="truncate text-sm font-medium">{me.name}</span>
             <span class="text-xs text-muted-foreground">{me.method === 'oidc' ? 'Signed in with SSO' : 'Console account'}</span>
           </div>
+        </Sidebar.MenuItem>
+      {/if}
+      {#if me?.local}
+        <!-- A local account's own password; an identity-provider account has none here. -->
+        <Sidebar.MenuItem>
+          <PasswordSheet {me}>
+            {#snippet trigger(props)}
+              <Sidebar.MenuButton tooltipContent="Change password" {...props}>
+                <Password aria-hidden="true" class="text-muted-foreground" />
+                <span>Change password</span>
+              </Sidebar.MenuButton>
+            {/snippet}
+          </PasswordSheet>
         </Sidebar.MenuItem>
       {/if}
       <Sidebar.MenuItem>

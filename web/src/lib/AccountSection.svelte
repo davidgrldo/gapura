@@ -219,6 +219,9 @@
   {/if}
   {#if self}
     <p class="text-muted-foreground">You cannot disable, delete or demote yourself; another superuser can.</p>
+    {#if local}
+      <p class="text-muted-foreground">Change your own password from Change password in the sidebar.</p>
+    {/if}
   {:else}
     <div class="flex flex-wrap gap-2">
       {#if local}
