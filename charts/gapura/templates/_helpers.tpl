@@ -29,6 +29,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: gapura
 {{- end -}}
 
+{{- /* gapura.labels carries app.kubernetes.io/component: gateway through the selector labels.
+       An object that is not the gateway -- the console's workloads, the smoke-test fixtures --
+       used to append its own component and shipped with the key twice: helm keeps the last
+       value and shrugs, but kustomize refuses the document outright, which broke every
+       post-renderer that routes through it (#140). This is the same label set with the
+       component named by the "component" entry instead: call it with
+       (dict "root" . "component" "console"). */}}
+{{- define "gapura.componentLabels" -}}
+{{- $root := index . "root" -}}
+helm.sh/chart: {{ include "gapura.chart" $root }}
+app.kubernetes.io/name: {{ include "gapura.name" $root }}
+app.kubernetes.io/instance: {{ $root.Release.Name }}
+app.kubernetes.io/component: {{ index . "component" }}
+app.kubernetes.io/version: {{ $root.Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ $root.Release.Service }}
+app.kubernetes.io/part-of: gapura
+{{- end -}}
+
 {{- define "gapura.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "gapura.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

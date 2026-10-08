@@ -33,9 +33,7 @@ kind: Secret
 metadata:
   name: {{ $usersSecret }}
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 type: Opaque
 stringData:
   users.yaml: |
@@ -72,18 +70,14 @@ kind: ServiceAccount
 metadata:
   name: {{ $fullname }}-control
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 {{- if (((.Values.console).rbac).create) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: {{ $fullname }}-control
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 rules:
   # What kube_source reads: HTTPRoutes across every namespace, because the console scopes
   # what it shows by the caller's grants, not by the API server's. The data plane's role is
@@ -96,9 +90,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: {{ $fullname }}-control
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -114,9 +106,7 @@ kind: Service
 metadata:
   name: {{ $fullname }}-control
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
   type: {{ $serviceType }}
   selector:
@@ -136,9 +126,7 @@ kind: Deployment
 metadata:
   name: {{ $fullname }}-control
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
   {{- if not ((.Values.console).updateStrategy) }}
   strategy:

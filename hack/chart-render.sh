@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render the chart with every values permutation under charts/gapura/tests and compare against the
 # committed golden output. `hack/chart-render.sh --update` rewrites the golden files.
-# Needs: helm.
+# Needs: helm, kubectl (the strict-parse check below runs kustomize).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -10,6 +10,8 @@ GOLDEN="$CHART/tests/golden"
 UPDATE=${1:-}
 mkdir -p "$GOLDEN"
 status=0
+
+command -v kubectl >/dev/null || { echo "FAIL: kubectl is required, the strict-parse check runs kustomize" >&2; exit 1; }
 
 if ! diff -q deploy/grafana/gapura-overview.json charts/gapura/dashboards/gapura-overview.json; then
   echo "FAIL dashboards differ: cp deploy/grafana/gapura-overview.json charts/gapura/dashboards/" >&2
@@ -43,7 +45,8 @@ fi
 # conditional templates (metrics, dashboards) legitimately render nothing under defaults.
 # NOTES.txt renders no documents by design and is exempt.
 tmp_sources=$(mktemp)
-trap 'rm -f "$tmp_sources"' EXIT
+kust_dir=$(mktemp -d)
+trap 'rm -f "$tmp_sources"; rm -rf "$kust_dir"' EXIT
 for values in "$CHART"/tests/values-*.yaml; do
   helm template gapura "$CHART" --namespace gapura-system --values "$values" --kube-version 1.34 \
     | grep '^# Source: gapura/templates/' >> "$tmp_sources" || true
@@ -74,6 +77,19 @@ for values in "$CHART"/tests/values-*.yaml; do
   if [ -n "$merged" ]; then
     echo "FAIL $case: a document holds more than one object (missing --- in a template?)" >&2
     printf '%s\n' "$merged" >&2
+    status=1
+    continue
+  fi
+  # A duplicate mapping key inside one object -- gapura.labels already carried
+  # app.kubernetes.io/component when a template appended its own -- is something helm's renderer
+  # shrugs at (last value wins) and every kustomize-based post-renderer refuses the whole install
+  # for: helm --post-renderer, Flux HelmRelease postRenderers, Argo CD helm+kustomize. Parse each
+  # render the way those do, so the failure lands here and not at the user's apply.
+  printf 'resources: [render.yaml]\n' > "$kust_dir/kustomization.yaml"
+  printf '%s\n' "$out" > "$kust_dir/render.yaml"
+  if ! kubectl kustomize "$kust_dir" > /dev/null 2> "$kust_dir/kustomize.err"; then
+    echo "FAIL $case: rendered output does not survive strict parsing (duplicate key?)" >&2
+    cat "$kust_dir/kustomize.err" >&2
     status=1
     continue
   fi

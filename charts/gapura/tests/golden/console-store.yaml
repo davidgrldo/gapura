@@ -37,11 +37,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: console
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: console
 ---
 # Source: gapura/templates/serviceaccount.yaml
 apiVersion: v1
@@ -67,11 +66,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: console
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: console
 rules:
   # What kube_source reads: HTTPRoutes across every namespace, because the console scopes
   # what it shows by the caller's grants, not by the API server's. The data plane's role is
@@ -116,11 +114,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: console
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: console
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -204,11 +201,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: console
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: console
 spec:
   type: ClusterIP
   selector:
@@ -293,11 +289,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: console
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: console
 spec:
   strategy:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
@@ -508,11 +503,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: smoke-backend
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: smoke-backend
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
@@ -534,11 +528,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: smoke
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: smoke
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
@@ -577,11 +570,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: smoke-backend
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: smoke-backend
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
