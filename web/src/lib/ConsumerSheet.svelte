@@ -3,6 +3,7 @@
   import * as Sheet from '$lib/components/ui/sheet/index.js'
   import { Button } from '$lib/components/ui/button/index.js'
   import { Input } from '$lib/components/ui/input/index.js'
+  import SecretBox from './SecretBox.svelte'
   import Tag from './Tag.svelte'
   import { write } from './api.js'
   import { base, when } from './configuration.js'
@@ -55,7 +56,6 @@
   // `{ key, prefix, expires_at }`, the server's one answer that carries a key.
   let issued = $state(null)
   let copied = $state(false)
-  let copyFailed = $state(false)
   // A refusal leaves the list possibly out of date; it is fetched when the sheet closes, not
   // while the reader is reading why.
   let staleOnClose = false
@@ -69,7 +69,6 @@
     question = null
     issued = null
     copied = false
-    copyFailed = false
   }
 
   // The fields this sheet draws, and the ids of their inputs. A refusal naming anything else has
@@ -165,22 +164,9 @@
     if (!done) return
     issued = done.answer
     copied = false
-    copyFailed = false
     expires = ''
     await reloadInPlace()
     keyInput?.focus()
-  }
-
-  async function copy() {
-    try {
-      // `navigator.clipboard` is missing outside a secure context, which throws here too.
-      await navigator.clipboard.writeText(issued.key)
-      copied = true
-      copyFailed = false
-    } catch {
-      copyFailed = true
-      keyInput?.focus()
-    }
   }
 
   async function ask(next, from = null) {
@@ -267,8 +253,6 @@
     closed()
   }
 
-  const selectAll = (event) => event.currentTarget.select()
-
   const sentence = $derived.by(() => {
     if (question?.kind === 'close') return 'Close without copying the key? It cannot be shown again.'
     if (question?.kind === 'revoke') {
@@ -324,37 +308,14 @@
         </form>
       {:else}
         {#if issued}
-          <!-- The key itself, shown this once. A readonly input rather than text, so it can be
-               selected whole and read character by character. -->
-          <div class="grid gap-2 rounded-lg border border-success/30 bg-success-soft p-3">
-            <label for="{id}-key" class="font-medium">New key <span class="font-mono">{issued.prefix}</span></label>
-            <div class="flex gap-2">
-              <Input
-                bind:ref={keyInput}
-                id="{id}-key"
-                class="bg-background font-mono"
-                readonly
-                value={issued.key}
-                spellcheck="false"
-                autocomplete="off"
-                aria-describedby="{id}-key-once"
-                onfocus={selectAll}
-                onclick={selectAll}
-                oncopy={() => {
-                  copied = true
-                  copyFailed = false
-                }}
-              />
-              <Button variant="outline" size="sm" onclick={copy} onkeydown={once}>{copied ? 'Copied' : 'Copy'}</Button>
-            </div>
-            <p id="{id}-key-once" class="text-sm">
-              This is the only time it is shown.
-              {issued.expires_at ? `It expires ${when(issued.expires_at)}.` : 'It never expires.'}
-            </p>
-            <p role="status" class={copyFailed ? 'text-xs text-danger' : 'sr-only'}>
-              {copyFailed ? 'Copy failed — select the key and copy it yourself.' : copied ? 'Copied.' : ''}
-            </p>
-          </div>
+          <SecretBox
+            bind:ref={keyInput}
+            bind:copied
+            secret={issued.key}
+            label="New key"
+            code={issued.prefix}
+            note={issued.expires_at ? `It expires ${when(issued.expires_at)}.` : 'It never expires.'}
+          />
         {/if}
         {#if issuer}
           <form class="grid gap-2" onsubmit={issue}>
