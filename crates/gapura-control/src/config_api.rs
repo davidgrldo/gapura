@@ -183,7 +183,13 @@ async fn serve(
     // alive either way, and a 304 is the overwhelming majority of these calls.
     if let Err(e) = api
         .store
-        .record_call(id, token_id, version, sent, peer.map(|p| p.0 .0.ip()))
+        .record_call(
+            id,
+            token_id,
+            version,
+            sent,
+            peer.map(|p| p.0 .0.ip().to_canonical()),
+        )
         .await
     {
         // Liveness is for a human looking at a console. Losing it must not cost a data plane
