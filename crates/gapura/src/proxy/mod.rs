@@ -263,6 +263,19 @@ async fn write_local(session: &mut Session, code: u16, request_id: &str) -> Resu
         .await
 }
 
+/// The JWT and key_auth refusal answer: the challenge plus the framing every other local
+/// answer carries. `Content-Length: 0` matters beyond tidiness -- without it the body is
+/// close-delimited, so the connection closes after every 401 even while pingora announces
+/// keep-alive.
+fn refusal_response(challenge: &str, request_id: &str) -> Result<ResponseHeader> {
+    let mut resp = ResponseHeader::build(401u16, Some(4))?;
+    resp.insert_header(http::header::WWW_AUTHENTICATE, challenge)?;
+    resp.insert_header("Content-Length", "0")?;
+    resp.insert_header("Cache-Control", "no-store")?;
+    resp.insert_header("X-Request-Id", request_id)?;
+    Ok(resp)
+}
+
 /// The client address after the trusted-proxy walk, the same answer the access log records:
 /// one computation so limiting and logging can never disagree about who the client is.
 /// `trusted_client_headers` names the single-IP headers (e.g. CF-Connecting-IP) consulted when
@@ -541,13 +554,16 @@ impl ProxyHttp for GapuraProxy {
                             .policy_refused_total
                             .with_label_values(&[&route, kind, reason])
                             .inc();
+                        // Attributed before answering, as the 429 below does: metrics, the
+                        // duration histogram and the access log read these, and a refusal that
+                        // records route="-" tells an operator nothing.
+                        ctx.listener = Some(listener);
+                        ctx.rule = Some(rule);
+                        ctx.local_status = Some(401);
                         // No detail in the body. Which reason it was is an operator's business,
                         // and telling a caller narrows the search for whoever is guessing.
-                        let mut header = ResponseHeader::build(401u16, Some(1))?;
-                        header.insert_header(http::header::WWW_AUTHENTICATE, challenge)?;
-                        session
-                            .write_response_header(Box::new(header), true)
-                            .await?;
+                        let header = refusal_response(&challenge, &ctx.request_id)?;
+                        session.write_response_header(Box::new(header), true).await?;
                         return Ok(true);
                     }
                 }
@@ -1060,6 +1076,23 @@ mod tests {
         );
         assert!(headers.get("transfer-encoding").is_none());
         assert_eq!(headers.get("x-keep").unwrap(), "yes");
+    }
+
+    #[test]
+    fn a_policy_refusal_carries_the_framing_of_any_local_answer() {
+        // Like the 429 and the local errors: an explicit empty length so the connection is not
+        // close-delimited (pingora would still say keep-alive and then close), no-store so no
+        // cache keeps a refusal, and the request id where every other answer carries it.
+        let resp = refusal_response("Bearer", "req-1").unwrap();
+        assert_eq!(resp.status.as_u16(), 401);
+        assert_eq!(resp.headers.get("www-authenticate").unwrap(), "Bearer");
+        assert_eq!(
+            resp.headers.get("content-length").unwrap(),
+            "0",
+            "the body must not be close-delimited"
+        );
+        assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
+        assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-1");
     }
 
     #[test]
