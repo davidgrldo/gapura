@@ -11,7 +11,7 @@
 //! checked, so a request that is both malformed and anonymous is 401, not a 400 that tells a
 //! stranger how the route is shaped.
 
-use crate::access_api::{admin_caller, StoreCaller};
+use crate::access_api::{admin_caller, CallerError, StoreCaller};
 use crate::grants::{self, GroupMapping, Refusal, RoleChanges};
 use crate::state::AppState;
 use crate::store::{sqlstate, WriteError};
@@ -47,7 +47,11 @@ impl IntoResponse for Refusal {
 }
 
 /// `admin_caller`'s refusals, in words.
-fn refused_early(status: StatusCode) -> Response {
+fn refused_early(error: CallerError) -> Response {
+    let status = match error {
+        CallerError::MustChangePassword => return error.into_response(),
+        CallerError::Status(status) => status,
+    };
     let sentence = match status {
         StatusCode::UNAUTHORIZED => "You are not signed in.",
         StatusCode::FORBIDDEN => "You do not administer any workspace.",

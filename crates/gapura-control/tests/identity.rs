@@ -445,6 +445,11 @@ fn console(store: Arc<Store>, auth_mode: gapura_control::login::AuthMode) -> axu
 }
 
 fn cookie(subject: &str) -> String {
+    cookie_issued_at(subject, 0)
+}
+
+/// A session for `subject` issued at `issued_at`, in Unix milliseconds.
+fn cookie_issued_at(subject: &str, issued_at: u64) -> String {
     format!(
         "{}={}",
         gapura_control::login::COOKIE_NAME,
@@ -453,7 +458,7 @@ fn cookie(subject: &str) -> String {
                 subject: subject.to_string(),
                 groups: vec![],
                 expires_at: u64::MAX,
-                issued_at: 0,
+                issued_at,
             },
             KEY
         )
@@ -687,6 +692,155 @@ async fn a_disabled_unknown_or_foreign_session_is_signed_out() {
         .await
         .unwrap();
     assert_eq!(foreign.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// `method path` with the cookie `cookie`, sent as the console sends its own requests.
+async fn send_with(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+) -> (StatusCode, String) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn a_session_issued_before_its_accounts_cut_off_is_signed_out() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "update users set sessions_valid_after = to_timestamp(1700000000) where id = $1",
+            &[&s.root],
+        )
+        .await
+        .unwrap();
+    let app = console(store, gapura_control::login::AuthMode::Local);
+    let root = s.root.to_string();
+    for path in ["/api/me", "/api/users"] {
+        for issued_at in [0, 1_699_999_999_999] {
+            assert_eq!(
+                send_with(&app, "GET", path, &cookie_issued_at(&root, issued_at))
+                    .await
+                    .0,
+                StatusCode::UNAUTHORIZED,
+                "{path} with a session issued at {issued_at}"
+            );
+        }
+        for issued_at in [1_700_000_000_000, 1_700_000_000_001] {
+            let (status, body) =
+                send_with(&app, "GET", path, &cookie_issued_at(&root, issued_at)).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{path} with a session issued at {issued_at}: {body}"
+            );
+        }
+    }
+    // Only the account whose sessions were cut off is signed out.
+    assert_eq!(
+        call(&app, "/api/users", Some(s.pat)).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_temporary_password_opens_nothing_but_me() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "update users set must_change_password = true where id = $1",
+            &[&s.root],
+        )
+        .await
+        .unwrap();
+    let app = console(store, gapura_control::login::AuthMode::Local);
+
+    let (status, body) = call(&app, "/api/me", Some(s.root)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let me = json(&body);
+    assert_eq!(me["must_change_password"], true);
+    assert_eq!(me["local"], true);
+    let oli = json(&call(&app, "/api/me", Some(s.oli)).await.1);
+    assert_eq!(oli["must_change_password"], false);
+    assert_eq!(oli["local"], false);
+
+    // Every store API route a signed-in person can call, each method of it. A superuser, so no
+    // refusal for want of a role can pass for this one.
+    let user_roles = format!("/api/users/{}/roles", s.pat);
+    let routes: &[(&str, &str)] = &[
+        ("GET", "/api/users"),
+        ("GET", "/api/roles"),
+        ("PATCH", &user_roles),
+        ("PUT", "/api/group-mappings"),
+        ("DELETE", "/api/group-mappings"),
+        ("GET", "/api/workspaces/default/services"),
+        ("POST", "/api/workspaces/default/services"),
+        ("PUT", "/api/workspaces/default/services/s"),
+        ("DELETE", "/api/workspaces/default/services/s"),
+        ("GET", "/api/workspaces/default/routes"),
+        ("POST", "/api/workspaces/default/routes"),
+        ("PUT", "/api/workspaces/default/routes/r"),
+        ("DELETE", "/api/workspaces/default/routes/r"),
+        ("GET", "/api/workspaces/default/consumers"),
+        ("POST", "/api/workspaces/default/consumers"),
+        ("DELETE", "/api/workspaces/default/consumers/c"),
+        ("POST", "/api/workspaces/default/consumers/c/keys"),
+        ("DELETE", "/api/workspaces/default/consumers/c/keys/p"),
+        ("GET", "/api/workspaces/default/key-auth"),
+        ("PUT", "/api/workspaces/default/key-auth"),
+        ("DELETE", "/api/workspaces/default/key-auth"),
+        ("GET", "/api/data-planes"),
+        ("POST", "/api/data-planes"),
+        ("DELETE", "/api/data-planes/d"),
+        ("POST", "/api/data-planes/d/tokens"),
+        ("DELETE", "/api/data-planes/d/tokens/p"),
+        ("GET", "/api/routes"),
+        ("GET", "/api/overview"),
+    ];
+    let root = cookie(&s.root.to_string());
+    for (method, path) in routes {
+        let (status, body) = send_with(&app, method, path, &root).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+        assert_eq!(
+            json(&body),
+            serde_json::json!({"error": "Choose a new password first."}),
+            "{method} {path}"
+        );
+    }
+
+    // Signing out needs no account at all, so it still works.
+    let (status, _) = send_with(&app, "POST", "/auth/logout", &root).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]

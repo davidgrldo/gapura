@@ -6,6 +6,7 @@
 
 pub mod access;
 pub mod access_api;
+pub mod accounts;
 pub mod api;
 pub mod assets;
 pub mod bootstrap;

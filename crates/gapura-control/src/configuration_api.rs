@@ -7,7 +7,7 @@
 //! and a field the console should mark answers 400 with `{"error": sentence, "field": field}`.
 //! Kubernetes mode keeps no configuration in a store, so there these answer 404.
 
-use crate::access_api::{store_caller, StoreCaller};
+use crate::access_api::{store_caller, CallerError, StoreCaller};
 use crate::configuration::{self, Action, FieldError, Write};
 use crate::grants::Refusal;
 use crate::grants_api::{unreadable, unsaved, NOT_SAVED};
@@ -27,7 +27,11 @@ use uuid::Uuid;
 const CONTENDED: &str = "Someone else was changing this workspace at that moment, so this change was not saved. Try again.";
 
 /// `store_caller`'s refusals, and a missing store, in words.
-pub(crate) fn early(status: StatusCode) -> Response {
+pub(crate) fn early(error: CallerError) -> Response {
+    let status = match error {
+        CallerError::MustChangePassword => return error.into_response(),
+        CallerError::Status(status) => status,
+    };
     let sentence = match status {
         StatusCode::UNAUTHORIZED => "You are not signed in.",
         StatusCode::NOT_FOUND => "This console keeps no configuration: it runs without a database.",
@@ -67,12 +71,11 @@ pub(crate) fn written(result: Result<(), WriteError>) -> Response {
 }
 
 /// The store and the caller behind `headers`, before anything about the request is looked at.
-/// A refusal is a status `early` words; returning it rather than the response keeps the error
-/// small.
+/// A refusal is one `early` words; returning it rather than the response keeps the error small.
 pub(crate) async fn caller_of<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
-) -> Result<(&'a Store, StoreCaller), StatusCode> {
+) -> Result<(&'a Store, StoreCaller), CallerError> {
     let store = state.store.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let caller = store_caller(store, headers, &state.session_key).await?;
     Ok((store, caller))
@@ -123,7 +126,7 @@ pub(crate) fn body<T: serde::de::DeserializeOwned>(
 /// A read that failed in the store, which is not the caller's fault.
 pub(crate) fn unavailable(error: &anyhow::Error) -> Response {
     tracing::warn!(error = format!("{error:#}"), "reading configuration failed");
-    early(StatusCode::SERVICE_UNAVAILABLE)
+    early(StatusCode::SERVICE_UNAVAILABLE.into())
 }
 
 /// What a replace without `updated_at` is told. `configuration` has already refused one, so this

@@ -1,5 +1,6 @@
 //! The HTTP surface. Handlers stay thin: they resolve scope, call a reader, and serialise.
 
+use crate::access_api::CallerError;
 use crate::grants_api::MAX_BODY;
 use crate::rows::{self, Row};
 use crate::scope::{self, Scope};
@@ -277,7 +278,7 @@ mod session_cookie_tests {
 /// In store mode those screens know nothing about workspaces, so they are a superuser's until
 /// store-backed versions exist. Anyone else is refused outright, rather than shown a list
 /// filtered by a namespace mapping store mode does not have.
-async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, StatusCode> {
+async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, CallerError> {
     match &state.store {
         None => {
             let session =
@@ -290,7 +291,7 @@ async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, 
             if caller.me.superuser {
                 Ok(Scope::AllNamespaces)
             } else {
-                Err(StatusCode::FORBIDDEN)
+                Err(StatusCode::FORBIDDEN.into())
             }
         }
     }
@@ -299,7 +300,7 @@ async fn namespaces_for(state: &AppState, headers: &HeaderMap) -> Result<Scope, 
 async fn routes(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Row>>, StatusCode> {
+) -> Result<Json<Vec<Row>>, CallerError> {
     let visible = namespaces_for(&state, &headers).await?;
     let declared = state
         .source
@@ -369,7 +370,7 @@ struct Overview {
 async fn overview(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Overview>, StatusCode> {
+) -> Result<Json<Overview>, CallerError> {
     let visible = namespaces_for(&state, &headers).await?;
     // Same rule as `/api/routes`: a gateway that cannot be reached is not a failed request,
     // it is the answer. Collapsing the error to `None` here, rather than propagating it,
