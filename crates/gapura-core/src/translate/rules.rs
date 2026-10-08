@@ -101,6 +101,7 @@ pub(crate) fn compile(
                     .as_ref()
                     .and_then(|t| t.backend_request.as_deref()),
             )?,
+            connect_ms: None,
         };
         rules.push(RouteRule {
             route: rref.to_string(),

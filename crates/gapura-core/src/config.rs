@@ -270,6 +270,13 @@ pub struct WeightedBackend {
 pub struct Timeouts {
     pub request_ms: Option<u64>,
     pub backend_request_ms: Option<u64>,
+    /// How long connecting to an upstream may take, per attempt. For a TLS cluster Pingora applies
+    /// the same value separately to the TCP connect and to the TLS handshake, so connecting can
+    /// take up to about twice this. Set from a store service; Gateway API has no such field, so Kubernetes mode
+    /// leaves it `None`, which keeps the data plane's default. Omitted from the wire when unset, so
+    /// a configuration without it serialises byte-for-byte as before and its ETag does not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
 }
 
 /// TLS towards the backend. `None` on the cluster means plain HTTP.
@@ -405,6 +412,21 @@ mod tests {
         let old = serde_json::json!({"endpoints": [], "tls": null});
         let c: Cluster = serde_json::from_value(old).expect("a missing `resolve` must mean None");
         assert_eq!(c.resolve, None);
+    }
+
+    /// `connect_ms` must stay invisible on the wire while unset: a configuration that does not use
+    /// it has to serialise byte-for-byte as before, or its ETag changes for no reason.
+    #[test]
+    fn an_unset_connect_ms_is_absent_on_the_wire_and_reads_as_none() {
+        let old = serde_json::json!({"request_ms": null, "backend_request_ms": null});
+        let t: Timeouts =
+            serde_json::from_value(old).expect("a missing `connect_ms` must mean None");
+        assert_eq!(t.connect_ms, None);
+        let wire = serde_json::to_value(Timeouts::default()).unwrap();
+        assert!(
+            wire.get("connect_ms").is_none(),
+            "an unset connect_ms must not be serialised: {wire}"
+        );
     }
 
     /// The other direction, which is easy to miss: the data plane keeps a disk cache, so

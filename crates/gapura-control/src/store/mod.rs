@@ -13,6 +13,7 @@ use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService,
 use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
+mod configuration;
 mod grants;
 mod identity;
 mod tls;
@@ -35,6 +36,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0003_audit_method",
         include_str!("../../migrations/0003_audit_method.sql"),
+    ),
+    (
+        "0004_routes_service_index",
+        include_str!("../../migrations/0004_routes_service_index.sql"),
     ),
 ];
 
@@ -160,7 +165,8 @@ impl Store {
 
         let services = tx
             .query(
-                "select w.name as workspace, s.name, s.protocol, s.host, s.port
+                "select w.name as workspace, s.name, s.protocol, s.host, s.port,
+                        s.connect_timeout_ms, s.read_timeout_ms
                    from services s join workspaces w on w.id = s.workspace_id
                   order by w.name, s.name",
                 &[],
@@ -179,6 +185,12 @@ impl Store {
                     },
                     host: r.get("host"),
                     port: r.get::<_, i32>("port") as u16,
+                    connect_timeout_ms: r
+                        .get::<_, Option<i32>>("connect_timeout_ms")
+                        .and_then(|ms| u32::try_from(ms).ok()),
+                    read_timeout_ms: r
+                        .get::<_, Option<i32>>("read_timeout_ms")
+                        .and_then(|ms| u32::try_from(ms).ok()),
                 }
             })
             .collect();

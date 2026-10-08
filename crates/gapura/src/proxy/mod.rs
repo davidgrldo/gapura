@@ -148,6 +148,14 @@ pub fn effective_timeout(t: &Timeouts) -> Option<Duration> {
     }
 }
 
+/// The connect timeout for `t`'s rule: its own, where 0 or unset means the default.
+pub fn connect_timeout(t: &Timeouts) -> Duration {
+    t.connect_ms
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_CONNECT_TIMEOUT)
+}
+
 /// RFC 9110 section 9.2.2: sending these twice has the effect of sending them once.
 fn idempotent(method: &http::Method) -> bool {
     use http::Method;
@@ -645,7 +653,10 @@ impl ProxyHttp for GapuraProxy {
             .rule()
             .map(|r| effective_timeout(&r.timeouts))
             .unwrap_or(Some(DEFAULT_UPSTREAM_TIMEOUT));
-        peer.options.connection_timeout = Some(DEFAULT_CONNECT_TIMEOUT);
+        peer.options.connection_timeout = Some(
+            ctx.rule()
+                .map_or(DEFAULT_CONNECT_TIMEOUT, |r| connect_timeout(&r.timeouts)),
+        );
         peer.options.read_timeout = timeout;
         peer.options.write_timeout = timeout;
         ctx.upstream_started = Some(Instant::now());
@@ -958,6 +969,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn connect_timeout_is_the_rules_own_or_the_default() {
+        assert_eq!(
+            connect_timeout(&Timeouts::default()),
+            DEFAULT_CONNECT_TIMEOUT
+        );
+        assert_eq!(
+            connect_timeout(&Timeouts {
+                connect_ms: Some(250),
+                ..Timeouts::default()
+            }),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            connect_timeout(&Timeouts {
+                connect_ms: Some(0),
+                ..Timeouts::default()
+            }),
+            DEFAULT_CONNECT_TIMEOUT
+        );
+    }
+
+    #[test]
     fn effective_timeout_follows_gateway_api_zero_means_disabled() {
         assert_eq!(
             effective_timeout(&Timeouts::default()),
@@ -966,28 +999,32 @@ mod tests {
         assert_eq!(
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
-                backend_request_ms: None
+                backend_request_ms: None,
+                ..Timeouts::default()
             }),
             Some(Duration::from_millis(1500))
         );
         assert_eq!(
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
-                backend_request_ms: Some(500)
+                backend_request_ms: Some(500),
+                ..Timeouts::default()
             }),
             Some(Duration::from_millis(500))
         );
         assert_eq!(
             effective_timeout(&Timeouts {
                 request_ms: Some(0),
-                backend_request_ms: None
+                backend_request_ms: None,
+                ..Timeouts::default()
             }),
             None
         );
         assert_eq!(
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
-                backend_request_ms: Some(0)
+                backend_request_ms: Some(0),
+                ..Timeouts::default()
             }),
             None
         );
