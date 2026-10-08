@@ -13,7 +13,7 @@ use crate::configuration_api::{body, caller_of, early, field_error, unavailable,
 use crate::data_planes::{self, IssuedToken};
 use crate::grants::Refusal;
 use crate::state::AppState;
-use crate::store::WriteError;
+use crate::store::{WriteError, PREFIX_LEN};
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{Path, State};
@@ -25,6 +25,14 @@ use axum::Json;
 /// does not exist.
 fn unknown() -> Response {
     Refusal::NotFound("There is no such data plane.".into()).into_response()
+}
+
+/// A name that could be no data plane's, answered as the store answers one that does not exist
+/// but without a query, so a name the database would reject (a NUL byte) never reaches it.
+fn refuse_name(name: &str) -> Option<Response> {
+    crate::configuration::name(name, "name")
+        .err()
+        .map(|_| Refusal::NotFound(format!("There is no data plane named {name}.")).into_response())
 }
 
 /// The answer to registering or issuing: the token, once, never cached.
@@ -96,10 +104,14 @@ pub async fn delete_data_plane(
     let Ok(Path(name)) = name else {
         return unknown();
     };
-    match data_planes::may_write(&caller.me) {
-        Ok(()) => written(store.delete_data_plane(caller.me.id, &name).await),
-        Err(r) => r.into_response(),
+    if let Err(r) = data_planes::may_write(&caller.me) {
+        return r.into_response();
     }
+    // After the superuser check, so a caller who may not write learns nothing about names.
+    if let Some(r) = refuse_name(&name) {
+        return r;
+    }
+    written(store.delete_data_plane(caller.me.id, &name).await)
 }
 
 /// `POST /api/data-planes/{name}/tokens`: issue another token, the first half of rotating one,
@@ -116,10 +128,13 @@ pub async fn issue_data_plane_token(
     let Ok(Path(name)) = name else {
         return unknown();
     };
-    match data_planes::may_write(&caller.me) {
-        Ok(()) => issued(store.issue_data_plane_token(caller.me.id, &name).await),
-        Err(r) => r.into_response(),
+    if let Err(r) = data_planes::may_write(&caller.me) {
+        return r.into_response();
     }
+    if let Some(r) = refuse_name(&name) {
+        return r;
+    }
+    issued(store.issue_data_plane_token(caller.me.id, &name).await)
 }
 
 /// `DELETE /api/data-planes/{name}/tokens/{prefix}`: revoke one token, by the prefix the list
@@ -136,12 +151,21 @@ pub async fn revoke_data_plane_token(
     let Ok(Path((name, prefix))) = path else {
         return unknown();
     };
-    match data_planes::may_write(&caller.me) {
-        Ok(()) => written(
-            store
-                .revoke_data_plane_token(caller.me.id, &name, &prefix)
-                .await,
-        ),
-        Err(r) => r.into_response(),
+    if let Err(r) = data_planes::may_write(&caller.me) {
+        return r.into_response();
     }
+    if let Some(r) = refuse_name(&name) {
+        return r;
+    }
+    // A prefix is exactly the length the list shows, of ASCII, which is also what keeps the
+    // store from slicing a longer string in the middle of a character.
+    if prefix.len() != PREFIX_LEN || !prefix.is_ascii() {
+        return Refusal::NotFound(format!("There is no token {prefix} for {name}."))
+            .into_response();
+    }
+    written(
+        store
+            .revoke_data_plane_token(caller.me.id, &name, &prefix)
+            .await,
+    )
 }

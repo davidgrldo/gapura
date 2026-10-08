@@ -358,17 +358,23 @@ impl Store {
         // tokio-postgres binds no IpAddr to inet without a feature it is not built with, so the
         // address goes over as text and the database parses it.
         let address = address.map(|a| a.to_string());
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                "with t as (update data_plane_tokens set last_used_at = now() where id = $2)
-                 update data_planes
-                    set last_seen_at = now(), last_seen_version = $3, last_seen_etag = $4,
-                        last_seen_address = $5::text::inet
-                  where id = $1",
-                &[&data_plane, &token, &version, &etag, &address],
-            )
-            .await?;
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        // The console's writes lock the data plane row. Liveness is best-effort, so a call
+        // queued behind one gives up after a second instead of holding the configuration call
+        // and a pool connection for as long as that write runs.
+        tx.batch_execute("set local lock_timeout = '1s'").await?;
+        tx.execute(
+            // A call with no peer keeps the address from the last one that had it.
+            "with t as (update data_plane_tokens set last_used_at = now() where id = $2)
+             update data_planes
+                set last_seen_at = now(), last_seen_version = $3, last_seen_etag = $4,
+                    last_seen_address = coalesce($5::text::inet, last_seen_address)
+              where id = $1",
+            &[&data_plane, &token, &version, &etag, &address],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -434,7 +440,7 @@ impl Store {
 
 /// Long enough that a prefix collision is a curiosity rather than a lookup that scans, short
 /// enough to be safe to log and to print in the console next to a data plane's name.
-const PREFIX_LEN: usize = 13;
+pub(crate) const PREFIX_LEN: usize = 13;
 
 fn hash(token: &str) -> String {
     hex(&Sha256::digest(token.as_bytes()))

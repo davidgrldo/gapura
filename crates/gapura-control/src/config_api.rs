@@ -179,6 +179,9 @@ async fn serve(
     let sent = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok());
+    // A served tag is 66 characters (quotes and 64 hex digits), so anything past 128 cannot be
+    // one a data plane holds. It is recorded as unknown rather than storing what a caller sent.
+    let recorded = sent.filter(|v| v.len() <= 128);
     // Recorded before the body is built and whatever the answer turns out to be: the caller is
     // alive either way, and a 304 is the overwhelming majority of these calls.
     if let Err(e) = api
@@ -187,7 +190,7 @@ async fn serve(
             id,
             token_id,
             version,
-            sent,
+            recorded,
             peer.map(|p| p.0 .0.ip().to_canonical()),
         )
         .await

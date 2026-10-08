@@ -880,6 +880,22 @@ async fn bad_input_is_named() {
             format!("{DATA_PLANES}/edge-1/tokens/gpdp_00000000"),
             "There is no token gpdp_00000000 for edge-1.",
         ),
+        // Answered before the store, which would reject a NUL byte in a text value.
+        (
+            "POST",
+            format!("{DATA_PLANES}/a%00b/tokens"),
+            "There is no data plane named a\0b.",
+        ),
+        (
+            "DELETE",
+            format!("{DATA_PLANES}/a%00b"),
+            "There is no data plane named a\0b.",
+        ),
+        (
+            "DELETE",
+            format!("{DATA_PLANES}/edge-1/tokens/gpd"),
+            "There is no token gpd for edge-1.",
+        ),
     ] {
         let (status, answer) = send(&app, method, &path, Some(s.root), FROM_THE_CONSOLE, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {answer}");

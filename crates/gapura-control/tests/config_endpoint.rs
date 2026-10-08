@@ -433,3 +433,27 @@ async fn a_call_records_the_address_the_tag_sent_and_the_token_used() {
         .get(0);
     assert_eq!(etag, None);
 }
+
+#[tokio::test]
+async fn a_tag_too_long_to_be_one_is_answered_but_not_stored() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.seed_token("edge-1").await.unwrap();
+
+    let (status, _, _) = get(&app, &token, Some(&"a".repeat(10 * 1024))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let etag: Option<String> = store
+        .client()
+        .await
+        .unwrap()
+        .query_one(
+            "select last_seen_etag from data_planes where name = 'edge-1'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(etag, None);
+}
