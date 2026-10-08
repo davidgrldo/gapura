@@ -450,7 +450,7 @@ impl Store {
             // audited as creating one.
             Some((id, current, enabled)) => {
                 tx.execute(
-                    "update plugins set config = jsonb_build_object('header', $2::text),
+                    "update plugins set config = config || jsonb_build_object('header', $2::text),
                             enabled = true, updated_at = now()
                       where id = $1",
                     &[&id, &header],

@@ -103,6 +103,20 @@ pub struct KeyAuthInput {
     pub header: Option<String>,
 }
 
+/// Names a key cannot be read from: the connection's own, which a proxy owns, and the one the
+/// data plane writes for the upstream (`gapura_core::credentials::CONSUMER_HEADER`, set in
+/// `upstream_request_filter` after it removes the inbound one). `authorization` is not here:
+/// people send keys in it.
+const RESERVED_HEADERS: &[&str] = &[
+    gapura_core::credentials::CONSUMER_HEADER,
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "te",
+    "upgrade",
+];
+
 /// An HTTP header name (RFC 9110 token characters), lowercased; `x-api-key` when absent.
 pub fn header(value: Option<&str>) -> Result<String, FieldError> {
     let value = value
@@ -113,10 +127,19 @@ pub fn header(value: Option<&str>) -> Result<String, FieldError> {
     if value.len() > MAX_HEADER_CHARS || !value.chars().all(token) {
         return Err(field(
             "header",
-            format!("Use a header name of 1 to {MAX_HEADER_CHARS} letters, digits or - _ ."),
+            format!(
+                "Use a header name of 1 to {MAX_HEADER_CHARS} letters, digits and - _ . ! # $ % & ' * + ^ ` | ~, with no spaces or colons."
+            ),
         ));
     }
-    Ok(value.to_ascii_lowercase())
+    let value = value.to_ascii_lowercase();
+    if RESERVED_HEADERS.contains(&value.as_str()) {
+        return Err(field(
+            "header",
+            format!("{value} is set by the connection or the gateway. Pick another header name."),
+        ));
+    }
+    Ok(value)
 }
 
 /// A key as a list shows it: never the key, never its hash.
@@ -135,11 +158,22 @@ pub struct ConsumerView {
 }
 
 /// What issuing answers with, the only time the key itself is shown.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct IssuedKey {
     pub key: String,
     pub prefix: String,
     pub expires_at: Option<String>,
+}
+
+/// By hand, so that a `{:?}` in a log or a failed assertion never prints the key.
+impl std::fmt::Debug for IssuedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssuedKey")
+            .field("key", &"<redacted>")
+            .field("prefix", &self.prefix)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -193,6 +227,11 @@ mod tests {
             expiry(&at("tomorrow"), now()).unwrap_err().field,
             "expires_at"
         );
+        // An offset is kept as the instant it names, in UTC.
+        assert_eq!(
+            expiry(&at("2030-01-01T07:00:00+07:00"), now()).unwrap(),
+            Some("2030-01-01T00:00:00Z".to_string())
+        );
     }
 
     #[test]
@@ -221,5 +260,36 @@ mod tests {
             assert_eq!(header(Some(bad)).unwrap_err().field, "header");
         }
         assert!(header(Some(&"a".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn a_header_the_connection_or_the_gateway_owns_is_refused() {
+        for bad in [
+            "x-consumer-username",
+            "X-Consumer-Username",
+            "Host",
+            "content-length",
+            "Transfer-Encoding",
+            "connection",
+            "TE",
+            "upgrade",
+        ] {
+            let e = header(Some(bad)).unwrap_err();
+            assert_eq!(e.field, "header", "{bad}");
+            assert!(e.sentence.contains("Pick another"), "{bad}");
+        }
+        assert_eq!(header(Some("Authorization")).unwrap(), "authorization");
+    }
+
+    #[test]
+    fn an_issued_key_is_not_printed() {
+        let issued = IssuedKey {
+            key: "gpak_secret".into(),
+            prefix: "gpak_abcd".into(),
+            expires_at: None,
+        };
+        let shown = format!("{issued:?}");
+        assert!(!shown.contains("gpak_secret"), "{shown}");
+        assert!(shown.contains("gpak_abcd"), "{shown}");
     }
 }

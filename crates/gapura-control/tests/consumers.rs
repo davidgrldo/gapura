@@ -574,6 +574,28 @@ async fn an_expired_key_is_not_served() {
 }
 
 #[tokio::test]
+async fn an_expiry_with_an_offset_is_stored_in_utc() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    let (_, _) = issue(
+        &app,
+        CONSUMERS,
+        "mobile",
+        s.ed,
+        r#"{"expires_at":"2030-01-01T07:00:00+07:00"}"#,
+    )
+    .await;
+    assert_eq!(
+        read(&app, CONSUMERS, s.vi).await[0]["keys"][0]["expires_at"],
+        "2030-01-01T00:00:00.000000Z"
+    );
+}
+
+#[tokio::test]
 async fn the_most_specific_requirement_applies() {
     let Some((store, _guard)) = fresh_store().await else {
         return;
@@ -793,6 +815,87 @@ async fn roles() {
     assert_eq!(read(&app, KEY_AUTH, s.vi).await, serde_json::json!([]));
 }
 
+/// A user whose only role is in `default` is refused the same way in a workspace that exists and
+/// one that does not, on every endpoint, so a refusal never says which workspaces exist, and
+/// nothing is written.
+#[tokio::test]
+async fn no_role_is_403_everywhere() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let before = everything(&store).await;
+    for (who, name) in [(s.ed, "ed"), (s.ada, "ada")] {
+        for (method, tail, body) in [
+            ("GET", "/consumers", ""),
+            ("POST", "/consumers", r#"{"name":"web"}"#),
+            ("DELETE", "/consumers/web", ""),
+            ("POST", "/consumers/web/keys", ""),
+            ("DELETE", "/consumers/web/keys/gpak_00000000", ""),
+            ("GET", "/key-auth", ""),
+            ("PUT", "/key-auth", r#"{"target":"workspace"}"#),
+            ("DELETE", "/key-auth?target=workspace", ""),
+        ] {
+            let mut answers = vec![];
+            for ws in ["payments", "nowhere"] {
+                let path = format!("/api/workspaces/{ws}{tail}");
+                let (status, answer) =
+                    send(&app, method, &path, Some(who), FROM_THE_CONSOLE, body).await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{name} {method} {path}: {answer}"
+                );
+                answers.push(answer);
+            }
+            assert_eq!(answers[0], answers[1], "{name} {method} {tail}");
+        }
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+}
+
+/// A key's prefix names it within one consumer of one workspace: another workspace's key with a
+/// consumer of the same name is not found, and keeps working.
+#[tokio::test]
+async fn a_prefix_names_a_key_in_its_own_workspace_only() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    for consumers in [CONSUMERS, PAYMENTS_CONSUMERS] {
+        ok(&app, "POST", consumers, s.root, r#"{"name":"mobile"}"#).await;
+    }
+    let (_, ours) = issue(&app, CONSUMERS, "mobile", s.root, "").await;
+    let (theirs, prefix) = issue(&app, PAYMENTS_CONSUMERS, "mobile", s.root, "").await;
+    assert_ne!(ours, prefix);
+
+    let before = everything(&store).await;
+    let (status, answer) = send(
+        &app,
+        "DELETE",
+        &format!("{CONSUMERS}/mobile/keys/{prefix}"),
+        Some(s.ada),
+        FROM_THE_CONSOLE,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+    assert_eq!(everything(&store).await, before, "nothing was written");
+    let listed = read(&app, PAYMENTS_CONSUMERS, s.root).await;
+    assert_eq!(listed[0]["keys"][0]["prefix"], prefix.as_str());
+    assert_eq!(
+        identify(&compiled(&store).await, Some(&theirs), Some("payments")),
+        Ok("mobile"),
+        "the payments key is still served"
+    );
+}
+
 /// Two editors switching key_auth on for one target at the same moment, with different headers:
 /// the unique index lets one insert, and the other, retried, finds that row and changes its
 /// header. Once per kind of target, each from nothing.
@@ -891,6 +994,18 @@ async fn bad_input_is_named() {
             "PUT",
             KEY_AUTH,
             r#"{"target":"workspace","header":"x y"}"#,
+            "header",
+        ),
+        (
+            "PUT",
+            KEY_AUTH,
+            r#"{"target":"workspace","header":"X-Consumer-Username"}"#,
+            "header",
+        ),
+        (
+            "PUT",
+            KEY_AUTH,
+            r#"{"target":"workspace","header":"Host"}"#,
             "header",
         ),
     ] {
