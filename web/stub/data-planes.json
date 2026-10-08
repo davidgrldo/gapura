@@ -1,0 +1,46 @@
+[
+  {
+    "name": "edge-eu-1",
+    "created_at": "2026-09-14T08:21:09.554120Z",
+    "last_seen_at": "2026-10-08T03:00:00.000000Z",
+    "last_seen_address": "10.0.3.7",
+    "status": "connected",
+    "in_sync": true,
+    "tokens": [
+      {
+        "prefix": "gpdp_3f9a1c0e",
+        "created_at": "2026-09-14T08:21:09.554120Z",
+        "last_used_at": "2026-10-08T03:00:00.000000Z"
+      },
+      {
+        "prefix": "gpdp_b7d2e481",
+        "created_at": "2026-10-07T10:42:33.871905Z",
+        "last_used_at": null
+      }
+    ]
+  },
+  {
+    "name": "edge-staging",
+    "created_at": "2026-10-06T14:05:48.209733Z",
+    "last_seen_at": null,
+    "last_seen_address": null,
+    "status": "never",
+    "in_sync": null,
+    "tokens": []
+  },
+  {
+    "name": "edge-us-1",
+    "created_at": "2026-09-20T17:33:12.046381Z",
+    "last_seen_at": "2026-10-08T02:59:41.000000Z",
+    "last_seen_address": "10.1.0.12",
+    "status": "connected",
+    "in_sync": false,
+    "tokens": [
+      {
+        "prefix": "gpdp_9c4e07a5",
+        "created_at": "2026-09-20T17:33:12.046381Z",
+        "last_used_at": "2026-10-08T02:59:41.000000Z"
+      }
+    ]
+  }
+]

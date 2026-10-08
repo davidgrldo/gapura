@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console has a Data planes page under Gateways. Anyone with a role sees each data plane's
+  status (connected within the last two minutes, not seen for how long, or never), whether it holds
+  the configuration served now, the address it called from as the control plane sees it, and its
+  tokens with when each was last used; the list refreshes on its own while it is visible.
+  Superusers register data planes (the token is shown once, with an example command to start the
+  gateway with it), issue another token for rotation, revoke tokens and delete data planes. The
+  once-only box that shows a token is now shared with the consumer key sheet.
 - The control plane has an API for data planes: `/api/data-planes` (list, register), and
   `/data-planes/{name}/tokens` (issue another, revoke) and `/data-planes/{name}` (delete).
   Registering, issuing, revoking and deleting are a superuser's, because a data plane fetches every
