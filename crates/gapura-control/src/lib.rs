@@ -15,6 +15,7 @@ pub mod configuration_api;
 pub mod consumers;
 pub mod consumers_api;
 pub mod data_planes;
+pub mod data_planes_api;
 pub mod declared;
 pub mod grants;
 pub mod grants_api;
