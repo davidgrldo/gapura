@@ -56,7 +56,7 @@
 {{- end }}
 {{- $usersSecret := "" }}
 {{- if $localFile }}
-{{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" .)) }}
+{{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" . | trunc 49 | trimSuffix "-")) }}
 {{- if not ((((.Values.console).auth).local).existingSecret) }}
 ---
 apiVersion: v1
@@ -85,6 +85,12 @@ stringData:
 {{- fail (printf "console.service.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $port) }}
 {{- end }}
 {{- $fullname := include "gapura.fullname" . }}
+{{- /* One name base for every -control object: the helper truncates, a raw fullname minus
+       suffix makes a 67-character Service on a long release. */}}
+{{- $controlName := include "gapura.controlName" . }}
+{{- /* The config endpoint's Service carries the longest suffix (-control-config), so it
+       truncates its own base; deriving it from $controlName could itself overrun 63. */}}
+{{- $configName := printf "%s-control-config" (include "gapura.fullname" . | trunc 48 | trimSuffix "-") }}
 ---
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
@@ -95,7 +101,7 @@ stringData:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   namespace: {{ .Release.Namespace }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 {{- if (((.Values.console).rbac).create) }}
@@ -103,7 +109,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 rules:
   # What kube_source reads: HTTPRoutes across every namespace, because the console scopes
@@ -116,22 +122,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $fullname }}-control
+    name: {{ $controlName }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   namespace: {{ .Release.Namespace }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
@@ -156,7 +162,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $fullname }}-control-config
+  name: {{ $configName }}
   namespace: {{ .Release.Namespace }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
@@ -174,7 +180,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   namespace: {{ .Release.Namespace }}
   labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
@@ -195,7 +201,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: console
     spec:
-      serviceAccountName: {{ $fullname }}-control
+      serviceAccountName: {{ $controlName }}
       {{- if or $localFile $storeCa $configTls }}
       volumes:
       {{- if $localFile }}
@@ -237,7 +243,7 @@ spec:
         {{- if $localFile }}
         - --local-users-file=/etc/gapura-control/users.yaml
         {{- end }}
-        - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ ((.Values.ports).admin) }}
+        - --gateway-admin=http://{{ include "gapura.adminName" . }}.{{ .Release.Namespace }}.svc:{{ ((.Values.ports).admin) }}
         - --controller-name={{ .Values.controllerName }}
         - --session-lifetime-seconds={{ (((.Values.console).sessionLifetimeSeconds) | default 3600) }}
         - --log-level={{ (((.Values.console).logLevel) | default "info") }}

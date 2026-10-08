@@ -61,6 +61,20 @@ app.kubernetes.io/component: gateway
 {{- end -}}
 {{- end -}}
 
+{{- /* The admin Service's name: the base truncated so the suffix still fits the 63-character
+       limit. Both the Service and --gateway-admin must build the name this one way -- with the
+       untruncated fullname the console called a Service that does not exist and every route
+       read "cannot tell". */}}
+{{- define "gapura.adminName" -}}
+{{- printf "%s-admin" (include "gapura.fullname" . | trunc 57 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- /* The console objects' name base, truncated for the same 63-character limit: a fullname
+       long enough to survive it makes <fullname>-control an invalid name on its own. */}}
+{{- define "gapura.controlName" -}}
+{{- printf "%s-control" (include "gapura.fullname" . | trunc 55 | trimSuffix "-") -}}
+{{- end -}}
+
 {{- define "gapura.consoleImage" -}}
 {{- /* Every level guarded with the chart's defaults repeated here: a --reuse-values upgrade from
        a chart without a console section delivers image as null, and an unguarded read renders

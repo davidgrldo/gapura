@@ -4,7 +4,7 @@ apiVersion: v1
 kind: Service
 metadata:
   # Truncated so the suffix still fits the 63-character limit on a Service name.
-  name: {{ include "gapura.fullname" . | trunc 57 | trimSuffix "-" }}-admin
+  name: {{ include "gapura.adminName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "gapura.labels" . | nindent 4 }}

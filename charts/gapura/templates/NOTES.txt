@@ -34,14 +34,14 @@ Gapura {{ .Chart.AppVersion }} installed as {{ include "gapura.fullname" . }} in
 {{- end }}
 
 Metrics, health and the routing table live on the admin port ({{ (.Values.ports).admin }}) of the
-ClusterIP Service {{ include "gapura.fullname" . }}-admin. They are deliberately kept off the
+ClusterIP Service {{ include "gapura.adminName" . }}. They are deliberately kept off the
 public Service:
-     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gapura.fullname" . }}-admin {{ (.Values.ports).admin }}:{{ (.Values.ports).admin }}
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gapura.adminName" . }} {{ (.Values.ports).admin }}:{{ (.Values.ports).admin }}
      curl -s localhost:{{ (.Values.ports).admin }}/debug/config | head -20
 
 {{- if ((.Values.console).enabled) }}
 
-The console is enabled and served by {{ include "gapura.fullname" . }}-control on port
+The console is enabled and served by {{ include "gapura.controlName" . }} on port
 {{ (((.Values.console).service).port | default 8080) }}.
 {{- $mode := ((((.Values.console).auth).mode) | default "local") }}
 {{- if eq $mode "oidc" }}
