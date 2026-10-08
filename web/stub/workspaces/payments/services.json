@@ -7,7 +7,8 @@
     "connect_timeout_ms": null,
     "read_timeout_ms": 30000,
     "routes": 1,
-    "updated_at": "2026-09-22T07:55:18.250619Z"
+    "updated_at": "2026-09-22T07:55:18.250619Z",
+    "key_auth": null
   },
   {
     "name": "ledger",
@@ -17,7 +18,8 @@
     "connect_timeout_ms": 1500,
     "read_timeout_ms": 15000,
     "routes": 2,
-    "updated_at": "2026-09-25T11:20:47.671203Z"
+    "updated_at": "2026-09-25T11:20:47.671203Z",
+    "key_auth": null
   },
   {
     "name": "legacy-batch",
@@ -27,6 +29,7 @@
     "connect_timeout_ms": null,
     "read_timeout_ms": null,
     "routes": 0,
-    "updated_at": "2026-08-14T16:05:33.098374Z"
+    "updated_at": "2026-08-14T16:05:33.098374Z",
+    "key_auth": null
   }
 ]

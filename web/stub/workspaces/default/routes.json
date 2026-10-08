@@ -16,7 +16,11 @@
       "HEAD"
     ],
     "priority": 10,
-    "updated_at": "2026-09-30T08:13:02.417766Z"
+    "updated_at": "2026-09-30T08:13:02.417766Z",
+    "key_auth": {
+      "header": "x-api-key",
+      "from": "service"
+    }
   },
   {
     "name": "catch-all",
@@ -25,6 +29,10 @@
     "paths": [],
     "methods": [],
     "priority": 0,
-    "updated_at": "2026-09-28T14:41:12.033918Z"
+    "updated_at": "2026-09-28T14:41:12.033918Z",
+    "key_auth": {
+      "header": "x-partner-key",
+      "from": "route"
+    }
   }
 ]

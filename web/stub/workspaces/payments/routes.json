@@ -15,7 +15,8 @@
       "POST"
     ],
     "priority": 30,
-    "updated_at": "2026-09-25T11:24:05.312840Z"
+    "updated_at": "2026-09-25T11:24:05.312840Z",
+    "key_auth": null
   },
   {
     "name": "ledger-read",
@@ -34,7 +35,8 @@
       "HEAD"
     ],
     "priority": 20,
-    "updated_at": "2026-09-25T11:22:51.945027Z"
+    "updated_at": "2026-09-25T11:22:51.945027Z",
+    "key_auth": null
   },
   {
     "name": "provider-callback",
@@ -52,6 +54,7 @@
       "POST"
     ],
     "priority": 10,
-    "updated_at": "2026-09-22T07:58:40.126553Z"
+    "updated_at": "2026-09-22T07:58:40.126553Z",
+    "key_auth": null
   }
 ]

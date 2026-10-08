@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console has a Consumers page under Configuration, and an API-key requirement to go with it.
+  Create consumers and issue them keys: a key is shown once, with a Copy button, and closing the
+  dialog without copying asks first. A key may expire; revoke one, or delete the consumer. A
+  "Require an API key" control sits in the service and route sheets and, for the whole workspace,
+  on the Consumers page; a broader requirement shows read-only there, with where it comes from. A
+  lock beside a service or route says it requires a key. Roles are as for services and routes: a
+  viewer reads, an editor creates, issues and switches the requirement, an admin revokes and deletes.
 - The control plane has an API for store-mode consumers, their API keys, and the `key_auth`
   requirement: `/api/workspaces/{workspace}/consumers` (list, create, delete),
   `/consumers/{name}/keys` (issue, revoke) and `/key-auth` (list, require a key on the workspace, a
