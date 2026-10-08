@@ -178,7 +178,14 @@ fn compile_match(m: &HttpRouteMatch) -> Result<RouteMatch, Unsupported> {
         }
     };
     let mut headers = Vec::new();
+    let mut seen_headers = std::collections::BTreeSet::new();
     for h in &m.headers {
+        // The CRD's listMapKey=name is case-sensitive, so entries differing only in case both
+        // arrive; Gateway API's HTTPHeaderMatch says later ones with an equivalent name are
+        // ignored. Ignored entirely: a later entry cannot make the route Unsupported either.
+        if !seen_headers.insert(h.name.to_ascii_lowercase()) {
+            continue;
+        }
         if h.type_.as_deref().unwrap_or("Exact") != "Exact" {
             return Err(Unsupported(
                 "header match type RegularExpression is not supported".to_string(),
@@ -554,6 +561,34 @@ spec:
       urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: /new } }
 "#;
         assert!(compile_first(mixed).0.is_err());
+    }
+
+    #[test]
+    fn header_matches_differing_only_in_name_case_keep_the_first() {
+        // The CRD's listMapKey=name is case-sensitive, so {Foo: a} and {foo: b} both arrive;
+        // Gateway API's HTTPHeaderMatch says later entries with an equivalent name are ignored.
+        // Keeping both made the rule unmatchable (a request carries one casing) and ranked it
+        // as two header matches.
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - matches:
+    - path: { type: PathPrefix, value: / }
+      headers: [{ name: Foo, value: a }, { name: foo, value: b }]
+"#;
+        let (result, _) = compile_first(yaml);
+        let c = result.unwrap();
+        assert_eq!(
+            c.rules[0].matches[0].headers,
+            vec![KvMatch {
+                name: "foo".to_string(),
+                value: "a".to_string()
+            }],
+            "the first entry counts, the later equivalent name is dropped"
+        );
     }
 
     #[test]

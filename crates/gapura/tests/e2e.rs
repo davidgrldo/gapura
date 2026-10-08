@@ -10,7 +10,7 @@ use axum::extract::Request;
 use axum::routing::any;
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -60,6 +60,41 @@ async fn spawn_dead_and_upstream() -> (SocketAddr, SocketAddr) {
         SocketAddr::from(([127, 0, 0, 1], 1)),
         spawn_upstream(live).await,
     )
+}
+
+/// An upstream that answers each connection once, then closes the socket a moment later without
+/// saying so. Pingora finishes the response and pools the connection before the FIN arrives, so
+/// the next request is handed a connection the backend has already closed -- the common case
+/// `error_while_proxy` grants one retry for.
+async fn spawn_closing_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                // Read to the end of the request headers; a GET carries no body.
+                let mut buf = [0u8; 4096];
+                loop {
+                    match sock.read(&mut buf).await {
+                        Ok(n) if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") => break,
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => continue,
+                    }
+                }
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    addr
 }
 
 struct Gateway {
@@ -119,7 +154,7 @@ fn url(gw: &Gateway, host: &str, path: &str) -> String {
 }
 
 /// One Gateway on the HTTP port, one HTTPRoute with a rule per scenario, and three Services.
-fn config(http_port: u16, upstream: SocketAddr, dead: SocketAddr) -> String {
+fn config(http_port: u16, upstream: SocketAddr, dead: SocketAddr, reuse: SocketAddr) -> String {
     format!(
         r#"
 apiVersion: gateway.networking.k8s.io/v1
@@ -204,6 +239,11 @@ spec:
   parentRefs: [{{ name: main, namespace: infra }}]
   hostnames: [other.test]
   rules:
+  - matches: [{{ path: {{ type: PathPrefix, value: /reusedmirror }} }}]
+    filters:
+    - type: RequestMirror
+      requestMirror: {{ backendRef: {{ name: shadow, port: 80 }} }}
+    backendRefs: [{{ name: reuse, port: 80 }}]
   - backendRefs: [{{ name: echo, port: 80 }}]
 ---
 apiVersion: gateway.networking.k8s.io/v1
@@ -307,17 +347,31 @@ metadata: {{ name: flaky-live, namespace: apps, labels: {{ kubernetes.io/service
 addressType: IPv4
 endpoints: [{{ addresses: ["{up_ip}"], conditions: {{ ready: true }} }}]
 ports: [{{ name: http, port: {up_port} }}]
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: reuse, namespace: apps }}
+spec: {{ ports: [{{ name: http, port: 80 }}] }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {{ name: reuse-1, namespace: apps, labels: {{ kubernetes.io/service-name: reuse }} }}
+addressType: IPv4
+endpoints: [{{ addresses: ["{reuse_ip}"], conditions: {{ ready: true }} }}]
+ports: [{{ name: http, port: {reuse_port} }}]
 "#,
         up_ip = upstream.ip(),
         up_port = upstream.port(),
         dead_ip = dead.ip(),
         dead_port = dead.port(),
+        reuse_ip = reuse.ip(),
+        reuse_port = reuse.port(),
     )
 }
 
 async fn setup() -> (Gateway, reqwest::Client) {
     let (dead, upstream) = spawn_dead_and_upstream().await;
-    let gw = start_gateway(|http| config(http, upstream, dead)).await;
+    let gw = start_gateway(|http| config(http, upstream, dead, upstream)).await;
     let c = client(&gw);
     (gw, c)
 }
@@ -629,6 +683,53 @@ async fn mirrored_requests_fire_and_are_counted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_retry_on_a_reused_connection_mirrors_only_once() {
+    // #145: pingora runs upstream_request_filter on every attempt, and error_while_proxy grants
+    // one retry when a reused upstream connection fails. The first attempt had already run the
+    // filter, so the retry fired the mirror a second time for the same request.
+    let reuse = spawn_closing_upstream().await;
+    let dead = SocketAddr::from(([127, 0, 0, 1], 1));
+    // A live echo for the mirror to land on; the primary uses the closing upstream.
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_gateway(move |http| config(http, upstream, dead, reuse)).await;
+    let c = client(&gw);
+    let r = c
+        .get(url(&gw, "other.test", "/reusedmirror/a"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "the first request is served and mirrored");
+    let r = c
+        .get(url(&gw, "other.test", "/reusedmirror/b"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "the pooled connection is dead, the retry on the fresh one serves"
+    );
+    // One copy per request, on this route's own label so nothing else moves the count. Copies
+    // land milliseconds apart, so wait for the total, settle, and require it to hold.
+    wait_for_metric(
+        &gw,
+        "gapura_mirror_requests_total{result=\"sent\",route=\"apps/other\"} 2",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metrics.contains("gapura_mirror_requests_total{result=\"sent\",route=\"apps/other\"} 2"),
+        "each request is mirrored exactly once, retry included: {metrics}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_dead_mirror_backend_leaves_the_primary_alone() {
     let (gw, c) = setup().await;
     let r = c
@@ -914,7 +1015,7 @@ async fn an_unlimited_route_is_untouched_by_a_neighbors_limit() {
 async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
     let gw = start_gateway_with(
-        |http| config(http, upstream, dead),
+        |http| config(http, upstream, dead, upstream),
         &["--trusted-proxy", "127.0.0.0/8"],
     )
     .await;
@@ -956,7 +1057,11 @@ async fn debug_status_serves_the_computed_patches() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_query_string_is_logged_only_when_asked_for() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
-    let gw = start_gateway_with(|http| config(http, upstream, dead), &["--access-log-query"]).await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &["--access-log-query"],
+    )
+    .await;
     let r = client(&gw)
         .get(url(&gw, "echo.test", "/api/x?msg=it-works&page=2"))
         .send()
@@ -976,7 +1081,7 @@ async fn the_query_string_is_logged_only_when_asked_for() {
     // Without the flag the field is absent -- not null, absent -- so the default keeps
     // tokens out of the log without every consumer having to know about it.
     let (dead, upstream) = spawn_dead_and_upstream().await;
-    let gw = start_gateway_with(|http| config(http, upstream, dead), &[]).await;
+    let gw = start_gateway_with(|http| config(http, upstream, dead, upstream), &[]).await;
     let r = client(&gw)
         .get(url(&gw, "echo.test", "/api/x?msg=secret-token"))
         .send()
@@ -991,7 +1096,7 @@ async fn the_query_string_is_logged_only_when_asked_for() {
 async fn a_named_client_header_is_believed_behind_a_trusted_proxy() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
     let gw = start_gateway_with(
-        |http| config(http, upstream, dead),
+        |http| config(http, upstream, dead, upstream),
         &[
             "--trusted-proxy",
             "127.0.0.0/8",
@@ -1034,7 +1139,7 @@ async fn a_named_client_header_is_believed_behind_a_trusted_proxy() {
 async fn a_named_client_header_from_an_untrusted_peer_is_ignored() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
     let gw = start_gateway_with(
-        |http| config(http, upstream, dead),
+        |http| config(http, upstream, dead, upstream),
         &["--trusted-client-header", "CF-Connecting-IP"],
     )
     .await;

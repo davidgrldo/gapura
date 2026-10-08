@@ -457,3 +457,122 @@ async fn a_tag_too_long_to_be_one_is_answered_but_not_stored() {
         .get(0);
     assert_eq!(etag, None);
 }
+
+/// The schema's foreign key allows a route to name another workspace's service, which only SQL
+/// written by hand can make. Sent on, the route would compile into whichever same-named service
+/// its own workspace has -- the wrong upstream, silently -- or be dropped; like a foreign
+/// policy row, it fails the snapshot instead of guessing.
+#[tokio::test]
+async fn a_route_pointing_at_another_workspace_s_service_fails_the_snapshot() {
+    let Some((store, _, _guard)) = fixture().await else {
+        return;
+    };
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "insert into workspaces (name) values ('payments');
+             insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'orders.internal', 8080
+                 from workspaces where name = 'default';
+             insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'impostor.internal', 9090
+                 from workspaces where name = 'payments';
+             insert into routes (workspace_id, service_id, name, paths, priority)
+               select w.id, s.id, 'orders-api', '[{\"type\":\"prefix\",\"value\":\"/orders\"}]', 0
+                 from workspaces w, services s
+                where w.name = 'default' and s.workspace_id <> w.id;",
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .snapshot()
+        .await
+        .expect_err("a foreign service must fail the snapshot");
+    let text = format!("{error:#}");
+    assert!(text.contains("orders-api"), "{text}");
+    assert!(text.contains("default"), "{text}");
+    assert!(text.contains("another workspace"), "{text}");
+}
+
+/// The start order the comment in `main` promises: a flag that cannot be honoured stops the
+/// process before the store is touched. The certificate and the listener of the configuration
+/// endpoint are settled only after `migrate` today, so an upgrade carrying a bad path migrates
+/// the schema and then exits -- leaving the new schema for the old image's rollback. The
+/// ordering lives in `main`, so this runs the real binary.
+#[tokio::test]
+async fn a_bad_configuration_certificate_stops_the_start_before_any_migration() {
+    let Some((store, _, _guard)) = fixture().await else {
+        return;
+    };
+    // `fixture` migrates; this test is about a start that must not.
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "drop schema public cascade; create schema public;
+             grant all on schema public to public;",
+        )
+        .await
+        .unwrap();
+
+    // A kubeconfig pointing nowhere, so the Kubernetes client builds without a cluster and the
+    // start gets as far as the flags under test.
+    let kubeconfig = std::env::temp_dir().join(format!("gapura-kubeconfig-{}", std::process::id()));
+    std::fs::write(
+        &kubeconfig,
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: http://127.0.0.1:1\ncontexts:\n- name: c\n  context:\n    cluster: c\n    user: u\ncurrent-context: c\nusers:\n- name: u\n  user: {}\n",
+    )
+    .unwrap();
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_gapura-control"))
+            .args([
+                "--gateway-admin",
+                "http://127.0.0.1:1",
+                "--auth-mode",
+                "local",
+                "--listen",
+                "127.0.0.1:0",
+                "--listen-config",
+                "127.0.0.1:0",
+                "--config-tls-cert",
+                "/nonexistent/cert.pem",
+                "--config-tls-key",
+                "/nonexistent/key.pem",
+            ])
+            .env(
+                "DATABASE_URL",
+                std::env::var("GAPURA_TEST_DATABASE_URL").unwrap(),
+            )
+            .env("KUBECONFIG", &kubeconfig)
+            .output(),
+    )
+    .await
+    .expect("the start must stop on its own, not serve")
+    .unwrap();
+    let _ = std::fs::remove_file(&kubeconfig);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reading /nonexistent"),
+        "the certificate is what stopped it: {stderr}"
+    );
+    let migrated = store
+        .client()
+        .await
+        .unwrap()
+        .query_one(
+            "select to_regclass('public._migrations') is not null as ran",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, bool>("ran");
+    assert!(!migrated, "the schema must still be untouched: {stderr}");
+}

@@ -213,7 +213,7 @@ impl Store {
         let routes = tx
             .query(
                 "select w.name as workspace, r.name, s.name as service, r.hosts, r.methods,
-                        r.paths, r.priority
+                        r.paths, r.priority, r.workspace_id <> s.workspace_id as foreign_service
                    from routes r
                    join services s   on s.id = r.service_id
                    join workspaces w on w.id = r.workspace_id
@@ -224,11 +224,22 @@ impl Store {
             .into_iter()
             .map(|r| {
                 let name: String = r.get("name");
+                let workspace: String = r.get("workspace");
+                // The schema's foreign key allows a route to name another workspace's service,
+                // which only SQL written by hand can make. Sent on, the route would compile
+                // into whichever same-named service its own workspace has -- the wrong
+                // upstream, silently -- so it fails the snapshot like any unreadable row.
+                if r.get::<_, bool>("foreign_service") {
+                    anyhow::bail!(
+                        "route {name:?} in workspace {workspace:?} names a service of another \
+                         workspace"
+                    );
+                }
                 let paths: serde_json::Value = r.get("paths");
                 let paths = parse_paths(&paths)
                     .with_context(|| format!("route {name:?} has paths this binary cannot read"))?;
                 Ok(StoreRoute {
-                    workspace: r.get("workspace"),
+                    workspace,
                     name,
                     service: r.get("service"),
                     hosts: r.get("hosts"),

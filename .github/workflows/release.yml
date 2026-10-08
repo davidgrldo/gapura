@@ -24,6 +24,8 @@ jobs:
   # A dispatch builds whatever the dispatched branch holds, so it may only publish a prerelease.
   # Without this, dispatching v0.2.0 instead of v0.2.0-rc.9 published the GA image and chart from
   # main, and the later tag push overwrote both, since ghcr tags are mutable.
+  # Symmetrically, a pushed tag is a release: pushing v0.2.0-rc.11, which RELEASING.md forbids,
+  # would rebuild the candidate under new digests and publish it as a full, Latest release (#143).
   guard:
     runs-on: ubuntu-latest
     steps:
@@ -33,6 +35,14 @@ jobs:
           set -euo pipefail
           if ! printf '%s' "$DISPATCHED_TAG" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+$'; then
             echo "::error::dispatch publishes prereleases only (e.g. v0.2.0-rc.9), got '$DISPATCHED_TAG'; publish a release by pushing its tag"
+            exit 1
+          fi
+      - name: A pushed tag publishes a release, never a prerelease
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          if printf '%s' "$GITHUB_REF_NAME" | grep -q -- '-'; then
+            echo "::error::a pushed tag is a release; '$GITHUB_REF_NAME' is a prerelease -- publish prereleases by dispatch, not by pushing their tag"
             exit 1
           fi
   build:
@@ -237,8 +247,14 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           if [ -n "$DISPATCHED_TAG" ]; then version="${DISPATCHED_TAG#v}"; fi
           tag="v${version}"
+          # A prerelease version must not take over Latest; --prerelease keeps the Latest
+          # pointer on the newest full release, should one ever reach this step past the guard.
+          case "$version" in
+            *-*) prerelease=(--prerelease) ;;
+            *)   prerelease=() ;;
+          esac
           gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --verify-tag --title "gapura v${version}" --notes-file /tmp/notes.md
+            || gh release create "$tag" "${prerelease[@]}" --verify-tag --title "gapura v${version}" --notes-file /tmp/notes.md
           # The report file name embeds the version it was run for; older releases carry none.
           shopt -s nullglob
           reports=(conformance/reports/*/*/*v"${version}"-*.yaml)

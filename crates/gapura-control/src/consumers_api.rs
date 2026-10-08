@@ -9,10 +9,12 @@
 
 use crate::configuration::{Action, FieldError};
 use crate::configuration_api::{
-    body, caller_of, early, field_error, unavailable, unnamed, workspace_in, written,
+    body, caller_of, early, field_error, refuse_name, unavailable, unnamed, workspace_in, written,
 };
 use crate::consumers::{self, KeyInput, Target};
+use crate::grants::Refusal;
 use crate::state::AppState;
+use crate::store::PREFIX_LEN;
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
@@ -83,7 +85,12 @@ pub async fn delete_consumer(
         return unnamed();
     };
     match workspace_in(&caller, &ws, Action::Delete) {
-        Ok(workspace) => written(store.delete_consumer(caller.me.id, workspace, &name).await),
+        Ok(workspace) => {
+            if let Some(r) = refuse_name("consumer", &name) {
+                return r;
+            }
+            written(store.delete_consumer(caller.me.id, workspace, &name).await)
+        }
         Err(r) => r.into_response(),
     }
 }
@@ -107,6 +114,9 @@ pub async fn issue_key(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    if let Some(r) = refuse_name("consumer", &name) {
+        return r;
+    }
     let input = match raw {
         Ok(bytes) if bytes.is_empty() => KeyInput::default(),
         raw => match body(raw, "a request for a key") {
@@ -142,11 +152,22 @@ pub async fn revoke_key(
         return unnamed();
     };
     match workspace_in(&caller, &ws, Action::Delete) {
-        Ok(workspace) => written(
-            store
-                .revoke_key(caller.me.id, workspace, &name, &prefix)
-                .await,
-        ),
+        Ok(workspace) => {
+            if let Some(r) = refuse_name("consumer", &name) {
+                return r;
+            }
+            // A prefix is exactly the length the list shows, of ASCII, which is also what keeps
+            // the store from slicing a longer string in the middle of a character.
+            if prefix.len() != PREFIX_LEN || !prefix.is_ascii() {
+                return Refusal::NotFound(format!("There is no key {prefix} for {name}."))
+                    .into_response();
+            }
+            written(
+                store
+                    .revoke_key(caller.me.id, workspace, &name, &prefix)
+                    .await,
+            )
+        }
         Err(r) => r.into_response(),
     }
 }
