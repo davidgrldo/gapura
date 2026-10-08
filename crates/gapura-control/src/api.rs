@@ -23,10 +23,36 @@ pub fn router_with(state: AppState) -> Router {
         .route("/auth/callback", get(crate::login::callback))
         .route("/auth/logout", post(crate::login::logout))
         .route("/api/me", get(crate::access_api::me))
-        .route("/api/users", get(crate::access_api::users))
+        // Accounts. Every route that reads a body caps it, so a caller who has not been checked
+        // yet cannot make the console buffer more than `MAX_BODY` of it.
+        .route(
+            "/api/users",
+            get(crate::access_api::users)
+                .post(crate::accounts_api::create_account)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/users/{id}",
+            delete(crate::accounts_api::delete_account),
+        )
+        .route(
+            "/api/users/{id}/password",
+            post(crate::accounts_api::reset_password),
+        )
+        .route(
+            "/api/users/{id}/status",
+            put(crate::accounts_api::set_status).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/users/{id}/superuser",
+            put(crate::accounts_api::set_superuser).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/me/password",
+            post(crate::accounts_api::change_password).layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         .route("/api/roles", get(crate::access_api::roles))
-        // The two that read a body cap it, so a caller who has not been checked yet cannot make
-        // the console buffer more than `MAX_BODY` of it.
+        // Grants, which cap their bodies the same way.
         .route(
             "/api/users/{id}/roles",
             patch(crate::grants_api::set_roles).layer(DefaultBodyLimit::max(MAX_BODY)),

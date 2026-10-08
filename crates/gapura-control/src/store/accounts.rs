@@ -364,12 +364,16 @@ impl Store {
     /// allows. A wrong current password is refused as a `WriteError::Field` on
     /// `accounts::CURRENT`, which the handler counts as a failed attempt; a new password the
     /// rules refuse is a `WriteError::Field` on `new`.
+    ///
+    /// The answer is the cut-off it set, in Unix milliseconds, read as `access_rows` reads it.
+    /// It comes from the database's clock, and the new session from the console's: a session
+    /// issued no earlier than this stands whatever the difference between the two.
     pub async fn change_own_password(
         &self,
         caller: Uuid,
         current: &str,
         new: &str,
-    ) -> Result<(), WriteError> {
+    ) -> Result<i64, WriteError> {
         let change = PasswordChange {
             current: current.to_string(),
             new: new.to_string(),
@@ -381,7 +385,7 @@ impl Store {
         &self,
         caller: Uuid,
         change: &PasswordChange,
-    ) -> Result<(), WriteError> {
+    ) -> Result<i64, WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         bound_lock_waits(&tx).await?;
@@ -415,13 +419,16 @@ impl Store {
         }
         accounts::new_password(&username, change).map_err(WriteError::Field)?;
         let hash = hashed(change.new.clone()).await?;
-        tx.execute(
-            "update users set password_hash = $2, must_change_password = false,
-                              sessions_valid_after = now()
-              where id = $1",
-            &[&caller, &hash],
-        )
-        .await?;
+        let cut_off: i64 = tx
+            .query_one(
+                "update users set password_hash = $2, must_change_password = false,
+                                  sessions_valid_after = now()
+                  where id = $1
+              returning floor(extract(epoch from sessions_valid_after) * 1000)::bigint",
+                &[&caller, &hash],
+            )
+            .await?
+            .get(0);
         audit(
             &tx,
             &actor,
@@ -434,6 +441,6 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(cut_off)
     }
 }

@@ -225,6 +225,11 @@ pub struct UserView {
     method: Method,
     superuser: bool,
     status: Status,
+    /// On a temporary password a superuser handed out, not yet replaced.
+    must_change_password: bool,
+    /// A local account, whose password a superuser may reset and which may be deleted; an OIDC
+    /// one has no password here and would come back at its next sign-in.
+    local: bool,
     /// Unix seconds.
     last_sign_in_at: Option<i64>,
     /// Only the workspaces the caller administers. An empty list says nothing about roles
@@ -278,6 +283,8 @@ pub async fn users(
                 method: u.method,
                 superuser: u.superuser,
                 status,
+                must_change_password: u.must_change_password,
+                local: u.method == Method::Local,
                 last_sign_in_at: u.last_sign_in,
                 access,
             }

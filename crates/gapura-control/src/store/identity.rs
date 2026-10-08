@@ -32,6 +32,8 @@ impl Store {
             .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
             .start()
             .await?;
+        // The cut-off is floored to the millisecond: rounded, one late in its millisecond would
+        // read as the next, and refuse a session issued within the same one.
         let users = tx
             .query(
                 "select id,
@@ -42,7 +44,7 @@ impl Store {
                         oidc_groups,
                         floor(extract(epoch from last_sign_in_at))::bigint as last_sign_in,
                         must_change_password,
-                        (extract(epoch from sessions_valid_after) * 1000)::bigint
+                        floor(extract(epoch from sessions_valid_after) * 1000)::bigint
                             as sessions_valid_after
                    from users
                   order by lower(coalesce(username, display_name, oidc_subject)), id",

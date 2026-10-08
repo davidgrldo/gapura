@@ -571,7 +571,7 @@ fn now_seconds() -> u64 {
 }
 
 /// When a session is issued, to the millisecond, which `sessions_valid_after` is compared with.
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -772,7 +772,7 @@ pub async fn login_local(
 }
 
 /// The address `throttle` counts this request against.
-fn client_addr(
+pub(crate) fn client_addr(
     state: &AppState,
     headers: &header::HeaderMap,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
@@ -844,6 +844,29 @@ async fn store_login(
     )
 }
 
+/// The `Set-Cookie` value of a fresh session for `subject`, issued at `issued_at` (Unix
+/// milliseconds), which is `now_millis()` but where the session must not fall before a cut-off
+/// read from the database's clock.
+pub(crate) fn session_cookie(
+    state: &AppState,
+    subject: String,
+    groups: Vec<String>,
+    issued_at: u64,
+) -> String {
+    set_cookie(
+        &session::encode(
+            &Session {
+                subject,
+                groups,
+                expires_at: now_seconds() + state.session_lifetime.as_secs(),
+                issued_at,
+            },
+            &state.session_key,
+        ),
+        state.session_lifetime,
+    )
+}
+
 /// A redirect to where the reader was going, carrying a fresh session for `subject`.
 fn session_response(
     state: &AppState,
@@ -851,18 +874,7 @@ fn session_response(
     groups: Vec<String>,
     return_to: Option<&str>,
 ) -> Response {
-    let cookie = set_cookie(
-        &session::encode(
-            &Session {
-                subject,
-                groups,
-                expires_at: now_seconds() + state.session_lifetime.as_secs(),
-                issued_at: now_millis(),
-            },
-            &state.session_key,
-        ),
-        state.session_lifetime,
-    );
+    let cookie = session_cookie(state, subject, groups, now_millis());
     let destination = return_to
         .filter(|p| safe_return_path(p))
         .unwrap_or(AFTER_LOGIN);
@@ -1114,18 +1126,7 @@ pub async fn callback(
         }
     };
 
-    let cookie = set_cookie(
-        &session::encode(
-            &Session {
-                subject,
-                groups,
-                expires_at: now_seconds() + state.session_lifetime.as_secs(),
-                issued_at: now_millis(),
-            },
-            &state.session_key,
-        ),
-        state.session_lifetime,
-    );
+    let cookie = session_cookie(&state, subject, groups, now_millis());
     let destination = pending
         .return_to
         .as_deref()
