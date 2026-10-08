@@ -1,5 +1,7 @@
 # The console in store mode: accounts and roles in Postgres. DATABASE_URL and the bootstrap
-# superuser come from Secrets; no users Secret, no users file, no --grant.
+# superuser come from Secrets; no users Secret, no users file, no --grant. The configuration
+# endpoint data planes poll gets its Service and its TLS Secret, so a registered plane can
+# reach it the way the Data planes page tells the operator to point one.
 console:
   enabled: true
   store:
@@ -8,5 +10,10 @@ console:
       existingSecret: gapura-console-bootstrap
     ca:
       existingSecret: gapura-console-db-ca
+    config:
+      service:
+        create: true
+      tls:
+        existingSecret: gapura-console-config-tls
   sessionKey:
     existingSecret: gapura-console-session

@@ -3,7 +3,7 @@
 {{- if not (has $mode (list "local" "oidc")) }}
 {{- fail (printf "console.auth.mode must be local or oidc, got %q" $mode) }}
 {{- end }}
-{{- $localUsers := (((.Values.console).auth).local).users | default list }}
+{{- $localUsers := ((((.Values.console).auth).local).users) | default list }}
 {{- /* Store mode: the console keeps its accounts and roles in Postgres. gapura-control refuses
        --local-users-file and --grant alongside DATABASE_URL rather than ignoring them, and the
        chart says so at render time instead of leaving a pod in CrashLoopBackOff. */}}
@@ -20,12 +20,43 @@
 {{- /* The store's CA bundle, mounted only with a store: without one there is no connection for it
        to verify. */}}
 {{- $storeCa := and $store (((((.Values.console).store).ca).existingSecret) | default "") }}
-{{- if and $localFile (not (((.Values.console).auth).local).existingSecret) (eq (len $localUsers) 0) }}
+{{- /* The configuration endpoint data planes poll (/v1/config). gapura-control serves it on a
+       second listener, and only with a store -- the configuration lives there -- refusing
+       --config-tls-cert without DATABASE_URL exactly as it refuses the endpoint without one;
+       the chart mirrors both refusals at render time. */}}
+{{- $configPort := int (((((.Values.console).store).config).port) | default 8081) }}
+{{- $configTls := (((((.Values.console).store).config).tls).existingSecret) | default "" }}
+{{- if and (not $store) (or $configTls (((((.Values.console).store).config).service).create)) }}
+{{- fail "console.store.config needs console.store: the configuration endpoint exists only when accounts and roles live in Postgres" }}
+{{- end }}
+{{- if and $localFile (not ((((.Values.console).auth).local).existingSecret)) (eq (len $localUsers) 0) }}
 {{- fail "console.auth.mode local with no console.auth.local.users: a console nobody can log into is the failure this catches" }}
+{{- end }}
+{{- /* The renderer cannot tell an unset provider from an empty one, and values.yaml's promise
+       that helm fails an enabled console naming no provider was just prose: --oidc-issuer=
+       rendered empty and the empty secretKeyRef names only fell over at apply, as a pod that
+       starts and signs nobody in. The same goes for a session key with no Secret behind it, in
+       either mode: GAPURA_SESSION_KEY with an empty secretKeyRef name. Say it at render time. */}}
+{{- if eq $mode "oidc" }}
+{{- if not (((.Values.console).oidc).issuer) }}
+{{- fail "console.auth.mode oidc with no console.oidc.issuer: --oidc-issuer renders empty and the console signs nobody in" }}
+{{- end }}
+{{- if not (((.Values.console).oidc).clientId) }}
+{{- fail "console.auth.mode oidc with no console.oidc.clientId: --oidc-client-id renders empty and the provider refuses every sign-in" }}
+{{- end }}
+{{- if not (((.Values.console).oidc).redirectUrl) }}
+{{- fail "console.auth.mode oidc with no console.oidc.redirectUrl: --oidc-redirect-url renders empty and the provider drops the callback" }}
+{{- end }}
+{{- if not (((.Values.console).oidc).existingSecret) }}
+{{- fail "console.auth.mode oidc with no console.oidc.existingSecret: the client secret's secretKeyRef renders an empty name the API server rejects" }}
+{{- end }}
+{{- end }}
+{{- if not (((.Values.console).sessionKey).existingSecret) }}
+{{- fail "console.sessionKey.existingSecret must name a Secret holding the session-signing key (>= 32 bytes, base64 accepted): the chart does not create one, because a key generated at install time would rotate on every upgrade" }}
 {{- end }}
 {{- $usersSecret := "" }}
 {{- if $localFile }}
-{{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" .)) }}
+{{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" . | trunc 49 | trimSuffix "-")) }}
 {{- if not ((((.Values.console).auth).local).existingSecret) }}
 ---
 apiVersion: v1
@@ -33,32 +64,33 @@ kind: Secret
 metadata:
   name: {{ $usersSecret }}
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 type: Opaque
 stringData:
   users.yaml: |
     users:
+{{- /* toJson, not bare interpolation: a group "*" renders as `- *`, an invalid YAML alias the
+      console cannot parse its users file over, and "team #1" reads as `team` with the rest
+      taken for a comment, so its grants silently never match. */}}
 {{- range $localUsers }}
-      - email: {{ .email }}
-        bcrypt: {{ .bcryptHash }}
-        groups:
-{{- if .groups }}
-{{- range .groups }}
-        - {{ . }}
-{{- end }}
-{{- else }}
-        []
-{{- end }}
+      - email: {{ .email | toJson }}
+        bcrypt: {{ .bcryptHash | toJson }}
+        groups: {{ (.groups | default list) | toJson }}
 {{- end }}
 {{- end }}
 {{- end }}
 {{- $port := int (((.Values.console).service).port | default 8080) }}
+{{- $serviceType := (((.Values.console).service).type | default "ClusterIP") }}
 {{- if and (ne .Values.privilegedPorts "capability") (ne .Values.privilegedPorts "sysctl") (lt $port 1024) }}
 {{- fail (printf "console.service.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $port) }}
 {{- end }}
 {{- $fullname := include "gapura.fullname" . }}
+{{- /* One name base for every -control object: the helper truncates, a raw fullname minus
+       suffix makes a 67-character Service on a long release. */}}
+{{- $controlName := include "gapura.controlName" . }}
+{{- /* The config endpoint's Service carries the longest suffix (-control-config), so it
+       truncates its own base; deriving it from $controlName could itself overrun 63. */}}
+{{- $configName := printf "%s-control-config" (include "gapura.fullname" . | trunc 48 | trimSuffix "-") }}
 ---
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
@@ -69,20 +101,16 @@ stringData:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
-{{- if ((.Values.console).rbac.create) }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
+{{- if (((.Values.console).rbac).create) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $fullname }}-control
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  name: {{ $controlName }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 rules:
   # What kube_source reads: HTTPRoutes across every namespace, because the console scopes
   # what it shows by the caller's grants, not by the API server's. The data plane's role is
@@ -94,56 +122,78 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $fullname }}-control
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  name: {{ $controlName }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $fullname }}-control
+    name: {{ $controlName }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
-  type: {{ ((.Values.console).service.type) }}
+  type: {{ $serviceType }}
   selector:
     app.kubernetes.io/name: {{ include "gapura.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: console
   ports:
   - name: http
-    port: {{ ((.Values.console).service.port) }}
+    port: {{ $port }}
     targetPort: http
-    {{- if and (eq ((.Values.console).service.type) "NodePort") (((.Values.console).service.nodePort)) }}
-    nodePort: {{ ((.Values.console).service.nodePort) }}
+    {{- if and (eq $serviceType "NodePort") ((((.Values.console).service).nodePort)) }}
+    nodePort: {{ (((.Values.console).service).nodePort) }}
     {{- end }}
+{{- /* The configuration endpoint's own Service, and deliberately not a port on the console's
+       Service above: every /v1/config response carries private keys, so an operator publishing
+       the console must not publish this with it. ClusterIP on purpose, like the admin Service:
+       publishing this one is a decision, not a default. */}}
+{{- if and $store (((((.Values.console).store).config).service).create) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $configName }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "gapura.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: console
+  ports:
+  - name: config
+    port: {{ $configPort }}
+    targetPort: config
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $fullname }}-control
+  name: {{ $controlName }}
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: console
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
-  {{- if not ((.Values.console).updateStrategy) }}
   strategy:
+  {{- /* Setting console.updateStrategy used to suppress the default rollingUpdate and then
+         render nothing, handing the Deployment the Kubernetes default silently. Render what
+         was set. */}}
+  {{- if ((.Values.console).updateStrategy) }}
+    {{- toYaml ((.Values.console).updateStrategy) | nindent 4 }}
+  {{- else }}
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   {{- end }}
-  replicas: {{ ((.Values.console).replicaCount) }}
+  replicas: {{ (((.Values.console).replicaCount) | default 1) }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "gapura.name" . }}
@@ -156,8 +206,8 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: console
     spec:
-      serviceAccountName: {{ $fullname }}-control
-      {{- if or $localFile $storeCa }}
+      serviceAccountName: {{ $controlName }}
+      {{- if or $localFile $storeCa $configTls }}
       volumes:
       {{- if $localFile }}
       - name: users
@@ -167,10 +217,15 @@ spec:
       - name: database-ca
         secret: { secretName: {{ $storeCa }} }
       {{- end }}
+      {{- if $configTls }}
+      - name: config-tls
+        secret: { secretName: {{ $configTls }} }
+      {{- end }}
       {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
         {{- if and (eq .Values.privilegedPorts "sysctl") (lt $port 1024) }}
         sysctls:
@@ -180,24 +235,31 @@ spec:
       containers:
       - name: control
         image: {{ include "gapura.consoleImage" . }}
-        imagePullPolicy: {{ ((.Values.console).image.pullPolicy) }}
+        imagePullPolicy: {{ (((.Values.console).image).pullPolicy | default "IfNotPresent") }}
         args:
-        - --listen=0.0.0.0:{{ ((.Values.console).service).port | default 8080 }}
+        - --listen=0.0.0.0:{{ $port }}
         - --auth-mode={{ $mode }}
+        {{- if $store }}
+        - --listen-config=0.0.0.0:{{ $configPort }}
+        {{- if $configTls }}
+        - --config-tls-cert=/etc/gapura-config-tls/{{ (((((.Values.console).store).config).tls).certKey) | default "tls.crt" }}
+        - --config-tls-key=/etc/gapura-config-tls/{{ (((((.Values.console).store).config).tls).keyKey) | default "tls.key" }}
+        {{- end }}
+        {{- end }}
         {{- if $localFile }}
         - --local-users-file=/etc/gapura-control/users.yaml
         {{- end }}
-        - --gateway-admin=http://{{ $fullname }}-admin.{{ .Release.Namespace }}.svc:{{ ((.Values.ports).admin) }}
+        - --gateway-admin=http://{{ include "gapura.adminName" . }}.{{ .Release.Namespace }}.svc:{{ ((.Values.ports).admin) }}
         - --controller-name={{ .Values.controllerName }}
-        - --session-lifetime-seconds={{ ((.Values.console).sessionLifetimeSeconds) }}
-        - --log-level={{ ((.Values.console).logLevel) }}
+        - --session-lifetime-seconds={{ (((.Values.console).sessionLifetimeSeconds) | default 3600) }}
+        - --log-level={{ (((.Values.console).logLevel) | default "info") }}
         {{- range ((.Values.console).grants) }}
         - --grant={{ . }}
         {{- end }}
         {{- if eq $mode "oidc" }}
-        - --oidc-issuer={{ ((.Values.console).oidc).issuer }}
-        - --oidc-client-id={{ ((.Values.console).oidc).clientId }}
-        - --oidc-redirect-url={{ ((.Values.console).oidc).redirectUrl }}
+        - --oidc-issuer={{ (((.Values.console).oidc).issuer) }}
+        - --oidc-client-id={{ (((.Values.console).oidc).clientId) }}
+        - --oidc-redirect-url={{ (((.Values.console).oidc).redirectUrl) }}
         - --oidc-groups-claim={{ (((.Values.console).oidc).groupsClaim) | default "groups" }}
         {{- range (((.Values.console).oidc).scopes) }}
         - --oidc-scope={{ . }}
@@ -211,14 +273,14 @@ spec:
         - name: GAPURA_SESSION_KEY
           valueFrom:
             secretKeyRef:
-              name: {{ ((.Values.console).sessionKey.existingSecret) }}
-              key: {{ ((.Values.console).sessionKey.key) }}
+              name: {{ (((.Values.console).sessionKey).existingSecret) }}
+              key: {{ (((.Values.console).sessionKey).key | default "session-key") }}
         {{- if eq $mode "oidc" }}
         - name: GAPURA_OIDC_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: {{ ((.Values.console).oidc.existingSecret) }}
-              key: {{ ((.Values.console).oidc.clientSecretKey) }}
+              name: {{ (((.Values.console).oidc).existingSecret) }}
+              key: {{ (((.Values.console).oidc).clientSecretKey | default "client-secret") }}
         {{- end }}
         {{- if $store }}
         - name: DATABASE_URL
@@ -245,7 +307,7 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
-        {{- if or $localFile $storeCa }}
+        {{- if or $localFile $storeCa $configTls }}
         volumeMounts:
         {{- if $localFile }}
         - { name: users, mountPath: /etc/gapura-control, readOnly: true }
@@ -253,17 +315,27 @@ spec:
         {{- if $storeCa }}
         - { name: database-ca, mountPath: /etc/gapura-database-ca, readOnly: true }
         {{- end }}
+        {{- if $configTls }}
+        - { name: config-tls, mountPath: /etc/gapura-config-tls, readOnly: true }
+        {{- end }}
         {{- end }}
         ports:
         - name: http
-          containerPort: {{ ((.Values.console).service.port) }}
+          containerPort: {{ $port }}
+        {{- if $store }}
+        - name: config
+          containerPort: {{ $configPort }}
+        {{- end }}
         livenessProbe:
           httpGet: { path: /healthz, port: http }
         readinessProbe:
           httpGet: { path: /healthz, port: http }
-        resources: {{- toYaml ((.Values.console).resources) | nindent 10 }}
+        resources: {{- toYaml (((.Values.console).resources) | default dict) | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
+          # The gateway container sets both of these too; the console writes nothing to disk and
+          # it is the process holding the session key and the database URL.
+          readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
             {{- if and (eq .Values.privilegedPorts "capability") (lt $port 1024) }}

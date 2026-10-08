@@ -55,9 +55,7 @@ kind: Service
 metadata:
   name: {{ $fullname }}-smoke-backend
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: smoke-backend
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "smoke-backend") | nindent 4 }}
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
@@ -74,9 +72,7 @@ kind: Deployment
 metadata:
   name: {{ $fullname }}-smoke-backend
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: smoke-backend
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "smoke-backend") | nindent 4 }}
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
@@ -108,9 +104,7 @@ kind: Pod
 metadata:
   name: {{ $fullname }}-smoke-curl
   namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "gapura.labels" . | nindent 4 }}
-    app.kubernetes.io/component: smoke
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "smoke") | nindent 4 }}
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
