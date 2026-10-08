@@ -563,7 +563,9 @@ impl ProxyHttp for GapuraProxy {
                         // No detail in the body. Which reason it was is an operator's business,
                         // and telling a caller narrows the search for whoever is guessing.
                         let header = refusal_response(&challenge, &ctx.request_id)?;
-                        session.write_response_header(Box::new(header), true).await?;
+                        session
+                            .write_response_header(Box::new(header), true)
+                            .await?;
                         return Ok(true);
                     }
                 }

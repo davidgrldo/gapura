@@ -355,7 +355,7 @@ mod path_tests {
         // forwarded upstream double-encoded, past any validation on `path_normalized`.
         let raw = "/café";
         assert_eq!(normalize_path(raw).unwrap(), raw);
-        let mut r = RequestHeader::build("GET", raw.as_bytes(), None).unwrap();
+        let r = RequestHeader::build("GET", raw.as_bytes(), None).unwrap();
         let e = Extracted::from_request(&r).unwrap();
         assert_eq!(e.path, raw);
         assert!(

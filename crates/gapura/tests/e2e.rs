@@ -1057,7 +1057,11 @@ async fn debug_status_serves_the_computed_patches() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_query_string_is_logged_only_when_asked_for() {
     let (dead, upstream) = spawn_dead_and_upstream().await;
-    let gw = start_gateway_with(|http| config(http, upstream, dead, upstream), &["--access-log-query"]).await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &["--access-log-query"],
+    )
+    .await;
     let r = client(&gw)
         .get(url(&gw, "echo.test", "/api/x?msg=it-works&page=2"))
         .send()

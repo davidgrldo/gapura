@@ -1101,7 +1101,11 @@ fn an_addressed_gateways_same_port_listeners_share_one_target_port() {
     assert_eq!(b.port, 10000, "same group, same target port");
     assert_eq!(a.client_port, Some(80));
     assert_eq!(b.client_port, Some(80));
-    assert_eq!(t.config.ports[&10000].len(), 2, "both routes match on 10000");
+    assert_eq!(
+        t.config.ports[&10000].len(),
+        2,
+        "both routes match on 10000"
+    );
     assert!(
         !t.config.ports.contains_key(&80),
         "the group moved off the shared port together"
