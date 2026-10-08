@@ -73,7 +73,8 @@ impl Extracted {
 /// - Percent-encoded unreserved characters (`A-Z a-z 0-9 - . _ ~`) are decoded, as RFC 3986
 ///   section 6.2.2.2 says they are equivalent to the character. Anything else stays encoded,
 ///   `%2F` included: an encoded slash is data some APIs carry on purpose, and Envoy's default
-///   is likewise to leave it.
+///   is likewise to leave it. Raw non-ASCII bytes pass through unchanged, so a path the client
+///   sent as UTF-8 is matched and forwarded as the same UTF-8.
 /// - Repeated slashes are merged.
 /// - A `.` or `..` segment, after decoding, is refused rather than resolved: a browser never
 ///   sends one, and resolving it is the backend's semantics to guess at.
@@ -85,24 +86,31 @@ pub fn normalize_path(raw: &str) -> Result<String, &'static str> {
         return Err("the request target is not an absolute path");
     }
     let bytes = raw.as_bytes();
-    let mut decoded = String::with_capacity(raw.len());
+    // Decoded bytes, not chars: the target may carry raw non-ASCII UTF-8 (httparse accepts
+    // bytes 0x80-0xFF there), and casting each byte to char re-encoded every byte of a
+    // multi-byte sequence as its own Latin-1 character — `/café` became `/cafÃ©`, which missed
+    // the route for `/café` and was forwarded upstream double-encoded. Bytes >= 0x80 pass
+    // through untouched; the percent branch below only ever writes ASCII.
+    let mut decoded: Vec<u8> = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
             let hex = raw.get(i + 1..i + 3).ok_or("a truncated percent escape")?;
             let v = u8::from_str_radix(hex, 16).map_err(|_| "an invalid percent escape")?;
             if v.is_ascii_alphanumeric() || matches!(v, b'-' | b'.' | b'_' | b'~') {
-                decoded.push(v as char);
+                decoded.push(v);
             } else {
-                decoded.push('%');
-                decoded.push_str(&hex.to_ascii_uppercase());
+                decoded.push(b'%');
+                decoded.extend_from_slice(hex.to_ascii_uppercase().as_bytes());
             }
             i += 3;
         } else {
-            decoded.push(bytes[i] as char);
+            decoded.push(bytes[i]);
             i += 1;
         }
     }
+    let decoded = std::str::from_utf8(&decoded)
+        .expect("only ASCII bytes were replaced, so the target is still UTF-8");
     let mut out = String::with_capacity(decoded.len());
     for c in decoded.chars() {
         if c == '/' && out.ends_with('/') {
@@ -286,6 +294,8 @@ mod tests {
 #[cfg(test)]
 mod path_tests {
     use super::normalize_path;
+    use crate::proxy::attrs::Extracted;
+    use pingora::http::RequestHeader;
 
     #[test]
     fn ordinary_paths_pass_unchanged() {
@@ -335,6 +345,25 @@ mod path_tests {
         }
         // Dots inside a segment are just characters.
         assert_eq!(normalize_path("/v1.2/..x/x..").unwrap(), "/v1.2/..x/x..");
+    }
+
+    #[test]
+    fn raw_non_ascii_bytes_pass_through_unchanged() {
+        // httparse accepts bytes 0x80-0xFF in the target, so a raw UTF-8 path arrives as its
+        // bytes: `/café` is 2f 63 61 66 c3 a9. Casting each byte to char re-encoded every one
+        // as Latin-1 (c3 83 c2 a9), so the mangled path missed the route for `/café` and was
+        // forwarded upstream double-encoded, past any validation on `path_normalized`.
+        let raw = "/café";
+        assert_eq!(normalize_path(raw).unwrap(), raw);
+        let mut r = RequestHeader::build("GET", raw.as_bytes(), None).unwrap();
+        let e = Extracted::from_request(&r).unwrap();
+        assert_eq!(e.path, raw);
+        assert!(
+            !e.path_normalized,
+            "a path we did not change must not be rewritten"
+        );
+        // Normalisation around the non-ASCII segment still applies.
+        assert_eq!(normalize_path("//café").unwrap(), "/café");
     }
 
     #[test]
