@@ -68,11 +68,12 @@ const ATTEMPTS: u32 = 3;
 ///   mapping, when neither existed yet, and the second insert lost. Run again, it reads the
 ///   first one's row as what it is changing, and its audit entry says so. Renaming a service or
 ///   route meets the same way when another write takes the new name at the same moment: run
-///   again, the rename sees the name taken and is refused as a conflict.
-pub(super) async fn retrying<F, Fut>(mut attempt: F) -> Result<(), WriteError>
+///   again, the rename sees the name taken and is refused as a conflict. Issuing an API key
+///   meets it when the new key's prefix is one already stored: run again, it draws another key.
+pub(super) async fn retrying<T, F, Fut>(mut attempt: F) -> Result<T, WriteError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<(), WriteError>>,
+    Fut: Future<Output = Result<T, WriteError>>,
 {
     let mut tried = 1;
     loop {
