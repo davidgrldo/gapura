@@ -6,6 +6,7 @@
   import * as Table from '$lib/components/ui/table/index.js'
   import { anyOf, base } from '../lib/configuration.js'
   import { can, remembered } from '../lib/workspace.js'
+  import Lock from 'phosphor-svelte/lib/Lock'
 
   let { me } = $props()
   // Only the starting choice: the picker owns it from here, and `me` is read once when the page
@@ -53,6 +54,11 @@
   const paths = (list) =>
     list.length === 0 ? 'any' : list.map((p) => `${p.type} ${p.value}`).join(', ')
   const region = (label) => ({ tabindex: 0, role: 'region', 'aria-label': label })
+  // The lock beside a name says a key is required there, and where that is set: on the row
+  // itself, or on what it inherits from. The title is for a pointer; the sr-only text says it to
+  // everyone else.
+  const locked = (row) =>
+    row.key_auth ? `Requires an API key in the ${row.key_auth.header} header, set on the ${row.key_auth.from}` : undefined
 </script>
 
 <h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Routes</h1>
@@ -107,7 +113,15 @@
         <Table.Body>
           {#each answer.routes as r (r.name)}
             <Table.Row>
-              <Table.Cell class="font-mono">{r.name}</Table.Cell>
+              <Table.Cell class="font-mono">
+                <span class="inline-flex items-center gap-1.5" title={locked(r)}>
+                  {r.name}
+                  {#if r.key_auth}
+                    <Lock aria-hidden="true" class="size-3.5 text-muted-foreground" />
+                    <span class="sr-only">, requires an API key (from the {r.key_auth.from})</span>
+                  {/if}
+                </span>
+              </Table.Cell>
               <Table.Cell class="font-mono">{r.service}</Table.Cell>
               <Table.Cell class="font-mono">{anyOf(r.hosts)}</Table.Cell>
               <Table.Cell class="font-mono">{paths(r.paths)}</Table.Cell>

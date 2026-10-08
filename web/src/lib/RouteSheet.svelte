@@ -4,6 +4,7 @@
   import { Button } from '$lib/components/ui/button/index.js'
   import { Input } from '$lib/components/ui/input/index.js'
   import NativeSelect from './NativeSelect.svelte'
+  import KeyAuthControl from './KeyAuthControl.svelte'
   import { write } from './api.js'
   import { METHODS, PATH_LABEL, PATH_TYPES, base } from './configuration.js'
   import { can } from './workspace.js'
@@ -115,6 +116,9 @@
         stale:
           (failure.status === 409 && failure.message.includes('Reload')) ||
           (failure.status === 404 && mode === 'edit'),
+        // A delete refused because a policy is attached to the row; when that is its own key
+        // requirement, the footer says where to switch it off.
+        attached: failure.status === 409 && /attached to this/.test(failure.message),
       }
       staleOnClose = true
       // A refused delete has had its answer: the footer goes back to the sheet's own buttons, with
@@ -291,97 +295,108 @@
         any method listed; an empty list matches everything.
       </Sheet.Description>
     </Sheet.Header>
-    <form id="{id}-form" class="grid gap-5 overflow-y-auto px-4" onsubmit={save}>
-      <fieldset class="grid gap-5" disabled={!editable || saving}>
-        <div class="grid grid-cols-[1fr_6rem] gap-2">
-          <div class="grid gap-1.5">
-            <label for="{id}-name" class="font-medium">Name</label>
-            <Input id="{id}-name" class="font-mono" bind:value={name} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('name')} aria-describedby={described('name')} />
-          </div>
-          <div class="grid gap-1.5">
-            <label for="{id}-priority" class="font-medium">Priority</label>
-            <Input id="{id}-priority" type="number" step="1" min="-2147483648" max="2147483647" bind:value={priority} aria-invalid={invalid('priority')} aria-describedby="{id}-priority-help {described('priority') ?? ''}" />
-          </div>
-        </div>
-        <p id="{id}-priority-help" class="-mt-3 text-xs text-muted-foreground">Higher is tried first.</p>
-        {@render problem('name')}
-        {@render problem('priority')}
-        <div class="grid gap-1.5">
-          <label for="{id}-service" class="font-medium">Service</label>
-          <NativeSelect id="{id}-service" bind:value={service} aria-invalid={invalid('service')} aria-describedby={described('service')}>
-            {#each services as s (s)}
-              <option value={s}>{s}</option>
-            {/each}
-          </NativeSelect>
-          {@render problem('service')}
-        </div>
-
-        <fieldset class="grid gap-2">
-          <legend class="mb-1.5 font-medium">Hosts</legend>
-          {#each hosts as _, i (i)}
-            <div class="flex gap-2">
-              <Input id="{id}-host-{i}" class="font-mono" aria-label="Host {i + 1}" bind:value={hosts[i]} placeholder="api.example.com or *.example.com" autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`hosts[${i}]`)} aria-describedby={described(`hosts[${i}]`)} />
-              {#if editable}
-              <Button variant="ghost" size="sm" aria-label="Remove host {i + 1}" onclick={() => dropHost(i)}>Remove</Button>
-              {/if}
+    <!-- The key requirement is its own form below the sheet's, applied on its own, and scrolls
+         with it. Its `onchanged` is `onsaved`, which only fetches the list again: the sheet stays
+         open, and the new list brings the control what now applies. -->
+    <div class="grid gap-5 overflow-y-auto px-4">
+      <form id="{id}-form" class="grid gap-5" onsubmit={save}>
+        <fieldset class="grid gap-5" disabled={!editable || saving}>
+          <div class="grid grid-cols-[1fr_6rem] gap-2">
+            <div class="grid gap-1.5">
+              <label for="{id}-name" class="font-medium">Name</label>
+              <Input id="{id}-name" class="font-mono" bind:value={name} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('name')} aria-describedby={described('name')} />
             </div>
-            {@render problem(`hosts[${i}]`)}
-          {/each}
-          {#if editable}
-          <Button id="{id}-add-host" variant="outline" size="sm" class="justify-self-start" onclick={() => hosts.push('')} aria-invalid={invalid('hosts')} aria-describedby={described('hosts')}><Plus aria-hidden="true" />Add host</Button>
-          {/if}
-          {@render problem('hosts')}
-          <p class="text-xs text-muted-foreground">
-            At least one host; only a superuser may route any host.
-            {#if hosts.length === 0}No hosts: any host.{/if}
-          </p>
-        </fieldset>
-
-        <fieldset class="grid gap-2">
-          <legend class="mb-1.5 font-medium">Paths</legend>
-          {#each paths as path, i (i)}
-            <div class="grid grid-cols-[6.5rem_1fr_auto] gap-2">
-              <NativeSelect id="{id}-path-{i}-type" aria-label="Path {i + 1} match" bind:value={path.type} aria-invalid={invalid(`paths[${i}].type`)} aria-describedby={described(`paths[${i}].type`)}>
-                {#each PATH_TYPES as t (t)}
-                  <option value={t}>{PATH_LABEL[t]}</option>
-                {/each}
-              </NativeSelect>
-              <Input id="{id}-path-{i}-value" class="font-mono" aria-label="Path {i + 1}" bind:value={path.value} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`paths[${i}].value`)} aria-describedby={described(`paths[${i}].value`)} />
-              {#if editable}
-              <Button variant="ghost" size="sm" aria-label="Remove path {i + 1}" onclick={() => dropPath(i)}>Remove</Button>
-              {/if}
+            <div class="grid gap-1.5">
+              <label for="{id}-priority" class="font-medium">Priority</label>
+              <Input id="{id}-priority" type="number" step="1" min="-2147483648" max="2147483647" bind:value={priority} aria-invalid={invalid('priority')} aria-describedby="{id}-priority-help {described('priority') ?? ''}" />
             </div>
-            {@render problem(`paths[${i}].type`)}
-            {@render problem(`paths[${i}].value`)}
-          {/each}
-          {#if editable}
-          <Button id="{id}-add-path" variant="outline" size="sm" class="justify-self-start" onclick={() => paths.push({ type: 'prefix', value: '' })} aria-invalid={invalid('paths')} aria-describedby={described('paths')}><Plus aria-hidden="true" />Add path</Button>
-          {/if}
-          {@render problem('paths')}
-          <p class="text-xs text-muted-foreground">
-            A prefix matches whole segments: /api matches /api/x, not /apix. A regex must match
-            the whole path; end it with .* to match a prefix. No paths: every path.
-          </p>
-        </fieldset>
-
-        <fieldset class="grid gap-2">
-          <legend class="mb-1.5 font-medium">Methods</legend>
-          <div class="flex flex-wrap gap-x-4 gap-y-2">
-            {#each METHODS as m, k (m)}
-              <label class="flex items-center gap-1.5 font-mono text-sm">
-                <input id="{id}-method-{m}" type="checkbox" bind:checked={checked[m]} aria-invalid={k === 0 ? invalid('methods') : undefined} aria-describedby={k === 0 ? described('methods') : undefined} />{m}
-              </label>
-            {/each}
           </div>
-          {@render problem('methods')}
-          <p class="text-xs text-muted-foreground">None ticked: any method.</p>
+          <p id="{id}-priority-help" class="-mt-3 text-xs text-muted-foreground">Higher is tried first.</p>
+          {@render problem('name')}
+          {@render problem('priority')}
+          <div class="grid gap-1.5">
+            <label for="{id}-service" class="font-medium">Service</label>
+            <NativeSelect id="{id}-service" bind:value={service} aria-invalid={invalid('service')} aria-describedby={described('service')}>
+              {#each services as s (s)}
+                <option value={s}>{s}</option>
+              {/each}
+            </NativeSelect>
+            {@render problem('service')}
+          </div>
+
+          <fieldset class="grid gap-2">
+            <legend class="mb-1.5 font-medium">Hosts</legend>
+            {#each hosts as _, i (i)}
+              <div class="flex gap-2">
+                <Input id="{id}-host-{i}" class="font-mono" aria-label="Host {i + 1}" bind:value={hosts[i]} placeholder="api.example.com or *.example.com" autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`hosts[${i}]`)} aria-describedby={described(`hosts[${i}]`)} />
+                {#if editable}
+                <Button variant="ghost" size="sm" aria-label="Remove host {i + 1}" onclick={() => dropHost(i)}>Remove</Button>
+                {/if}
+              </div>
+              {@render problem(`hosts[${i}]`)}
+            {/each}
+            {#if editable}
+            <Button id="{id}-add-host" variant="outline" size="sm" class="justify-self-start" onclick={() => hosts.push('')} aria-invalid={invalid('hosts')} aria-describedby={described('hosts')}><Plus aria-hidden="true" />Add host</Button>
+            {/if}
+            {@render problem('hosts')}
+            <p class="text-xs text-muted-foreground">
+              At least one host; only a superuser may route any host.
+              {#if hosts.length === 0}No hosts: any host.{/if}
+            </p>
+          </fieldset>
+
+          <fieldset class="grid gap-2">
+            <legend class="mb-1.5 font-medium">Paths</legend>
+            {#each paths as path, i (i)}
+              <div class="grid grid-cols-[6.5rem_1fr_auto] gap-2">
+                <NativeSelect id="{id}-path-{i}-type" aria-label="Path {i + 1} match" bind:value={path.type} aria-invalid={invalid(`paths[${i}].type`)} aria-describedby={described(`paths[${i}].type`)}>
+                  {#each PATH_TYPES as t (t)}
+                    <option value={t}>{PATH_LABEL[t]}</option>
+                  {/each}
+                </NativeSelect>
+                <Input id="{id}-path-{i}-value" class="font-mono" aria-label="Path {i + 1}" bind:value={path.value} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`paths[${i}].value`)} aria-describedby={described(`paths[${i}].value`)} />
+                {#if editable}
+                <Button variant="ghost" size="sm" aria-label="Remove path {i + 1}" onclick={() => dropPath(i)}>Remove</Button>
+                {/if}
+              </div>
+              {@render problem(`paths[${i}].type`)}
+              {@render problem(`paths[${i}].value`)}
+            {/each}
+            {#if editable}
+            <Button id="{id}-add-path" variant="outline" size="sm" class="justify-self-start" onclick={() => paths.push({ type: 'prefix', value: '' })} aria-invalid={invalid('paths')} aria-describedby={described('paths')}><Plus aria-hidden="true" />Add path</Button>
+            {/if}
+            {@render problem('paths')}
+            <p class="text-xs text-muted-foreground">
+              A prefix matches whole segments: /api matches /api/x, not /apix. A regex must match
+              the whole path; end it with .* to match a prefix. No paths: every path.
+            </p>
+          </fieldset>
+
+          <fieldset class="grid gap-2">
+            <legend class="mb-1.5 font-medium">Methods</legend>
+            <div class="flex flex-wrap gap-x-4 gap-y-2">
+              {#each METHODS as m, k (m)}
+                <label class="flex items-center gap-1.5 font-mono text-sm">
+                  <input id="{id}-method-{m}" type="checkbox" bind:checked={checked[m]} aria-invalid={k === 0 ? invalid('methods') : undefined} aria-describedby={k === 0 ? described('methods') : undefined} />{m}
+                </label>
+              {/each}
+            </div>
+            {@render problem('methods')}
+            <p class="text-xs text-muted-foreground">None ticked: any method.</p>
+          </fieldset>
         </fieldset>
-      </fieldset>
-    </form>
+      </form>
+      {#if mode === 'edit'}
+        <KeyAuthControl {workspace} target="route:{route.name}" applies={route.key_auth} {role} onchanged={onsaved} />
+      {:else}
+        <p class="text-xs text-muted-foreground"><span class="font-medium">API key.</span> Save it first, then require a key.</p>
+      {/if}
+    </div>
     <Sheet.Footer>
       {#if error && !shown}
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
           {error.sentence}
+          {#if error.attached && route?.key_auth?.from === 'route'}The API key requirement above counts as one: switch it off there.{/if}
         </p>
       {/if}
       {#if error?.stale}

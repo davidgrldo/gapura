@@ -4,6 +4,7 @@
   import { Button } from '$lib/components/ui/button/index.js'
   import { Input } from '$lib/components/ui/input/index.js'
   import NativeSelect from './NativeSelect.svelte'
+  import KeyAuthControl from './KeyAuthControl.svelte'
   import { write } from './api.js'
   import { base } from './configuration.js'
   import { can } from './workspace.js'
@@ -99,6 +100,9 @@
         stale:
           (failure.status === 409 && failure.message.includes('Reload')) ||
           (failure.status === 404 && mode === 'edit'),
+        // A delete refused because a policy is attached to the row; when that is its own key
+        // requirement, the footer says where to switch it off.
+        attached: failure.status === 409 && /attached to this/.test(failure.message),
       }
       staleOnClose = true
       // A refused delete has had its answer: the footer goes back to the sheet's own buttons, with
@@ -226,55 +230,66 @@
         An upstream that routes in {workspace} can send traffic to.
       </Sheet.Description>
     </Sheet.Header>
-    <form id="{id}-form" class="grid gap-5 overflow-y-auto px-4" onsubmit={save}>
-      <fieldset class="grid gap-5" disabled={!editable || saving}>
-        <div class="grid gap-1.5">
-          <label for="{id}-name" class="font-medium">Name</label>
-          <Input id="{id}-name" class="font-mono" bind:value={name} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('name')} aria-describedby={described('name')} />
-          {@render problem('name')}
-        </div>
-        <div class="grid grid-cols-[7rem_1fr_6rem] gap-2">
+    <!-- The key requirement is its own form below the sheet's, applied on its own, and scrolls
+         with it. Its `onchanged` is `onsaved`, which only fetches the list again: the sheet stays
+         open, and the new list brings the control what now applies. -->
+    <div class="grid gap-5 overflow-y-auto px-4">
+      <form id="{id}-form" class="grid gap-5" onsubmit={save}>
+        <fieldset class="grid gap-5" disabled={!editable || saving}>
           <div class="grid gap-1.5">
-            <label for="{id}-protocol" class="font-medium">Protocol</label>
-            <NativeSelect id="{id}-protocol" bind:value={protocol} aria-invalid={invalid('protocol')} aria-describedby={described('protocol')}>
-              <option value="http">http</option>
-              <option value="https">https</option>
-            </NativeSelect>
+            <label for="{id}-name" class="font-medium">Name</label>
+            <Input id="{id}-name" class="font-mono" bind:value={name} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('name')} aria-describedby={described('name')} />
+            {@render problem('name')}
           </div>
-          <div class="grid gap-1.5">
-            <label for="{id}-host" class="font-medium">Host</label>
-            <Input id="{id}-host" class="font-mono" bind:value={host} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('host')} aria-describedby={described('host')} />
+          <div class="grid grid-cols-[7rem_1fr_6rem] gap-2">
+            <div class="grid gap-1.5">
+              <label for="{id}-protocol" class="font-medium">Protocol</label>
+              <NativeSelect id="{id}-protocol" bind:value={protocol} aria-invalid={invalid('protocol')} aria-describedby={described('protocol')}>
+                <option value="http">http</option>
+                <option value="https">https</option>
+              </NativeSelect>
+            </div>
+            <div class="grid gap-1.5">
+              <label for="{id}-host" class="font-medium">Host</label>
+              <Input id="{id}-host" class="font-mono" bind:value={host} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('host')} aria-describedby={described('host')} />
+            </div>
+            <div class="grid gap-1.5">
+              <label for="{id}-port" class="font-medium">Port</label>
+              <Input id="{id}-port" type="number" min="1" max="65535" bind:value={port} aria-invalid={invalid('port')} aria-describedby={described('port')} />
+            </div>
           </div>
-          <div class="grid gap-1.5">
-            <label for="{id}-port" class="font-medium">Port</label>
-            <Input id="{id}-port" type="number" min="1" max="65535" bind:value={port} aria-invalid={invalid('port')} aria-describedby={described('port')} />
+          {@render problem('protocol')}
+          {@render problem('host')}
+          {@render problem('port')}
+          <div class="grid grid-cols-2 gap-2">
+            <div class="grid gap-1.5">
+              <label for="{id}-connect" class="font-medium">Connect timeout (ms)</label>
+              <Input id="{id}-connect" type="number" min="1" max="3600000" placeholder="default" bind:value={connect} aria-invalid={invalid('connect_timeout_ms')} aria-describedby={described('connect_timeout_ms')} />
+            </div>
+            <div class="grid gap-1.5">
+              <label for="{id}-read" class="font-medium">Read timeout (ms)</label>
+              <Input id="{id}-read" type="number" min="1" max="3600000" placeholder="default" bind:value={read} aria-invalid={invalid('read_timeout_ms')} aria-describedby={described('read_timeout_ms')} />
+            </div>
           </div>
-        </div>
-        {@render problem('protocol')}
-        {@render problem('host')}
-        {@render problem('port')}
-        <div class="grid grid-cols-2 gap-2">
-          <div class="grid gap-1.5">
-            <label for="{id}-connect" class="font-medium">Connect timeout (ms)</label>
-            <Input id="{id}-connect" type="number" min="1" max="3600000" placeholder="default" bind:value={connect} aria-invalid={invalid('connect_timeout_ms')} aria-describedby={described('connect_timeout_ms')} />
-          </div>
-          <div class="grid gap-1.5">
-            <label for="{id}-read" class="font-medium">Read timeout (ms)</label>
-            <Input id="{id}-read" type="number" min="1" max="3600000" placeholder="default" bind:value={read} aria-invalid={invalid('read_timeout_ms')} aria-describedby={described('read_timeout_ms')} />
-          </div>
-        </div>
-        {@render problem('connect_timeout_ms')}
-        {@render problem('read_timeout_ms')}
-        <p class="text-xs text-muted-foreground">
-          https is verified against the system's trusted certificates, so it needs a host name,
-          not an IP address. IPv6 is not accepted. Empty timeouts use the gateway's defaults.
-        </p>
-      </fieldset>
-    </form>
+          {@render problem('connect_timeout_ms')}
+          {@render problem('read_timeout_ms')}
+          <p class="text-xs text-muted-foreground">
+            https is verified against the system's trusted certificates, so it needs a host name,
+            not an IP address. IPv6 is not accepted. Empty timeouts use the gateway's defaults.
+          </p>
+        </fieldset>
+      </form>
+      {#if mode === 'edit'}
+        <KeyAuthControl {workspace} target="service:{service.name}" applies={service.key_auth} {role} onchanged={onsaved} />
+      {:else}
+        <p class="text-xs text-muted-foreground"><span class="font-medium">API key.</span> Save it first, then require a key.</p>
+      {/if}
+    </div>
     <Sheet.Footer>
       {#if error && !shown}
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
           {error.sentence}
+          {#if error.attached && service?.key_auth?.from === 'service'}The API key requirement above counts as one: switch it off there.{/if}
         </p>
       {/if}
       {#if error?.stale}

@@ -269,3 +269,12 @@ if (!stale[1].includes('Reload')) {
   throw new Error(`the STALE sentence in ${STORE_CONFIGURATION} no longer contains "Reload", so the sheets cannot tell a stale edit`)
 }
 console.log('ok: the stale-edit sentence still says Reload')
+
+// The same for a delete refused because a policy is attached to the row: the sheets find that
+// refusal by "attached to this" and then point at the key requirement above, so both of the
+// server's sentences, one policy and several, have to keep the words.
+const attached = readFileSync(STORE_CONFIGURATION, 'utf8').match(/"[^"]*attached to this \{kind\}[^"]*"/g) ?? []
+if (attached.length < 2) {
+  throw new Error(`${STORE_CONFIGURATION} no longer says a policy is "attached to this {kind}" in both its sentences, so the sheets cannot tell a delete refused for one`)
+}
+console.log('ok: the attached-policy sentences still say attached to this')

@@ -1,0 +1,10 @@
+[
+  {
+    "target": "service:docs",
+    "header": "x-api-key"
+  },
+  {
+    "target": "route:catch-all",
+    "header": "x-partner-key"
+  }
+]

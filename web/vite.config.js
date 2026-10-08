@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
@@ -38,25 +39,42 @@ import tailwindcss from '@tailwindcss/vite'
 // me.json says it may see; a workspace with no folder answers 404, as the server does for one the
 // caller holds no role in.
 //
+// The same folder holds that workspace's consumers.json, as `GET /api/workspaces/<name>/consumers`
+// answers it (each consumer's keys newest first, a key's prefix and times and `expired` flag, never
+// the key), and key-auth.json, the `[{ target, header }]` of the API-key requirements set on the
+// workspace, a service or a route. Each service and route row carries the `key_auth` the server
+// would have worked out for it, so keep those rows and key-auth.json telling the same story.
+//
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
-// service or route created on its list, replaced or deleted by name — answer 204 and store
-// nothing, for every persona, so the lists read back as they were. That is enough to look at the
-// forms and at what follows a save. What a write does is proven against Postgres by the Rust
-// tests, and by a pass against a real server. Each answers only the method the server serves it
-// on, so a form that sends the wrong one fails here as it would there.
+// service or route created on its list, replaced or deleted by name, a consumer created or
+// deleted, a key revoked, an API-key requirement put or removed — answer 204 and store nothing,
+// for every persona, so the lists read back as they were. Issuing a key is the one write that
+// answers with a body, as the server does: a made-up key, shown once like the real one, and the
+// expiry the request asked for. That is enough to look at the forms and at what follows a save.
+// What a write does is proven against Postgres by the Rust tests, and by a pass against a real
+// server. Each answers only the method the server serves it on, so a form that sends the wrong
+// one fails here as it would there.
 function stubApi() {
   const shared = { '/api/overview': 'overview.json', '/api/routes': 'routes.json' }
   const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
-  // `/api/workspaces/<name>/services` and `/routes`, and one row of either by name.
-  const lists = /^\/api\/workspaces\/([^/]+)\/(services|routes)$/
-  const rows = /^\/api\/workspaces\/[^/]+\/(services|routes)\/[^/]+$/
+  // `/api/workspaces/<name>/services`, `/routes`, `/consumers` and `/key-auth`, and one row of
+  // the first three by name. Only the first three are created by POST; `/key-auth` is put and
+  // deleted whole.
+  const lists = /^\/api\/workspaces\/([^/]+)\/(services|routes|consumers|key-auth)$/
+  const rows = /^\/api\/workspaces\/[^/]+\/(services|routes|consumers)\/[^/]+$/
+  const keys = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys$/
+  const revoke = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys\/[^/]+$/
+  const keyAuth = /^\/api\/workspaces\/[^/]+\/key-auth$/
   const writes = [
     ['PATCH', /^\/api\/users\/[^/]+\/roles$/],
     ['PUT', /^\/api\/group-mappings$/],
     ['DELETE', /^\/api\/group-mappings$/],
-    ['POST', lists],
+    ['POST', /^\/api\/workspaces\/[^/]+\/(services|routes|consumers)$/],
     ['PUT', rows],
     ['DELETE', rows],
+    ['DELETE', revoke],
+    ['PUT', keyAuth],
+    ['DELETE', keyAuth],
   ]
   return {
     name: 'gapura-stub-api',
@@ -78,6 +96,22 @@ function stubApi() {
           res.statusCode = 303
           res.setHeader('location', '/')
           return res.end()
+        }
+        if (req.method === 'POST' && keys.test(url)) {
+          let body = ''
+          req.on('data', (chunk) => (body += chunk))
+          req.on('end', () => {
+            let expires_at = null
+            try {
+              expires_at = JSON.parse(body).expires_at ?? null
+            } catch {
+              // A body that is not JSON asks for no expiry.
+            }
+            const key = `gpak_${randomBytes(32).toString('hex')}`
+            res.setHeader('content-type', 'application/json')
+            res.end(JSON.stringify({ key, prefix: key.slice(0, 13), expires_at }))
+          })
+          return
         }
         if (writes.some(([method, pattern]) => req.method === method && pattern.test(url))) {
           res.statusCode = 204

@@ -9,6 +9,7 @@
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck'
   import HardDrives from 'phosphor-svelte/lib/HardDrives'
   import Path from 'phosphor-svelte/lib/Path'
+  import Key from 'phosphor-svelte/lib/Key'
   import AppSidebar from './lib/AppSidebar.svelte'
   import Failure from './lib/Failure.svelte'
   import Home from './lib/Home.svelte'
@@ -19,6 +20,7 @@
   import Roles from './routes/Roles.svelte'
   import Services from './routes/Services.svelte'
   import StoreRoutes from './routes/StoreRoutes.svelte'
+  import Consumers from './routes/Consumers.svelte'
 
   // A handful of screens does not earn a router dependency. The server already answers any
   // path it does not own with index.html (see `resolve` in crates/gapura-control/src/assets.rs),
@@ -45,6 +47,7 @@
   const CONFIGURATION = [
     { path: '/services', label: 'Services', icon: HardDrives, component: Services },
     { path: '/store-routes', label: 'Routes', icon: Path, component: StoreRoutes },
+    { path: '/consumers', label: 'Consumers', icon: Key, component: Consumers },
   ]
   const ACCESS = [
     { path: '/users', label: 'Users', icon: UsersThree, component: Users },
