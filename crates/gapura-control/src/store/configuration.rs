@@ -28,7 +28,7 @@ use uuid::Uuid;
 /// `column`, a `timestamptz`, as the API shows it and compares it: UTC, to the microsecond, as
 /// text. Postgres keeps microseconds, so a value read back and sent again compares equal, which
 /// is what lets a stale save be told from a fresh one.
-fn updated_at(column: &str) -> String {
+pub(super) fn updated_at(column: &str) -> String {
     format!(r#"to_char({column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#)
 }
 
@@ -78,7 +78,7 @@ fn route_from(row: &tokio_postgres::Row) -> Result<Route> {
 
 /// Step 1 of every write: may `caller` do `action` in `workspace`, decided over rows locked here.
 /// `allowed` also refuses a disabled caller, which `rights` leaves to it.
-async fn decide(
+pub(super) async fn decide(
     tx: &Transaction<'_>,
     caller: Uuid,
     workspace: Uuid,
@@ -133,7 +133,7 @@ async fn may_route(
     Ok(())
 }
 
-fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+pub(super) fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).expect("a validated row always serialises")
 }
 

@@ -27,7 +27,7 @@ use uuid::Uuid;
 const CONTENDED: &str = "Someone else was changing this workspace at that moment, so this change was not saved. Try again.";
 
 /// `store_caller`'s refusals, and a missing store, in words.
-fn early(status: StatusCode) -> Response {
+pub(crate) fn early(status: StatusCode) -> Response {
     let sentence = match status {
         StatusCode::UNAUTHORIZED => "You are not signed in.",
         StatusCode::NOT_FOUND => "This console keeps no configuration: it runs without a database.",
@@ -41,7 +41,7 @@ fn early(status: StatusCode) -> Response {
 }
 
 /// A refused field, which the console shows beside it.
-fn field_error(error: FieldError) -> Response {
+pub(crate) fn field_error(error: FieldError) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({ "error": error.sentence, "field": error.field })),
@@ -50,7 +50,7 @@ fn field_error(error: FieldError) -> Response {
 }
 
 /// The answer once the store has had its say.
-fn written(result: Result<(), WriteError>) -> Response {
+pub(crate) fn written(result: Result<(), WriteError>) -> Response {
     match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(WriteError::Refused(refusal)) => refusal.into_response(),
@@ -69,7 +69,7 @@ fn written(result: Result<(), WriteError>) -> Response {
 /// The store and the caller behind `headers`, before anything about the request is looked at.
 /// A refusal is a status `early` words; returning it rather than the response keeps the error
 /// small.
-async fn caller_of<'a>(
+pub(crate) async fn caller_of<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
 ) -> Result<(&'a Store, StoreCaller), StatusCode> {
@@ -80,7 +80,11 @@ async fn caller_of<'a>(
 
 /// The workspace `ws` names, when `caller` may do `action` there. A workspace that does not
 /// exist is answered as one the caller holds no role in.
-fn workspace_in(caller: &StoreCaller, ws: &str, action: Action) -> Result<Uuid, Refusal> {
+pub(crate) fn workspace_in(
+    caller: &StoreCaller,
+    ws: &str,
+    action: Action,
+) -> Result<Uuid, Refusal> {
     let Some(workspace) = caller
         .rows
         .workspaces
@@ -96,13 +100,13 @@ fn workspace_in(caller: &StoreCaller, ws: &str, action: Action) -> Result<Uuid, 
 
 /// A path that could not be read, which is a name that can never be a workspace's, so it reads
 /// as an unknown one. Answered only once the caller is known, like a body that could not be read.
-fn unnamed() -> Response {
+pub(crate) fn unnamed() -> Response {
     configuration::no_role().into_response()
 }
 
 /// The body read into a `what` (with its article: "a service"). One that is too long or cut off
 /// keeps the status axum chose for it; one that is not a `what` is a 400.
-fn body<T: serde::de::DeserializeOwned>(
+pub(crate) fn body<T: serde::de::DeserializeOwned>(
     body: Result<Bytes, BytesRejection>,
     what: &str,
 ) -> Result<T, Box<Response>> {
@@ -117,7 +121,7 @@ fn body<T: serde::de::DeserializeOwned>(
 }
 
 /// A read that failed in the store, which is not the caller's fault.
-fn unavailable(error: &anyhow::Error) -> Response {
+pub(crate) fn unavailable(error: &anyhow::Error) -> Response {
     tracing::warn!(error = format!("{error:#}"), "reading configuration failed");
     early(StatusCode::SERVICE_UNAVAILABLE)
 }

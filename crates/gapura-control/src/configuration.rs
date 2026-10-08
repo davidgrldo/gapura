@@ -66,12 +66,12 @@ pub fn allowed(
     }
     let verb = match action {
         Action::Read => "Reading",
-        Action::Write => "Changing",
-        Action::Delete => "Deleting",
+        Action::Write => "Making changes",
+        Action::Delete => "Deleting things",
     };
     let needs = action.needs().as_str();
     Err(Refusal::Forbidden(format!(
-        "{verb} services and routes needs the {needs} role in this workspace."
+        "{verb} in this workspace needs the {needs} role."
     )))
 }
 
@@ -1057,13 +1057,13 @@ mod tests {
         assert_eq!(
             allowed(&rows, &me, ws, Action::Write),
             Err(Refusal::Forbidden(
-                "Changing services and routes needs the editor role in this workspace.".into()
+                "Making changes in this workspace needs the editor role.".into()
             ))
         );
         assert_eq!(
             allowed(&rows, &me, ws, Action::Delete),
             Err(Refusal::Forbidden(
-                "Deleting services and routes needs the admin role in this workspace.".into()
+                "Deleting things in this workspace needs the admin role.".into()
             ))
         );
     }

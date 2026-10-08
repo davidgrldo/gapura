@@ -877,14 +877,14 @@ async fn a_request_is_judged_by_who_sent_it_before_it_is_judged_by_what_it_says(
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
         assert_eq!(
             sentence(&body),
-            "Changing services and routes needs the editor role in this workspace."
+            "Making changes in this workspace needs the editor role."
         );
     }
     let (status, body) = send(&app, "DELETE", &route, Some(s.ed), FROM_THE_CONSOLE, "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
         sentence(&body),
-        "Deleting services and routes needs the admin role in this workspace."
+        "Deleting things in this workspace needs the admin role."
     );
 
     assert_eq!(
