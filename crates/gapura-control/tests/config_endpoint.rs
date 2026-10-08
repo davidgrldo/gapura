@@ -490,8 +490,7 @@ async fn a_route_pointing_at_another_workspace_s_service_fails_the_snapshot() {
     let error = store
         .snapshot()
         .await
-        .err()
-        .expect("a foreign service must fail the snapshot");
+        .expect_err("a foreign service must fail the snapshot");
     let text = format!("{error:#}");
     assert!(text.contains("orders-api"), "{text}");
     assert!(text.contains("default"), "{text}");

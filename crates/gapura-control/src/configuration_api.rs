@@ -110,8 +110,10 @@ pub(crate) fn unnamed() -> Response {
 /// `data_planes_api`, so a caller who may not write learns nothing about names.
 pub(crate) fn refuse_name(kind: &str, name: &str) -> Option<Response> {
     configuration::name(name, "name").err().map(|_| {
-        Refusal::NotFound(format!("There is no {kind} named {name} in this workspace."))
-            .into_response()
+        Refusal::NotFound(format!(
+            "There is no {kind} named {name} in this workspace."
+        ))
+        .into_response()
     })
 }
 

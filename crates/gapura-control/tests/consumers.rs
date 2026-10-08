@@ -371,23 +371,23 @@ async fn a_name_or_prefix_with_a_nul_byte_reads_as_missing_not_unsaved() {
     for (method, path, as_) in [
         ("DELETE", &format!("{CONSUMERS}/a%00b"), s.ada),
         ("POST", &format!("{CONSUMERS}/a%00b/keys"), s.ed),
-        ("DELETE", &format!("{CONSUMERS}/a%00b/keys/gpak_000000000"), s.ada),
+        (
+            "DELETE",
+            &format!("{CONSUMERS}/a%00b/keys/gpak_000000000"),
+            s.ada,
+        ),
         ("DELETE", &format!("{CONSUMERS}/mobile/keys/%00"), s.ada),
     ] {
-        let (status, body) = send(&app, method, &path, Some(as_), FROM_THE_CONSOLE, "").await;
+        let (status, body) = send(&app, method, path, Some(as_), FROM_THE_CONSOLE, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
     }
-    let (status, _, body) = request(
-        &app,
-        "GET",
-        CONSUMERS,
-        Some(s.vi),
-        &[],
-        "",
-    )
-    .await;
+    let (status, _, body) = request(&app, "GET", CONSUMERS, Some(s.vi), &[], "").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(json(&body).as_array().unwrap().len(), 1, "nothing was written");
+    assert_eq!(
+        json(&body).as_array().unwrap().len(),
+        1,
+        "nothing was written"
+    );
 }
 
 #[tokio::test]

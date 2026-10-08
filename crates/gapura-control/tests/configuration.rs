@@ -1174,7 +1174,12 @@ async fn a_name_with_a_nul_byte_reads_as_missing_not_unsaved() {
             s.ed,
             service_edit.as_str(),
         ),
-        ("DELETE", "/api/workspaces/default/services/a%00b", s.ada, ""),
+        (
+            "DELETE",
+            "/api/workspaces/default/services/a%00b",
+            s.ada,
+            "",
+        ),
         (
             "PUT",
             "/api/workspaces/default/routes/a%00b",
