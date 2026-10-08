@@ -7,6 +7,8 @@
   import TreeStructure from 'phosphor-svelte/lib/TreeStructure'
   import UsersThree from 'phosphor-svelte/lib/UsersThree'
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck'
+  import HardDrives from 'phosphor-svelte/lib/HardDrives'
+  import Path from 'phosphor-svelte/lib/Path'
   import AppSidebar from './lib/AppSidebar.svelte'
   import Failure from './lib/Failure.svelte'
   import Home from './lib/Home.svelte'
@@ -15,6 +17,8 @@
   import Routes from './routes/Routes.svelte'
   import Users from './routes/Users.svelte'
   import Roles from './routes/Roles.svelte'
+  import Services from './routes/Services.svelte'
+  import StoreRoutes from './routes/StoreRoutes.svelte'
 
   // A handful of screens does not earn a router dependency. The server already answers any
   // path it does not own with index.html (see `resolve` in crates/gapura-control/src/assets.rs),
@@ -31,28 +35,36 @@
     (error) => (failed = error),
   )
 
-  const GATEWAY = [
-    { path: '/', label: 'Overview', icon: SquaresFour, component: Overview },
-    { path: '/routes', label: 'Routes', icon: TreeStructure, component: Routes },
+  // In store mode the Kubernetes-reading pages sit beside the store's own Routes page, so they
+  // are named for what they read.
+  const store = $derived(me?.mode === 'store')
+  const GATEWAY = $derived([
+    { path: '/', label: store ? 'Cluster overview' : 'Overview', icon: SquaresFour, component: Overview },
+    { path: '/routes', label: store ? 'Cluster routes' : 'Routes', icon: TreeStructure, component: Routes },
+  ])
+  const CONFIGURATION = [
+    { path: '/services', label: 'Services', icon: HardDrives, component: Services },
+    { path: '/store-routes', label: 'Routes', icon: Path, component: StoreRoutes },
   ]
   const ACCESS = [
     { path: '/users', label: 'Users', icon: UsersThree, component: Users },
     { path: '/roles', label: 'Roles', icon: ShieldCheck, component: Roles },
   ]
 
-  // The navigation this account gets. In store mode the gateway screens read Kubernetes and the
-  // gateway's admin port without knowing about workspaces, so they are a superuser's until
-  // store-backed versions exist; the access screens are for superusers and anyone who
-  // administers a workspace. The server enforces both. This only avoids offering a screen the
-  // server would refuse.
+  // The navigation this account gets. The cluster pages read Kubernetes and the gateway's admin
+  // port without knowing about workspaces, so in store mode they are a superuser's; the
+  // configuration pages are for anyone holding a role in a workspace; the access pages for
+  // superusers and anyone who administers one. The server enforces all three. This only avoids
+  // offering a page the server would refuse.
   const groups = $derived(
     me === undefined
       ? []
       : [
-          { label: 'Gateway', screens: me.mode === 'kubernetes' || me.superuser ? GATEWAY : [] },
+          { label: store ? 'Cluster' : 'Gateway', screens: me.mode === 'kubernetes' || me.superuser ? GATEWAY : [] },
+          { label: 'Configuration', screens: store && me.roles.length > 0 ? CONFIGURATION : [] },
           {
             label: 'Access',
-            screens: me.mode === 'store' && (me.superuser || me.grantable.length > 0) ? ACCESS : [],
+            screens: store && (me.superuser || me.grantable.length > 0) ? ACCESS : [],
           },
         ].filter((group) => group.screens.length > 0),
   )

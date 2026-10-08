@@ -8,14 +8,21 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console has Services and Routes pages for store mode, under a new Configuration section that
+  anyone holding a role in a workspace sees. A viewer reads them, an editor creates and changes
+  services and routes, an admin deletes them, and a workspace picker appears for anyone with more
+  than one workspace. A refusal is shown beside the field the server named, an edit made from a
+  stale read offers Reload, and a delete that would orphan routes or policies is refused in words.
+  In store mode the Kubernetes-reading pages stay for superusers, named Cluster overview and
+  Cluster routes. A route path the gateway could never match (`//`, `.` or `..` segments, or an
+  escaped letter or digit) is now refused when it is saved.
 - The control plane has an API for store-mode services and routes:
   `/api/workspaces/{workspace}/services` and `/routes`, with list, create, replace (renames
   included) and delete. ADR 5's roles apply per workspace: a viewer reads, an editor creates and
   changes, an admin deletes. Every write is checked against the compiler's own rules and names the
   field it refuses, refuses an edit made from a stale read with 409, leaves one audit entry, and
   writes nothing when nothing changed. A service that routes still use, or a route or service with
-  a policy attached, is not deleted: the policy would otherwise go with it, silently. The console's
-  pages for them come next.
+  a policy attached, is not deleted: the policy would otherwise go with it, silently.
 - Hosts belong to one workspace. Every workspace's store routes share the data plane's ports, so a
   route may not name a host that another workspace's route already names, or one a `*.` wildcard of
   theirs covers (409). A route for any host, and a wildcard with a single label after `*.`, are a

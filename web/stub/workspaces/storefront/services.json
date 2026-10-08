@@ -1,0 +1,22 @@
+[
+  {
+    "name": "catalog",
+    "protocol": "http",
+    "host": "catalog.storefront.svc",
+    "port": 8080,
+    "connect_timeout_ms": null,
+    "read_timeout_ms": null,
+    "routes": 2,
+    "updated_at": "2026-09-18T09:30:12.774090Z"
+  },
+  {
+    "name": "checkout",
+    "protocol": "http",
+    "host": "checkout.storefront.svc",
+    "port": 8080,
+    "connect_timeout_ms": 2000,
+    "read_timeout_ms": 10000,
+    "routes": 1,
+    "updated_at": "2026-09-19T13:47:26.309581Z"
+  }
+]

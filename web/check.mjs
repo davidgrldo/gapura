@@ -235,3 +235,37 @@ for (const role of ROLES) {
   }
 }
 console.log(`ok: the console knows the ${storeRoles.length} roles the store declares`)
+
+// The methods and path types the route form offers are configuration.rs's, read from it for the
+// reason the roles are read from the migrations: one added on the server and forgotten here has
+// to fail the build, not reach a reader as a choice the server refuses.
+const CONFIGURATION = '../crates/gapura-control/src/configuration.rs'
+const configurationSource = readFileSync(CONFIGURATION, 'utf8')
+function serverList(name) {
+  const found = configurationSource.match(new RegExp(`pub const ${name}: \\[&str; \\d+\\] = \\[([^\\]]*)\\]`))
+  if (!found) throw new Error(`${CONFIGURATION} has no ${name}`)
+  const items = [...found[1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+  // Loud rather than empty, as with the enum parsers above: an empty list on both sides would
+  // compare equal and the check would pass without having looked.
+  if (items.length === 0) throw new Error(`${CONFIGURATION}: ${name} is declared but nothing could be read from it`)
+  return items
+}
+const { METHODS, PATH_TYPES } = await import('./src/lib/configuration.js')
+for (const [name, ours] of [['METHODS', METHODS], ['PATH_TYPES', PATH_TYPES]]) {
+  const theirs = serverList(name)
+  if (JSON.stringify(theirs) !== JSON.stringify(ours)) {
+    throw new Error(`${name} in src/lib/configuration.js is ${ours}, the server's is ${theirs}`)
+  }
+}
+console.log('ok: the route form offers the methods and path types the server accepts')
+
+// The sheets offer a Reload button when a 409's sentence contains "Reload" (that is how they
+// tell a stale save from any other conflict), so the server's stale-edit sentence has to keep
+// the word. Reworded without it, the button would silently stop appearing.
+const STORE_CONFIGURATION = '../crates/gapura-control/src/store/configuration.rs'
+const stale = readFileSync(STORE_CONFIGURATION, 'utf8').match(/const STALE: &str =\s*"([^"]*)"/)
+if (!stale) throw new Error(`${STORE_CONFIGURATION} has no STALE sentence`)
+if (!stale[1].includes('Reload')) {
+  throw new Error(`the STALE sentence in ${STORE_CONFIGURATION} no longer contains "Reload", so the sheets cannot tell a stale edit`)
+}
+console.log('ok: the stale-edit sentence still says Reload')

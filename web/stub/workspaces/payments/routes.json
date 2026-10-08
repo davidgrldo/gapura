@@ -1,0 +1,57 @@
+[
+  {
+    "name": "ledger-write",
+    "service": "ledger",
+    "hosts": [
+      "pay.example.com"
+    ],
+    "paths": [
+      {
+        "type": "exact",
+        "value": "/ledger/entries"
+      }
+    ],
+    "methods": [
+      "POST"
+    ],
+    "priority": 30,
+    "updated_at": "2026-09-25T11:24:05.312840Z"
+  },
+  {
+    "name": "ledger-read",
+    "service": "ledger",
+    "hosts": [
+      "pay.example.com"
+    ],
+    "paths": [
+      {
+        "type": "prefix",
+        "value": "/ledger"
+      }
+    ],
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "priority": 20,
+    "updated_at": "2026-09-25T11:22:51.945027Z"
+  },
+  {
+    "name": "provider-callback",
+    "service": "gateway-api",
+    "hosts": [
+      "*.hooks.pay.example.com"
+    ],
+    "paths": [
+      {
+        "type": "regex",
+        "value": "/callbacks/[a-z]+/.*"
+      }
+    ],
+    "methods": [
+      "POST"
+    ],
+    "priority": 10,
+    "updated_at": "2026-09-22T07:58:40.126553Z"
+  }
+]

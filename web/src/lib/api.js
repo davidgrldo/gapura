@@ -165,28 +165,49 @@ export async function get(path) {
   return response.json()
 }
 
-// The sentence in a refused write's `{"error": …}` body, which a form shows as it is. A body
-// without one, such as a proxy's error page, is not the server's answer, and whether the change
-// was made is then unknown, so that is what the reader is told.
+// The sentence in a refused write's `{"error": …}` body, which a form shows as it is, and the
+// field the server named, when it did: the configuration API answers a rejected input as
+// `{"error": …, "field": "paths[1].value"}` so a form can put the sentence beside the input it
+// is about. A body without a sentence, such as a proxy's error page, is not the server's
+// answer, and whether the change was made is then unknown, so that is what the reader is told.
 async function refusal(response) {
   try {
     const body = await response.json()
-    if (typeof body?.error === 'string') return body.error
+    if (typeof body?.error === 'string') {
+      return { sentence: body.error, field: typeof body.field === 'string' ? body.field : undefined }
+    }
   } catch {
     // Not JSON: the sentence below says what can be said.
   }
-  return (
-    `The console answered ${response.status} without saying why, so this change may not ` +
-    'have been saved. Check the list, then try again.'
-  )
+  return {
+    sentence:
+      `The console answered ${response.status} without saying why, so this change may not ` +
+      'have been saved. Check the list, then try again.',
+    field: undefined,
+  }
+}
+
+/**
+ * A refused write: the server's sentence, its status, and the field it named, if any. The
+ * status lets a form tell a conflict (409: such as an edit made from a stale read, a name
+ * already taken, or a host another workspace routes) from a rejected input (400), and it is an
+ * `Error` so a caller that only shows `message` keeps working.
+ */
+export class Refused extends Error {
+  constructor(status, { sentence, field }) {
+    super(sentence)
+    this.name = 'Refused'
+    this.status = status
+    this.field = field
+  }
 }
 
 /**
  * Send `body` to `path` with `method`, as JSON and signed in: the console's writes. Resolves
  * with nothing once the server has made the change. A 401 is answered as `get` answers it, a
  * 403 throws `Forbidden` carrying the server's sentence, and anything else that is not a
- * success throws an Error whose message is the server's sentence, which the form shows as it
- * is.
+ * success throws `Refused`, whose message is the server's sentence, which the form shows as it
+ * is, and which also carries the status and the field.
  *
  * `Content-Type: application/json` goes on every write, a DELETE with no body included. The
  * server refuses a write to the API without it, because a page on another site cannot send it
@@ -216,11 +237,11 @@ export async function write(method, path, body) {
   // The sign-in marker is not forgotten here as `get` forgets it: a write's 403 may come from
   // the cross-site check, before the session is looked at, so it proves nothing about the
   // session. A write is only ever sent after a read has already cleared the marker.
-  if (response.status === 403) throw new Forbidden(path, await refusal(response))
+  if (response.status === 403) throw new Forbidden(path, (await refusal(response)).sentence)
 
   // The server's one success is 204. Anything else, a 200 page from a proxy included, did not
   // come from the write, so it is not taken as one.
-  if (response.status !== 204) throw new Error(await refusal(response))
+  if (response.status !== 204) throw new Refused(response.status, await refusal(response))
 
   forgetSentToSignIn()
 }
