@@ -42,7 +42,7 @@ public Service:
 {{- if ((.Values.console).enabled) }}
 
 The console is enabled and served by {{ include "gapura.fullname" . }}-control on port
-{{ ((.Values.console).service).port }}.
+{{ (((.Values.console).service).port | default 8080) }}.
 {{- $mode := ((((.Values.console).auth).mode) | default "local") }}
 {{- if eq $mode "oidc" }}
 Sign-in is OIDC: the provider in console.oidc.issuer, plus its Secret.
@@ -52,15 +52,15 @@ Sign-in is OIDC: the provider in console.oidc.issuer, plus its Secret.
    from a reader granted nothing -- every sign-in would see an empty console with no error.
    (dex: the email claim needs the email scope; keycloak realms may require their groups scope.)
 {{- end }}
-{{- else if ((.Values.console).store).existingSecret }}
+{{- else if (((.Values.console).store).existingSecret) }}
 Sign-in is local: accounts in the store, no identity provider involved.
 {{- else }}
 Sign-in is local: users from console.auth.local, no identity provider involved.
 {{- end }}
-{{- if ((.Values.console).store).existingSecret }}
+{{- if (((.Values.console).store).existingSecret) }}
 Accounts and roles live in Postgres (console.store), and the Users and Roles pages are on.
 Superusers and workspace admins grant roles and map groups on those pages.
-{{- if not (((.Values.console).store).bootstrap).existingSecret }}
+{{- if not ((((.Values.console).store).bootstrap).existingSecret) }}
    No console.store.bootstrap: an empty store has no account anyone can sign in with.
 {{- end }}
 {{- end }}

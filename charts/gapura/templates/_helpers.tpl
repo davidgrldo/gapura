@@ -44,10 +44,14 @@ app.kubernetes.io/component: gateway
 {{- end -}}
 
 {{- define "gapura.consoleImage" -}}
-{{- if ((.Values.console).image).digest -}}
-{{- printf "%s@%s" ((.Values.console).image).repository ((.Values.console).image).digest -}}
+{{- /* Every level guarded with the chart's defaults repeated here: a --reuse-values upgrade from
+       a chart without a console section delivers image as null, and an unguarded read renders
+       %!s(<nil>) into the image ref instead of failing. */}}
+{{- $repository := (((.Values.console).image).repository) | default "ghcr.io/davidgrldo/gapura-control" -}}
+{{- if (((.Values.console).image).digest) -}}
+{{- printf "%s@%s" $repository (((.Values.console).image).digest) -}}
 {{- else -}}
-{{- printf "%s:%s" ((.Values.console).image).repository (default .Chart.AppVersion ((.Values.console).image).tag) -}}
+{{- printf "%s:%s" $repository (default .Chart.AppVersion (((.Values.console).image).tag)) -}}
 {{- end -}}
 {{- end -}}
 

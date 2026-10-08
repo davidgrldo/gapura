@@ -26,9 +26,11 @@ helm lint "$CHART"
 # `helm upgrade --reuse-values` from an older chart delivers a values section that did not exist
 # then as missing, and `.Values.section.key` on a missing section is a nil-pointer render error
 # -- an upgrade that refuses to render, reported only by the user who ran it. Two-level access
-# must be written `((.Values.section).key)`. tests/values-reuse-null.yaml checks the sections it
-# names; this checks every template, including sections added after that file was written.
-if bare=$(grep -nE '(^|[^(])\.Values\.[A-Za-z0-9_]+\.[A-Za-z0-9_]' "$CHART"/templates/*.yaml "$CHART"/templates/*.tpl "$CHART"/templates/NOTES.txt); then
+# must be written `((.Values.section).key)`, and a chain off a guarded access, `).a.b`, is just
+# as bare (`((.Values.console).rbac.create)` died exactly like `.Values.console.rbac.create`).
+# tests/values-reuse-null.yaml checks the sections it names; this checks every template,
+# including sections added after that file was written.
+if bare=$(grep -nE -e '(^|[^(])\.Values\.[A-Za-z0-9_]+\.[A-Za-z0-9_]' -e '\)\.[A-Za-z0-9_]+\.[A-Za-z0-9_]' "$CHART"/templates/*.yaml "$CHART"/templates/*.tpl "$CHART"/templates/NOTES.txt); then
   echo "FAIL two-level .Values access without a nil guard, write ((.Values.a).b):" >&2
   echo "$bare" >&2
   exit 1

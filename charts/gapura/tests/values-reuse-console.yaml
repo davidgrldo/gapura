@@ -1,0 +1,29 @@
+# Regression: `helm upgrade --reuse-values --set console.enabled=true` on a release installed
+# from 0.1.0 delivers every console section the old chart did not know as an explicit null, and
+# a `.Values.console.x.y` read on one of them refused to render at all (nil pointer at
+# console.yaml's rbac check). The console has to come up from console.enabled plus only the
+# pieces the upgrade --set provides; every absent section reads as its chart default.
+console:
+  enabled: true
+  replicaCount: null
+  rbac: null
+  service: null
+  image: null
+  grants: null
+  trustedProxies: null
+  sessionLifetimeSeconds: null
+  logLevel: null
+  resources: null
+  oidc: null
+  store: null
+  auth:
+    mode: null
+    local:
+      users:
+        - email: admin@example.test
+          bcryptHash: "$2b$10$abcdefghijklmnopqrstuvC9LdVZ0iJPT8fB4t1S0YwJxQ2uHq3z"
+          groups: ["admins"]
+      existingSecret: null
+  sessionKey:
+    existingSecret: gapura-console-session
+    key: null
