@@ -1147,6 +1147,52 @@ async fn two_workspaces_claiming_one_host_at_once_get_one_each_way() {
     assert_eq!(claimed, 20, "one route per host");
 }
 
+/// A path name the database would refuse to query (`%00` decodes to a NUL byte) is a name
+/// nothing can have: answered as a missing row, not as a store failure with a warning logged.
+#[tokio::test]
+async fn a_name_with_a_nul_byte_reads_as_missing_not_unsaved() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    let service_edit = format!(
+        r#"{{"name":"orders","protocol":"http","host":"orders.internal","port":8081,"updated_at":"{}"}}"#,
+        seen(&app, SERVICES, "orders", s.ed).await
+    );
+    let route_edit = format!(
+        r#"{{"name":"orders-api","service":"orders","hosts":["api.example.com"],"priority":2,"updated_at":"{}"}}"#,
+        seen(&app, ROUTES, "orders-api", s.ed).await
+    );
+    let before = everything(&store).await;
+    for (method, path, as_, request) in [
+        (
+            "PUT",
+            "/api/workspaces/default/services/a%00b",
+            s.ed,
+            service_edit.as_str(),
+        ),
+        ("DELETE", "/api/workspaces/default/services/a%00b", s.ada, ""),
+        (
+            "PUT",
+            "/api/workspaces/default/routes/a%00b",
+            s.ed,
+            route_edit.as_str(),
+        ),
+        ("DELETE", "/api/workspaces/default/routes/a%00b", s.ada, ""),
+    ] {
+        let (status, body) = send(&app, method, path, Some(as_), FROM_THE_CONSOLE, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "none of it wrote anything"
+    );
+}
+
 #[tokio::test]
 async fn a_route_or_service_with_a_policy_attached_is_not_deleted() {
     let Some((store, _guard)) = fresh_store().await else {

@@ -104,6 +104,17 @@ pub(crate) fn unnamed() -> Response {
     configuration::no_role().into_response()
 }
 
+/// A path name that could be nothing's, answered as the store answers a name that does not
+/// exist but without a query, so a name the database would reject (a NUL byte) never reaches it
+/// and is not logged as a store failure. Called once the caller's role is settled, like
+/// `data_planes_api`, so a caller who may not write learns nothing about names.
+pub(crate) fn refuse_name(kind: &str, name: &str) -> Option<Response> {
+    configuration::name(name, "name").err().map(|_| {
+        Refusal::NotFound(format!("There is no {kind} named {name} in this workspace."))
+            .into_response()
+    })
+}
+
 /// The body read into a `what` (with its article: "a service"). One that is too long or cut off
 /// keeps the status axum chose for it; one that is not a `what` is a 400.
 pub(crate) fn body<T: serde::de::DeserializeOwned>(
@@ -205,6 +216,9 @@ pub async fn replace_service(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    if let Some(r) = refuse_name("service", &name) {
+        return r;
+    }
     let input = match body(raw, "a service") {
         Ok(i) => i,
         Err(r) => return *r,
@@ -235,7 +249,12 @@ pub async fn delete_service(
         return unnamed();
     };
     match workspace_in(&caller, &ws, Action::Delete) {
-        Ok(workspace) => written(store.delete_service(caller.me.id, workspace, &name).await),
+        Ok(workspace) => {
+            if let Some(r) = refuse_name("service", &name) {
+                return r;
+            }
+            written(store.delete_service(caller.me.id, workspace, &name).await)
+        }
         Err(r) => r.into_response(),
     }
 }
@@ -307,6 +326,9 @@ pub async fn replace_route(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    if let Some(r) = refuse_name("route", &name) {
+        return r;
+    }
     let input: RouteInput = match body(raw, "a route") {
         Ok(i) => i,
         Err(r) => return *r,
@@ -344,7 +366,12 @@ pub async fn delete_route(
         return unnamed();
     };
     match workspace_in(&caller, &ws, Action::Delete) {
-        Ok(workspace) => written(store.delete_route(caller.me.id, workspace, &name).await),
+        Ok(workspace) => {
+            if let Some(r) = refuse_name("route", &name) {
+                return r;
+            }
+            written(store.delete_route(caller.me.id, workspace, &name).await)
+        }
         Err(r) => r.into_response(),
     }
 }
