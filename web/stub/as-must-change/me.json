@@ -1,0 +1,12 @@
+{
+  "mode": "store",
+  "id": "10000000-0000-4000-8000-000000000010",
+  "name": "bayu.pratama",
+  "method": "local",
+  "local": true,
+  "must_change_password": true,
+  "superuser": false,
+  "waiting": false,
+  "roles": [],
+  "grantable": []
+}

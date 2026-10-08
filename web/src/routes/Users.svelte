@@ -1,6 +1,7 @@
 <script>
   import { get } from '../lib/api.js'
   import AccessSheet from '../lib/AccessSheet.svelte'
+  import NewAccountSheet from '../lib/NewAccountSheet.svelte'
   import Failure from '../lib/Failure.svelte'
   import Tag from '../lib/Tag.svelte'
   import { ROLE_LABEL } from '../lib/roles.js'
@@ -43,7 +44,7 @@
 
   // Where focus goes once an account's row, or the button in it, is gone and focus has fallen to
   // the page: after a refused save whose list, fetched again, no longer has the account, or has it
-  // disabled.
+  // disabled, and after a superuser deletes the account.
   let heading = $state(undefined)
 
   const focusHeading = () => heading?.focus()
@@ -82,9 +83,13 @@
 
 <!-- tabindex -1: focus is put here when a row has gone, never reached by Tab. -->
 <h1 bind:this={heading} tabindex="-1" class="mb-1 text-2xl font-semibold tracking-tight outline-none">Users</h1>
-<p class="mb-4 max-w-2xl text-sm text-muted-foreground">
-  Every account, with its roles in the workspaces you administer.
-</p>
+<div class="mb-4 flex items-start justify-between gap-4">
+  <p class="max-w-2xl text-sm text-muted-foreground">
+    Every account, with its roles in the workspaces you administer.
+  </p>
+  <!-- Accounts are a superuser's to create and change; a workspace admin grants roles only. -->
+  {#if me.superuser}<NewAccountSheet onsaved={load} />{/if}
+</div>
 
 {#if failed && rows === undefined}
   <Failure error={failed} what="the accounts" />
@@ -146,7 +151,13 @@
               </span>
             {/each}
           </span>
-          <Tag tone={status.tone}>{status.label}</Tag>
+          <!-- An account on a temporary password says so under its status, which it may combine
+               with: a new account has no role yet, and a disabled one keeps the flag for when it
+               is enabled again. -->
+          <span class="flex flex-col items-end gap-1 @4xl:items-start">
+            <Tag tone={status.tone}>{status.label}</Tag>
+            {#if user.must_change_password}<Tag tone="warn">Must change password</Tag>{/if}
+          </span>
           <span class="hidden text-sm text-muted-foreground @4xl:block">
             <span class="sr-only">Last sign-in:{' '}</span>{@render signedIn(user.last_sign_in_at)}
           </span>
@@ -199,8 +210,9 @@
             <!-- Any enabled account may be given a role, a waiting one or a superuser included.
                  Not a disabled one, from here: a disabled account holds nothing, so its grants
                  are not in /api/users, and the form would open saying No access everywhere
-                 whatever it holds. -->
-            {#if me.grantable.length > 0 && user.status !== 'disabled'}
+                 whatever it holds. A superuser's sheet opens on every account, a disabled one
+                 included, for the account itself; it offers no roles for a disabled one. -->
+            {#if me.superuser || (me.grantable.length > 0 && user.status !== 'disabled')}
               <div class="mt-3">
                 <AccessSheet {user} {me} onsaved={load} onremoved={focusHeading} />
               </div>
