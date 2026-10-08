@@ -582,6 +582,8 @@ mod tests {
             disabled: false,
             groups: vec![],
             last_sign_in: None,
+            must_change_password: false,
+            sessions_valid_after: None,
         }
     }
 

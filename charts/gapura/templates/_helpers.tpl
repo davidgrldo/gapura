@@ -29,6 +29,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: gapura
 {{- end -}}
 
+{{- /* gapura.labels carries app.kubernetes.io/component: gateway through the selector labels.
+       An object that is not the gateway -- the console's workloads, the smoke-test fixtures --
+       used to append its own component and shipped with the key twice: helm keeps the last
+       value and shrugs, but kustomize refuses the document outright, which broke every
+       post-renderer that routes through it (#140). This is the same label set with the
+       component named by the "component" entry instead: call it with
+       (dict "root" . "component" "console"). */}}
+{{- define "gapura.componentLabels" -}}
+{{- $root := index . "root" -}}
+helm.sh/chart: {{ include "gapura.chart" $root }}
+app.kubernetes.io/name: {{ include "gapura.name" $root }}
+app.kubernetes.io/instance: {{ $root.Release.Name }}
+app.kubernetes.io/component: {{ index . "component" }}
+app.kubernetes.io/version: {{ $root.Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ $root.Release.Service }}
+app.kubernetes.io/part-of: gapura
+{{- end -}}
+
 {{- define "gapura.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "gapura.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -43,11 +61,29 @@ app.kubernetes.io/component: gateway
 {{- end -}}
 {{- end -}}
 
+{{- /* The admin Service's name: the base truncated so the suffix still fits the 63-character
+       limit. Both the Service and --gateway-admin must build the name this one way -- with the
+       untruncated fullname the console called a Service that does not exist and every route
+       read "cannot tell". */}}
+{{- define "gapura.adminName" -}}
+{{- printf "%s-admin" (include "gapura.fullname" . | trunc 57 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- /* The console objects' name base, truncated for the same 63-character limit: a fullname
+       long enough to survive it makes <fullname>-control an invalid name on its own. */}}
+{{- define "gapura.controlName" -}}
+{{- printf "%s-control" (include "gapura.fullname" . | trunc 55 | trimSuffix "-") -}}
+{{- end -}}
+
 {{- define "gapura.consoleImage" -}}
-{{- if ((.Values.console).image).digest -}}
-{{- printf "%s@%s" ((.Values.console).image).repository ((.Values.console).image).digest -}}
+{{- /* Every level guarded with the chart's defaults repeated here: a --reuse-values upgrade from
+       a chart without a console section delivers image as null, and an unguarded read renders
+       %!s(<nil>) into the image ref instead of failing. */}}
+{{- $repository := (((.Values.console).image).repository) | default "ghcr.io/davidgrldo/gapura-control" -}}
+{{- if (((.Values.console).image).digest) -}}
+{{- printf "%s@%s" $repository (((.Values.console).image).digest) -}}
 {{- else -}}
-{{- printf "%s:%s" ((.Values.console).image).repository (default .Chart.AppVersion ((.Values.console).image).tag) -}}
+{{- printf "%s:%s" $repository (default .Chart.AppVersion (((.Values.console).image).tag)) -}}
 {{- end -}}
 {{- end -}}
 

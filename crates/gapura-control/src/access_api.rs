@@ -4,10 +4,12 @@
 //! effect on the next one and a disabled account is signed out on the next one.
 
 use crate::access::{Access, Method, Role, Rows, User};
+use crate::accounts::session_current;
 use crate::state::AppState;
 use crate::store::{sqlstate, Store};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -20,12 +22,58 @@ pub struct StoreCaller {
     pub me: User,
 }
 
-/// The caller behind `headers`, read back from `store`.
+/// What every store API route but `/api/me` and the password change says to an account still on
+/// a temporary password.
+pub const CHOOSE_A_NEW_PASSWORD: &str = "Choose a new password first.";
+
+/// Why there is no caller to act for: a bare status, or an account that must replace its
+/// temporary password, whose 403 has to say so, since it is the one refusal the console acts on
+/// rather than shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerError {
+    Status(StatusCode),
+    MustChangePassword,
+}
+
+impl From<StatusCode> for CallerError {
+    fn from(status: StatusCode) -> Self {
+        CallerError::Status(status)
+    }
+}
+
+impl IntoResponse for CallerError {
+    fn into_response(self) -> Response {
+        match self {
+            CallerError::Status(status) => status.into_response(),
+            CallerError::MustChangePassword => {
+                crate::api::refuse(StatusCode::FORBIDDEN, CHOOSE_A_NEW_PASSWORD)
+            }
+        }
+    }
+}
+
+/// The caller behind `headers`, read back from `store`, as every store API route but two reads
+/// them: as `signed_in`, and refused while their account must replace a temporary password.
+pub async fn store_caller(
+    store: &Store,
+    headers: &HeaderMap,
+    key: &[u8],
+) -> Result<StoreCaller, CallerError> {
+    let caller = signed_in(store, headers, key).await?;
+    if caller.me.must_change_password {
+        return Err(CallerError::MustChangePassword);
+    }
+    Ok(caller)
+}
+
+/// The caller behind `headers`, read back from `store`, whether or not they must replace a
+/// temporary password: for `/api/me`, which says they must, and the change that does it.
 ///
 /// 401 when there is no session, when it names no account -- a session issued in Kubernetes
-/// mode carries an email where store mode puts an id -- or when the account is disabled. 503
-/// when the store cannot be read, which is not the caller's fault and must not look like it.
-pub async fn store_caller(
+/// mode carries an email where store mode puts an id -- when the account is disabled, or when
+/// the session was issued before the account's sessions were cut off. 503 when the store cannot
+/// be read, which is not the caller's fault and must not look like it.
+pub async fn signed_in(
     store: &Store,
     headers: &HeaderMap,
     key: &[u8],
@@ -48,7 +96,9 @@ pub async fn store_caller(
     let me = rows
         .users
         .iter()
-        .find(|u| u.id == id && !u.disabled)
+        .find(|u| {
+            u.id == id && !u.disabled && session_current(session.issued_at, u.sessions_valid_after)
+        })
         .cloned()
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(StoreCaller { rows, me })
@@ -62,12 +112,12 @@ pub async fn store_caller(
 pub(crate) async fn admin_caller<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
-) -> Result<(&'a Store, StoreCaller, BTreeSet<Uuid>), StatusCode> {
+) -> Result<(&'a Store, StoreCaller, BTreeSet<Uuid>), CallerError> {
     let store = state.store.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let caller = store_caller(store, headers, &state.session_key).await?;
     let within = caller.rows.grantable(&caller.me);
     if within.is_empty() && !caller.me.superuser {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into());
     }
     Ok((store, caller, within))
 }
@@ -85,9 +135,15 @@ pub enum Me {
         method: Method,
         superuser: bool,
         waiting: bool,
+        /// Signed in with a temporary password: the console offers nothing but replacing it,
+        /// which every other store API route insists on with a 403.
+        must_change_password: bool,
+        /// A local account, which has a password of its own to change; an OIDC one does not.
+        local: bool,
         /// Every workspace where the caller holds a role, that role, and every grant that gives
         /// them one there, as `/api/users` lists them: what a change to one of those grants would
-        /// leave the caller holding is the console's to say before it is made.
+        /// leave the caller holding is the console's to say before it is made. Empty, like
+        /// `grantable`, while `must_change_password`.
         roles: Vec<AccessView>,
         /// Where the caller is admin, and so may see and grant other people's roles. Named, so a
         /// form can list them without asking again, and in the order of their names.
@@ -103,18 +159,26 @@ pub struct WorkspaceName {
     workspace: String,
 }
 
-/// `GET /api/me`: who this is and what they hold. A waiting account gets an answer here and a
-/// 403 everywhere else, so the console can say why instead of showing empty pages.
-pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me>, StatusCode> {
+/// `GET /api/me`: who this is and what they hold. A waiting account, and one that must replace a
+/// temporary password, gets an answer here and a 403 everywhere else, so the console can say why
+/// instead of showing empty pages.
+pub async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Me>, CallerError> {
     let Some(store) = &state.store else {
         crate::api::session_from(&headers, &state.session_key).ok_or(StatusCode::UNAUTHORIZED)?;
         return Ok(Json(Me::Kubernetes));
     };
-    let caller = store_caller(store, &headers, &state.session_key).await?;
+    let caller = signed_in(store, &headers, &state.session_key).await?;
+    // A temporary password opens nothing but replacing it, so until then the answer shows no
+    // role or workspace either: what the account holds waits for a password of its own.
+    let holds = !caller.me.must_change_password;
     let roles = caller
         .rows
         .workspaces
         .iter()
+        .filter(|_| holds)
         .filter_map(|w| {
             caller
                 .rows
@@ -132,7 +196,7 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
         .rows
         .workspaces
         .iter()
-        .filter(|w| within.contains(&w.id))
+        .filter(|w| holds && within.contains(&w.id))
         .map(|w| WorkspaceName {
             workspace_id: w.id,
             workspace: w.name.clone(),
@@ -144,6 +208,8 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
         method: caller.me.method,
         superuser: caller.me.superuser,
         waiting: caller.rows.waiting(&caller.me),
+        must_change_password: caller.me.must_change_password,
+        local: caller.me.method == Method::Local,
         roles,
         grantable,
     }))
@@ -164,6 +230,11 @@ pub struct UserView {
     method: Method,
     superuser: bool,
     status: Status,
+    /// On a temporary password a superuser handed out, not yet replaced.
+    must_change_password: bool,
+    /// A local account, whose password a superuser may reset and which may be deleted; an OIDC
+    /// one has no password here and would come back at its next sign-in.
+    local: bool,
     /// Unix seconds.
     last_sign_in_at: Option<i64>,
     /// Only the workspaces the caller administers. An empty list says nothing about roles
@@ -183,7 +254,7 @@ pub struct AccessView {
 pub async fn users(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<UserView>>, StatusCode> {
+) -> Result<Json<Vec<UserView>>, CallerError> {
     let (_, caller, within) = admin_caller(&state, &headers).await?;
     let mut views: Vec<UserView> = caller
         .rows
@@ -217,6 +288,8 @@ pub async fn users(
                 method: u.method,
                 superuser: u.superuser,
                 status,
+                must_change_password: u.must_change_password,
+                local: u.method == Method::Local,
                 last_sign_in_at: u.last_sign_in,
                 access,
             }
@@ -260,7 +333,7 @@ pub struct RolesView {
 pub async fn roles(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<RolesView>, StatusCode> {
+) -> Result<Json<RolesView>, CallerError> {
     let (_, caller, within) = admin_caller(&state, &headers).await?;
     let mut held_by = HeldBy::default();
     for user in caller.rows.users.iter().filter(|u| !u.disabled) {

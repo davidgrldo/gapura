@@ -293,6 +293,23 @@ console:
     ca:
       existingSecret: ""
       key: ca.crt
+    # The configuration endpoint data planes poll (GET /v1/config): gapura-control serves it on
+    # a second listener of its own (--listen-config), because every response carries the keys
+    # the planes need, and an operator publishing the console Service must not publish those
+    # with it. Only exists in store mode. Needs TLS before a data plane can use it -- a gateway
+    # refuses an http:// --control-plane -- so give the Secret named below (type
+    # kubernetes.io/tls) to serve the endpoint over TLS; without it the endpoint is plain text
+    # and planes have to come in through a mesh or sidecar that encrypts the hop.
+    config:
+      port: 8081
+      tls:
+        existingSecret: ""
+        certKey: tls.crt
+        keyKey: tls.key
+      # A ClusterIP Service for the endpoint, named <fullname>-control-config: separate from the
+      # console's own Service so that publishing one never publishes the other.
+      service:
+        create: false
   # Name of an existing Secret holding the session-signing key (>= 32 bytes, base64
   # accepted). Not created by the chart: a key generated at install time would rotate on
   # every upgrade and sign every reader out of a console they were using.

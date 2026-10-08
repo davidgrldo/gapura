@@ -305,11 +305,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: smoke-backend
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: smoke-backend
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
@@ -331,11 +330,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: smoke
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: smoke
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test
@@ -374,11 +372,10 @@ metadata:
     helm.sh/chart: gapura-0.2.0
     app.kubernetes.io/name: gapura
     app.kubernetes.io/instance: gapura
-    app.kubernetes.io/component: gateway
+    app.kubernetes.io/component: smoke-backend
     app.kubernetes.io/version: "0.2.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gapura
-    app.kubernetes.io/component: smoke-backend
     gapura.dev/smoke: "true"
   annotations:
     helm.sh/hook: test

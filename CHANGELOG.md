@@ -8,6 +8,19 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The control plane has an API for accounts, a superuser's alone (ADR 5): create a local account
+  (`POST /api/users`), reset a password (`POST /api/users/{id}/password`), disable and enable
+  (`PUT /api/users/{id}/status`), make and remove superusers (`PUT /api/users/{id}/superuser`) and
+  delete a local account (`DELETE /api/users/{id}`). A new or reset account gets a temporary
+  password, shown once, which opens nothing but changing it: until then every other request
+  answers 403 "Choose a new password first.". Anyone with a local account changes their own
+  password at `POST /api/me/password`, with the current one and through the sign-in throttle. A
+  reset, a change, disabling, removing superuser and deleting sign the account out everywhere: the
+  session cookie now carries when it was issued, and a session issued before the account's cut-off
+  is refused. Cookies from before this release carry no issue time and stay valid until their
+  account is next cut off. Nobody may disable, delete or demote themselves or the last enabled
+  superuser, and an identity-provider account is disabled rather than deleted or reset. Migration
+  0007 adds two columns to `users`.
 - The console has a Data planes page under Gateways. Anyone with a role sees each data plane's
   status (connected within the last two minutes, not seen for how long, or never), whether it holds
   the configuration served now, the address it called from as the control plane sees it, and its

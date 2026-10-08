@@ -96,6 +96,10 @@ pub struct User {
     pub groups: Vec<String>,
     /// Unix seconds.
     pub last_sign_in: Option<i64>,
+    /// Set by a temporary password: until it is replaced, the account reaches nothing else.
+    pub must_change_password: bool,
+    /// Unix milliseconds; a session issued before this is no longer accepted.
+    pub sessions_valid_after: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -231,6 +235,8 @@ mod tests {
             disabled: false,
             groups: groups.iter().map(|g| g.to_string()).collect(),
             last_sign_in: None,
+            must_change_password: false,
+            sessions_valid_after: None,
         }
     }
 

@@ -13,6 +13,7 @@ use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService,
 use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
+mod accounts;
 mod configuration;
 mod consumers;
 mod data_planes;
@@ -50,6 +51,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0006_data_plane_health",
         include_str!("../../migrations/0006_data_plane_health.sql"),
+    ),
+    (
+        "0007_accounts",
+        include_str!("../../migrations/0007_accounts.sql"),
     ),
 ];
 

@@ -124,6 +124,8 @@ mod tests {
             disabled: false,
             groups: Vec::new(),
             last_sign_in: None,
+            must_change_password: false,
+            sessions_valid_after: None,
         };
         assert!(may_write(&caller).is_ok());
         caller.disabled = true;

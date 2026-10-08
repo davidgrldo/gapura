@@ -5,6 +5,10 @@ console:
   enabled: true
   auth:
     mode: oidc
+  # One console; the strategy is set to prove the chart renders it instead of the
+  # Kubernetes default it used to fall back to silently.
+  updateStrategy:
+    type: Recreate
   grants: ["platform=platform", "sre=*"]
   trustedProxies: ["10.0.0.0/8", "fd00::/8"]
   oidc:
