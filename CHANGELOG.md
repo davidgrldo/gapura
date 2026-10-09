@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's service sheet shows an `https` service's upstream TLS settings, under "TLS to the
+  upstream": whether the upstream's certificate is verified (unchecking it says that anyone on the
+  path can read and change the traffic), its own CA certificates as PEM, and the server name it
+  sends, each optional and empty for the defaults. Editors change them and viewers read them; an
+  `http` service has none to show and sends none. The Services list tags an upstream "verify off"
+  or "own CA" beside its address.
 - A store service's upstream TLS settings are honoured. Services read and write
   `tls: {verify, ca_pem, sni}`: an `https` service may name its own CA certificates (PEM, at most
   64 KiB, certificates only), its own SNI, or turn verification off, as `BackendTLSPolicy` and the
