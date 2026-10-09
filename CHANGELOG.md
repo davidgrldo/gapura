@@ -59,6 +59,11 @@ means what it usually does, moving from one version below to a later one. Releas
   first. Behind a trusted proxy that adds a line of its own, such as HAProxy's `option forwardfor`,
   the first line is the client's own words, and a client could pick the address it was counted
   against (#160).
+- The console's cookies are `__Host-gapura_session` and `__Host-gapura_login_state`, so a sibling
+  subdomain can no longer plant a session or a sign-in state for the console's host; the login-state
+  cookie's path is now `/`, as the prefix requires. A request carrying two session cookies is
+  treated as signed out rather than trusting the first. Upgrading signs everyone out once: a
+  `gapura_session` cookie is no longer read, and sign-in and sign-out expire it (#162).
 - The console has a Consumers page under Configuration, and an API-key requirement to go with it.
   Create consumers and issue them keys: a key is shown once, with a Copy button, and closing the
   dialog without copying asks first. A key may expire; revoke one, or delete the consumer. A

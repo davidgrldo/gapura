@@ -33,7 +33,16 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// The cookie a session travels in. `api` reads it back out under the same name.
-pub const COOKIE_NAME: &str = "gapura_session";
+///
+/// `__Host-` makes the browser refuse it unless it is `Secure`, `Path=/` and has no `Domain`, so
+/// a sibling subdomain cannot plant one for this host and have it sent ahead of the real one
+/// (#162).
+pub const COOKIE_NAME: &str = "__Host-gapura_session";
+
+/// What the session cookie was called before it took the `__Host-` prefix. A browser still
+/// holding one is sent this on every sign-in and sign-out, expiring it rather than leaving a
+/// cookie nothing reads for as long as its `Max-Age` ran.
+const RETIRED_COOKIE: &str = "gapura_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
 /// Where a browser lands once it is signed in, when it did not arrive from anywhere finer.
 const AFTER_LOGIN: &str = "/";
@@ -405,14 +414,17 @@ pub fn set_cookie(value: &str, lifetime: Duration) -> String {
 }
 
 /// The cookie that ties a sign-in's `state` to the browser that began it. See `callback`.
-const LOGIN_STATE_COOKIE: &str = "gapura_login_state";
+/// `__Host-` for the same reason as the session's: one planted from a sibling subdomain would
+/// undo the browser binding it exists for.
+const LOGIN_STATE_COOKIE: &str = "__Host-gapura_login_state";
 
 /// The `Set-Cookie` value holding `state` for the callback, or clearing it when `state` is empty
 /// and `lifetime` zero. `SameSite=Lax` still sends it on the provider's redirect back, which is
-/// a top-level GET; `Path` keeps it off every request but that one.
+/// a top-level GET. `__Host-` requires `Path=/`, so it rides along on the console's other
+/// requests too while a sign-in is in flight; it is short-lived, and the callback clears it.
 fn login_state_cookie(state: &str, lifetime: Duration) -> String {
     format!(
-        "{LOGIN_STATE_COOKIE}={state}; HttpOnly; Secure; SameSite=Lax; Path=/auth/callback; Max-Age={}",
+        "{LOGIN_STATE_COOKIE}={state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
         lifetime.as_secs()
     )
 }
@@ -915,6 +927,10 @@ fn session_response(
     let mut response = Redirect::to(destination).into_response();
     if let Ok(value) = header::HeaderValue::from_str(&cookie) {
         response.headers_mut().insert(header::SET_COOKIE, value);
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            header::HeaderValue::from_static(RETIRED_COOKIE),
+        );
     }
     response
 }
@@ -943,6 +959,7 @@ pub async fn logout() -> Response {
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::SET_COOKIE, set_cookie("", Duration::ZERO))
+        .header(header::SET_COOKIE, RETIRED_COOKIE)
         .body(axum::body::Body::from(body))
         .expect("static page")
 }
@@ -1202,6 +1219,10 @@ pub async fn callback(
         header::HeaderValue::from_str(&login_state_cookie("", Duration::ZERO))
             .expect("a static cookie"),
     );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        header::HeaderValue::from_static(RETIRED_COOKIE),
+    );
     Ok(response)
 }
 
@@ -1287,9 +1308,26 @@ mod tests {
         assert!(cookie.contains("HttpOnly"), "got {cookie}");
         assert!(cookie.contains("Secure"), "got {cookie}");
         assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
-        assert!(cookie.starts_with("gapura_session=a.b;"), "got {cookie}");
+        // #162: `__Host-`, which browsers honour only with Secure, Path=/ and no Domain.
+        assert!(
+            cookie.starts_with("__Host-gapura_session=a.b;"),
+            "got {cookie}"
+        );
         assert!(cookie.contains("Max-Age=3600"), "got {cookie}");
-        assert!(cookie.contains("Path=/"), "got {cookie}");
+        assert!(cookie.contains("; Path=/;"), "got {cookie}");
+        assert!(!cookie.contains("Domain"), "got {cookie}");
+    }
+
+    #[test]
+    fn the_login_state_cookie_is_host_prefixed_and_scoped_to_the_whole_origin() {
+        let cookie = login_state_cookie("s", PENDING_LIFETIME);
+        assert!(
+            cookie.starts_with("__Host-gapura_login_state=s;"),
+            "got {cookie}"
+        );
+        assert!(cookie.contains("Secure"), "got {cookie}");
+        assert!(cookie.contains("; Path=/;"), "got {cookie}");
+        assert!(!cookie.contains("Domain"), "got {cookie}");
     }
 
     #[test]
@@ -1652,9 +1690,9 @@ mod against_a_stub_provider {
     fn session_of(response: &axum::response::Response) -> Session {
         let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
         let value = cookie
-            .strip_prefix("gapura_session=")
+            .strip_prefix("__Host-gapura_session=")
             .and_then(|rest| rest.split(';').next())
-            .expect("a gapura_session cookie");
+            .expect("a session cookie");
         session::decode(value, SESSION_KEY, now_seconds()).expect("a valid session")
     }
 
@@ -1743,7 +1781,7 @@ mod against_a_stub_provider {
         assert!(response.headers()[header::SET_COOKIE]
             .to_str()
             .unwrap()
-            .starts_with("gapura_session="));
+            .starts_with("__Host-gapura_session="));
     }
 
     #[tokio::test]
@@ -1775,9 +1813,9 @@ mod against_a_stub_provider {
         assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
 
         let value = cookie
-            .strip_prefix("gapura_session=")
+            .strip_prefix("__Host-gapura_session=")
             .and_then(|rest| rest.split(';').next())
-            .expect("a gapura_session cookie");
+            .expect("a session cookie");
         let session = session::decode(value, SESSION_KEY, now_seconds()).expect("a valid session");
         assert_eq!(session.subject, "alice");
         assert_eq!(session.groups, ["team-a", "team-b"]);
@@ -1829,7 +1867,7 @@ mod against_a_stub_provider {
 
         let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
         assert!(
-            cookie.starts_with(&format!("gapura_login_state={csrf};")),
+            cookie.starts_with(&format!("__Host-gapura_login_state={csrf};")),
             "got {cookie}"
         );
         assert!(cookie.contains("HttpOnly"), "got {cookie}");
@@ -1837,7 +1875,8 @@ mod against_a_stub_provider {
         // Lax, not Strict: the provider sends the browser back with a top-level GET from its
         // own site, and Strict would leave the cookie off exactly that request.
         assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
-        assert!(cookie.contains("Path=/auth/callback"), "got {cookie}");
+        // `__Host-` requires the whole origin as its path (#162).
+        assert!(cookie.contains("; Path=/;"), "got {cookie}");
         assert!(
             cookie.contains(&format!("Max-Age={}", PENDING_LIFETIME.as_secs())),
             "got {cookie}"
@@ -1885,11 +1924,17 @@ mod against_a_stub_provider {
             .get_all(header::SET_COOKIE)
             .iter()
             .filter_map(|v| v.to_str().ok())
-            .find(|c| c.starts_with("gapura_login_state=;"))
+            .find(|c| c.starts_with("__Host-gapura_login_state=;"))
             .expect("the state cookie is cleared");
         // A browser only replaces the cookie if the path matches the one it was set with.
-        assert!(spent.contains("Path=/auth/callback"), "got {spent}");
+        assert!(spent.contains("; Path=/;"), "got {spent}");
         assert!(spent.contains("Max-Age=0"), "got {spent}");
+        // And a session cookie under the name before #162 is expired with it.
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|c| c == RETIRED_COOKIE));
     }
 
     #[tokio::test]
@@ -2542,5 +2587,13 @@ mod store_mode_tests {
             response.headers()[header::SET_COOKIE],
             set_cookie("", Duration::ZERO).as_str()
         );
+        // The cookie's name before #162 goes too, so an upgraded browser keeps nothing stale.
+        let all: Vec<_> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1], RETIRED_COOKIE);
     }
 }
