@@ -293,7 +293,9 @@ pub async fn change_password(
     };
     attempt.succeeded();
     tracing::info!(user = %caller.me.id, "changed their password");
-    let issued_at = crate::login::now_millis().max(u64::try_from(cut_off).unwrap_or(0));
+    // The cut-off just set, from the database's clock, which the session is compared with: the
+    // new session stands, and every one issued before the change does not.
+    let issued_at = u64::try_from(cut_off).unwrap_or(0);
     let cookie =
         crate::login::session_cookie(&state, caller.me.id.to_string(), Vec::new(), issued_at);
     let Ok(value) = HeaderValue::from_str(&cookie) else {

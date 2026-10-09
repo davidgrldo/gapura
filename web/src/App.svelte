@@ -11,6 +11,7 @@
   import Path from 'phosphor-svelte/lib/Path'
   import Key from 'phosphor-svelte/lib/Key'
   import Broadcast from 'phosphor-svelte/lib/Broadcast'
+  import ClockCounterClockwise from 'phosphor-svelte/lib/ClockCounterClockwise'
   import Stack from 'phosphor-svelte/lib/Stack'
   import AppSidebar from './lib/AppSidebar.svelte'
   import ChoosePassword from './lib/ChoosePassword.svelte'
@@ -25,6 +26,7 @@
   import StoreRoutes from './routes/StoreRoutes.svelte'
   import Consumers from './routes/Consumers.svelte'
   import DataPlanes from './routes/DataPlanes.svelte'
+  import Audit from './routes/Audit.svelte'
   import Workspaces from './routes/Workspaces.svelte'
 
   // A handful of screens does not earn a router dependency. The server already answers any
@@ -83,12 +85,14 @@
     { path: '/roles', label: 'Roles', icon: ShieldCheck, component: Roles },
     { path: '/workspaces', label: 'Workspaces', icon: Stack, component: Workspaces },
   ]
+  const ACTIVITY = [{ path: '/audit', label: 'Audit log', icon: ClockCounterClockwise, component: Audit }]
 
   // The navigation this account gets. The cluster pages read Kubernetes and the gateway's admin
   // port without knowing about workspaces, so in store mode they are a superuser's; the
   // configuration pages are for anyone holding a role in a workspace; the data planes page for
   // the same readers and superusers, though only a superuser changes it; the access pages for
-  // superusers and anyone who administers one. The server enforces all four. This only avoids
+  // superusers and anyone who administers one; the audit log for superusers and anyone holding a
+  // role, who read their own workspaces' entries. The server enforces all five. This only avoids
   // offering a page the server would refuse.
   const groups = $derived(
     me === undefined || choosing
@@ -101,6 +105,7 @@
             label: 'Access',
             screens: store && (me.superuser || me.grantable.length > 0) ? ACCESS : [],
           },
+          { label: 'Activity', screens: store && (me.superuser || me.roles.length > 0) ? ACTIVITY : [] },
         ].filter((group) => group.screens.length > 0),
   )
   const screens = $derived(groups.flatMap((group) => group.screens))

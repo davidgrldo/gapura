@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store-mode session now takes its issue time from the database's clock alone, the clock that
+  stamps every cut-off. Taking the later of the two clocks let a session opened just before a
+  password reset or a disable survive it whenever the console's clock ran ahead of the database's.
+- The console has an Audit log page under Activity, for superusers and anyone with a role. It
+  lists every change made through the console, newest first: when, who (and whether they signed in
+  through the identity provider), whether it was created, changed or deleted, what it was and its
+  workspace. A row opens to show the object before and after as JSON, with the top-level fields
+  that changed named above them. It filters by workspace (and, for a superuser, the entries with no
+  workspace) and by kind, and reads older entries a page at a time with Load older. The build now
+  fails if the kinds it offers drift from the server's.
 - A superuser can open sign-up (`GET`/`PUT /api/settings`, `{"sign_up_open": true}`); it is closed
   on a fresh install, and each change is one audit entry. While it is open, the sign-in page links
   to `/auth/signup`, where anyone reaching the console creates a local account with a username, a
@@ -27,6 +37,16 @@ means what it usually does, moving from one version below to a later one. Releas
   something says what is left instead of offering Delete, and the only workspace says it cannot go.
   After a change the console reads who you are again, so the workspace pickers and the Users and
   Roles pages follow it. Workspace admins see the page without controls.
+- The control plane has an API for reading the audit log: `GET /api/audit`, newest first, a page
+  at a time (`limit` 1 to 200, default 50; `before` the `next` of the page before, which is null on
+  the last page). Each entry says when, who and how they signed in, the action, the kind of object,
+  the workspace by its name now, and what it was before and after. Anyone with a role in a
+  workspace reads that workspace's entries, whatever the role; entries with no workspace (accounts,
+  workspaces, data planes, and those of a deleted workspace) are a superuser's alone (ADR 5).
+  `workspace={name}` and `kind={object_kind}` filter; `workspace=-` is the entries with no
+  workspace, for a superuser. A workspace the caller cannot see gives an empty page rather than a
+  refusal, so the filter does not tell which names exist. A bad `limit`, `before` or `kind` is a
+  400 naming the field; someone with no role anywhere is refused with 403.
 - The control plane has an API for workspaces: list (`GET /api/workspaces`), create
   (`POST /api/workspaces`), rename (`PUT /api/workspaces/{ws}`) and delete
   (`DELETE /api/workspaces/{ws}`). Creating, renaming and deleting are a superuser's (ADR 5); a
