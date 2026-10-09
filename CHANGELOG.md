@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store service's upstream TLS settings are honoured. Services read and write
+  `tls: {verify, ca_pem, sni}`: an `https` service may name its own CA certificates (PEM, at most
+  64 KiB, certificates only), its own SNI, or turn verification off, as `BackendTLSPolicy` and the
+  `gapura.dev/backend-tls: insecure` annotation do in Kubernetes mode. An `http` service may only
+  carry the defaults, and an absent `tls` is the defaults. Each change is in the audit entry's
+  before and after. The cluster key names every setting that is not the default
+  (`https://host:port?sni=…&ca=…&insecure`), so services that differ in one never share a
+  connection pool; a service on the defaults keeps `https://host:port` and its configuration's
+  ETag. A replace that leaves `tls` out resets it to the defaults, as for any other field.
 - The console's Users page has the sign-up switch for superusers, above the list: it says whether
   sign-up is open and opens or closes it, asking first before opening. An account that wrote a
   note when it signed itself up carries a "Signed up" tag, and its sheet shows what it wrote above
@@ -196,8 +205,7 @@ means what it usually does, moving from one version below to a later one. Releas
   superuser's to create. Without this an editor could take every workspace's traffic.
 - A store service's `https` is honoured. It was compiled as plain HTTP; it is now TLS verified
   against the system trust store, with the host as SNI, in a cluster keyed `https://host:port` of its
-  own. An `https` service therefore needs a host name, not an address. The service's `tls_verify`,
-  `tls_ca_pem` and `tls_sni` columns are not read yet.
+  own. An `https` service therefore needs a host name, not an address.
 - A store route now sends its service's host upstream as `Host` (with the port when it is not the
   protocol's default), as Kong does by default, instead of the client's; the client's still arrives
   as `X-Forwarded-Host`. Every existing store configuration's ETag changes once because of it.
