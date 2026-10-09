@@ -65,7 +65,7 @@ fn gone() -> Refusal {
 
 /// The caller, read again by `rights`. Its one refusal is of a caller whose row is gone, worded
 /// for a change to roles; an account write says it about the account instead.
-async fn caller_rights(tx: &Transaction<'_>, caller: Uuid) -> Result<User, WriteError> {
+pub(super) async fn caller_rights(tx: &Transaction<'_>, caller: Uuid) -> Result<User, WriteError> {
     match rights(tx, caller, &BTreeSet::new()).await {
         Ok((actor, _)) => Ok(actor),
         Err(WriteError::Refused(r)) if r == Refusal::outside_your_workspaces() => {
@@ -123,6 +123,7 @@ async fn decide(
         last_sign_in: None,
         must_change_password: false,
         sessions_valid_after: None,
+        signup_note: None,
     };
     accounts::guard(&actor, &target, &change, enabled_superusers)?;
     Ok((actor, target))

@@ -100,6 +100,8 @@ pub struct User {
     pub must_change_password: bool,
     /// Unix milliseconds; a session issued before this is no longer accepted.
     pub sessions_valid_after: Option<i64>,
+    /// What the account wrote when it signed itself up, for whoever grants it access.
+    pub signup_note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,6 +239,7 @@ mod tests {
             last_sign_in: None,
             must_change_password: false,
             sessions_valid_after: None,
+            signup_note: None,
         }
     }
 

@@ -19,11 +19,13 @@ mod consumers;
 mod data_planes;
 mod grants;
 mod identity;
+mod settings;
 mod tls;
 mod workspaces;
 pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
+pub use settings::SignedUp;
 
 /// Applied in order, recorded in `_migrations`. Schema migration is permanent work;
 /// embedding them in the binary is what keeps the schema and the code that queries it shipped
@@ -60,6 +62,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0008_audit_workspace_index",
         include_str!("../../migrations/0008_audit_workspace_index.sql"),
+    ),
+    (
+        "0009_sign_up",
+        include_str!("../../migrations/0009_sign_up.sql"),
     ),
 ];
 

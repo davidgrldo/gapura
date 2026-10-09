@@ -217,6 +217,7 @@ pub(super) async fn rights(
         last_sign_in: None,
         must_change_password: false,
         sessions_valid_after: None,
+        signup_note: None,
     };
     let ids: Vec<Uuid> = concerned.iter().copied().collect();
     let workspaces: Vec<Workspace> = tx
