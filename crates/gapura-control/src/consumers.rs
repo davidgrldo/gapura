@@ -123,8 +123,7 @@ pub fn header(value: Option<&str>) -> Result<String, FieldError> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or(DEFAULT_HEADER);
-    let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
-    if value.len() > MAX_HEADER_CHARS || !value.chars().all(token) {
+    if value.len() > MAX_HEADER_CHARS || !configuration::header_token(value) {
         return Err(field(
             "header",
             format!(

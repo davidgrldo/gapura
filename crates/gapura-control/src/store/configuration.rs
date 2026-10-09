@@ -17,8 +17,8 @@ use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
-    self, Action, KeyAuthView, PathMatch, Protocol, Route, RouteView, Service, ServiceView, Tls,
-    TlsOnReplace,
+    self, Action, HeaderMatch, HeadersOnReplace, KeyAuthView, PathMatch, Protocol, Route,
+    RouteView, Service, ServiceView, Tls, TlsOnReplace,
 };
 use crate::grants::Refusal;
 use anyhow::Result;
@@ -70,18 +70,22 @@ fn service_from(row: &tokio_postgres::Row) -> Service {
 const SERVICE_COLUMNS: &str = "protocol, host, port, connect_timeout_ms, read_timeout_ms, \
                                tls_verify, tls_ca_pem, tls_sni";
 
-/// A route row as the API shows it. A `paths` value this binary cannot read is an error, not an
-/// empty list, which would read as "every path".
+/// A route row as the API shows it. A `paths` or `headers` value this binary cannot read is an
+/// error, not an empty list, which would read as "every path" or "any headers".
 fn route_from(row: &tokio_postgres::Row) -> Result<Route> {
     let paths: serde_json::Value = row.get("paths");
     let paths: Vec<PathMatch> = serde_json::from_value(paths)
         .map_err(|e| anyhow::anyhow!("a route's paths do not read: {e}"))?;
+    let headers: serde_json::Value = row.get("headers");
+    let headers: Vec<HeaderMatch> = serde_json::from_value(headers)
+        .map_err(|e| anyhow::anyhow!("a route's headers do not read: {e}"))?;
     Ok(Route {
         name: row.get("name"),
         service: row.get("service"),
         hosts: row.get("hosts"),
         paths,
         methods: row.get("methods"),
+        headers,
         priority: row.get("priority"),
     })
 }
@@ -287,7 +291,7 @@ impl Store {
             .query(
                 &format!(
                     "select r.id, r.service_id, r.name, s.name as service, r.hosts, r.methods,
-                            r.paths, r.priority, {} as updated_at,
+                            r.paths, r.headers, r.priority, {} as updated_at,
                             {} as service_updated_at
                        from routes r join services s on s.id = r.service_id
                       where r.workspace_id = $1 order by r.priority desc, r.name",
@@ -572,7 +576,9 @@ impl Store {
 
     /// Replaces the route called `current`, which may rename it, when `seen` is its
     /// `updated_at` as last read and `service_seen`, when sent, is the `updated_at` of the
-    /// service the route pointed at then.
+    /// service the route pointed at then. `headers` says whether `r.headers` is written or the
+    /// stored ones are kept.
+    #[allow(clippy::too_many_arguments)]
     pub async fn replace_route(
         &self,
         caller: Uuid,
@@ -581,9 +587,15 @@ impl Store {
         r: &Route,
         seen: &str,
         service_seen: Option<&str>,
+        headers: HeadersOnReplace,
     ) -> Result<(), WriteError> {
         retrying(move || {
-            self.try_write_route(caller, workspace, Some((current, seen, service_seen)), r)
+            self.try_write_route(
+                caller,
+                workspace,
+                Some((current, seen, service_seen, headers)),
+                r,
+            )
         })
         .await
     }
@@ -595,7 +607,7 @@ impl Store {
         &self,
         caller: Uuid,
         workspace: Uuid,
-        replacing: Option<(&str, &str, Option<&str>)>,
+        replacing: Option<(&str, &str, Option<&str>, HeadersOnReplace)>,
         r: &Route,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
@@ -605,12 +617,13 @@ impl Store {
         // meanwhile answers that, not some other refusal its new contents would earn.
         let existing = match replacing {
             None => None,
-            Some((current, seen, service_seen)) => {
+            Some((current, seen, service_seen, headers)) => {
                 let Some(row) = tx
                     .query_opt(
                         &format!(
                             "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths,
-                                    r.priority, {} as updated_at, {} as service_updated_at
+                                    r.headers, r.priority, {} as updated_at,
+                                    {} as service_updated_at
                                from routes r join services s on s.id = r.service_id
                               where r.workspace_id = $1 and r.name = $2 for update of r",
                             updated_at("r.updated_at"),
@@ -640,8 +653,16 @@ impl Store {
                     }
                 }
                 let before = route_from(&row).map_err(WriteError::Store)?;
-                Some((row.get::<_, Uuid>("id"), before))
+                Some((row.get::<_, Uuid>("id"), before, headers))
             }
+        };
+        // Read under the `for update` above, so what is kept is what is there when this writes.
+        let r = &match &existing {
+            Some((_, before, HeadersOnReplace::Kept)) => Route {
+                headers: before.headers.clone(),
+                ..r.clone()
+            },
+            _ => r.clone(),
         };
         // On a replace as well as a create, so a save that keeps `hosts: []` is checked too.
         may_route(&tx, &actor, workspace, &r.hosts).await?;
@@ -660,13 +681,14 @@ impl Store {
         };
         let service_id: Uuid = service.get("id");
         let paths = json(&r.paths);
+        let headers = json(&r.headers);
         match existing {
             None => {
                 let Some(row) = tx
                     .query_opt(
                         "insert into routes (workspace_id, service_id, name, hosts, methods,
-                                             paths, priority)
-                         values ($1, $2, $3, $4, $5, $6, $7)
+                                             paths, headers, priority)
+                         values ($1, $2, $3, $4, $5, $6, $7, $8)
                          on conflict (workspace_id, name) do nothing returning id",
                         &[
                             &workspace,
@@ -675,6 +697,7 @@ impl Store {
                             &r.hosts,
                             &r.methods,
                             &paths,
+                            &headers,
                             &r.priority,
                         ],
                     )
@@ -700,7 +723,7 @@ impl Store {
                 )
                 .await?;
             }
-            Some((id, before)) => {
+            Some((id, before, _)) => {
                 if r.name != before.name
                     && tx
                         .query_opt(
@@ -723,7 +746,7 @@ impl Store {
                 }
                 tx.execute(
                     "update routes set service_id = $2, name = $3, hosts = $4, methods = $5,
-                            paths = $6, priority = $7, updated_at = now()
+                            paths = $6, headers = $7, priority = $8, updated_at = now()
                       where id = $1",
                     &[
                         &id,
@@ -732,6 +755,7 @@ impl Store {
                         &r.hosts,
                         &r.methods,
                         &paths,
+                        &headers,
                         &r.priority,
                     ],
                 )
@@ -777,7 +801,8 @@ impl Store {
         let actor = decide(&tx, caller, workspace, Action::Delete).await?;
         let Some(row) = tx
             .query_opt(
-                "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths, r.priority
+                "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths, r.headers,
+                        r.priority
                    from routes r join services s on s.id = r.service_id
                   where r.workspace_id = $1 and r.name = $2 for update of r",
                 &[&workspace, &name],

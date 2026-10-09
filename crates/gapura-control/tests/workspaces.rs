@@ -854,6 +854,7 @@ async fn write(
                 hosts: vec!["api.example.com".into()],
                 paths: Vec::new(),
                 methods: Vec::new(),
+                headers: Vec::new(),
                 priority: 0,
             };
             store.create_route(caller, workspace, &route).await
