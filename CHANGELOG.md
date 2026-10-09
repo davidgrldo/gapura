@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store route can match request headers. Routes read and write
+  `headers: [{"name": "x-version", "value": "2"}]`: every header listed must be present with exactly
+  that value (case-sensitive, as Gateway API's `Exact`), on every host, path and method the route
+  names; none means any headers, and matching order stays priority, then name. Names are HTTP
+  tokens of at most 64 characters, lowercased, listed once each ignoring case, and never `host`;
+  values are 1 to 1024 visible ASCII characters, with spaces and tabs only inside; a route takes at
+  most 16. An absent `headers` is none on a create and keeps the stored ones on a replace, so a
+  client that does not know about them, the console included, cannot erase them; `[]` clears them.
+  Each change is in the audit entry's before and after. A route without headers compiles exactly as
+  before, ETag included.
 - A store service's upstream TLS settings are honoured. Services read and write
   `tls: {verify, ca_pem, sni}`: an `https` service may name its own CA certificates (PEM, at most
   64 KiB, certificates only), its own SNI, or turn verification off, as `BackendTLSPolicy` and the
