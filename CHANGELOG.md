@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A superuser can open sign-up (`GET`/`PUT /api/settings`, `{"sign_up_open": true}`); it is closed
+  on a fresh install, and each change is one audit entry. While it is open, the sign-in page links
+  to `/auth/signup`, where anyone reaching the console creates a local account with a username, a
+  password and an optional note of up to 500 characters for whoever grants access. The account
+  holds no role, so it reaches nothing until someone grants it one; it is signed in at once and
+  sees the Waiting page. `/api/users` shows the note to superusers and workspace admins as
+  `signup_note`. Each address gets five sign-ups in ten minutes and twenty in a day, whatever
+  they end in. Closing sign-up leaves the accounts it made, and no account is made by sign-up
+  once closing has been answered. Kubernetes mode has no sign-up. Migration 0009 adds the
+  setting and the note.
 - The console has a Workspaces page under Access, after Roles. Superusers see every workspace and
   workspace admins the ones they administer, each with its services, routes, consumers and members.
   Superusers create workspaces, rename them and delete empty ones; a workspace that still holds
