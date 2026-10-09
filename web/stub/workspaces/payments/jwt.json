@@ -1,0 +1,8 @@
+[
+  {
+    "target": "route:ledger-write",
+    "issuer": "https://auth.pay.example.com/",
+    "audience": "ledger",
+    "jwks": "{\n  \"keys\": [\n    {\n      \"kty\": \"EC\",\n      \"crv\": \"P-256\",\n      \"kid\": \"ledger-2026-09\",\n      \"use\": \"sig\",\n      \"alg\": \"ES256\",\n      \"x\": \"7o7saoBEq4o9M0KlGSlqPEF0Qwnx3HgGyo2_TNB3FdI\",\n      \"y\": \"jegbDGW5m-HdFyqOsb2L-Se6tyIw7cvveI9c15F0JPw\"\n    }\n  ]\n}"
+  }
+]

@@ -42,6 +42,9 @@
   // everyone else.
   const locked = (row) =>
     row.key_auth ? `Requires an API key in the ${row.key_auth.header} header, set on the ${row.key_auth.from}` : undefined
+  // The JWT tag beside it says the same of a token, and whose. An issuer is missing only from a
+  // requirement written by hand in SQL, which accepts any.
+  const tokened = (row) => `Requires a JWT from ${row.jwt.issuer ?? 'any issuer'} (from the ${row.jwt.from})`
 </script>
 
 <h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Services</h1>
@@ -88,6 +91,12 @@
                   {#if s.key_auth}
                     <Lock aria-hidden="true" class="size-3.5 text-muted-foreground" />
                     <span class="sr-only">, requires an API key (from the {s.key_auth.from})</span>
+                  {/if}
+                  {#if s.jwt}
+                    <span class="inline-flex font-sans" title={tokened(s)}>
+                      <Tag tone="idle"><span aria-hidden="true">JWT</span></Tag>
+                      <span class="sr-only">, requires a JWT from {s.jwt.issuer ?? 'any issuer'} (from the {s.jwt.from})</span>
+                    </span>
                   {/if}
                 </span>
               </Table.Cell>
