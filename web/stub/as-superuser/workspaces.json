@@ -1,0 +1,6 @@
+[
+  { "name": "default", "created_at": "2026-08-14T09:12:40Z", "services": 3, "routes": 2, "consumers": 3, "policies": 2, "certificates": 0, "members": 2 },
+  { "name": "payments", "created_at": "2026-08-21T03:47:05Z", "services": 3, "routes": 3, "consumers": 1, "policies": 0, "certificates": 0, "members": 3 },
+  { "name": "sandbox", "created_at": "2026-10-09T11:30:18Z", "services": 0, "routes": 0, "consumers": 0, "policies": 0, "certificates": 0, "members": 0 },
+  { "name": "storefront", "created_at": "2026-08-21T03:52:51Z", "services": 2, "routes": 3, "consumers": 0, "policies": 0, "certificates": 0, "members": 2 }
+]

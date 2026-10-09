@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console has a Workspaces page under Access, after Roles. Superusers see every workspace and
+  workspace admins the ones they administer, each with its services, routes, consumers and members.
+  Superusers create workspaces, rename them and delete empty ones; a workspace that still holds
+  something says what is left instead of offering Delete, and the only workspace says it cannot go.
+  After a change the console reads who you are again, so the workspace pickers and the Users and
+  Roles pages follow it. Workspace admins see the page without controls.
 - The control plane has an API for workspaces: list (`GET /api/workspaces`), create
   (`POST /api/workspaces`), rename (`PUT /api/workspaces/{ws}`) and delete
   (`DELETE /api/workspaces/{ws}`). Creating, renaming and deleting are a superuser's (ADR 5); a

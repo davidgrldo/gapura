@@ -1,0 +1,4 @@
+[
+  { "name": "payments", "created_at": "2026-08-21T03:47:05Z", "services": 3, "routes": 3, "consumers": 1, "policies": 0, "certificates": 0, "members": 3 },
+  { "name": "storefront", "created_at": "2026-08-21T03:52:51Z", "services": 2, "routes": 3, "consumers": 0, "policies": 0, "certificates": 0, "members": 2 }
+]
