@@ -16,6 +16,9 @@ pub struct LocalAccount {
 pub struct OidcAccount {
     pub id: Uuid,
     pub disabled: bool,
+    /// The database's clock as the sign-in was recorded, in Unix milliseconds: see
+    /// `record_sign_in`.
+    pub signed_in_at: i64,
 }
 
 impl Store {
@@ -159,19 +162,23 @@ impl Store {
     }
 
     /// Stamps a local account's sign-in, if `verified` -- the hash its password was checked
-    /// against -- is still the account's. False when it is not: a reset or a password change
-    /// committed between the read and now, so the password that signed in no longer opens the
-    /// account, and the sign-in must be refused. An OIDC sign-in is stamped by
-    /// `upsert_oidc_user`, in the statement that records it.
-    pub async fn record_sign_in(&self, id: Uuid, verified: &str) -> Result<bool> {
+    /// against -- is still the account's, and says when by the database's clock, in Unix
+    /// milliseconds. None when it is not: a reset or a password change committed between the
+    /// read and now, so the password that signed in no longer opens the account, and the
+    /// sign-in must be refused. An OIDC sign-in is stamped by `upsert_oidc_user`, in the
+    /// statement that records it.
+    ///
+    /// The time is what the session is issued at, so it and a cut-off come from one clock.
+    pub async fn record_sign_in(&self, id: Uuid, verified: &str) -> Result<Option<i64>> {
         let client = self.pool.get().await?;
-        let changed = client
-            .execute(
-                "update users set last_sign_in_at = now() where id = $1 and password_hash = $2",
+        let row = client
+            .query_opt(
+                "update users set last_sign_in_at = now() where id = $1 and password_hash = $2
+                 returning floor(extract(epoch from clock_timestamp()) * 1000)::bigint",
                 &[&id, &verified],
             )
             .await?;
-        Ok(changed == 1)
+        Ok(row.map(|r| r.get(0)))
     }
 
     /// Records an OIDC sign-in: the row for (issuer, subject), created the first time, with
@@ -195,13 +202,15 @@ impl Store {
                         oidc_groups = excluded.oidc_groups,
                         last_sign_in_at = case when users.disabled_at is null
                                                then now() else users.last_sign_in_at end
-                 returning id, disabled_at is not null as disabled",
+                 returning id, disabled_at is not null as disabled,
+                           floor(extract(epoch from clock_timestamp()) * 1000)::bigint as signed_in_at",
                 &[&issuer, &subject, &display_name, &groups],
             )
             .await?;
         Ok(OidcAccount {
             id: row.get("id"),
             disabled: row.get("disabled"),
+            signed_in_at: row.get("signed_in_at"),
         })
     }
 
