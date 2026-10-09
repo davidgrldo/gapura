@@ -789,9 +789,19 @@ pub(crate) fn client_addr(
     headers: &header::HeaderMap,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
 ) -> std::net::IpAddr {
+    // Every `X-Forwarded-For` field line, joined in order: RFC 9110 reads repeated lines as one
+    // comma-separated list. A proxy that adds a line of its own rather than appending to the
+    // client's, as HAProxy's `option forwardfor` does, leaves the first line entirely
+    // client-written, and reading only that let a client name its own address (#160).
+    let forwarded_for = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ");
     state.sign_in.client(
         peer.map(|axum::Extension(axum::extract::ConnectInfo(a))| a.ip()),
-        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        (!forwarded_for.is_empty()).then_some(forwarded_for.as_str()),
     )
 }
 
@@ -2387,6 +2397,39 @@ mod local_login_flow_tests {
         )
         .await;
         assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn every_forwarded_for_line_is_read_so_a_client_cannot_name_itself() {
+        // #160: a trusted proxy that adds its own line, as HAProxy's `option forwardfor` does,
+        // leaves the client's own words alone in the first one.
+        let mut state = local_state("users: []\n");
+        state.sign_in = Arc::new(crate::throttle::Throttle::new(vec!["10.0.0.0/8"
+            .parse()
+            .unwrap()]));
+        let mut headers = header::HeaderMap::new();
+        headers.append("x-forwarded-for", "6.6.6.6".parse().unwrap());
+        headers.append("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        let peer = || {
+            Some(axum::Extension(axum::extract::ConnectInfo(
+                "10.1.2.3:443".parse().unwrap(),
+            )))
+        };
+        assert_eq!(
+            client_addr(&state, &headers, peer()),
+            "203.0.113.5".parse::<std::net::IpAddr>().unwrap()
+        );
+        // One line, or none, reads as before.
+        headers.remove("x-forwarded-for");
+        headers.append("x-forwarded-for", "6.6.6.6, 203.0.113.5".parse().unwrap());
+        assert_eq!(
+            client_addr(&state, &headers, peer()),
+            "203.0.113.5".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(
+            client_addr(&state, &header::HeaderMap::new(), peer()),
+            "10.1.2.3".parse::<std::net::IpAddr>().unwrap()
+        );
     }
 
     #[tokio::test]

@@ -55,6 +55,10 @@ means what it usually does, moving from one version below to a later one. Releas
   failure was counted. The password checks' queue is bounded too: with 16 already waiting, a
   sign-in answers 503 "Sign-in is busy right now" with `Retry-After: 1` at once, the same whether or
   not the name has an account, instead of waiting minutes behind someone else's burst (#157).
+- The console's sign-in throttle reads every `X-Forwarded-For` line, joined in order, not just the
+  first. Behind a trusted proxy that adds a line of its own, such as HAProxy's `option forwardfor`,
+  the first line is the client's own words, and a client could pick the address it was counted
+  against (#160).
 - The console has a Consumers page under Configuration, and an API-key requirement to go with it.
   Create consumers and issue them keys: a key is shown once, with a Copy button, and closing the
   dialog without copying asks first. A key may expire; revoke one, or delete the consumer. A
