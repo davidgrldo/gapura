@@ -8,6 +8,16 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The control plane has an API for reading the audit log: `GET /api/audit`, newest first, a page
+  at a time (`limit` 1 to 200, default 50; `before` the `next` of the page before, which is null on
+  the last page). Each entry says when, who and how they signed in, the action, the kind of object,
+  the workspace by its name now, and what it was before and after. Anyone with a role in a
+  workspace reads that workspace's entries, whatever the role; entries with no workspace (accounts,
+  workspaces, data planes, and those of a deleted workspace) are a superuser's alone (ADR 5).
+  `workspace={name}` and `kind={object_kind}` filter; `workspace=-` is the entries with no
+  workspace, for a superuser. A workspace the caller cannot see gives an empty page rather than a
+  refusal, so the filter does not tell which names exist. A bad `limit`, `before` or `kind` is a
+  400 naming the field; someone with no role anywhere is refused with 403.
 - The control plane has an API for workspaces: list (`GET /api/workspaces`), create
   (`POST /api/workspaces`), rename (`PUT /api/workspaces/{ws}`) and delete
   (`DELETE /api/workspaces/{ws}`). Creating, renaming and deleting are a superuser's (ADR 5); a
