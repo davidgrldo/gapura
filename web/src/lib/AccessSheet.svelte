@@ -266,6 +266,15 @@
     <!-- The body scrolls on its own, so a long list of workspaces never pushes Save off the
          bottom of the sheet. -->
     <div class="grid gap-5 overflow-y-auto px-4">
+      <!-- What the account wrote when it signed itself up, for whoever decides what it may do:
+           first, so it is read before Decline or a role. Text, never markup, with its own line
+           breaks kept; a long word wraps rather than widening the sheet. -->
+      {#if user.signup_note != null}
+        <figure class="grid gap-1 rounded-lg border px-3 py-2">
+          <figcaption class="text-muted-foreground">They wrote:</figcaption>
+          <blockquote class="whitespace-pre-wrap wrap-anywhere">{user.signup_note}</blockquote>
+        </figure>
+      {/if}
       {#if superuser}
         <AccountSection
           bind:this={account}

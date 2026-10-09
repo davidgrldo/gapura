@@ -69,6 +69,11 @@ import tailwindcss from '@tailwindcss/vite'
 // the admin, and 403 to the rest. Its counts tell the same story as the workspace folders, users.json
 // and roles.json; sandbox is the empty one, which the superuser can delete. Creating, renaming and
 // deleting a workspace answer 204 and store nothing.
+// The sign-up switch is the superuser's own: web/stub/as-superuser/settings.json is
+// `GET /api/settings`, and `PUT /api/settings` answers 204 and stores nothing; every other persona
+// lacks the file and is answered 403 to both, as the server answers an account that is not a
+// superuser. The superuser and admin users.json each hold an account that signed itself up and
+// is waiting, with the note it wrote.
 // What a write does is proven against Postgres by the Rust tests, and by a pass against a real
 // server. Each answers only the method the server serves it on, so a form that sends the wrong
 // one fails here as it would there.
@@ -84,6 +89,7 @@ function stubApi() {
     '/api/users': 'users.json',
     '/api/roles': 'roles.json',
     '/api/workspaces': 'workspaces.json',
+    '/api/settings': 'settings.json',
   }
   // `/api/workspaces/<name>/services`, `/routes`, `/consumers` and `/key-auth`, and one row of
   // the first three by name. Only the first three are created by POST; `/key-auth` is put and
@@ -189,6 +195,10 @@ function stubApi() {
             res.end(JSON.stringify({ name: registered ?? null, token, prefix: token.slice(0, 13) }))
           })
           return
+        }
+        if (req.method === 'PUT' && url === '/api/settings') {
+          res.statusCode = existsSync(path.join(persona, 'settings.json')) ? 204 : 403
+          return res.end()
         }
         if (writes.some(([method, pattern]) => req.method === method && pattern.test(url))) {
           res.statusCode = 204

@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's Users page has the sign-up switch for superusers, above the list: it says whether
+  sign-up is open and opens or closes it, asking first before opening. An account that wrote a
+  note when it signed itself up carries a "Signed up" tag, and its sheet shows what it wrote above
+  the roles. A superuser can Decline an account that holds no role, after a question: a local
+  account is deleted and an identity-provider account is disabled.
 - A store-mode session now takes its issue time from the database's clock alone, the clock that
   stamps every cut-off. Taking the later of the two clocks let a session opened just before a
   password reset or a disable survive it whenever the console's clock ran ahead of the database's.
