@@ -4,6 +4,7 @@
   import ConsumerSheet from '../lib/ConsumerSheet.svelte'
   import KeyAuthControl from '../lib/KeyAuthControl.svelte'
   import JwtControl from '../lib/JwtControl.svelte'
+  import RateLimitControl from '../lib/RateLimitControl.svelte'
   import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
@@ -16,9 +17,9 @@
   // svelte-ignore state_referenced_locally
   let workspace = $state(remembered(me.roles))
   const role = $derived(me.roles.find((r) => r.workspace === workspace)?.role)
-  // `{ consumers, keyAuth, jwt }`, read together: the workspace-wide key requirement sits above
-  // the table, and is what the consumers' keys are asked for; the workspace-wide JWT requirement
-  // sits under it.
+  // `{ consumers, keyAuth, jwt, rateLimit }`, read together: the workspace-wide key requirement
+  // sits above the table, and is what the consumers' keys are asked for; the workspace-wide JWT
+  // requirement and request limit sit under it.
   let answer = $state(undefined)
   let failed = $state(undefined)
   // The newest request's number, so a slow answer for a workspace the reader has left cannot
@@ -33,15 +34,18 @@
       get(base(workspace, 'consumers')),
       get(base(workspace, 'key-auth')),
       get(base(workspace, 'jwt')),
+      get(base(workspace, 'rate-limit')),
     ]).then(
-      ([consumers, keyAuths, jwts]) => {
+      ([consumers, keyAuths, jwts, limits]) => {
         if (mine !== latest) return
         const own = keyAuths.find((r) => r.target === 'workspace')
         const token = jwts.find((r) => r.target === 'workspace')
+        const limited = limits.find((r) => r.target === 'workspace')
         answer = {
           consumers,
           keyAuth: own ? { header: own.header, from: 'workspace' } : null,
           jwt: token ? { issuer: token.issuer, from: 'workspace' } : null,
+          rateLimit: limited ? { limit: limited.limit, per: limited.per, from: 'workspace' } : null,
         }
         failed = undefined
       },
@@ -92,6 +96,10 @@
   <section class="mb-6 grid max-w-md gap-2" aria-labelledby="workspace-jwt">
     <h2 id="workspace-jwt" class="text-sm font-medium">Require a JWT on every route in {workspace}</h2>
     <JwtControl {workspace} target="workspace" applies={answer.jwt} {role} onchanged={load} />
+  </section>
+  <section class="mb-6 grid max-w-md gap-2" aria-labelledby="workspace-rate-limit">
+    <h2 id="workspace-rate-limit" class="text-sm font-medium">Limit requests on every route in {workspace}</h2>
+    <RateLimitControl {workspace} target="workspace" applies={answer.rateLimit} {role} onchanged={load} />
   </section>
   <div class="mb-3 flex items-center justify-between gap-4">
     <p class="text-sm text-muted-foreground">Who may call the routes in {workspace} that require an API key.</p>
