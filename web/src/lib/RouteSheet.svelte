@@ -5,6 +5,7 @@
   import { Input } from '$lib/components/ui/input/index.js'
   import NativeSelect from './NativeSelect.svelte'
   import KeyAuthControl from './KeyAuthControl.svelte'
+  import JwtControl from './JwtControl.svelte'
   import { write } from './api.js'
   import { MAX_HEADERS, METHODS, PATH_LABEL, PATH_TYPES, base } from './configuration.js'
   import { can } from './workspace.js'
@@ -122,8 +123,8 @@
         stale:
           (failure.status === 409 && failure.message.includes('Reload')) ||
           (failure.status === 404 && mode === 'edit'),
-        // A delete refused because a policy is attached to the row; when that is its own key
-        // requirement, the footer says where to switch it off.
+        // A delete refused because a policy is attached to the row; when that is its own key or
+        // JWT requirement, the footer says where to switch it off.
         attached: failure.status === 409 && /attached to this/.test(failure.message),
       }
       staleOnClose = true
@@ -432,15 +433,22 @@
       </form>
       {#if mode === 'edit'}
         <KeyAuthControl {workspace} target="route:{route.name}" applies={route.key_auth} {role} onchanged={onsaved} />
+        <JwtControl {workspace} target="route:{route.name}" applies={route.jwt} {role} onchanged={onsaved} />
       {:else}
-        <p class="text-xs text-muted-foreground"><span class="font-medium">API key.</span> Save it first, then require a key.</p>
+        <p class="text-xs text-muted-foreground"><span class="font-medium">API key and JWT.</span> Save it first, then require a key or a token.</p>
       {/if}
     </div>
     <Sheet.Footer>
       {#if error && !shown}
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
           {error.sentence}
-          {#if error.attached && route?.key_auth?.from === 'route'}The API key requirement above counts as one: switch it off there.{/if}
+          {#if error.attached}
+            {@const key = route?.key_auth?.from === 'route'}
+            {@const jwt = route?.jwt?.from === 'route'}
+            {#if key && jwt}The API key and JWT requirements above count as two: switch them off there.
+            {:else if key}The API key requirement above counts as one: switch it off there.
+            {:else if jwt}The JWT requirement above counts as one: switch it off there.{/if}
+          {/if}
         </p>
       {/if}
       {#if error?.stale}
