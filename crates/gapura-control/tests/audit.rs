@@ -242,6 +242,7 @@ fn service(name: &str) -> Service {
         port: 8080,
         connect_timeout_ms: None,
         read_timeout_ms: None,
+        tls: Default::default(),
     }
 }
 

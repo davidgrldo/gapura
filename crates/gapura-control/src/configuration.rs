@@ -19,6 +19,9 @@ pub const MAX_PATHS: usize = 32;
 pub const MAX_COMBINATIONS: usize = 1024;
 pub const MAX_PATH_CHARS: usize = 1024;
 pub const MAX_TIMEOUT_MS: i32 = 3_600_000;
+/// The largest CA bundle a service may carry: room for dozens of certificates, and a bound on
+/// what every configuration served to every data plane repeats.
+pub const MAX_CA_PEM_BYTES: usize = 64 * 1024;
 /// The methods a route may name. `web/check.mjs` reads this list, so the console offers exactly
 /// these.
 pub const METHODS: [&str; 9] = [
@@ -117,9 +120,53 @@ pub struct ServiceInput {
     pub connect_timeout_ms: Option<i64>,
     #[serde(default)]
     pub read_timeout_ms: Option<i64>,
+    /// Absent = the defaults.
+    #[serde(default)]
+    pub tls: Option<TlsInput>,
     /// Required on `PUT`, the value last read; refused on `POST`.
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+/// How an `https` service's upstream is reached, as a request sends it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsInput {
+    #[serde(default = "verify_by_default")]
+    pub verify: bool,
+    #[serde(default)]
+    pub ca_pem: Option<String>,
+    #[serde(default)]
+    pub sni: Option<String>,
+}
+
+fn verify_by_default() -> bool {
+    true
+}
+
+/// How an `https` service's upstream is reached: what `BackendTLSPolicy` and the
+/// `gapura.dev/backend-tls: insecure` annotation say in Kubernetes mode. The default -- verified,
+/// against the process trust store, with the host as SNI -- is the only value an `http` service
+/// may have.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Tls {
+    /// `false` encrypts without checking the certificate or the name.
+    pub verify: bool,
+    /// PEM CA certificates to verify against; `None` = the process trust store. Public CA
+    /// material, so the audit log records it as stored.
+    pub ca_pem: Option<String>,
+    /// The name sent and checked; `None` = the service's host.
+    pub sni: Option<String>,
+}
+
+impl Default for Tls {
+    fn default() -> Self {
+        Self {
+            verify: true,
+            ca_pem: None,
+            sni: None,
+        }
+    }
 }
 
 /// A service that passed validation, as the store writes it and the audit log records it.
@@ -131,6 +178,7 @@ pub struct Service {
     pub port: i32,
     pub connect_timeout_ms: Option<i32>,
     pub read_timeout_ms: Option<i32>,
+    pub tls: Tls,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -296,6 +344,78 @@ fn upstream_host(value: &str) -> Result<String, FieldError> {
     }
 }
 
+/// PEM CA certificates, and nothing else: at least one `CERTIFICATE` block, each of which
+/// parses as a certificate, and no other kind of block -- a private key pasted with them would be
+/// served to every data plane.
+fn ca_pem(value: Option<String>) -> Result<Option<String>, FieldError> {
+    const AT: &str = "tls.ca_pem";
+    const NOT_PEM: &str =
+        "Paste PEM certificates, each between BEGIN CERTIFICATE and END CERTIFICATE lines.";
+    let Some(pem) = value else {
+        return Ok(None);
+    };
+    if pem.len() > MAX_CA_PEM_BYTES {
+        return Err(field(AT, "Paste at most 64 KiB of certificates."));
+    }
+    let other_block = pem.lines().any(|line| {
+        line.trim()
+            .strip_prefix("-----BEGIN ")
+            .is_some_and(|label| label.trim_end_matches('-') != "CERTIFICATE")
+    });
+    if other_block {
+        return Err(field(AT, "Paste CA certificates only."));
+    }
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::CertificateDer;
+    // Parsed as a trust anchor is, which reads the certificate's subject and key: a block whose
+    // base64 decodes to something else is refused here rather than by every data plane.
+    let mut anchors = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let cert = cert.map_err(|_| field(AT, NOT_PEM))?;
+        anchors.add(cert).map_err(|_| field(AT, NOT_PEM))?;
+    }
+    if anchors.is_empty() {
+        return Err(field(AT, NOT_PEM));
+    }
+    Ok(Some(pem))
+}
+
+/// A service's TLS settings: an `https` service's, checked, or an `http` one's, which must be the
+/// default. SNI is a host name as a route's is, without the wildcard, lowercased. An empty CA
+/// bundle or SNI is none.
+fn tls(protocol: Protocol, input: Option<TlsInput>) -> Result<Tls, FieldError> {
+    let Some(input) = input else {
+        return Ok(Tls::default());
+    };
+    let pem = input.ca_pem.filter(|pem| !pem.trim().is_empty());
+    let sni = input.sni.filter(|sni| !sni.is_empty());
+    if protocol == Protocol::Http {
+        return if input.verify && pem.is_none() && sni.is_none() {
+            Ok(Tls::default())
+        } else {
+            Err(field("tls", "TLS settings apply to an https service."))
+        };
+    }
+    let sni = match sni {
+        None => None,
+        Some(sni) => {
+            let lowered = sni.to_ascii_lowercase();
+            if !dns_name(&lowered) {
+                return Err(field(
+                    "tls.sni",
+                    "Use a host name, without a scheme, port or wildcard.",
+                ));
+            }
+            Some(lowered)
+        }
+    };
+    Ok(Tls {
+        verify: input.verify,
+        ca_pem: ca_pem(pem)?,
+        sni,
+    })
+}
+
 fn timeout(value: Option<i64>, at: &str) -> Result<Option<i32>, FieldError> {
     match value {
         None => Ok(None),
@@ -334,6 +454,7 @@ pub fn service(input: ServiceInput, kind: Write) -> Result<(Service, Option<Stri
         port,
         connect_timeout_ms: timeout(input.connect_timeout_ms, "connect_timeout_ms")?,
         read_timeout_ms: timeout(input.read_timeout_ms, "read_timeout_ms")?,
+        tls: tls(protocol, input.tls)?,
     };
     Ok((service, updated_at(kind, input.updated_at)?))
 }
@@ -645,6 +766,7 @@ mod tests {
             port: 8080,
             connect_timeout_ms: Some(2000),
             read_timeout_ms: None,
+            tls: None,
             updated_at: None,
         }
     }
@@ -696,6 +818,182 @@ mod tests {
         input.host = "10.0.0.7".into();
         input.protocol = "https".into();
         assert_eq!(service(input, Write::Create).unwrap_err().field, "host");
+    }
+
+    fn ca() -> String {
+        rcgen::generate_simple_self_signed(vec!["ca.example".into()])
+            .unwrap()
+            .cert
+            .pem()
+    }
+
+    fn https_with(tls: TlsInput) -> ServiceInput {
+        ServiceInput {
+            protocol: "https".into(),
+            tls: Some(tls),
+            ..service_input()
+        }
+    }
+
+    fn tls_input() -> TlsInput {
+        TlsInput {
+            verify: true,
+            ca_pem: None,
+            sni: None,
+        }
+    }
+
+    #[test]
+    fn a_service_without_tls_settings_has_the_defaults() {
+        for protocol in ["http", "https"] {
+            let input = ServiceInput {
+                protocol: protocol.into(),
+                ..service_input()
+            };
+            let (s, _) = service(input, Write::Create).unwrap();
+            assert_eq!(s.tls, Tls::default(), "{protocol}");
+        }
+    }
+
+    #[test]
+    fn an_https_service_takes_its_own_cas_sni_and_verification() {
+        let pem = format!("{}{}", ca(), ca());
+        let (s, _) = service(
+            https_with(TlsInput {
+                verify: false,
+                ca_pem: Some(pem.clone()),
+                sni: Some("Origin.Example".into()),
+            }),
+            Write::Create,
+        )
+        .unwrap();
+        assert_eq!(
+            s.tls,
+            Tls {
+                verify: false,
+                ca_pem: Some(pem),
+                sni: Some("origin.example".into()),
+            }
+        );
+        // Empty is none: what a console sends for a field left blank.
+        let (s, _) = service(
+            https_with(TlsInput {
+                ca_pem: Some(" \n".into()),
+                sni: Some(String::new()),
+                ..tls_input()
+            }),
+            Write::Create,
+        )
+        .unwrap();
+        assert_eq!(s.tls, Tls::default());
+    }
+
+    #[test]
+    fn an_http_service_may_carry_only_the_default_tls_settings() {
+        let http = |tls: TlsInput| ServiceInput {
+            tls: Some(tls),
+            ..service_input()
+        };
+        assert!(service(http(tls_input()), Write::Create).is_ok());
+        let blank = TlsInput {
+            ca_pem: Some(String::new()),
+            sni: Some(String::new()),
+            ..tls_input()
+        };
+        assert!(service(http(blank), Write::Create).is_ok());
+        for tls in [
+            TlsInput {
+                verify: false,
+                ..tls_input()
+            },
+            TlsInput {
+                ca_pem: Some(ca()),
+                ..tls_input()
+            },
+            TlsInput {
+                sni: Some("origin.example".into()),
+                ..tls_input()
+            },
+            // Not judged on its contents: it has no place here at all.
+            TlsInput {
+                ca_pem: Some("not pem".into()),
+                ..tls_input()
+            },
+        ] {
+            let err = service(http(tls), Write::Create).unwrap_err();
+            assert_eq!(err.field, "tls");
+            assert_eq!(err.sentence, "TLS settings apply to an https service.");
+        }
+    }
+
+    #[test]
+    fn a_ca_bundle_is_certificates_and_nothing_else() {
+        let cert = ca();
+        let key = rcgen::KeyPair::generate().unwrap().serialize_pem();
+        let garbage = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let cases = [
+            (
+                "not pem at all".to_string(),
+                "Paste PEM certificates, each between BEGIN CERTIFICATE and END CERTIFICATE lines.",
+            ),
+            (
+                garbage.to_string(),
+                "Paste PEM certificates, each between BEGIN CERTIFICATE and END CERTIFICATE lines.",
+            ),
+            (
+                "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n".to_string(),
+                "Paste PEM certificates, each between BEGIN CERTIFICATE and END CERTIFICATE lines.",
+            ),
+            (format!("{cert}{key}"), "Paste CA certificates only."),
+            (key.clone(), "Paste CA certificates only."),
+            (
+                format!("{cert}{}", cert.repeat(MAX_CA_PEM_BYTES / cert.len())),
+                "Paste at most 64 KiB of certificates.",
+            ),
+        ];
+        for (pem, sentence) in cases {
+            let err = service(
+                https_with(TlsInput {
+                    ca_pem: Some(pem.clone()),
+                    ..tls_input()
+                }),
+                Write::Create,
+            )
+            .unwrap_err();
+            assert_eq!(err.field, "tls.ca_pem", "{pem}");
+            assert_eq!(err.sentence, sentence, "{pem}");
+        }
+        // Text around the blocks, as bundles carry, is not a block.
+        let commented = format!("# Issuer: CN=ca.example\n{cert}");
+        assert!(service(
+            https_with(TlsInput {
+                ca_pem: Some(commented),
+                ..tls_input()
+            }),
+            Write::Create
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_sni_is_a_host_name() {
+        for bad in [
+            "*.example.com",
+            "origin.example:443",
+            "https://origin.example",
+            "10.0.0.1",
+            "bad host",
+        ] {
+            let err = service(
+                https_with(TlsInput {
+                    sni: Some(bad.into()),
+                    ..tls_input()
+                }),
+                Write::Create,
+            )
+            .unwrap_err();
+            assert_eq!(err.field, "tls.sni", "{bad}");
+        }
     }
 
     #[test]

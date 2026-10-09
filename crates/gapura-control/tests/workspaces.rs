@@ -843,6 +843,7 @@ async fn write(
                 port: 8080,
                 connect_timeout_ms: None,
                 read_timeout_ms: None,
+                tls: Default::default(),
             };
             store.create_service(caller, workspace, &service).await
         }
