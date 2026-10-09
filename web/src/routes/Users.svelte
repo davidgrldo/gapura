@@ -2,6 +2,7 @@
   import { get } from '../lib/api.js'
   import AccessSheet from '../lib/AccessSheet.svelte'
   import NewAccountSheet from '../lib/NewAccountSheet.svelte'
+  import SignUpSwitch from '../lib/SignUpSwitch.svelte'
   import Failure from '../lib/Failure.svelte'
   import Tag from '../lib/Tag.svelte'
   import { ROLE_LABEL } from '../lib/roles.js'
@@ -90,6 +91,8 @@
   <!-- Accounts are a superuser's to create and change; a workspace admin grants roles only. -->
   {#if me.superuser}<NewAccountSheet onsaved={load} />{/if}
 </div>
+<!-- Whether people may make their own accounts is a superuser's to decide. -->
+{#if me.superuser}<SignUpSwitch />{/if}
 
 {#if failed && rows === undefined}
   <Failure error={failed} what="the accounts" />
@@ -138,6 +141,10 @@
             <span class="text-sm font-medium wrap-anywhere">{user.name}</span>
             <Tag>{user.method === 'oidc' ? 'SSO' : 'Local'}</Tag>
             {#if user.superuser}<Tag>Superuser</Tag>{/if}
+            <!-- Only an account that wrote a note when it signed itself up: an empty note is
+                 stored as nothing, so one that wrote nothing cannot be told from one a
+                 superuser made. -->
+            {#if user.signup_note != null}<Tag>Signed up</Tag>{/if}
           </span>
           <span class="hidden min-w-0 flex-wrap gap-1.5 @4xl:flex">
             {#each user.access as held (held.workspace_id)}

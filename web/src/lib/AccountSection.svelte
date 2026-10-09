@@ -5,7 +5,8 @@
   import { write } from './api.js'
 
   // The Account section of a person's sheet, for superusers: reset their password, disable or
-  // enable them, make them a superuser or no longer one, and delete them. Every one but Enable is
+  // enable them, make them a superuser or no longer one, delete them, and decline one that holds
+  // no role, which deletes a local account and disables any other. Every one but Enable is
   // asked first, and the question, like a refusal, is drawn in the sheet's footer, which this
   // section does not own: `question` and `error` are bound by AccessSheet, which draws them and
   // whose footer buttons call `confirm` and `dismiss` below. The same footer asks before closing
@@ -41,6 +42,9 @@
   const self = $derived(user.id === me.id)
   const local = $derived(user.local)
   const disabled = $derived(user.status === 'disabled')
+  // To a superuser, waiting is no role anywhere and not a superuser: an account someone has yet
+  // to say yes or no to, signed up or not.
+  const waiting = $derived(user.status === 'waiting')
 
   // `{ password }` from a reset, shown until the sheet closes.
   let issued = $state(null)
@@ -52,6 +56,7 @@
   let statusButton = $state(null)
   let superuserButton = $state(null)
   let deleteButton = $state(null)
+  let declineButton = $state(null)
   let askedAt = 0
 
   const here = () => `/api/users/${encodeURIComponent(user.id)}`
@@ -83,6 +88,11 @@
       confirm: 'Delete',
       destructive: true,
     }),
+    decline: () => ({
+      sentence: `Decline ${user.name}? A local account is deleted; an identity-provider account is disabled.`,
+      confirm: 'Decline',
+      destructive: true,
+    }),
   }
 
   function asker(kind) {
@@ -90,6 +100,7 @@
     if (kind === 'disable' || kind === 'enable') return statusButton
     if (kind === 'promote' || kind === 'demote') return superuserButton
     if (kind === 'delete') return deleteButton
+    if (kind === 'decline') return declineButton
     return passwordInput
   }
 
@@ -178,8 +189,11 @@
       passwordInput?.focus()
       return
     }
-    if (kind === 'delete') {
-      if (await request('delete', 'DELETE', here())) {
+    // Declining is Delete for a local account and Disable for any other, the calls they make
+    // and what follows them: an identity-provider account deleted would only come back at its
+    // next sign-in.
+    if (kind === 'delete' || (kind === 'decline' && local)) {
+      if (await request(kind, 'DELETE', here())) {
         question = null
         busy = false
         await ondeleted()
@@ -187,7 +201,7 @@
       return
     }
     const done =
-      kind === 'disable'
+      kind === 'disable' || kind === 'decline'
         ? await request(kind, 'PUT', `${here()}/status`, { disabled: true })
         : await request(kind, 'PUT', `${here()}/superuser`, { superuser: kind === 'promote' })
     if (done) await changed(kind)
@@ -224,6 +238,11 @@
     {/if}
   {:else}
     <div class="flex flex-wrap gap-2">
+      {#if waiting}
+        <Button bind:ref={declineButton} variant="outline" size="sm" class="text-danger" onclick={() => ask('decline')} onkeydown={once} disabled={busy}>
+          Decline
+        </Button>
+      {/if}
       {#if local}
         <Button bind:ref={resetButton} variant="outline" size="sm" onclick={() => ask('reset')} onkeydown={once} disabled={busy}>
           Reset password
