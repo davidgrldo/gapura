@@ -67,6 +67,20 @@ pub fn router_with(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_BODY))
                 .delete(crate::grants_api::delete_mapping),
         )
+        // The workspaces themselves. Their paths stop where the ones below continue, so the two
+        // sets never match the same request.
+        .route(
+            "/api/workspaces",
+            get(crate::workspaces_api::list_workspaces)
+                .post(crate::workspaces_api::create_workspace)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}",
+            put(crate::workspaces_api::rename_workspace)
+                .delete(crate::workspaces_api::delete_workspace)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         // Store-mode configuration, per workspace. The ones that read a body cap it as the
         // grants writes do.
         .route(

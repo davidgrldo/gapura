@@ -33,3 +33,4 @@ pub mod state;
 pub mod store;
 pub mod throttle;
 pub mod workspaces;
+pub mod workspaces_api;
