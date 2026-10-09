@@ -120,7 +120,8 @@ pub struct ServiceInput {
     pub connect_timeout_ms: Option<i64>,
     #[serde(default)]
     pub read_timeout_ms: Option<i64>,
-    /// Absent = the defaults.
+    /// Absent on a create = the defaults; absent on a replace = the settings the service has, so
+    /// a client that does not know about them cannot erase them. See [`TlsOnReplace`].
     #[serde(default)]
     pub tls: Option<TlsInput>,
     /// Required on `PUT`, the value last read; refused on `POST`.
@@ -167,6 +168,16 @@ impl Default for Tls {
             sni: None,
         }
     }
+}
+
+/// Whether a replace writes the TLS settings it validated or keeps the ones the service has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TlsOnReplace {
+    /// The request sent `tls`: write what it says.
+    AsSent,
+    /// The request named no `tls`: keep the stored settings. An `http` service has only the
+    /// defaults, and one changed to `http` drops settings that no longer apply.
+    Kept,
 }
 
 /// A service that passed validation, as the store writes it and the audit log records it.

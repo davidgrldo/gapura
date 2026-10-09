@@ -1603,3 +1603,121 @@ async fn bad_tls_settings_are_named_and_nothing_is_written() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn a_replace_that_names_no_tls_keeps_the_service_s_tls_settings() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let pem = ca_pem();
+    let settings = serde_json::json!({"verify": false, "ca_pem": pem, "sni": "origin.example"});
+    ok(
+        &app,
+        "POST",
+        SERVICES,
+        s.ed,
+        &https_service("secure", Some(settings.clone())),
+    )
+    .await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        r#"{"name":"secure","service":"secure","hosts":["a.example.com"]}"#,
+    )
+    .await;
+    let put = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let mut body = body;
+            body["updated_at"] = seen(&app, SERVICES, "secure", s.ed).await.into();
+            ok(
+                &app,
+                "PUT",
+                &format!("{SERVICES}/secure"),
+                s.ed,
+                &body.to_string(),
+            )
+            .await;
+        }
+    };
+    let served = || async {
+        let (_, snapshot) = store.snapshot().await.unwrap();
+        let config = gapura_core::store::compile(&snapshot, &Default::default());
+        let rule = config.listeners[0]
+            .rules
+            .iter()
+            .find(|r| r.route == "default/secure")
+            .expect("the route is served");
+        let key = rule.backends[0].cluster.clone().expect("a cluster");
+        let tls = config.clusters[&key].tls.clone().expect("tls");
+        (key, tls)
+    };
+
+    // A port change from a client that sends no `tls`, as the console did before it had one.
+    put(json(&https_service("secure", None).replace("443", "8443"))).await;
+    let listed = row(&app, SERVICES, "secure", s.vi).await;
+    assert_eq!(listed["port"], 8443);
+    assert_eq!(listed["tls"], settings, "kept, not reset");
+    let (key, tls) = served().await;
+    assert!(
+        key.starts_with("https://api.internal:8443?sni=origin.example&ca=")
+            && key.ends_with("&insecure"),
+        "{key}"
+    );
+    assert_eq!(
+        (tls.sni.as_str(), tls.ca_pem.as_deref(), tls.insecure),
+        ("origin.example", Some(pem.as_str()), true)
+    );
+    let audited = audited_tls(&store).await;
+    assert_eq!(
+        audited.last(),
+        Some(&(settings.clone(), settings.clone())),
+        "the audit entry shows them kept"
+    );
+
+    // Sending the row back without `tls` changes nothing, so writes nothing.
+    let before = everything(&store).await;
+    let mut listed = listed;
+    for added in ["routes", "key_auth", "tls"] {
+        listed.as_object_mut().unwrap().remove(added);
+    }
+    ok(
+        &app,
+        "PUT",
+        &format!("{SERVICES}/secure"),
+        s.ed,
+        &listed.to_string(),
+    )
+    .await;
+    assert_eq!(everything(&store).await, before);
+
+    // Naming `tls` replaces them: here, with the defaults.
+    put(json(
+        &https_service("secure", Some(serde_json::json!({"verify": true}))).replace("443", "8443"),
+    ))
+    .await;
+    let defaults = serde_json::json!({"verify": true, "ca_pem": null, "sni": null});
+    assert_eq!(row(&app, SERVICES, "secure", s.vi).await["tls"], defaults);
+    let (key, tls) = served().await;
+    assert_eq!(key, "https://api.internal:8443");
+    assert_eq!(
+        (tls.sni.as_str(), tls.ca_pem, tls.insecure),
+        ("api.internal", None, false)
+    );
+
+    // A service changed to `http` without `tls` drops settings that no longer apply.
+    put(json(&https_service(
+        "secure",
+        Some(serde_json::json!({"verify": false})),
+    )))
+    .await;
+    put(serde_json::json!({
+        "name": "secure", "protocol": "http", "host": "api.internal", "port": 8080
+    }))
+    .await;
+    assert_eq!(row(&app, SERVICES, "secure", s.vi).await["tls"], defaults);
+}

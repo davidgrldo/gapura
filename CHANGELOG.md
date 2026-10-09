@@ -12,11 +12,13 @@ means what it usually does, moving from one version below to a later one. Releas
   `tls: {verify, ca_pem, sni}`: an `https` service may name its own CA certificates (PEM, at most
   64 KiB, certificates only), its own SNI, or turn verification off, as `BackendTLSPolicy` and the
   `gapura.dev/backend-tls: insecure` annotation do in Kubernetes mode. An `http` service may only
-  carry the defaults, and an absent `tls` is the defaults. Each change is in the audit entry's
+  carry the defaults. An absent `tls` is the defaults on a create and keeps the stored settings on
+  a replace, so a client that does not know about them, the console before it shows them included,
+  cannot erase them; a service changed to `http` drops them. Each change is in the audit entry's
   before and after. The cluster key names every setting that is not the default
   (`https://host:port?sni=…&ca=…&insecure`), so services that differ in one never share a
   connection pool; a service on the defaults keeps `https://host:port` and its configuration's
-  ETag. A replace that leaves `tls` out resets it to the defaults, as for any other field.
+  ETag.
 - The console's Users page has the sign-up switch for superusers, above the list: it says whether
   sign-up is open and opens or closes it, asking first before opening. An account that wrote a
   note when it signed itself up carries a "Signed up" tag, and its sheet shows what it wrote above

@@ -18,6 +18,7 @@ use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
     self, Action, KeyAuthView, PathMatch, Protocol, Route, RouteView, Service, ServiceView, Tls,
+    TlsOnReplace,
 };
 use crate::grants::Refusal;
 use anyhow::Result;
@@ -375,6 +376,7 @@ impl Store {
 
     /// Replaces the service called `current`, which may rename it, when `seen` is its
     /// `updated_at` as last read. Its routes follow it, since they hold its id, not its name.
+    /// `tls` says whether `s.tls` is written or the stored settings are kept.
     pub async fn replace_service(
         &self,
         caller: Uuid,
@@ -382,8 +384,9 @@ impl Store {
         current: &str,
         s: &Service,
         seen: &str,
+        tls: TlsOnReplace,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_replace_service(caller, workspace, current, s, seen)).await
+        retrying(move || self.try_replace_service(caller, workspace, current, s, seen, tls)).await
     }
 
     async fn try_replace_service(
@@ -393,6 +396,7 @@ impl Store {
         current: &str,
         s: &Service,
         seen: &str,
+        tls: TlsOnReplace,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
@@ -433,8 +437,14 @@ impl Store {
             .into());
         }
         let before = service_from(&row);
+        // Read under the `for update` above, so what is kept is what is there when this writes.
+        // An `http` service keeps nothing: it may only have the defaults, which `s` carries.
+        let mut s = s.clone();
+        if tls == TlsOnReplace::Kept && s.protocol == Protocol::Https {
+            s.tls = before.tls.clone();
+        }
         // Nothing to write, so nothing to audit and nothing for the data planes to reload.
-        if before == *s {
+        if before == s {
             return Ok(());
         }
         tx.execute(
@@ -465,7 +475,7 @@ impl Store {
                 object_id: Some(id),
                 workspace: Some(workspace),
                 before: Some(json(&before)),
-                after: Some(json(s)),
+                after: Some(json(&s)),
             },
         )
         .await?;
