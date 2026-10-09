@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{
     Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, ListenerConfig, PathMatch, Plugin,
@@ -35,6 +36,21 @@ pub struct StoreService {
     /// Milliseconds, the upstream read and write timeout. `None` keeps the data plane's default.
     #[serde(default)]
     pub read_timeout_ms: Option<u32>,
+    /// `https` only: whether the upstream's certificate and name are checked. `false` encrypts
+    /// without verifying, as the `gapura.dev/backend-tls: insecure` annotation does.
+    #[serde(default = "verify_by_default")]
+    pub tls_verify: bool,
+    /// `https` only: PEM CA certificates to verify the upstream against; `None` = the process
+    /// trust store.
+    #[serde(default)]
+    pub tls_ca_pem: Option<String>,
+    /// `https` only: the name sent as SNI and checked against the certificate; `None` = `host`.
+    #[serde(default)]
+    pub tls_sni: Option<String>,
+}
+
+fn verify_by_default() -> bool {
+    true
 }
 
 /// What traffic goes there. Kong's semantics: a request matches when it matches any of the
@@ -164,17 +180,15 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             // Nothing is resolved yet, which is why this is empty and not an error. The data
             // plane fills it, and until it does these requests get 503.
             endpoints: Vec::new(),
-            // Verified against the process trust store, as a `BackendTLSPolicy` naming the
-            // system CAs is: an `https` service that answered with any certificate at all would
-            // be no different from plain HTTP to anyone on the path.
-            //
-            // The service's `tls_verify`, `tls_ca_pem` and `tls_sni` columns are not honoured
-            // yet; that is a later slice. When they are, the cluster key must cover them too,
-            // because clusters are shared first-wins across services and workspaces.
+            // By default verified against the process trust store with the host as SNI, as a
+            // `BackendTLSPolicy` naming the system CAs is: an `https` service that answered with
+            // any certificate at all would be no different from plain HTTP to anyone on the
+            // path. A service may name its own CAs and SNI, or opt out of verifying, and
+            // `cluster_key` covers each of those, since clusters are shared first-wins.
             tls: (service.protocol == Protocol::Https).then(|| ClusterTls {
-                sni: service.host.clone(),
-                ca_pem: None,
-                insecure: false,
+                sni: sni(service).to_string(),
+                ca_pem: ca_pem(service).map(str::to_string),
+                insecure: !service.tls_verify,
             }),
             resolve: Some(ResolveTarget {
                 host: service.host.clone(),
@@ -332,11 +346,48 @@ fn same_kind(a: &Plugin, b: &Plugin) -> bool {
 /// HTTPS is keyed apart, so a TLS pool and a plain one to the same address are never one pool.
 /// Keyed by address rather than service name: two services pointing at one upstream share a
 /// cluster, and the key says what it is instead of which row first named it.
+///
+/// Clusters are shared first-wins, so an `https` key also carries every TLS setting that is not
+/// the default -- `?sni=…&ca=…&insecure`, only the parts that differ -- and two services that
+/// differ in any of them never share a pool. The defaults keep the bare `https://host:port`, so
+/// configurations written before these settings existed keep their keys and their ETags. The CA
+/// bundle is named by the first 16 hex digits of its SHA-256 rather than spelled out.
 fn cluster_key(service: &StoreService) -> String {
-    match service.protocol {
-        Protocol::Https => format!("https://{}:{}", service.host, service.port),
-        Protocol::Http => format!("{}:{}", service.host, service.port),
+    let address = format!("{}:{}", service.host, service.port);
+    if service.protocol == Protocol::Http {
+        return address;
     }
+    let mut settings = Vec::new();
+    let sni = sni(service);
+    if sni != service.host {
+        settings.push(format!("sni={sni}"));
+    }
+    if let Some(pem) = ca_pem(service) {
+        let digest = Sha256::digest(pem.as_bytes());
+        let short: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        settings.push(format!("ca={short}"));
+    }
+    if !service.tls_verify {
+        settings.push("insecure".to_string());
+    }
+    if settings.is_empty() {
+        format!("https://{address}")
+    } else {
+        format!("https://{address}?{}", settings.join("&"))
+    }
+}
+
+/// The name an `https` service's upstream is reached and checked by: its own SNI, else its host.
+fn sni(service: &StoreService) -> &str {
+    match service.tls_sni.as_deref() {
+        Some(sni) if !sni.is_empty() => sni,
+        _ => &service.host,
+    }
+}
+
+/// An `https` service's own CA bundle; an empty one is none, which is the process trust store.
+fn ca_pem(service: &StoreService) -> Option<&str> {
+    service.tls_ca_pem.as_deref().filter(|pem| !pem.is_empty())
 }
 
 /// The `Host` an upstream is sent: the service's host, with the port only when it is not the
@@ -404,6 +455,9 @@ mod tests {
             port,
             connect_timeout_ms: None,
             read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
         }
     }
 
@@ -535,6 +589,153 @@ mod tests {
         assert!(!tls.insecure);
         assert!(tls.ca_pem.is_none());
         assert!(cfg.clusters["api.internal:443"].tls.is_none());
+    }
+
+    const CA_A: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    const CA_B: &str = "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n";
+
+    fn https(name: &str, set: impl FnOnce(&mut StoreService)) -> StoreService {
+        let mut s = svc(name, "api.internal", 443);
+        s.protocol = Protocol::Https;
+        set(&mut s);
+        s
+    }
+
+    /// The one cluster `service` compiles to, and its key.
+    fn cluster_of(service: StoreService) -> (String, Cluster) {
+        let snap = StoreSnapshot {
+            routes: vec![route("r", &service.name, "/", 0)],
+            services: vec![service],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(cfg.clusters.len(), 1);
+        cfg.clusters.into_iter().next().expect("a cluster")
+    }
+
+    #[test]
+    fn each_tls_setting_of_a_service_reaches_its_cluster() {
+        let (_, c) = cluster_of(https("s", |s| s.tls_sni = Some("origin.example".into())));
+        let tls = c.tls.expect("tls");
+        assert_eq!(
+            (tls.sni.as_str(), tls.ca_pem.as_deref(), tls.insecure),
+            ("origin.example", None, false)
+        );
+        // The address is still the service's host: SNI changes the name, not where to connect.
+        let resolve = c.resolve.expect("resolve");
+        assert_eq!((resolve.host.as_str(), resolve.port), ("api.internal", 443));
+
+        let (_, c) = cluster_of(https("s", |s| s.tls_ca_pem = Some(CA_A.into())));
+        let tls = c.tls.expect("tls");
+        assert_eq!(
+            (tls.sni.as_str(), tls.ca_pem.as_deref(), tls.insecure),
+            ("api.internal", Some(CA_A), false)
+        );
+
+        let (_, c) = cluster_of(https("s", |s| s.tls_verify = false));
+        let tls = c.tls.expect("tls");
+        assert_eq!(
+            (tls.sni.as_str(), tls.ca_pem.as_deref(), tls.insecure),
+            ("api.internal", None, true)
+        );
+
+        // Empty is none, as the API reads it.
+        let (key, c) = cluster_of(https("s", |s| {
+            s.tls_sni = Some(String::new());
+            s.tls_ca_pem = Some(String::new());
+        }));
+        let tls = c.tls.expect("tls");
+        assert_eq!(
+            (tls.sni.as_str(), tls.ca_pem.as_deref()),
+            ("api.internal", None)
+        );
+        assert_eq!(key, "https://api.internal:443");
+    }
+
+    #[test]
+    fn the_cluster_key_names_the_settings_that_are_not_the_default_and_only_those() {
+        let key = |set: fn(&mut StoreService)| cluster_of(https("s", set)).0;
+        let ca_a = {
+            let digest = Sha256::digest(CA_A.as_bytes());
+            digest[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            key(|_| {}),
+            "https://api.internal:443",
+            "unchanged for the defaults"
+        );
+        assert_eq!(
+            key(|s| s.tls_sni = Some("api.internal".into())),
+            "https://api.internal:443",
+            "an SNI that is the host is the default"
+        );
+        assert_eq!(
+            key(|s| s.tls_sni = Some("origin.example".into())),
+            "https://api.internal:443?sni=origin.example"
+        );
+        assert_eq!(
+            key(|s| s.tls_ca_pem = Some(CA_A.into())),
+            format!("https://api.internal:443?ca={ca_a}")
+        );
+        assert_eq!(ca_a.len(), 16);
+        assert_eq!(
+            key(|s| s.tls_verify = false),
+            "https://api.internal:443?insecure"
+        );
+        assert_eq!(
+            key(|s| {
+                s.tls_sni = Some("origin.example".into());
+                s.tls_ca_pem = Some(CA_A.into());
+                s.tls_verify = false;
+            }),
+            format!("https://api.internal:443?sni=origin.example&ca={ca_a}&insecure")
+        );
+        // Plain HTTP has no TLS, whatever the columns say.
+        let mut plain = svc("p", "api.internal", 443);
+        plain.tls_verify = false;
+        plain.tls_sni = Some("origin.example".into());
+        assert_eq!(cluster_of(plain).0, "api.internal:443");
+    }
+
+    #[test]
+    fn two_services_that_differ_only_in_their_ca_get_a_cluster_each() {
+        let snap = StoreSnapshot {
+            services: vec![
+                https("a", |s| s.tls_ca_pem = Some(CA_A.into())),
+                https("b", |s| s.tls_ca_pem = Some(CA_B.into())),
+                https("system", |_| {}),
+            ],
+            routes: vec![
+                route("ra", "a", "/a", 0),
+                route("rb", "b", "/b", 0),
+                route("rs", "system", "/s", 0),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(cfg.clusters.len(), 3);
+        let ca_of = |rule: &str| {
+            let rule = cfg.listeners[0].rules.iter().find(|r| r.route == rule);
+            let key = rule.expect("rule").backends[0].cluster.as_deref();
+            let tls = cfg.clusters[key.expect("a cluster")].tls.as_ref();
+            tls.expect("tls").ca_pem.clone()
+        };
+        assert_eq!(ca_of("ra").as_deref(), Some(CA_A));
+        assert_eq!(ca_of("rb").as_deref(), Some(CA_B));
+        assert_eq!(ca_of("rs"), None);
+    }
+
+    #[test]
+    fn a_service_without_tls_settings_reads_as_verified_against_the_trust_store() {
+        let service: StoreService = serde_json::from_value(serde_json::json!({
+            "name": "s", "protocol": "Https", "host": "api.internal", "port": 443
+        }))
+        .expect("an older snapshot's service still reads");
+        assert!(service.tls_verify);
+        assert_eq!((service.tls_ca_pem, service.tls_sni), (None, None));
     }
 
     #[test]

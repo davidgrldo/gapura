@@ -218,6 +218,9 @@ impl Store {
                     read_timeout_ms: r
                         .get::<_, Option<i32>>("read_timeout_ms")
                         .and_then(|ms| u32::try_from(ms).ok()),
+                    tls_verify: true,
+                    tls_ca_pem: None,
+                    tls_sni: None,
                 }
             })
             .collect();
