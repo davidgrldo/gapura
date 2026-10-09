@@ -8,6 +8,9 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store-mode session now takes its issue time from the database's clock alone, the clock that
+  stamps every cut-off. Taking the later of the two clocks let a session opened just before a
+  password reset or a disable survive it whenever the console's clock ran ahead of the database's.
 - The console has an Audit log page under Activity, for superusers and anyone with a role. It
   lists every change made through the console, newest first: when, who (and whether they signed in
   through the identity provider), whether it was created, changed or deleted, what it was and its
