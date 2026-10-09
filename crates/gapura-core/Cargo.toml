@@ -18,6 +18,8 @@ thiserror = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 sha2.workspace = true
+# Reading a JWKS and verifying a JWT, shared by the data plane and the control plane.
+jsonwebtoken.workspace = true
 
 [dev-dependencies]
 insta = { workspace = true }

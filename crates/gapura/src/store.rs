@@ -37,7 +37,7 @@ pub struct Runtime {
     regexes: RegexMap,
     /// Decoding keys per JWKS document, for the same reason: a policy's keys cannot change
     /// between swaps, so parsing them per request would be work nothing asked for.
-    jwt_keys: HashMap<String, crate::proxy::jwt::JwtKeys>,
+    jwt_keys: HashMap<String, crate::proxy::jwt::Keys>,
 }
 
 impl Runtime {
@@ -114,7 +114,7 @@ impl Runtime {
     }
 
     /// Decoding keys for a policy's JWKS document, compiled with this generation.
-    pub fn jwt_keys(&self, jwks: &str) -> Option<&crate::proxy::jwt::JwtKeys> {
+    pub fn jwt_keys(&self, jwks: &str) -> Option<&crate::proxy::jwt::Keys> {
         self.jwt_keys.get(jwks)
     }
 

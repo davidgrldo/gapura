@@ -551,7 +551,7 @@ impl ProxyHttp for GapuraProxy {
                             // Refusing is the safe direction: the alternative is passing traffic
                             // through unverified because a configuration error made verification
                             // impossible.
-                            let empty = jwt::JwtKeys::default();
+                            let empty = jwt::Keys::default();
                             let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
                             jwt::verify(policy, keys, presented)
                                 .err()
