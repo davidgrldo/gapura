@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
 mod accounts;
+mod audit;
 mod configuration;
 mod consumers;
 mod data_planes;
