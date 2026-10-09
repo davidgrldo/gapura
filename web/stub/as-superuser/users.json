@@ -4,6 +4,7 @@
   { "id": "10000000-0000-4000-8000-000000000001", "name": "david", "method": "local", "local": true, "must_change_password": false, "superuser": true, "status": "active", "last_sign_in_at": 1790812800, "access": [
     { "workspace_id": "00000000-0000-4000-8000-000000000001", "workspace": "default", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] },
     { "workspace_id": "00000000-0000-4000-8000-000000000002", "workspace": "payments", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] },
+    { "workspace_id": "00000000-0000-4000-8000-000000000004", "workspace": "sandbox", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] },
     { "workspace_id": "00000000-0000-4000-8000-000000000003", "workspace": "storefront", "role": "admin", "sources": [{ "kind": "superuser", "role": "admin" }] }
   ] },
   { "id": "10000000-0000-4000-8000-000000000009", "name": "dewi.anggraini.kusumawardhani@payments.example", "method": "oidc", "local": false, "must_change_password": false, "superuser": false, "status": "disabled", "last_sign_in_at": 1788000000, "access": [] },

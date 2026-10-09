@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console has a Workspaces page under Access, after Roles. Superusers see every workspace and
+  workspace admins the ones they administer, each with its services, routes, consumers and members.
+  Superusers create workspaces, rename them and delete empty ones; a workspace that still holds
+  something says what is left instead of offering Delete, and the only workspace says it cannot go.
+  After a change the console reads who you are again, so the workspace pickers and the Users and
+  Roles pages follow it. Workspace admins see the page without controls.
 - The control plane has an API for reading the audit log: `GET /api/audit`, newest first, a page
   at a time (`limit` 1 to 200, default 50; `before` the `next` of the page before, which is null on
   the last page). Each entry says when, who and how they signed in, the action, the kind of object,
@@ -36,6 +42,8 @@ means what it usually does, moving from one version below to a later one. Releas
   never deleted. Two deletes at once cannot take the last two, and nothing written into a
   workspace while its delete waits slips past the count. Migration 0008 indexes the audit log by
   workspace, so a delete does not read the whole trail.
+- A console sign-in just after a reset, disable or demotion is no longer refused while the
+  database's clock runs ahead of the console's: a session is now issued by that clock too.
 - An HTTPRoute that names none of Gapura's Gateways is no longer compiled. Its RegularExpression
   paths were built on every translation all the same, so one route attached to nothing, holding 128
   patterns like `/0\w{100}`, held up configuration for the whole gateway for 18 seconds per change.
