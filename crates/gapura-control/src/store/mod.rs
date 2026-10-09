@@ -20,6 +20,7 @@ mod data_planes;
 mod grants;
 mod identity;
 mod tls;
+mod workspaces;
 pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
