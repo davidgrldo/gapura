@@ -65,7 +65,7 @@ pub fn wrong_current() -> FieldError {
 
 /// `password.rs` words its refusals as fragments ("a username cannot be empty"); the API answers
 /// in sentences.
-fn sentence(fragment: String) -> String {
+pub(crate) fn sentence(fragment: String) -> String {
     let mut s = fragment;
     if let Some(first) = s.get(..1) {
         let upper = first.to_uppercase();
@@ -107,6 +107,16 @@ pub fn may_administer(caller: &User) -> Result<(), Refusal> {
     }
     Err(Refusal::Forbidden(
         "Accounts are a superuser's to change.".into(),
+    ))
+}
+
+/// Whether sign-up is open is a superuser's to change, like the accounts it lets in.
+pub fn may_change_settings(caller: &User) -> Result<(), Refusal> {
+    if caller.superuser && !caller.disabled {
+        return Ok(());
+    }
+    Err(Refusal::Forbidden(
+        "Settings are a superuser's to change.".into(),
     ))
 }
 

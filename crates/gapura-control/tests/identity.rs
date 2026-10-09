@@ -444,6 +444,7 @@ fn console(store: Arc<Store>, auth_mode: gapura_control::login::AuthMode) -> axu
         session_lifetime: Duration::from_secs(3600),
         store: Some(store),
         sign_in: Default::default(),
+        sign_up: Default::default(),
         store_settings: Default::default(),
     })
 }
@@ -804,6 +805,8 @@ async fn a_temporary_password_opens_nothing_but_me() {
     let routes: &[(&str, &str)] = &[
         ("GET", "/api/users"),
         ("GET", "/api/roles"),
+        ("GET", "/api/settings"),
+        ("PUT", "/api/settings"),
         ("PATCH", &user_roles),
         ("PUT", "/api/group-mappings"),
         ("DELETE", "/api/group-mappings"),

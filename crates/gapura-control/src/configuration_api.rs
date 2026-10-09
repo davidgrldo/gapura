@@ -59,6 +59,9 @@ pub(crate) fn written(result: Result<(), WriteError>) -> Response {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(WriteError::Refused(refusal)) => refusal.into_response(),
         Err(WriteError::Field(error)) => field_error(error),
+        Err(WriteError::Busy) => {
+            crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, crate::grants_api::BUSY)
+        }
         Err(WriteError::Store(error)) => {
             let code = sqlstate(&error);
             tracing::warn!(

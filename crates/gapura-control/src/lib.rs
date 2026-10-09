@@ -31,6 +31,7 @@ pub mod same_origin;
 pub mod scope;
 pub mod served;
 pub mod session;
+pub mod settings_api;
 pub mod state;
 pub mod store;
 pub mod throttle;

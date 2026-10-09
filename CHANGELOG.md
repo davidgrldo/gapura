@@ -18,6 +18,19 @@ means what it usually does, moving from one version below to a later one. Releas
   that changed named above them. It filters by workspace (and, for a superuser, the entries with no
   workspace) and by kind, and reads older entries a page at a time with Load older. The build now
   fails if the kinds it offers drift from the server's.
+- A superuser can open sign-up (`GET`/`PUT /api/settings`, `{"sign_up_open": true}`); it is closed
+  on a fresh install, and each change is one audit entry. While it is open, the sign-in page links
+  to `/auth/signup`, where anyone reaching the console creates a local account with a username, a
+  password and an optional note of up to 500 characters for whoever grants access. The account
+  holds no role, so it reaches nothing until someone grants it one; it is signed in at once and
+  sees the Waiting page. `/api/users` shows the note to superusers and workspace admins as
+  `signup_note`. Each address (an IPv6 one by its /64) gets five sign-ups in ten minutes and
+  twenty in a day, whatever they end in, and while 500 accounts made by sign-up are waiting for
+  a role, sign-up says it is full. Closing sign-up leaves the accounts it made, and no account
+  is made by sign-up once closing has been answered. Kubernetes mode has no sign-up. Migration
+  0009 adds the setting, the note and when an account signed up. Every password hash the
+  console makes, a superuser's create and reset and a password change included, now answers
+  503 busy when too many are already waiting, instead of joining the queue however long it is.
 - The console has a Workspaces page under Access, after Roles. Superusers see every workspace and
   workspace admins the ones they administer, each with its services, routes, consumers and members.
   Superusers create workspaces, rename them and delete empty ones; a workspace that still holds

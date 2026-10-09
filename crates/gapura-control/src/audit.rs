@@ -38,6 +38,8 @@ pub const KINDS: &[&str] = &[
     "data_plane",
     // store/data_planes.rs, issuing and revoking a data plane's token.
     "data_plane_token",
+    // store/settings.rs, opening and closing sign-up.
+    "setting",
 ];
 
 /// The fewest and the most entries one page holds, and how many when the request does not say.
@@ -353,22 +355,21 @@ mod tests {
         }
     }
 
-    /// Every `object_kind: "…"` in the store's sources, read at compile time. The store writes
-    /// entries only through `grants::Entry`, so this is every kind it can record.
+    /// Every `object_kind: "…"` in the store's sources. The store writes entries only through
+    /// `grants::Entry`, so this is every kind it can record. Every file under `src/store` is read,
+    /// so a store module added later is checked without anyone remembering to list it here.
     #[test]
     fn the_known_kinds_are_the_ones_written() {
-        let sources = [
-            include_str!("store/accounts.rs"),
-            include_str!("store/configuration.rs"),
-            include_str!("store/consumers.rs"),
-            include_str!("store/data_planes.rs"),
-            include_str!("store/grants.rs"),
-            include_str!("store/identity.rs"),
-            include_str!("store/mod.rs"),
-            include_str!("store/workspaces.rs"),
-        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+        let sources: Vec<String> = std::fs::read_dir(&dir)
+            .expect("reading src/store")
+            .map(|entry| entry.expect("a src/store entry").path())
+            .filter(|path| path.extension().is_some_and(|e| e == "rs"))
+            .map(|path| std::fs::read_to_string(path).expect("reading a store module"))
+            .collect();
+        assert!(sources.len() >= 9, "src/store was not read");
         let mut written = BTreeSet::new();
-        for source in sources {
+        for source in &sources {
             for (i, m) in source.match_indices("object_kind: \"") {
                 let rest = &source[i + m.len()..];
                 written.insert(&rest[..rest.find('"').unwrap()]);

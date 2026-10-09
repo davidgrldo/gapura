@@ -37,6 +37,9 @@ pub enum WriteError {
     Field(crate::configuration::FieldError),
     /// The store could not be read or written.
     Store(anyhow::Error),
+    /// Too many password checks and hashes were already waiting, so the one this write needed
+    /// was not made. Says nothing about the request; it may simply be tried again.
+    Busy,
 }
 
 impl From<Refusal> for WriteError {

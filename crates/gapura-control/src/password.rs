@@ -134,24 +134,29 @@ pub async fn verify_or_dummy(password: String, stored: Option<String>) -> Result
     .unwrap_or(false))
 }
 
-/// The PHC string for `password`, made as `verify_or_dummy` checks one: off the async workers
-/// and under the same bound. A hash costs what a check costs, and the accounts API makes one per
-/// create, reset and change, so unbounded they would add to the memory the bound was set for.
-///
-/// It waits for its place however long the queue is, rather than answering `Busy`: only a
-/// signed-in caller makes a hash, and the queue in front of it is bounded by `verify_or_dummy`.
-pub async fn hash_bounded(password: String) -> anyhow::Result<String> {
-    let permit = CHECKING
-        .permits
-        .acquire()
-        .await
-        .map_err(|e| anyhow::anyhow!("waiting to hash a password: {e}"))?;
-    tokio::task::spawn_blocking(move || {
+/// The PHC string for `password`, made as `verify_or_dummy` checks one: off the async workers,
+/// under the same bound, and queued the same way, so `Busy` at once when too many are already
+/// waiting. A hash costs what a check costs, and every hash this console makes goes through here:
+/// a sign-up, which anyone can reach, and an account's own password change and a superuser's
+/// create and reset. Waiting for a place however long the queue was let a flood of those add to
+/// the memory the bound was set for and put real sign-ins behind it.
+pub async fn hash_or_busy(password: String) -> Result<anyhow::Result<String>, Busy> {
+    hash_in(&CHECKING, password).await
+}
+
+async fn hash_in(
+    checks: &'static Checks,
+    password: String,
+) -> Result<anyhow::Result<String>, Busy> {
+    let permit = checks.enter().await?;
+    Ok(tokio::task::spawn_blocking(move || {
         // Held by the work, as in `verify_or_dummy`.
         let _permit = permit;
         hash(&password)
     })
-    .await?
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|hashed| hashed))
 }
 
 /// Long enough for any name a person or a team uses, and well inside what a unique index on
@@ -225,6 +230,23 @@ pub fn check_password(username: &str, password: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_hash_behind_a_full_queue_is_busy_rather_than_waiting() {
+        let checks: &'static Checks = Box::leak(Box::new(Checks::new(1, 0)));
+        let running = checks.enter().await.unwrap();
+        assert_eq!(
+            hash_in(checks, "correct horse battery".into()).await.err(),
+            Some(Busy),
+            "no place and no room to wait: refused at once"
+        );
+        drop(running);
+        let stored = hash_in(checks, "correct horse battery".into())
+            .await
+            .expect("a place")
+            .unwrap();
+        assert!(verify("correct horse battery", &stored));
+    }
 
     #[test]
     fn the_check_semaphore_has_the_fixed_size() {

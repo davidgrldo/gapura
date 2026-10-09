@@ -90,6 +90,7 @@ fn console(store: Option<Arc<Store>>) -> axum::Router {
         session_lifetime: Duration::from_secs(3600),
         store,
         sign_in: Default::default(),
+        sign_up: Default::default(),
         store_settings: StoreSettings::default(),
     })
 }
