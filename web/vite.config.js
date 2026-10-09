@@ -44,10 +44,14 @@ import tailwindcss from '@tailwindcss/vite'
 // the key), and key-auth.json, the `[{ target, header }]` of the API-key requirements set on the
 // workspace, a service or a route. Each service and route row carries the `key_auth` the server
 // would have worked out for it, so keep those rows and key-auth.json telling the same story.
+// jwt.json holds the JWT requirements set there, `[{ target, issuer, audience, jwks }]` with each
+// JWKS as the text it was pasted as: `GET /api/workspaces/<name>/jwt` answers it without the JWKS
+// and with how many keys it lists, and `?target=` answers one of them whole, or 404 when that
+// target has none. The rows' `jwt` tells the same story, as their `key_auth` does.
 //
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
 // service or route created on its list, replaced or deleted by name, a consumer created or
-// deleted, a key revoked, an API-key requirement put or removed — answer 204 and store nothing,
+// deleted, a key revoked, an API-key or JWT requirement put or removed — answer 204 and store nothing,
 // for every persona, so the lists read back as they were. Issuing a key is the one write that
 // answers with a body, as the server does: a made-up key, shown once like the real one, and the
 // expiry the request asked for. That is enough to look at the forms and at what follows a save.
@@ -99,6 +103,7 @@ function stubApi() {
   const keys = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys$/
   const revoke = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys\/[^/]+$/
   const keyAuth = /^\/api\/workspaces\/[^/]+\/key-auth$/
+  const jwt = /^\/api\/workspaces\/([^/]+)\/jwt$/
   // Registering a data plane and issuing it another token both answer with a token.
   const issued = /^\/api\/data-planes(\/[^/]+\/tokens)?$/
   const dataPlaneWrites = /^\/api\/data-planes\/[^/]+(\/tokens\/[^/]+)?$/
@@ -118,6 +123,8 @@ function stubApi() {
     ['DELETE', revoke],
     ['PUT', keyAuth],
     ['DELETE', keyAuth],
+    ['PUT', jwt],
+    ['DELETE', jwt],
     ['DELETE', dataPlaneWrites],
     ['POST', /^\/api\/workspaces$/],
     ['PUT', /^\/api\/workspaces\/[^/]+$/],
@@ -203,6 +210,35 @@ function stubApi() {
         if (writes.some(([method, pattern]) => req.method === method && pattern.test(url))) {
           res.statusCode = 204
           return res.end()
+        }
+        const requirements = req.method === 'GET' ? jwt.exec(url) : null
+        if (requirements) {
+          let name
+          try {
+            name = decodeURIComponent(requirements[1])
+          } catch {
+            name = ''
+          }
+          const file = path.join(stub, 'workspaces', name, 'jwt.json')
+          if (!/^[\w-]+$/.test(name) || !existsSync(file)) {
+            res.statusCode = 404
+            return res.end()
+          }
+          const documents = JSON.parse(readFileSync(file, 'utf8'))
+          const target = new URLSearchParams(req.url.split('?')[1] ?? '').get('target')
+          let answer
+          if (target === null) {
+            answer = documents.map(({ jwks, ...rest }) => ({ ...rest, keys: JSON.parse(jwks).keys.length }))
+          } else {
+            answer = documents.find((d) => d.target === target)
+            if (!answer) {
+              res.statusCode = 404
+              res.setHeader('content-type', 'application/json')
+              return res.end(JSON.stringify({ error: `${target} has no JWT requirement.` }))
+            }
+          }
+          res.setHeader('content-type', 'application/json')
+          return res.end(JSON.stringify(answer))
         }
         const list = req.method === 'GET' ? lists.exec(url) : null
         if (list) {
