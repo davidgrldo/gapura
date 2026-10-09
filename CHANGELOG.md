@@ -69,6 +69,25 @@ means what it usually does, moving from one version below to a later one. Releas
   when each token was last used. `/v1/config` records those on each call; migration 0006 adds the
   two columns they need. `Store::issue_token`, which wrote no audit row, is now `seed_token`, for
   seeding and tests.
+- The sign-in throttle keeps a name only as a fixed-size SHA-256 digest of its lowercased form, and
+  `POST /auth/login` reads at most 16 KiB, answering 413 beyond it. A unique megabyte-long username
+  per request used to be buffered and kept until the counters held 100,000 entries, enough to
+  OOM-kill the console; an over-long name is still counted against its address and pair (#158).
+- The sign-in throttle counts an attempt from the moment it is let through, not once its password
+  has been verified, so a burst of guesses sent at once is held to five per name and address and ten
+  per address like a sequence; before, every attempt of a burst passed the check before the first
+  failure was counted. The password checks' queue is bounded too: with 16 already waiting, a
+  sign-in answers 503 "Sign-in is busy right now" with `Retry-After: 1` at once, the same whether or
+  not the name has an account, instead of waiting minutes behind someone else's burst (#157).
+- The console's sign-in throttle reads every `X-Forwarded-For` line, joined in order, not just the
+  first. Behind a trusted proxy that adds a line of its own, such as HAProxy's `option forwardfor`,
+  the first line is the client's own words, and a client could pick the address it was counted
+  against (#160).
+- The console's cookies are `__Host-gapura_session` and `__Host-gapura_login_state`, so a sibling
+  subdomain can no longer plant a session or a sign-in state for the console's host; the login-state
+  cookie's path is now `/`, as the prefix requires. A request carrying two session cookies is
+  treated as signed out rather than trusting the first. Upgrading signs everyone out once: a
+  `gapura_session` cookie is no longer read, and sign-in and sign-out expire it (#162).
 - The console has a Consumers page under Configuration, and an API-key requirement to go with it.
   Create consumers and issue them keys: a key is shown once, with a Copy button, and closing the
   dialog without copying asks first. A key may expire; revoke one, or delete the consumer. A

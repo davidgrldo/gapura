@@ -16,9 +16,13 @@ use axum::{
 pub fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        // The sign-in form answers anyone, so it gets the smallest cap that holds a real form,
+        // not axum's 2 MiB default: see `MAX_LOGIN_FORM`.
         .route(
             "/auth/login",
-            get(crate::login::begin).post(crate::login::login_local),
+            get(crate::login::begin)
+                .post(crate::login::login_local)
+                .layer(DefaultBodyLimit::max(crate::login::MAX_LOGIN_FORM)),
         )
         .route("/auth/callback", get(crate::login::callback))
         .route("/auth/logout", post(crate::login::logout))
@@ -183,7 +187,7 @@ pub(crate) fn refuse(status: StatusCode, sentence: &str) -> Response {
     (status, Json(serde_json::json!({ "error": sentence }))).into_response()
 }
 
-/// Pulls the signed session out of the `gapura_session` cookie. Any failure — no
+/// Pulls the signed session out of the `__Host-gapura_session` cookie. Any failure — no
 /// cookie, no signature, a bad signature, an expired session — collapses to `None`;
 /// the caller turns that into a uniform 401 rather than leaking which case it was.
 pub(crate) fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::session::Session> {
@@ -195,19 +199,25 @@ pub(crate) fn session_from(headers: &HeaderMap, key: &[u8]) -> Option<crate::ses
     crate::session::decode(value, key, now).ok()
 }
 
-/// The value of the cookie called `name`, if the request carries one.
+/// The value of the cookie called `name`, if the request carries exactly one.
 pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     // Every `cookie` field, not just the first: HTTP/2 lets a client or an intermediary
     // split the cookies across several of them (RFC 9113 section 8.2.3) and hyper leaves
     // them as it found them, so a cookie that landed in the second field would otherwise
     // be invisible and the caller refused while holding a valid one.
-    headers
+    let mut found = headers
         .get_all("cookie")
         .iter()
         .filter_map(|field| field.to_str().ok())
         .flat_map(|field| field.split(';'))
         .filter_map(|c| c.trim().strip_prefix(name))
-        .find_map(|rest| rest.strip_prefix('='))
+        .filter_map(|rest| rest.strip_prefix('='));
+    let first = found.next()?;
+    // A browser sends one cookie per name, path and domain, so a second of the same name was set
+    // by someone else: a sibling subdomain with `Domain=` and a longer `Path`, which a browser
+    // sends first. Neither is trusted then, rather than whichever came first (#162); the
+    // `__Host-` prefix stops that from happening in browsers that honour it.
+    found.next().is_none().then_some(first)
 }
 
 /// Drop every row outside the caller's namespaces.
@@ -231,7 +241,7 @@ mod session_cookie_tests {
 
     const KEY: &[u8] = b"test key";
 
-    /// A `gapura_session` cookie this key accepts, expiring far enough out that no test
+    /// A session cookie this key accepts, expiring far enough out that no test
     /// here is ever racing the clock.
     fn a_valid_session_cookie() -> String {
         let session = Session {
@@ -285,6 +295,28 @@ mod session_cookie_tests {
             session_from(&headers, KEY).map(|s| s.subject),
             Some("alice".to_string())
         );
+    }
+
+    #[test]
+    fn two_session_cookies_are_no_session_whichever_is_valid() {
+        // #162: a sibling subdomain plants a second session with a longer path, which the
+        // browser sends first. Taking the first would sign the victim in as the planter.
+        let ours = a_valid_session_cookie();
+        let other = format!("{}=planted.value", crate::login::COOKIE_NAME);
+        for fields in [
+            vec![format!("{other}; {ours}")],
+            vec![format!("{ours}; {ours}")],
+            vec![other.clone(), ours.clone()],
+        ] {
+            let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+            assert!(
+                session_from(&headers_with(&fields), KEY).is_none(),
+                "{fields:?}"
+            );
+        }
+        // A cookie whose name only starts with ours is someone else's, and no duplicate.
+        let line = format!("{}_x=1; {ours}", crate::login::COOKIE_NAME);
+        assert!(session_from(&headers_with(&[line.as_str()]), KEY).is_some());
     }
 
     #[test]
@@ -720,7 +752,7 @@ fn signed_in_as(groups: &[&str]) -> String {
         expires_at: u64::MAX,
         issued_at: 0,
     };
-    format!("gapura_session={}", encode(&session, KEY))
+    format!("{}={}", crate::login::COOKIE_NAME, encode(&session, KEY))
 }
 
 /// The `id` of every row in a response body, which must be an array of rows.
@@ -805,7 +837,18 @@ mod route_endpoint_tests {
     #[tokio::test]
     async fn a_forged_cookie_is_refused() {
         let state = state_reading(nothing_listening(), nothing_listening());
-        let (status, _) = get_routes(&state, Some("gapura_session=forged.nonsense")).await;
+        let forged = format!("{}=forged.nonsense", crate::login::COOKIE_NAME);
+        let (status, _) = get_routes(&state, Some(&forged)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn two_session_cookies_are_refused_even_when_both_are_valid() {
+        // #162: a planted session sent ahead of the real one must not pick the account.
+        let state = state_reading(stub_api(FIXTURE).await, stub_empty_gateway().await);
+        let planted = signed_in_as(&["team-b"]);
+        let ours = signed_in_as(&["team-a"]);
+        let (status, _) = get_routes(&state, Some(&format!("{planted}; {ours}"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 

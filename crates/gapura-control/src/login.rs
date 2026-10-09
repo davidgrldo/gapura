@@ -33,7 +33,16 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// The cookie a session travels in. `api` reads it back out under the same name.
-pub const COOKIE_NAME: &str = "gapura_session";
+///
+/// `__Host-` makes the browser refuse it unless it is `Secure`, `Path=/` and has no `Domain`, so
+/// a sibling subdomain cannot plant one for this host and have it sent ahead of the real one
+/// (#162).
+pub const COOKIE_NAME: &str = "__Host-gapura_session";
+
+/// What the session cookie was called before it took the `__Host-` prefix. A browser still
+/// holding one is sent this on every sign-in and sign-out, expiring it rather than leaving a
+/// cookie nothing reads for as long as its `Max-Age` ran.
+const RETIRED_COOKIE: &str = "gapura_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
 /// Where a browser lands once it is signed in, when it did not arrive from anywhere finer.
 const AFTER_LOGIN: &str = "/";
@@ -405,14 +414,17 @@ pub fn set_cookie(value: &str, lifetime: Duration) -> String {
 }
 
 /// The cookie that ties a sign-in's `state` to the browser that began it. See `callback`.
-const LOGIN_STATE_COOKIE: &str = "gapura_login_state";
+/// `__Host-` for the same reason as the session's: one planted from a sibling subdomain would
+/// undo the browser binding it exists for.
+const LOGIN_STATE_COOKIE: &str = "__Host-gapura_login_state";
 
 /// The `Set-Cookie` value holding `state` for the callback, or clearing it when `state` is empty
 /// and `lifetime` zero. `SameSite=Lax` still sends it on the provider's redirect back, which is
-/// a top-level GET; `Path` keeps it off every request but that one.
+/// a top-level GET. `__Host-` requires `Path=/`, so it rides along on the console's other
+/// requests too while a sign-in is in flight; it is short-lived, and the callback clears it.
 fn login_state_cookie(state: &str, lifetime: Duration) -> String {
     format!(
-        "{LOGIN_STATE_COOKIE}={state}; HttpOnly; Secure; SameSite=Lax; Path=/auth/callback; Max-Age={}",
+        "{LOGIN_STATE_COOKIE}={state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
         lifetime.as_secs()
     )
 }
@@ -720,6 +732,15 @@ fn query_escape(path: &str) -> String {
         .collect()
 }
 
+/// The most `POST /auth/login` reads, in bytes. Nobody has signed in yet when it is read, so
+/// whatever it is, anyone can make the console buffer it.
+///
+/// 16 KiB holds the largest form this console ever issues, with room to spare: a state carrying
+/// a 2048-byte return path is about 5.5 KiB once JSON-escaped, sealed and base64-encoded, a
+/// password of `MAX_PASSWORD_BYTES` is at most 3 KiB percent-encoded, and a username or an email
+/// well under 1 KiB. Anything larger was not typed into the form; it gets a 413.
+pub(crate) const MAX_LOGIN_FORM: usize = 16 * 1024;
+
 /// `POST /auth/login`: the form above lands here.
 #[derive(Deserialize)]
 pub struct LocalLogin {
@@ -742,12 +763,14 @@ pub async fn login_local(
     let Ok(pending) = Pending::resume(&state.session_key, &form.state) else {
         return refused_local("This sign-in form is no longer valid — open the console again.");
     };
-    // Before the password is looked at: a locked pair or a busy address costs no hashing.
+    // Before the password is looked at: a locked pair or a busy address costs no hashing. Let
+    // through, the attempt is reserved against both until its outcome below settles it, so a
+    // burst sent at once is held to the limits a sequence is.
     let addr = client_addr(&state, &headers, peer);
-    if let Some(wait) = state.sign_in.wait(Some(&form.username), addr) {
-        return throttled(wait);
-    }
-    let name = form.username.clone();
+    let attempt = match state.sign_in.begin(Some(&form.username), addr) {
+        Ok(attempt) => attempt,
+        Err(wait) => return throttled(wait),
+    };
     let response = if let Some(store) = state.store.clone() {
         store_login(&state, &store, form, pending.return_to).await
     } else {
@@ -762,11 +785,12 @@ pub async fn login_local(
         }
     };
     // Past the checks above, both modes answer a refused password with 401 and a session with
-    // a redirect; anything else, such as the store being down, is neither.
+    // a redirect; anything else, such as the store being down or the checks busy, is neither,
+    // and dropping the attempt gives its reservation back.
     match response.status() {
-        StatusCode::UNAUTHORIZED => state.sign_in.failed(Some(&name), addr),
-        s if s.is_redirection() => state.sign_in.succeeded(&name, addr),
-        _ => {}
+        StatusCode::UNAUTHORIZED => attempt.failed(),
+        s if s.is_redirection() => attempt.succeeded(),
+        _ => drop(attempt),
     }
     response
 }
@@ -777,9 +801,19 @@ pub(crate) fn client_addr(
     headers: &header::HeaderMap,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
 ) -> std::net::IpAddr {
+    // Every `X-Forwarded-For` field line, joined in order: RFC 9110 reads repeated lines as one
+    // comma-separated list. A proxy that adds a line of its own rather than appending to the
+    // client's, as HAProxy's `option forwardfor` does, leaves the first line entirely
+    // client-written, and reading only that let a client name its own address (#160).
+    let forwarded_for = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ");
     state.sign_in.client(
         peer.map(|axum::Extension(axum::extract::ConnectInfo(a))| a.ip()),
-        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        (!forwarded_for.is_empty()).then_some(forwarded_for.as_str()),
     )
 }
 
@@ -823,11 +857,14 @@ async fn store_login(
     };
     // Off the async workers, a bounded number at a time, and against the dummy when there is
     // no account: see `verify_or_dummy`.
-    let matches = crate::password::verify_or_dummy(
+    let Ok(matches) = crate::password::verify_or_dummy(
         form.password,
         account.as_ref().map(|a| a.password_hash.clone()),
     )
-    .await;
+    .await
+    else {
+        return busy_page();
+    };
     let Some(account) = account.filter(|a| matches && !a.disabled) else {
         return refused_local("Wrong username or password.");
     };
@@ -890,6 +927,10 @@ fn session_response(
     let mut response = Redirect::to(destination).into_response();
     if let Ok(value) = header::HeaderValue::from_str(&cookie) {
         response.headers_mut().insert(header::SET_COOKIE, value);
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            header::HeaderValue::from_static(RETIRED_COOKIE),
+        );
     }
     response
 }
@@ -918,6 +959,7 @@ pub async fn logout() -> Response {
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::SET_COOKIE, set_cookie("", Duration::ZERO))
+        .header(header::SET_COOKIE, RETIRED_COOKIE)
         .body(axum::body::Body::from(body))
         .expect("static page")
 }
@@ -952,6 +994,25 @@ fn unavailable_page() -> Response {
         "Sign-in is unavailable right now",
         "The console cannot reach its database. Try again in a moment.",
     )
+}
+
+/// What sign-in answers when too many password checks are already waiting (#157).
+///
+/// 503, not 429: the queue is the whole console's, so it says nothing about this client's own
+/// rate, and the attempt is not counted against it. It is decided before any hash is checked,
+/// so it reads the same whether or not the name has an account. `Retry-After` is a second,
+/// about how long the queue it found full takes to drain.
+fn busy_page() -> Response {
+    let mut response = notice_page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sign-in busy",
+        "Sign-in is busy right now",
+        "Too many sign-ins are being checked at once. Try again in a moment.",
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+    response
 }
 
 /// An OIDC account this console has disabled. The identity provider has already said who
@@ -1020,16 +1081,21 @@ pub async fn callback(
     // A refusal at the provider names no account here, so it counts against the address only,
     // and locks nothing anyone else uses.
     let addr = client_addr(&state, &headers, peer);
-    if let Some(wait) = state.sign_in.wait(None, addr) {
-        return Ok(throttled(wait));
-    }
+    let attempt = match state.sign_in.begin(None, addr) {
+        Ok(attempt) => attempt,
+        Err(wait) => return Ok(throttled(wait)),
+    };
     // Only the provider's error code is logged, never its description: the description is
     // free text from another system and the query string it arrived in also holds a code.
     if let Some(error) = &query.error {
         tracing::info!(provider_error = %error, "the identity provider refused a sign-in");
-        state.sign_in.failed(None, addr);
+        attempt.failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
+    // Only a provider's refusal is counted here. Nothing after it is a guess this address could
+    // repeat to learn something, so the reservation is given back now rather than held across
+    // the exchange with the provider.
+    drop(attempt);
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -1153,6 +1219,10 @@ pub async fn callback(
         header::HeaderValue::from_str(&login_state_cookie("", Duration::ZERO))
             .expect("a static cookie"),
     );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        header::HeaderValue::from_static(RETIRED_COOKIE),
+    );
     Ok(response)
 }
 
@@ -1238,9 +1308,26 @@ mod tests {
         assert!(cookie.contains("HttpOnly"), "got {cookie}");
         assert!(cookie.contains("Secure"), "got {cookie}");
         assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
-        assert!(cookie.starts_with("gapura_session=a.b;"), "got {cookie}");
+        // #162: `__Host-`, which browsers honour only with Secure, Path=/ and no Domain.
+        assert!(
+            cookie.starts_with("__Host-gapura_session=a.b;"),
+            "got {cookie}"
+        );
         assert!(cookie.contains("Max-Age=3600"), "got {cookie}");
-        assert!(cookie.contains("Path=/"), "got {cookie}");
+        assert!(cookie.contains("; Path=/;"), "got {cookie}");
+        assert!(!cookie.contains("Domain"), "got {cookie}");
+    }
+
+    #[test]
+    fn the_login_state_cookie_is_host_prefixed_and_scoped_to_the_whole_origin() {
+        let cookie = login_state_cookie("s", PENDING_LIFETIME);
+        assert!(
+            cookie.starts_with("__Host-gapura_login_state=s;"),
+            "got {cookie}"
+        );
+        assert!(cookie.contains("Secure"), "got {cookie}");
+        assert!(cookie.contains("; Path=/;"), "got {cookie}");
+        assert!(!cookie.contains("Domain"), "got {cookie}");
     }
 
     #[test]
@@ -1603,9 +1690,9 @@ mod against_a_stub_provider {
     fn session_of(response: &axum::response::Response) -> Session {
         let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
         let value = cookie
-            .strip_prefix("gapura_session=")
+            .strip_prefix("__Host-gapura_session=")
             .and_then(|rest| rest.split(';').next())
-            .expect("a gapura_session cookie");
+            .expect("a session cookie");
         session::decode(value, SESSION_KEY, now_seconds()).expect("a valid session")
     }
 
@@ -1694,7 +1781,7 @@ mod against_a_stub_provider {
         assert!(response.headers()[header::SET_COOKIE]
             .to_str()
             .unwrap()
-            .starts_with("gapura_session="));
+            .starts_with("__Host-gapura_session="));
     }
 
     #[tokio::test]
@@ -1726,9 +1813,9 @@ mod against_a_stub_provider {
         assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
 
         let value = cookie
-            .strip_prefix("gapura_session=")
+            .strip_prefix("__Host-gapura_session=")
             .and_then(|rest| rest.split(';').next())
-            .expect("a gapura_session cookie");
+            .expect("a session cookie");
         let session = session::decode(value, SESSION_KEY, now_seconds()).expect("a valid session");
         assert_eq!(session.subject, "alice");
         assert_eq!(session.groups, ["team-a", "team-b"]);
@@ -1780,7 +1867,7 @@ mod against_a_stub_provider {
 
         let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
         assert!(
-            cookie.starts_with(&format!("gapura_login_state={csrf};")),
+            cookie.starts_with(&format!("__Host-gapura_login_state={csrf};")),
             "got {cookie}"
         );
         assert!(cookie.contains("HttpOnly"), "got {cookie}");
@@ -1788,7 +1875,8 @@ mod against_a_stub_provider {
         // Lax, not Strict: the provider sends the browser back with a top-level GET from its
         // own site, and Strict would leave the cookie off exactly that request.
         assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
-        assert!(cookie.contains("Path=/auth/callback"), "got {cookie}");
+        // `__Host-` requires the whole origin as its path (#162).
+        assert!(cookie.contains("; Path=/;"), "got {cookie}");
         assert!(
             cookie.contains(&format!("Max-Age={}", PENDING_LIFETIME.as_secs())),
             "got {cookie}"
@@ -1836,11 +1924,17 @@ mod against_a_stub_provider {
             .get_all(header::SET_COOKIE)
             .iter()
             .filter_map(|v| v.to_str().ok())
-            .find(|c| c.starts_with("gapura_login_state=;"))
+            .find(|c| c.starts_with("__Host-gapura_login_state=;"))
             .expect("the state cookie is cleared");
         // A browser only replaces the cookie if the path matches the one it was set with.
-        assert!(spent.contains("Path=/auth/callback"), "got {spent}");
+        assert!(spent.contains("; Path=/;"), "got {spent}");
         assert!(spent.contains("Max-Age=0"), "got {spent}");
+        // And a session cookie under the name before #162 is expired with it.
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|c| c == RETIRED_COOKIE));
     }
 
     #[tokio::test]
@@ -2304,6 +2398,125 @@ mod local_login_flow_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_guesses_sent_at_once_is_held_to_the_limit() {
+        // #157: each attempt was checked against the counts and counted only once its password
+        // had been verified, so a burst all passed the check before the first failure landed.
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        let page = get(&state, "/auth/login").await;
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+        let burst: Vec<_> = (0..40)
+            .map(|i| {
+                let state = state.clone();
+                let body = format!("state={login_state}&email=a%40x&password=guess{i}");
+                tokio::spawn(async move { post(&state, "/auth/login", body).await.status() })
+            })
+            .collect();
+        let mut verified = 0;
+        for attempt in burst {
+            match attempt.await.unwrap() {
+                StatusCode::UNAUTHORIZED => verified += 1,
+                StatusCode::TOO_MANY_REQUESTS => {}
+                other => panic!("unexpected {other}"),
+            }
+        }
+        assert!(
+            (1..=5).contains(&verified),
+            "{verified} guesses were verified; five per name and address is the limit"
+        );
+        // And the pair is locked now, the right password included.
+        let locked = post(
+            &state,
+            "/auth/login",
+            format!("state={login_state}&email=a%40x&password=s3cret"),
+        )
+        .await;
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn every_forwarded_for_line_is_read_so_a_client_cannot_name_itself() {
+        // #160: a trusted proxy that adds its own line, as HAProxy's `option forwardfor` does,
+        // leaves the client's own words alone in the first one.
+        let mut state = local_state("users: []\n");
+        state.sign_in = Arc::new(crate::throttle::Throttle::new(vec!["10.0.0.0/8"
+            .parse()
+            .unwrap()]));
+        let mut headers = header::HeaderMap::new();
+        headers.append("x-forwarded-for", "6.6.6.6".parse().unwrap());
+        headers.append("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        let peer = || {
+            Some(axum::Extension(axum::extract::ConnectInfo(
+                "10.1.2.3:443".parse().unwrap(),
+            )))
+        };
+        assert_eq!(
+            client_addr(&state, &headers, peer()),
+            "203.0.113.5".parse::<std::net::IpAddr>().unwrap()
+        );
+        // One line, or none, reads as before.
+        headers.remove("x-forwarded-for");
+        headers.append("x-forwarded-for", "6.6.6.6, 203.0.113.5".parse().unwrap());
+        assert_eq!(
+            client_addr(&state, &headers, peer()),
+            "203.0.113.5".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(
+            client_addr(&state, &header::HeaderMap::new(), peer()),
+            "10.1.2.3".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_form_larger_than_any_this_console_issues_is_refused_unread() {
+        // #158: a unique megabyte name per request used to be buffered, verified and kept.
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!("users:\n  - email: a@x\n    bcrypt: {hash}\n"));
+        let page = get(&state, "/auth/login").await;
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+        let name = "a".repeat(MAX_LOGIN_FORM);
+        let response = post(
+            &state,
+            "/auth/login",
+            format!("state={login_state}&email={name}&password=wrong"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // A form of the largest size this console issues still fits.
+        let return_to = format!("/{}", "\"".repeat(2047));
+        let big_state = Pending::begin(&state.session_key, Some(return_to)).state;
+        let password = "é".repeat(crate::password::MAX_PASSWORD_BYTES / 2);
+        let body = format!(
+            "state={big_state}&email=a%40x&password={}",
+            password
+                .bytes()
+                .map(|b| format!("%{b:02X}"))
+                .collect::<String>()
+        );
+        assert!(body.len() < MAX_LOGIN_FORM, "{} bytes", body.len());
+        assert_eq!(
+            post(&state, "/auth/login", body).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     #[tokio::test]
     async fn a_wrong_password_is_refused_without_a_cookie_and_the_form_can_be_sent_again() {
         let hash = bcrypt::hash("s3cret", 4).unwrap();
@@ -2374,5 +2587,13 @@ mod store_mode_tests {
             response.headers()[header::SET_COOKIE],
             set_cookie("", Duration::ZERO).as_str()
         );
+        // The cookie's name before #162 goes too, so an upgraded browser keeps nothing stale.
+        let all: Vec<_> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1], RETIRED_COOKIE);
     }
 }

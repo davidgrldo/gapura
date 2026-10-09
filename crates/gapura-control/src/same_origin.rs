@@ -22,7 +22,7 @@
 //!
 //! Not covered here: `GET /auth/callback`, where an identity provider returns the browser. It
 //! is a `GET` by the protocol's design, so the callback guards itself instead, by refusing a
-//! `state` that does not match the `gapura_login_state` cookie set in the browser that began
+//! `state` that does not match the `__Host-gapura_login_state` cookie set in the browser that began
 //! the sign-in.
 
 use axum::extract::Request;
