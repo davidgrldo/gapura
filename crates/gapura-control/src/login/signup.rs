@@ -14,7 +14,9 @@
 //! limit is what bounds it. Many addresses together are bounded by the store instead: past
 //! `store::MAX_WAITING_SIGN_UPS` accounts waiting for access, sign-up says it is full.
 
-use super::{auth_page, client_addr, issued_at_or_after, notice_page, session_response, Pending};
+use super::{
+    auth_page, client_addr, issued_at_from_database, notice_page, session_response, Pending,
+};
 use super::{AuthMode, MAX_LOGIN_FORM};
 use crate::password::{Busy, MAX_USERNAME_CHARS, MIN_PASSWORD_CHARS};
 use crate::state::AppState;
@@ -201,7 +203,7 @@ async fn create(
                 signed_up.id.to_string(),
                 Vec::new(),
                 None,
-                issued_at_or_after(signed_up.signed_in_at),
+                issued_at_from_database(signed_up.signed_in_at),
             )
         }
         SignUp::Taken => refused(StatusCode::CONFLICT, "That username is taken."),

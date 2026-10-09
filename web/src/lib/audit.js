@@ -11,6 +11,7 @@ export const KIND_LABEL = {
   policy: 'Key requirement',
   data_plane: 'Data plane',
   data_plane_token: 'Data plane token',
+  setting: 'Setting',
 }
 export const KINDS = Object.keys(KIND_LABEL)
 
