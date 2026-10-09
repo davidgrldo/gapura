@@ -14,13 +14,16 @@ use crate::hostname;
 pub type RegexMap = HashMap<String, Arc<regex::Regex>>;
 
 /// The most a path regex may compile to, in bytes (`RegexBuilder::size_limit`; the default is
-/// 10 MiB). Realistic gateway paths are far below it: `^/api/v[0-9]+/.*` is about 1.5 KB,
-/// `/users/\w+/posts/\d+` about 55 KB (Unicode `\w` is the big part), three `[^/]{1,64}`
-/// segments about 200 KB, and `/\w{10}` just fits. Compile time grows with the program, so this
-/// is what bounds the work one pattern can cost: `/\w{100}` (about 5 MB, ~150 ms to compile
-/// under the default) is refused after a fraction of that. Envoy's RE2 default program size is
-/// stricter still.
-pub const PATH_REGEX_SIZE_LIMIT: usize = 512 * 1024;
+/// 10 MiB). Unicode classes make realistic patterns larger than they look: `^/api/v[0-9]+/.*` is
+/// about 2 KiB and `/users/\w+/posts/\d+` about 55 KiB, but `/users/[\w-]{1,64}` is about 3.1 MiB
+/// (each `\w` repetition carries the whole Unicode word class). 4 MiB keeps that kind of pattern,
+/// and is the limit the console has always applied to store-mode regexes, so one value now holds
+/// for both and nothing a store already accepted is refused. Compile time grows with the program
+/// (about 50 ms at 3 MiB), so this also bounds what one pattern costs: `/\w{100}` (about 4.9 MiB)
+/// and `a{1000}{1000}` (about 31 MiB) are refused once the program passes 4 MiB rather than built.
+/// What keeps translation cheap is mostly elsewhere: only routes attached to our Gateways are
+/// compiled, and a pattern's verdict is remembered across translations.
+pub const PATH_REGEX_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 
 /// The most memory each search cache of a path regex may give its lazy DFA, in bytes
 /// (`RegexBuilder::dfa_size_limit`; the default is 2 MiB). The data plane holds one cache per
@@ -650,6 +653,8 @@ mod tests {
             "/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
             r"/(?i)static/.*\.(css|js|png|svg|woff2?)",
             r"/\w{10}",
+            r"/users/[\w-]{1,64}",
+            "/[^/]{1,255}",
         ] {
             assert!(compile_path_regex(p).is_ok(), "{p} must compile");
         }
