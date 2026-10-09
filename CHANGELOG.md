@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's route sheet has a "Headers" list after Methods: rows of a name and a value, added
+  up to 16 and removed one by one, each of which a request must carry with exactly that value; none
+  matches any headers. A refusal's sentence lands on the name or value it names. The sheet always
+  sends the full list, so removing the last row clears a route's headers. The Routes list has a
+  Headers column, "any" or a `name: value` chip for each.
 - The console's service sheet shows an `https` service's upstream TLS settings, under "TLS to the
   upstream": whether the upstream's certificate is verified (unchecking it says that anyone on the
   path can read and change the traffic), its own CA certificates as PEM, and the server name it

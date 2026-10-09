@@ -15,6 +15,7 @@
       "GET",
       "HEAD"
     ],
+    "headers": [],
     "priority": 10,
     "updated_at": "2026-09-30T08:13:02.417766Z",
     "key_auth": {
@@ -28,6 +29,7 @@
     "hosts": [],
     "paths": [],
     "methods": [],
+    "headers": [],
     "priority": 0,
     "updated_at": "2026-09-28T14:41:12.033918Z",
     "key_auth": {
