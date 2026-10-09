@@ -55,37 +55,94 @@ const MAX_CONCURRENT_CHECKS: usize = 2;
 // memory cost per check, fails the build here rather than OOM-killing a pod in production.
 const _: () = assert!(MAX_CONCURRENT_CHECKS * 19 <= 128 / 2);
 
-static CHECKING: LazyLock<tokio::sync::Semaphore> =
-    LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_CHECKS));
+/// How many password checks may wait for one of the `MAX_CONCURRENT_CHECKS` places. Past it, a
+/// check is refused at once with `Busy` instead of joining the queue.
+///
+/// The sign-in throttle holds any one address to ten attempts in flight, but many addresses
+/// together could still queue thousands, and a FIFO queue that long puts every real sign-in,
+/// the break-glass superuser's included, minutes behind them (#157). Sixteen is eight rounds of
+/// two checks, a fraction of a second of waiting; beyond that the honest answer is "busy, try
+/// again", which a person can act on and a queue of minutes is not.
+const MAX_WAITING_CHECKS: usize = 16;
+
+/// Every password check, and every hash, goes through these.
+static CHECKING: LazyLock<Checks> =
+    LazyLock::new(|| Checks::new(MAX_CONCURRENT_CHECKS, MAX_WAITING_CHECKS));
+
+/// A check refused because `MAX_WAITING_CHECKS` were already waiting. It says nothing about the
+/// password, and is decided before any account's hash is looked at, so it reads the same for a
+/// name that has an account and one that does not.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Busy;
+
+/// The places to run a check in, and a bound on how many may wait for one.
+struct Checks {
+    permits: tokio::sync::Semaphore,
+    waiting: std::sync::atomic::AtomicUsize,
+    max_waiting: usize,
+}
+
+impl Checks {
+    fn new(concurrent: usize, max_waiting: usize) -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(concurrent),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+            max_waiting,
+        }
+    }
+
+    /// A place to run one check in: now, after a short wait, or `Busy` when the queue is full.
+    async fn enter(&self) -> Result<tokio::sync::SemaphorePermit<'_>, Busy> {
+        use std::sync::atomic::Ordering;
+        if let Ok(permit) = self.permits.try_acquire() {
+            return Ok(permit);
+        }
+        if self.waiting.fetch_add(1, Ordering::SeqCst) >= self.max_waiting {
+            self.waiting.fetch_sub(1, Ordering::SeqCst);
+            return Err(Busy);
+        }
+        // Uncounted however the wait ends, a request whose client hung up included.
+        struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _waiting = Waiting(&self.waiting);
+        self.permits.acquire().await.map_err(|_| Busy)
+    }
+}
 
 /// Verifies `password` against `stored`, or against `DUMMY` when there is no account, off the
-/// async workers and a bounded number at a time.
+/// async workers and a bounded number at a time; `Busy` when too many are already waiting.
 ///
 /// Every sign-in goes through here and pays for one verification whether or not the account
 /// exists, which is what makes an unknown name and a wrong password cost alike; choosing the
 /// dummy inside the blocking task keeps even its first use off the async workers.
-pub async fn verify_or_dummy(password: String, stored: Option<String>) -> bool {
+pub async fn verify_or_dummy(password: String, stored: Option<String>) -> Result<bool, Busy> {
     if password.len() > MAX_PASSWORD_BYTES {
-        return false;
+        return Ok(false);
     }
-    let Ok(permit) = CHECKING.acquire().await else {
-        return false;
-    };
-    tokio::task::spawn_blocking(move || {
+    let permit = CHECKING.enter().await?;
+    Ok(tokio::task::spawn_blocking(move || {
         // The permit travels with the work. Held by the request instead, it would be returned
         // the moment a client hung up mid-check, while the hashing it was counting carried on.
         let _permit = permit;
         verify(&password, stored.as_deref().unwrap_or(DUMMY.as_str()))
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(false))
 }
 
 /// The PHC string for `password`, made as `verify_or_dummy` checks one: off the async workers
 /// and under the same bound. A hash costs what a check costs, and the accounts API makes one per
 /// create, reset and change, so unbounded they would add to the memory the bound was set for.
+///
+/// It waits for its place however long the queue is, rather than answering `Busy`: only a
+/// signed-in caller makes a hash, and the queue in front of it is bounded by `verify_or_dummy`.
 pub async fn hash_bounded(password: String) -> anyhow::Result<String> {
     let permit = CHECKING
+        .permits
         .acquire()
         .await
         .map_err(|e| anyhow::anyhow!("waiting to hash a password: {e}"))?;
@@ -171,7 +228,7 @@ mod tests {
 
     #[test]
     fn the_check_semaphore_has_the_fixed_size() {
-        assert_eq!(CHECKING.available_permits(), MAX_CONCURRENT_CHECKS);
+        assert_eq!(CHECKING.permits.available_permits(), MAX_CONCURRENT_CHECKS);
     }
 
     use super::*;
@@ -224,13 +281,58 @@ mod tests {
     #[tokio::test]
     async fn verify_or_dummy_checks_an_account_and_refuses_without_one() {
         let stored = hash("correct horse battery").unwrap();
-        assert!(verify_or_dummy("correct horse battery".into(), Some(stored.clone())).await);
-        assert!(!verify_or_dummy("wrong horse battery".into(), Some(stored)).await);
-        assert!(!verify_or_dummy("correct horse battery".into(), None).await);
+        assert_eq!(
+            verify_or_dummy("correct horse battery".into(), Some(stored.clone())).await,
+            Ok(true)
+        );
+        assert_eq!(
+            verify_or_dummy("wrong horse battery".into(), Some(stored)).await,
+            Ok(false)
+        );
+        assert_eq!(
+            verify_or_dummy("correct horse battery".into(), None).await,
+            Ok(false)
+        );
         // Refused for its length alone: the hash below would match it without the cap.
         let long = "x".repeat(MAX_PASSWORD_BYTES + 1);
         let long_hash = hash(&long).unwrap();
-        assert!(!verify_or_dummy(long, Some(long_hash)).await);
+        assert_eq!(verify_or_dummy(long, Some(long_hash)).await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_answers_busy_at_once_instead_of_queueing() {
+        // #157: the queue in front of the checks used to be unbounded and first come, first
+        // served, so a burst put every real sign-in behind it. Its own instance, so the shared
+        // one the other tests use is never held here.
+        let checks = Checks::new(1, 2);
+        let running = checks.enter().await.unwrap();
+        let waiters = [checks.enter(), checks.enter()];
+        let mut waiters = waiters.map(Box::pin);
+        // Polled once each, so both are counted as waiting.
+        for waiter in &mut waiters {
+            assert!(futures_poll_once(waiter.as_mut()).await.is_none());
+        }
+        assert_eq!(checks.enter().await.err(), Some(Busy));
+        // A waiter that gives up frees its place in the queue.
+        let [one, two] = waiters;
+        drop(one);
+        let mut third = Box::pin(checks.enter());
+        assert!(futures_poll_once(third.as_mut()).await.is_none());
+        // And the queue moves when a check ends.
+        drop(running);
+        assert!(two.await.is_ok());
+    }
+
+    /// Polls `future` once, answering what it was ready with, if anything.
+    async fn futures_poll_once<F: std::future::Future + Unpin>(future: F) -> Option<F::Output> {
+        let mut future = future;
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(match std::pin::Pin::new(&mut future).poll(cx) {
+                std::task::Poll::Ready(v) => Some(v),
+                std::task::Poll::Pending => None,
+            })
+        })
+        .await
     }
 
     #[test]

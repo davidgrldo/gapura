@@ -430,8 +430,17 @@ impl Store {
             )
             .into());
         };
-        if !crate::password::verify_or_dummy(change.current.clone(), Some(verified.clone())).await {
-            return Err(WriteError::Field(accounts::wrong_current()));
+        match crate::password::verify_or_dummy(change.current.clone(), Some(verified.clone())).await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(WriteError::Field(accounts::wrong_current())),
+            // Not a verdict on the password: answered as the store being unavailable, a 503
+            // the caller can retry, and given back to the sign-in throttle.
+            Err(crate::password::Busy) => {
+                return Err(WriteError::Store(anyhow::anyhow!(
+                    "too many password checks are waiting"
+                )))
+            }
         }
         accounts::new_password(&username, &change).map_err(WriteError::Field)?;
         let hash = hashed(change.new.clone()).await?;

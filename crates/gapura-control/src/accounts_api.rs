@@ -274,21 +274,24 @@ pub async fn change_password(
     // Before the password is looked at: a locked pair or a busy address costs no hashing.
     let addr = crate::login::client_addr(&state, &headers, peer);
     let name = caller.me.name.as_str();
-    if let Some(wait) = state.sign_in.wait(Some(name), addr) {
-        return throttled(wait);
-    }
+    let attempt = match state.sign_in.begin(Some(name), addr) {
+        Ok(attempt) => attempt,
+        Err(wait) => return throttled(wait),
+    };
     let cut_off = match store
         .change_own_password(caller.me.id, &input.current, &input.new)
         .await
     {
         Ok(cut_off) => cut_off,
         Err(WriteError::Field(error)) if error.field == CURRENT => {
-            state.sign_in.failed(Some(name), addr);
+            attempt.failed();
             return field_error(error);
         }
+        // Anything else said nothing about the current password; dropping the attempt gives
+        // its reservation back.
         Err(e) => return written(Err(e)),
     };
-    state.sign_in.succeeded(name, addr);
+    attempt.succeeded();
     tracing::info!(user = %caller.me.id, "changed their password");
     let issued_at = crate::login::now_millis().max(u64::try_from(cut_off).unwrap_or(0));
     let cookie =

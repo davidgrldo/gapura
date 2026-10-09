@@ -751,12 +751,14 @@ pub async fn login_local(
     let Ok(pending) = Pending::resume(&state.session_key, &form.state) else {
         return refused_local("This sign-in form is no longer valid — open the console again.");
     };
-    // Before the password is looked at: a locked pair or a busy address costs no hashing.
+    // Before the password is looked at: a locked pair or a busy address costs no hashing. Let
+    // through, the attempt is reserved against both until its outcome below settles it, so a
+    // burst sent at once is held to the limits a sequence is.
     let addr = client_addr(&state, &headers, peer);
-    if let Some(wait) = state.sign_in.wait(Some(&form.username), addr) {
-        return throttled(wait);
-    }
-    let name = form.username.clone();
+    let attempt = match state.sign_in.begin(Some(&form.username), addr) {
+        Ok(attempt) => attempt,
+        Err(wait) => return throttled(wait),
+    };
     let response = if let Some(store) = state.store.clone() {
         store_login(&state, &store, form, pending.return_to).await
     } else {
@@ -771,11 +773,12 @@ pub async fn login_local(
         }
     };
     // Past the checks above, both modes answer a refused password with 401 and a session with
-    // a redirect; anything else, such as the store being down, is neither.
+    // a redirect; anything else, such as the store being down or the checks busy, is neither,
+    // and dropping the attempt gives its reservation back.
     match response.status() {
-        StatusCode::UNAUTHORIZED => state.sign_in.failed(Some(&name), addr),
-        s if s.is_redirection() => state.sign_in.succeeded(&name, addr),
-        _ => {}
+        StatusCode::UNAUTHORIZED => attempt.failed(),
+        s if s.is_redirection() => attempt.succeeded(),
+        _ => drop(attempt),
     }
     response
 }
@@ -832,11 +835,14 @@ async fn store_login(
     };
     // Off the async workers, a bounded number at a time, and against the dummy when there is
     // no account: see `verify_or_dummy`.
-    let matches = crate::password::verify_or_dummy(
+    let Ok(matches) = crate::password::verify_or_dummy(
         form.password,
         account.as_ref().map(|a| a.password_hash.clone()),
     )
-    .await;
+    .await
+    else {
+        return busy_page();
+    };
     let Some(account) = account.filter(|a| matches && !a.disabled) else {
         return refused_local("Wrong username or password.");
     };
@@ -963,6 +969,25 @@ fn unavailable_page() -> Response {
     )
 }
 
+/// What sign-in answers when too many password checks are already waiting (#157).
+///
+/// 503, not 429: the queue is the whole console's, so it says nothing about this client's own
+/// rate, and the attempt is not counted against it. It is decided before any hash is checked,
+/// so it reads the same whether or not the name has an account. `Retry-After` is a second,
+/// about how long the queue it found full takes to drain.
+fn busy_page() -> Response {
+    let mut response = notice_page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sign-in busy",
+        "Sign-in is busy right now",
+        "Too many sign-ins are being checked at once. Try again in a moment.",
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+    response
+}
+
 /// An OIDC account this console has disabled. The identity provider has already said who
 /// this is, so unlike the password form there is nothing for a uniform answer to hide.
 fn disabled_page() -> Response {
@@ -1029,16 +1054,21 @@ pub async fn callback(
     // A refusal at the provider names no account here, so it counts against the address only,
     // and locks nothing anyone else uses.
     let addr = client_addr(&state, &headers, peer);
-    if let Some(wait) = state.sign_in.wait(None, addr) {
-        return Ok(throttled(wait));
-    }
+    let attempt = match state.sign_in.begin(None, addr) {
+        Ok(attempt) => attempt,
+        Err(wait) => return Ok(throttled(wait)),
+    };
     // Only the provider's error code is logged, never its description: the description is
     // free text from another system and the query string it arrived in also holds a code.
     if let Some(error) = &query.error {
         tracing::info!(provider_error = %error, "the identity provider refused a sign-in");
-        state.sign_in.failed(None, addr);
+        attempt.failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
+    // Only a provider's refusal is counted here. Nothing after it is a guess this address could
+    // repeat to learn something, so the reservation is given back now rather than held across
+    // the exchange with the provider.
+    drop(attempt);
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -2311,6 +2341,52 @@ mod local_login_flow_tests {
             attempt("b%40x", "s3cret").await.status(),
             StatusCode::SEE_OTHER
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_guesses_sent_at_once_is_held_to_the_limit() {
+        // #157: each attempt was checked against the counts and counted only once its password
+        // had been verified, so a burst all passed the check before the first failure landed.
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        let page = get(&state, "/auth/login").await;
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+        let burst: Vec<_> = (0..40)
+            .map(|i| {
+                let state = state.clone();
+                let body = format!("state={login_state}&email=a%40x&password=guess{i}");
+                tokio::spawn(async move { post(&state, "/auth/login", body).await.status() })
+            })
+            .collect();
+        let mut verified = 0;
+        for attempt in burst {
+            match attempt.await.unwrap() {
+                StatusCode::UNAUTHORIZED => verified += 1,
+                StatusCode::TOO_MANY_REQUESTS => {}
+                other => panic!("unexpected {other}"),
+            }
+        }
+        assert!(
+            (1..=5).contains(&verified),
+            "{verified} guesses were verified; five per name and address is the limit"
+        );
+        // And the pair is locked now, the right password included.
+        let locked = post(
+            &state,
+            "/auth/login",
+            format!("state={login_state}&email=a%40x&password=s3cret"),
+        )
+        .await;
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
