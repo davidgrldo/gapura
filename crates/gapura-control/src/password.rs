@@ -154,6 +154,21 @@ pub async fn hash_bounded(password: String) -> anyhow::Result<String> {
     .await?
 }
 
+/// The PHC string for `password`, made as `hash_bounded` makes one but queued as
+/// `verify_or_dummy` queues a check: `Busy` at once when too many are already waiting. For
+/// sign-up, which anyone can reach, so the queue in front of it is not bounded by anything else.
+pub async fn hash_or_busy(password: String) -> Result<anyhow::Result<String>, Busy> {
+    let permit = CHECKING.enter().await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        // Held by the work, as in `verify_or_dummy`.
+        let _permit = permit;
+        hash(&password)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|hashed| hashed))
+}
+
 /// Long enough for any name a person or a team uses, and well inside what a unique index on
 /// the column can hold.
 pub const MAX_USERNAME_CHARS: usize = 64;

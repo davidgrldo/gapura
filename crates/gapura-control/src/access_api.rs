@@ -237,6 +237,10 @@ pub struct UserView {
     local: bool,
     /// Unix seconds.
     last_sign_in_at: Option<i64>,
+    /// What the account wrote when it signed itself up; null when it wrote nothing or was made
+    /// some other way. Every caller of `/api/users` grants access somewhere, which is who it was
+    /// written for.
+    signup_note: Option<String>,
     /// Only the workspaces the caller administers. An empty list says nothing about roles
     /// elsewhere, which is the point: whether they exist is not the caller's to know.
     access: Vec<AccessView>,
@@ -291,6 +295,7 @@ pub async fn users(
                 must_change_password: u.must_change_password,
                 local: u.method == Method::Local,
                 last_sign_in_at: u.last_sign_in,
+                signup_note: u.signup_note.clone(),
                 access,
             }
         })

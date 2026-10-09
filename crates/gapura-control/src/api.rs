@@ -24,6 +24,13 @@ pub fn router_with(state: AppState) -> Router {
                 .post(crate::login::login_local)
                 .layer(DefaultBodyLimit::max(crate::login::MAX_LOGIN_FORM)),
         )
+        // Sign-up answers anyone too, and its form is held to the same cap: see `signup`.
+        .route(
+            "/auth/signup",
+            get(crate::login::signup::page)
+                .post(crate::login::signup::submit)
+                .layer(DefaultBodyLimit::max(crate::login::MAX_LOGIN_FORM)),
+        )
         .route("/auth/callback", get(crate::login::callback))
         .route("/auth/logout", post(crate::login::logout))
         .route("/api/me", get(crate::access_api::me))
@@ -56,6 +63,12 @@ pub fn router_with(state: AppState) -> Router {
             post(crate::accounts_api::change_password).layer(DefaultBodyLimit::max(MAX_BODY)),
         )
         .route("/api/roles", get(crate::access_api::roles))
+        .route(
+            "/api/settings",
+            get(crate::settings_api::get_settings)
+                .put(crate::settings_api::put_settings)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         // Grants, which cap their bodies the same way.
         .route(
             "/api/users/{id}/roles",
@@ -537,6 +550,7 @@ mod tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            sign_up: Default::default(),
             store_settings: Default::default(),
         }
     }
@@ -747,6 +761,7 @@ fn state_reading(api_server: String, gateway_admin: String) -> AppState {
         session_lifetime: std::time::Duration::from_secs(3600),
         store: None,
         sign_in: Default::default(),
+        sign_up: Default::default(),
         store_settings: Default::default(),
     }
 }
@@ -1001,6 +1016,7 @@ mod overview_tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            sign_up: Default::default(),
             store_settings: Default::default(),
         }
     }

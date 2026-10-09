@@ -11,6 +11,8 @@
 //! mode a sign-in also writes: it records when an account last signed in, and an account that
 //! arrives through OIDC becomes a row the first time.
 
+pub mod signup;
+
 use crate::session::{self, Session};
 use crate::state::AppState;
 use crate::store::Store;
@@ -544,6 +546,14 @@ cursor:pointer;outline:none;transition:all .15s}
 .button:hover{background:color-mix(in oklch,var(--primary) 80%,transparent)}
 .button:active{transform:translateY(1px)}
 .button:focus-visible{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in oklch,var(--ring) 50%,transparent)}
+textarea{width:100%;min-height:4.5rem;padding:.5rem .625rem;border:1px solid var(--input);
+border-radius:var(--radius);background:var(--input-bg);color:inherit;font:inherit;font-size:1rem;
+outline:none;resize:vertical;transition:color .15s,border-color .15s,box-shadow .15s}
+@media (min-width:768px){textarea{font-size:.875rem}}
+textarea:focus-visible{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in oklch,var(--ring) 50%,transparent)}
+.hint{color:var(--muted-foreground);font-size:.8125rem}
+.footer{margin-top:1.5rem;text-align:center;color:var(--muted-foreground)}
+.link{color:var(--foreground);text-decoration:underline;text-underline-offset:4px}
 .alert{padding:.75rem 1rem;border:1px solid color-mix(in oklch,var(--danger) 30%,transparent);
 border-radius:var(--radius);background:var(--danger-soft);color:var(--danger)}
 code{padding:0 .3rem;border-radius:calc(var(--radius)*.6);background:var(--muted);
@@ -610,7 +620,12 @@ pub async fn begin(
     // kept for when the identity provider is down, sign in with a password even when one is
     // configured. Its "Sign in with SSO" link comes back here with `sso` set.
     if state.auth_mode == AuthMode::Local || (state.store.is_some() && query.sso.is_none()) {
-        return Ok(local_login_form(&state, query.return_to.as_deref()));
+        let sign_up = signup::is_open(&state).await;
+        return Ok(local_login_form(
+            &state,
+            query.return_to.as_deref(),
+            sign_up,
+        ));
     }
     let client = state.oidc.client().await.map_err(|error| {
         tracing::warn!(%error, "cannot reach the identity provider to begin a sign-in");
@@ -669,8 +684,8 @@ pub struct Begin {
 /// same choice ArgoCD's login page makes, and the page works even when the assets do not.
 /// The pending-login state it carries is the OIDC flow's own CSRF machinery reused verbatim,
 /// and `return_to` rides the identical validated path, so a local sign-in lands the reader
-/// where the 401 found them exactly like an OIDC one does.
-fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
+/// where the 401 found them exactly like an OIDC one does. While sign-up is open it links there.
+fn local_login_form(state: &AppState, return_to: Option<&str>, sign_up: bool) -> Response {
     let return_to = return_to
         .filter(|p| safe_return_path(p))
         .map(str::to_string);
@@ -694,6 +709,12 @@ fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
     } else {
         String::new()
     };
+    let sign_up = if sign_up {
+        r#"
+<p class="footer">No account? <a class="link" href="/auth/signup">Create an account</a></p>"#
+    } else {
+        ""
+    };
     // The OIDC flow's own forgery protection, reused: the form is only accepted with a state
     // this console signed in the last few minutes.
     let login_state = Pending::begin(&state.session_key, return_to).state;
@@ -711,7 +732,7 @@ fn local_login_form(state: &AppState, return_to: Option<&str>) -> Response {
 <div class="field"><label for="password">Password</label>
 <input id="password" type="password" name="password" autocomplete="current-password" required></div>
 <button class="button" type="submit">Sign in</button>
-</form></div></div>"#
+</form>{sign_up}</div></div>"#
         ),
     );
     Response::builder()
@@ -1543,6 +1564,7 @@ mod against_a_stub_provider {
             session_lifetime: Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            sign_up: Default::default(),
             store_settings: Default::default(),
         }
     }
@@ -2289,6 +2311,7 @@ mod local_login_flow_tests {
             session_lifetime: std::time::Duration::from_secs(3600),
             store: None,
             sign_in: Default::default(),
+            sign_up: Default::default(),
             store_settings: Default::default(),
         }
     }

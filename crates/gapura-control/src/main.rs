@@ -165,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         sign_in: Arc::new(gapura_control::throttle::Throttle::new(
             args.trusted_proxies.clone(),
         )),
+        sign_up: Default::default(),
         store_settings: store_settings.clone(),
     };
     // Served only when there is a store to serve it from, on its own listener: two servers in

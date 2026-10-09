@@ -372,6 +372,38 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_up_is_held_to_what_a_sign_in_is() {
+        // It sets a session as a sign-in does, so another site's page must not be able to post
+        // it either; and like the sign-in form it posts a form, not JSON.
+        for site in ["cross-site", "same-site"] {
+            assert_eq!(
+                judge(Method::POST, "/auth/signup", &[("sec-fetch-site", site)]),
+                Verdict::CrossSite,
+                "{site}"
+            );
+        }
+        assert_eq!(
+            judge(
+                Method::POST,
+                "/auth/signup",
+                &[("origin", "https://evil.example"), HOST]
+            ),
+            Verdict::CrossSite
+        );
+        assert_eq!(
+            judge(
+                Method::POST,
+                "/auth/signup",
+                &[
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/x-www-form-urlencoded")
+                ]
+            ),
+            Verdict::Pass
+        );
+    }
+
+    #[test]
     fn only_the_api_and_sign_in_paths_are_guarded() {
         assert_eq!(
             judge(Method::POST, "/", &[("sec-fetch-site", "cross-site")]),

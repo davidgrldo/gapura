@@ -23,6 +23,11 @@
 //! is a proxy named in `--trusted-proxies`. Behind an ingress without that flag every request
 //! comes from the ingress, and a locked pair would lock that name for everyone.
 //!
+//! Sign-ups (`SignUps`) are held by the same counters under a policy of their own: every attempt
+//! from an address counts, successful or not, against two windows, five in ten minutes and
+//! twenty in a day. Creating accounts is what is being limited, not guessing passwords, so a
+//! success is no reason to forgive one.
+//!
 //! ponytail: counted in this process. Each console replica keeps its own counts, so N replicas
 //! allow N times the attempts; a table in the store is the upgrade if that matters. argon2id's
 //! cost is the brake that holds either way.
@@ -52,6 +57,47 @@ const ADDRESS: Rule = Rule {
     lock: Duration::from_secs(60),
 };
 
+/// Sign-ups from one address in a burst: five in ten minutes.
+const SIGN_UP_BURST: Rule = Rule {
+    limit: 5,
+    window: Duration::from_secs(10 * 60),
+    lock: Duration::from_secs(10 * 60),
+};
+
+/// Sign-ups from one address in a day: twenty.
+const SIGN_UP_DAY: Rule = Rule {
+    limit: 20,
+    window: Duration::from_secs(24 * 60 * 60),
+    lock: Duration::from_secs(24 * 60 * 60),
+};
+
+/// Which counters an attempt is held to: a name at an address, when there is a rule for that,
+/// and the address, under each of its rules.
+#[derive(Clone, Copy)]
+struct Policy {
+    pair: Option<&'static Rule>,
+    address: &'static [Rule],
+}
+
+impl Policy {
+    fn rule(&self, key: &Key) -> &'static Rule {
+        match key {
+            Key::Pair(..) => self.pair.expect("a pair is counted only under a pair rule"),
+            Key::Address(_, window) => &self.address[usize::from(*window)],
+        }
+    }
+}
+
+const SIGN_IN: Policy = Policy {
+    pair: Some(&PAIR),
+    address: &[ADDRESS],
+};
+
+const SIGN_UP: Policy = Policy {
+    pair: None,
+    address: &[SIGN_UP_BURST, SIGN_UP_DAY],
+};
+
 /// Entries kept at most. Expired ones are dropped first when it is reached; a flood from more
 /// addresses than this leaves its newest ones uncounted rather than growing without bound.
 const CAPACITY: usize = 100_000;
@@ -62,7 +108,8 @@ const CAPACITY: usize = 100_000;
 enum Key {
     /// The digest of a lowercased name, and an address.
     Pair([u8; 32], IpAddr),
-    Address(IpAddr),
+    /// An address, under the policy's address rule at this index.
+    Address(IpAddr, u8),
 }
 
 impl Key {
@@ -76,13 +123,6 @@ impl Key {
             digest.update(c.encode_utf8(&mut buf).as_bytes());
         }
         Key::Pair(digest.finalize().into(), addr)
-    }
-
-    fn rule(&self) -> &'static Rule {
-        match self {
-            Key::Pair(..) => &PAIR,
-            Key::Address(_) => &ADDRESS,
-        }
     }
 }
 
@@ -137,10 +177,17 @@ impl Counter {
     }
 }
 
-#[derive(Default)]
 pub struct Throttle {
     trusted_proxies: Vec<Cidr>,
+    policy: Policy,
     counters: Mutex<HashMap<Key, Counter>>,
+}
+
+/// The sign-in limits, trusting no proxy.
+impl Default for Throttle {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 /// How an attempt ended, as far as the counters care.
@@ -196,9 +243,15 @@ impl Drop for Attempt<'_> {
 }
 
 impl Throttle {
+    /// The sign-in limits: a name at an address, and an address.
     pub fn new(trusted_proxies: Vec<Cidr>) -> Self {
+        Self::with_policy(trusted_proxies, SIGN_IN)
+    }
+
+    fn with_policy(trusted_proxies: Vec<Cidr>, policy: Policy) -> Self {
         Self {
             trusted_proxies,
+            policy,
             counters: Mutex::default(),
         }
     }
@@ -227,15 +280,18 @@ impl Throttle {
         addr: IpAddr,
         now: Instant,
     ) -> Result<Attempt<'_>, Duration> {
+        let policy = self.policy;
         let mut counters = self.lock();
+        let windows = (0..policy.address.len()).filter_map(|i| u8::try_from(i).ok());
         let keys: Vec<Key> = name
+            .filter(|_| policy.pair.is_some())
             .map(|n| Key::pair(n, addr))
             .into_iter()
-            .chain([Key::Address(addr)])
+            .chain(windows.map(|i| Key::Address(addr, i)))
             .collect();
         if let Some(wait) = keys
             .iter()
-            .filter_map(|k| counters.get(k).and_then(|c| c.wait(k.rule(), now)))
+            .filter_map(|k| counters.get(k).and_then(|c| c.wait(policy.rule(k), now)))
             .max()
         {
             return Err(wait);
@@ -243,7 +299,7 @@ impl Throttle {
         let keys = keys
             .into_iter()
             .map(|key| {
-                let reserved = match counter(&mut counters, key, now) {
+                let reserved = match counter(&mut counters, policy, key, now) {
                     Some(counter) => {
                         counter.pending += 1;
                         true
@@ -260,9 +316,10 @@ impl Throttle {
     }
 
     fn settle(&self, keys: Vec<(Key, bool)>, outcome: Outcome, now: Instant) {
+        let policy = self.policy;
         let mut counters = self.lock();
         for (key, reserved) in keys {
-            let rule = key.rule();
+            let rule = policy.rule(&key);
             if reserved {
                 if let Some(counter) = counters.get_mut(&key) {
                     counter.pending = counter.pending.saturating_sub(1);
@@ -270,7 +327,7 @@ impl Throttle {
             }
             match (outcome, key) {
                 (Outcome::Failed, _) => {
-                    if let Some(counter) = counter(&mut counters, key, now) {
+                    if let Some(counter) = counter(&mut counters, policy, key, now) {
                         counter.failures += 1;
                         if counter.failures >= rule.limit && counter.locked(now).is_none() {
                             counter.locked_until = Some(now + rule.lock);
@@ -283,7 +340,7 @@ impl Throttle {
                         counter.locked_until = None;
                     }
                 }
-                (Outcome::Succeeded, Key::Address(_)) | (Outcome::Refunded, _) => {}
+                (Outcome::Succeeded, Key::Address(..)) | (Outcome::Refunded, _) => {}
             }
             // A reservation makes an entry for every attempt, the ones that never fail
             // included; one left holding nothing goes now rather than waiting for the cap.
@@ -304,15 +361,20 @@ impl Throttle {
 
 /// The counter for `key`, made if there is none and restarted if its window has lapsed, or
 /// `None` when the counters are full even of entries still worth keeping.
-fn counter(counters: &mut HashMap<Key, Counter>, key: Key, now: Instant) -> Option<&mut Counter> {
+fn counter(
+    counters: &mut HashMap<Key, Counter>,
+    policy: Policy,
+    key: Key,
+    now: Instant,
+) -> Option<&mut Counter> {
     if !counters.contains_key(&key) && counters.len() >= CAPACITY {
-        counters.retain(|k, c| !c.expired(k.rule(), now));
+        counters.retain(|k, c| !c.expired(policy.rule(k), now));
         if counters.len() >= CAPACITY {
             tracing::warn!("the sign-in limits are full; an attempt went uncounted");
             return None;
         }
     }
-    let rule = key.rule();
+    let rule = policy.rule(&key);
     let counter = counters.entry(key).or_insert_with(|| Counter::fresh(now));
     if counter.lapsed(rule, now) {
         // Attempts in flight stay counted; only the failures of a window that is over go.
@@ -325,11 +387,43 @@ fn counter(counters: &mut HashMap<Key, Counter>, key: Key, now: Instant) -> Opti
 }
 
 /// What a refused sign-in is told: the same for a locked pair and a busy address, and for any
-/// name, so it says nothing about which accounts exist.
+/// name, so it says nothing about which accounts exist. A sign-up refused for its count is told
+/// the same. Past two hours, which only the sign-up day reaches, the wait is in hours.
 pub fn wait_message(wait: Duration) -> String {
     let minutes = wait.as_secs().div_ceil(60).max(1);
-    let unit = if minutes == 1 { "minute" } else { "minutes" };
-    format!("Too many failed attempts. Try again in {minutes} {unit}.")
+    let (count, unit) = if minutes > 120 {
+        (minutes.div_ceil(60), "hours")
+    } else if minutes == 1 {
+        (1, "minute")
+    } else {
+        (minutes, "minutes")
+    };
+    format!("Too many failed attempts. Try again in {count} {unit}.")
+}
+
+/// Sign-ups, counted per address: every attempt that reaches the form's checks, whether it
+/// creates an account or not, under `SIGN_UP_BURST` and `SIGN_UP_DAY`. The address is resolved
+/// as a sign-in's is, by `login::client_addr`, so this keeps no proxies of its own.
+pub struct SignUps(Throttle);
+
+impl Default for SignUps {
+    fn default() -> Self {
+        Self(Throttle::with_policy(Vec::new(), SIGN_UP))
+    }
+}
+
+impl SignUps {
+    /// Lets a sign-up from `addr` through and reserves it, or says how long it must wait. The
+    /// attempt is settled with `failed`, whatever its outcome, so that it counts; dropped, it
+    /// is given back, which is for an answer that said nothing, such as the store being down.
+    pub fn begin(&self, addr: IpAddr) -> Result<Attempt<'_>, Duration> {
+        self.0.begin(None, addr)
+    }
+
+    #[cfg(test)]
+    fn begin_at(&self, addr: IpAddr, now: Instant) -> Result<Attempt<'_>, Duration> {
+        self.0.begin_at(None, addr, now)
+    }
 }
 
 #[cfg(test)]
@@ -501,6 +595,45 @@ mod tests {
         }
         assert!(t.wait_at(Some(&long.to_lowercase()), here, now).is_some());
         assert_eq!(t.lock().len(), 2, "one pair and one address");
+    }
+
+    #[test]
+    fn five_sign_ups_from_an_address_wait_ten_minutes_and_twenty_wait_a_day() {
+        let s = SignUps::default();
+        let mut now = Instant::now();
+        let (here, there) = (ip("203.0.113.20"), ip("203.0.113.21"));
+        let sign_up = |now: Instant| s.begin_at(here, now).map(|a| a.failed_at(now));
+        for _ in 0..5 {
+            sign_up(now).expect("within the burst");
+        }
+        assert_eq!(sign_up(now), Err(Duration::from_secs(10 * 60)));
+        // Three more bursts of five, ten minutes apart, reach twenty.
+        for _ in 0..3 {
+            now += Duration::from_secs(10 * 60);
+            for _ in 0..5 {
+                sign_up(now).expect("a new burst");
+            }
+        }
+        now += Duration::from_secs(10 * 60);
+        let wait = sign_up(now).expect_err("twenty in a day");
+        assert!(wait > Duration::from_secs(23 * 60 * 60), "{wait:?}");
+        assert!(s.begin_at(there, now).is_ok(), "another address");
+        assert_eq!(
+            wait_message(wait),
+            "Too many failed attempts. Try again in 24 hours."
+        );
+    }
+
+    #[test]
+    fn a_sign_up_given_back_does_not_count() {
+        let s = SignUps::default();
+        let now = Instant::now();
+        let here = ip("203.0.113.22");
+        for _ in 0..10 {
+            drop(s.begin_at(here, now).unwrap());
+        }
+        assert!(s.begin_at(here, now).is_ok());
+        assert_eq!(s.0.lock().len(), 0, "no entry is left holding nothing");
     }
 
     #[test]
