@@ -1,11 +1,12 @@
-//! Consumers, their API keys, and the key_auth and JWT requirements: what a request may contain.
+//! Consumers, their API keys, the key_auth and JWT requirements, and request limits: what a
+//! request may contain, and how many may come.
 //!
 //! Pure, like `configuration`, whose permission rule it shares: a viewer reads, an editor creates
-//! consumers, issues keys and switches key_auth and JWT requirements on and off, an admin deletes
-//! consumers and revokes keys.
+//! consumers, issues keys and switches key_auth, JWT and rate_limit policies on and off, an admin
+//! deletes consumers and revokes keys.
 
 use crate::configuration::{self, FieldError};
-use gapura_core::config::JwtPolicy;
+use gapura_core::config::{JwtPolicy, RateLimit};
 use gapura_core::jwt::JwksError;
 use k8s_openapi::jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,127 @@ pub struct JwtDocument {
     pub jwks: String,
 }
 
+/// The most requests a limit may allow per window.
+pub const MAX_RATE_LIMIT: u32 = 1_000_000;
+
+/// The window a request limit counts in, as the API names it; the `gapura.dev/rate-limit`
+/// annotation's `s`, `min` and `h`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Per {
+    Second,
+    Minute,
+    Hour,
+}
+
+impl Per {
+    pub fn window_ms(self) -> u64 {
+        match self {
+            Per::Second => 1_000,
+            Per::Minute => 60_000,
+            Per::Hour => 3_600_000,
+        }
+    }
+
+    fn of_window(window_ms: u64) -> Option<Per> {
+        [Per::Second, Per::Minute, Per::Hour]
+            .into_iter()
+            .find(|p| p.window_ms() == window_ms)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitInput {
+    pub target: String,
+    #[serde(default)]
+    pub limit: Option<serde_json::Value>,
+    #[serde(default)]
+    pub per: Option<serde_json::Value>,
+}
+
+/// A request limit: at most `limit` requests per `per`, from each client address, counted by each
+/// data plane replica separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Limit {
+    pub limit: u32,
+    pub per: Per,
+}
+
+/// The configuration a `rate_limit` row stores, and nothing else: an unknown field is a shape this
+/// binary does not know, not one to ignore.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredLimit {
+    limit: u32,
+    window_ms: u64,
+}
+
+impl Limit {
+    /// What the row stores: `{"limit": n, "window_ms": ms}`.
+    pub fn config(self) -> serde_json::Value {
+        serde_json::to_value(StoredLimit {
+            limit: self.limit,
+            window_ms: self.per.window_ms(),
+        })
+        .expect("two numbers always serialise")
+    }
+
+    /// A stored configuration read back, when it is one the API could have written: a limit of
+    /// 1 to `MAX_RATE_LIMIT` and a window of a second, a minute or an hour. Anything else is
+    /// `None`, and the compiler refuses it rather than serve a limit the console cannot show.
+    pub fn from_config(config: serde_json::Value) -> Option<Limit> {
+        let stored: StoredLimit = serde_json::from_value(config).ok()?;
+        if !(1..=MAX_RATE_LIMIT).contains(&stored.limit) {
+            return None;
+        }
+        Some(Limit {
+            limit: stored.limit,
+            per: Per::of_window(stored.window_ms)?,
+        })
+    }
+
+    /// What the data plane enforces.
+    pub fn rate_limit(self) -> RateLimit {
+        RateLimit {
+            limit: self.limit,
+            window_ms: self.per.window_ms(),
+        }
+    }
+}
+
+/// A request limit as a request sends it: `limit` a whole number from 1 to `MAX_RATE_LIMIT`,
+/// `per` one of `second`, `minute` and `hour`.
+pub fn rate_limit(input: &RateLimitInput) -> Result<Limit, FieldError> {
+    let limit = input
+        .limit
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| (1..=MAX_RATE_LIMIT).contains(n))
+        .ok_or_else(|| {
+            field(
+                "limit",
+                format!("Use a whole number of requests from 1 to {MAX_RATE_LIMIT}."),
+            )
+        })?;
+    let per = match input.per.as_ref().and_then(serde_json::Value::as_str) {
+        Some("second") => Per::Second,
+        Some("minute") => Per::Minute,
+        Some("hour") => Per::Hour,
+        _ => return Err(field("per", "Use second, minute or hour.")),
+    };
+    Ok(Limit { limit, per })
+}
+
+/// A request limit as the list shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RateLimitView {
+    pub target: String,
+    pub limit: u32,
+    pub per: Per,
+}
+
 /// A key as a list shows it: never the key, never its hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct KeyView {
@@ -458,6 +580,92 @@ mod tests {
         }
         // Exactly at the limit is a length, not a refusal.
         assert!(jwt(&jwt_input(Some(&"a".repeat(MAX_CLAIM_CHARS)), None, JWKS)).is_ok());
+    }
+
+    fn limit_input(limit: serde_json::Value, per: serde_json::Value) -> RateLimitInput {
+        RateLimitInput {
+            target: "workspace".into(),
+            limit: Some(limit),
+            per: Some(per),
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_is_a_count_from_one_to_a_million_per_second_minute_or_hour() {
+        use serde_json::json;
+        for (limit, per, window_ms) in [
+            (1, "second", 1_000),
+            (120, "minute", 60_000),
+            (1_000_000, "hour", 3_600_000),
+        ] {
+            let got = rate_limit(&limit_input(json!(limit), json!(per))).unwrap();
+            assert_eq!(got.limit, limit);
+            assert_eq!(
+                got.rate_limit(),
+                RateLimit { limit, window_ms },
+                "{limit}/{per}"
+            );
+            assert_eq!(
+                got.config(),
+                json!({"limit": limit, "window_ms": window_ms})
+            );
+            assert_eq!(Limit::from_config(got.config()), Some(got), "read back");
+        }
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(1_000_001),
+            json!(1.5),
+            json!("10"),
+            json!(null),
+            json!(u64::MAX),
+        ] {
+            assert_eq!(
+                rate_limit(&limit_input(bad.clone(), json!("minute")))
+                    .unwrap_err()
+                    .field,
+                "limit",
+                "{bad}"
+            );
+        }
+        for bad in [
+            json!("min"),
+            json!("s"),
+            json!("day"),
+            json!("Minute"),
+            json!(60),
+        ] {
+            assert_eq!(
+                rate_limit(&limit_input(json!(10), bad.clone()))
+                    .unwrap_err()
+                    .field,
+                "per",
+                "{bad}"
+            );
+        }
+        let missing = RateLimitInput {
+            target: "workspace".into(),
+            limit: None,
+            per: None,
+        };
+        assert_eq!(rate_limit(&missing).unwrap_err().field, "limit");
+    }
+
+    #[test]
+    fn a_stored_rate_limit_reads_back_only_in_the_shape_the_api_writes() {
+        use serde_json::json;
+        for bad in [
+            json!({"limit": 10, "window_ms": 5_000}),
+            json!({"limit": 0, "window_ms": 1_000}),
+            json!({"limit": 1_000_001, "window_ms": 1_000}),
+            json!({"limit": 10}),
+            json!({"window_ms": 1_000}),
+            json!({"limit": "10", "window_ms": 1_000}),
+            json!({"limit": 10, "window_ms": 1_000, "by": "header"}),
+            json!(null),
+        ] {
+            assert_eq!(Limit::from_config(bad.clone()), None, "{bad}");
+        }
     }
 
     #[test]

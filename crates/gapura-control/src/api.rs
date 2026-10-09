@@ -162,6 +162,13 @@ pub fn router_with(state: AppState) -> Router {
                 .delete(crate::consumers_api::delete_jwt)
                 .layer(DefaultBodyLimit::max(MAX_JWT_BODY)),
         )
+        .route(
+            "/api/workspaces/{ws}/rate-limit",
+            get(crate::consumers_api::list_rate_limit)
+                .put(crate::consumers_api::put_rate_limit)
+                .delete(crate::consumers_api::delete_rate_limit)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         // Data planes and their tokens, across every workspace. Only registering reads a body.
         .route(
             "/api/data-planes",

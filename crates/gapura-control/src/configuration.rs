@@ -292,6 +292,16 @@ pub struct JwtRequirementView {
     pub from: &'static str,
 }
 
+/// The request limit that applies to a service or route, and where it comes from, picked as
+/// `KeyAuthView`'s is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RateLimitRequirementView {
+    pub limit: u32,
+    pub per: crate::consumers::Per,
+    /// `"route"`, `"service"` or `"workspace"`.
+    pub from: &'static str,
+}
+
 /// What the list endpoints answer with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceView {
@@ -303,6 +313,7 @@ pub struct ServiceView {
     /// The requirement its routes inherit, unless a route has its own.
     pub key_auth: Option<KeyAuthView>,
     pub jwt: Option<JwtRequirementView>,
+    pub rate_limit: Option<RateLimitRequirementView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -315,6 +326,7 @@ pub struct RouteView {
     pub service_updated_at: String,
     pub key_auth: Option<KeyAuthView>,
     pub jwt: Option<JwtRequirementView>,
+    pub rate_limit: Option<RateLimitRequirementView>,
 }
 
 /// Whether this is a create or a replace, which decides what `updated_at` must be.
