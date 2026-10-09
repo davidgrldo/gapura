@@ -293,7 +293,9 @@ pub async fn change_password(
     };
     attempt.succeeded();
     tracing::info!(user = %caller.me.id, "changed their password");
-    let issued_at = crate::login::now_millis().max(u64::try_from(cut_off).unwrap_or(0));
+    // The cut-off just set, from the database's clock, which the session is compared with: the
+    // new session stands, and every one issued before the change does not.
+    let issued_at = u64::try_from(cut_off).unwrap_or(0);
     let cookie =
         crate::login::session_cookie(&state, caller.me.id.to_string(), Vec::new(), issued_at);
     let Ok(value) = HeaderValue::from_str(&cookie) else {
@@ -335,6 +337,18 @@ mod tests {
         let (status, sentence) = sentence_of(early(StatusCode::NOT_FOUND.into())).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(sentence, NO_ACCOUNTS);
+    }
+
+    #[tokio::test]
+    async fn a_hash_that_found_the_queue_full_is_busy_not_unsaved() {
+        // Creating, resetting and changing a password hash through `password::hash_or_busy`,
+        // which answers at once rather than waiting behind a full queue.
+        let (status, sentence) = sentence_of(written(Err(WriteError::Busy))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            sentence,
+            "The console is busy right now. Try again in a moment."
+        );
     }
 
     #[tokio::test]

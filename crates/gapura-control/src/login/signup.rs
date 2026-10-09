@@ -8,16 +8,20 @@
 //! transaction that creates the account, so an account is never made after closing has been
 //! answered.
 //!
-//! Every post that reaches the form's checks counts against its address (`throttle::SignUps`),
-//! whatever it ends in: five in ten minutes and twenty in a day. "That username is taken." tells
-//! anyone which names exist; that limit is what bounds it.
+//! Every post that reaches the form's checks counts against its address (`throttle::SignUps`,
+//! an IPv6 address by its /64), whatever it ends in, a client hanging up included: five in ten
+//! minutes and twenty in a day. "That username is taken." tells anyone which names exist; that
+//! limit is what bounds it. Many addresses together are bounded by the store instead: past
+//! `store::MAX_WAITING_SIGN_UPS` accounts waiting for access, sign-up says it is full.
 
-use super::{auth_page, client_addr, issued_at_or_after, notice_page, session_response, Pending};
+use super::{
+    auth_page, client_addr, issued_at_from_database, notice_page, session_response, Pending,
+};
 use super::{AuthMode, MAX_LOGIN_FORM};
-use crate::grants::Refusal;
 use crate::password::{Busy, MAX_USERNAME_CHARS, MIN_PASSWORD_CHARS};
 use crate::state::AppState;
-use crate::store::{Store, WriteError};
+use crate::store::{SignUp, Store, WriteError};
+use crate::throttle::{Attempt, Refused};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
@@ -55,7 +59,7 @@ pub(super) async fn is_open(state: &AppState) -> bool {
 /// by the checks below rather than by the extractor.
 #[derive(Deserialize, Default)]
 #[serde(default)]
-pub struct SignUp {
+pub struct SignUpForm {
     state: String,
     username: String,
     password: String,
@@ -87,7 +91,7 @@ pub async fn submit(
     State(state): State<AppState>,
     headers: HeaderMap,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
-    axum::Form(input): axum::Form<SignUp>,
+    axum::Form(input): axum::Form<SignUpForm>,
 ) -> Response {
     let Some(store) = state.store.clone() else {
         return no_sign_up();
@@ -119,11 +123,11 @@ pub async fn submit(
     let addr = client_addr(&state, &headers, peer);
     let attempt = match state.sign_up.begin(addr) {
         Ok(attempt) => attempt,
-        Err(wait) => {
+        Err(Refused::Wait(wait)) => {
             let mut response = form(
                 &state,
                 StatusCode::TOO_MANY_REQUESTS,
-                Some(&crate::throttle::wait_message(wait)),
+                Some(&crate::throttle::sign_up_wait_message(wait)),
                 &input.username,
                 &input.note,
             );
@@ -132,44 +136,33 @@ pub async fn submit(
             }
             return response;
         }
+        // More addresses at once than the limits can count: refused rather than uncounted.
+        Err(Refused::Full) => {
+            return busy("Too many sign-ups are being made at once. Try again later.");
+        }
     };
-    let (response, counted) = create(&state, &store, &input).await;
-    // Counted whatever the answer, but for one that said nothing about the form, such as the
-    // store being down: dropping the attempt gives it back.
-    if counted {
-        attempt.failed();
-    } else {
-        drop(attempt);
-    }
-    response
+    create(&state, &store, &input, attempt).await
 }
 
-/// The checks, the hash and the insert. The answer, and whether it counts against the address.
-async fn create(state: &AppState, store: &Store, input: &SignUp) -> (Response, bool) {
+/// The checks, the hash and the insert. `attempt` counts against the address however this ends,
+/// a client that hangs up mid-hash included, unless it is given back: only where the answer says
+/// nothing about the form, the store being down or the hashing queue full.
+async fn create(
+    state: &AppState,
+    store: &Store,
+    input: &SignUpForm,
+    attempt: Attempt<'_>,
+) -> Response {
     let refused = |status: StatusCode, message: &str| {
-        (
-            form(state, status, Some(message), &input.username, &input.note),
-            true,
-        )
+        form(state, status, Some(message), &input.username, &input.note)
     };
-    if let Err(fragment) = crate::password::check_username(&input.username) {
-        return refused(
-            StatusCode::BAD_REQUEST,
-            &crate::accounts::sentence(fragment),
-        );
-    }
-    if input.password != input.password_again {
-        return refused(StatusCode::BAD_REQUEST, "The two passwords do not match.");
-    }
-    if let Err(fragment) = crate::password::check_password(&input.username, &input.password) {
-        return refused(
-            StatusCode::BAD_REQUEST,
-            &crate::accounts::sentence(fragment),
-        );
-    }
-    let note = match note(&input.note) {
+    let checked = check(input);
+    let note = match checked {
         Ok(note) => note,
-        Err(message) => return refused(StatusCode::BAD_REQUEST, message),
+        Err(message) => {
+            attempt.failed();
+            return refused(StatusCode::BAD_REQUEST, &message);
+        }
     };
     let hash = match crate::password::hash_or_busy(input.password.clone()).await {
         Ok(Ok(hash)) => hash,
@@ -178,56 +171,105 @@ async fn create(state: &AppState, store: &Store, input: &SignUp) -> (Response, b
                 error = format!("{error:#}"),
                 "hashing a password for a sign-up failed"
             );
-            return (unavailable(), false);
+            attempt.refund();
+            return unavailable();
         }
-        Err(Busy) => return (busy(), false),
+        Err(Busy) => {
+            attempt.refund();
+            return busy("Too many passwords are being checked at once. Try again in a moment.");
+        }
     };
-    match store.sign_up(&input.username, &hash, note).await {
-        Ok(signed_up) => {
+    let outcome = match store.sign_up(&input.username, &hash, note.as_deref()).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            match error {
+                WriteError::Store(error) => tracing::warn!(
+                    error = format!("{error:#}"),
+                    sqlstate = crate::store::sqlstate(&error).map(|c| c.code()),
+                    "creating a signed-up account failed"
+                ),
+                other => tracing::warn!(?other, "creating a signed-up account failed"),
+            }
+            attempt.refund();
+            return unavailable();
+        }
+    };
+    attempt.failed();
+    match outcome {
+        SignUp::Created(signed_up) => {
             tracing::info!(user = %signed_up.id, "signed up");
-            let response = session_response(
+            session_response(
                 state,
                 signed_up.id.to_string(),
                 Vec::new(),
                 None,
-                issued_at_or_after(signed_up.signed_in_at),
-            );
-            (response, true)
+                issued_at_from_database(signed_up.signed_in_at),
+            )
         }
-        Err(WriteError::Refused(Refusal::Conflict(_))) => {
-            refused(StatusCode::CONFLICT, "That username is taken.")
-        }
-        // Closed after the read above, before the insert.
-        Err(WriteError::Refused(Refusal::Forbidden(_))) => {
-            (closed(state, StatusCode::FORBIDDEN), true)
-        }
-        Err(WriteError::Refused(other)) => refused(other.status(), other.sentence()),
-        Err(WriteError::Field(error)) => refused(StatusCode::BAD_REQUEST, &error.sentence),
-        Err(WriteError::Store(error)) => {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                sqlstate = crate::store::sqlstate(&error).map(|c| c.code()),
-                "creating a signed-up account failed"
-            );
-            (unavailable(), false)
-        }
+        SignUp::Taken => refused(StatusCode::CONFLICT, "That username is taken."),
+        // Closed after the read in `submit`, before the insert.
+        SignUp::Closed => closed(state, StatusCode::FORBIDDEN),
+        SignUp::Full => full(),
     }
 }
 
-/// The note as it is kept: trimmed, and none when nothing is left. Plain text: line breaks and
-/// tabs, which a text box holds, but no other control character.
-fn note(raw: &str) -> Result<Option<&str>, &'static str> {
-    let note = raw.trim();
+/// The form's own rules: the note as it is kept, or the sentence refusing the form.
+fn check(input: &SignUpForm) -> Result<Option<String>, String> {
+    crate::password::check_username(&input.username).map_err(crate::accounts::sentence)?;
+    if input.password != input.password_again {
+        return Err("The two passwords do not match.".into());
+    }
+    crate::password::check_password(&input.username, &input.password)
+        .map_err(crate::accounts::sentence)?;
+    note(&input.note).map_err(str::to_string)
+}
+
+/// The note as it is kept: line breaks as `\n`, the way a text box sends them (`\r\n`) or not,
+/// trimmed, and none when nothing is left. Plain text: line breaks and tabs, but no other control
+/// character, and no format character, which changes how text around it is shown without being
+/// seen itself (a right-to-left override, a zero-width space), nor a line or paragraph separator.
+fn note(raw: &str) -> Result<Option<String>, &'static str> {
+    let note = raw.replace("\r\n", "\n");
+    let note = note.trim();
     if note.chars().count() > MAX_NOTE_CHARS {
         return Err("A note has at most 500 characters.");
     }
     if note
         .chars()
-        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        .any(|c| (c.is_control() && !matches!(c, '\n' | '\t')) || invisible(c))
     {
         return Err("A note can hold only plain text.");
     }
-    Ok((!note.is_empty()).then_some(note))
+    Ok((!note.is_empty()).then(|| note.to_string()))
+}
+
+/// Unicode's format characters (general category Cf), and the line and paragraph separators.
+/// Listed, since the standard library does not know categories; Unicode adds to Cf rarely.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 /// `text` made safe inside an element and inside a quoted attribute.
@@ -350,18 +392,28 @@ fn unavailable() -> Response {
     )
 }
 
-/// Too many passwords are already waiting to be checked or hashed: see `login::busy_page`.
-fn busy() -> Response {
+/// Busy, for `message`'s reason: not the form's fault, and not counted.
+fn busy(message: &str) -> Response {
     let mut response = notice_page(
         StatusCode::SERVICE_UNAVAILABLE,
         "Sign-up busy",
         "Sign-up is busy right now",
-        "Too many passwords are being checked at once. Try again in a moment.",
+        message,
     );
     response
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     response
+}
+
+/// `MAX_WAITING_SIGN_UPS` accounts made by sign-up are waiting for access.
+fn full() -> Response {
+    notice_page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sign-up full",
+        "Sign-up is full",
+        "Sign-up is full: too many accounts are waiting for access. Ask a superuser.",
+    )
 }
 
 #[cfg(test)]
@@ -370,10 +422,25 @@ mod tests {
 
     #[test]
     fn a_note_is_trimmed_bounded_and_plain() {
-        assert_eq!(note("  \n "), Ok(None));
+        assert_eq!(note("  \r\n "), Ok(None));
+        assert_eq!(note("a\r\nb"), Ok(Some("a\nb".to_string())));
+        assert!(note("a\rb").is_err(), "a lone carriage return");
+        for c in [
+            '\u{202E}',
+            '\u{2066}',
+            '\u{200B}',
+            '\u{200F}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{FEFF}',
+            '\u{E0041}',
+        ] {
+            assert!(note(&format!("a{c}b")).is_err(), "{:?}", c);
+        }
+        assert!(note("café, 東京, emoji \u{1F600}").is_ok());
         assert_eq!(
             note(" platform team,\nneed payments "),
-            Ok(Some("platform team,\nneed payments"))
+            Ok(Some("platform team,\nneed payments".to_string()))
         );
         assert_eq!(
             note(&"é".repeat(MAX_NOTE_CHARS)).map(|n| n.is_some()),

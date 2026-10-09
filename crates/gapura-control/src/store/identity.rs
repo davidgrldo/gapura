@@ -48,8 +48,7 @@ impl Store {
                         floor(extract(epoch from last_sign_in_at))::bigint as last_sign_in,
                         must_change_password,
                         floor(extract(epoch from sessions_valid_after) * 1000)::bigint
-                            as sessions_valid_after,
-                        signup_note
+                            as sessions_valid_after
                    from users
                   order by lower(coalesce(username, display_name, oidc_subject)), id",
                 &[],
@@ -70,7 +69,6 @@ impl Store {
                 last_sign_in: r.get("last_sign_in"),
                 must_change_password: r.get("must_change_password"),
                 sessions_valid_after: r.get("sessions_valid_after"),
-                signup_note: r.get("signup_note"),
             })
             .collect();
         let workspaces = tx

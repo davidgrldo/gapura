@@ -259,7 +259,16 @@ pub async fn users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<UserView>>, CallerError> {
-    let (_, caller, within) = admin_caller(&state, &headers).await?;
+    let (store, caller, within) = admin_caller(&state, &headers).await?;
+    // Only here, rather than in the rows every request reads.
+    let mut notes = store.signup_notes().await.map_err(|error| {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            sqlstate = sqlstate(&error).map(SqlState::code),
+            "reading sign-up notes from the store failed"
+        );
+        CallerError::from(StatusCode::SERVICE_UNAVAILABLE)
+    })?;
     let mut views: Vec<UserView> = caller
         .rows
         .users
@@ -295,7 +304,7 @@ pub async fn users(
                 must_change_password: u.must_change_password,
                 local: u.method == Method::Local,
                 last_sign_in_at: u.last_sign_in,
-                signup_note: u.signup_note.clone(),
+                signup_note: notes.remove(&u.id),
                 access,
             }
         })

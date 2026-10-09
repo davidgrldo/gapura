@@ -10,6 +10,8 @@ pub mod accounts;
 pub mod accounts_api;
 pub mod api;
 pub mod assets;
+pub mod audit;
+pub mod audit_api;
 pub mod bootstrap;
 pub mod config_api;
 pub mod configuration;

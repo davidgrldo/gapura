@@ -278,3 +278,22 @@ if (attached.length < 2) {
   throw new Error(`${STORE_CONFIGURATION} no longer says a policy is "attached to this {kind}" in both its sentences, so the sheets cannot tell a delete refused for one`)
 }
 console.log('ok: the attached-policy sentences still say attached to this')
+
+// The audit log's kind filter offers audit.rs's KINDS, read from it for the reason the methods
+// are read from configuration.rs: a kind the store starts writing and this page does not know
+// could not be filtered by, and one this page offers that the server does not know is a 400.
+const AUDIT = '../crates/gapura-control/src/audit.rs'
+const auditKinds = readFileSync(AUDIT, 'utf8').match(/pub const KINDS: &\[&str\] = &\[([\s\S]*?)\];/)
+if (!auditKinds) throw new Error(`${AUDIT} has no KINDS`)
+const serverKinds = [...auditKinds[1].replace(/\/\/.*$/gm, '').matchAll(/"([^"]+)"/g)].map((m) => m[1])
+if (serverKinds.length === 0) throw new Error(`${AUDIT}: KINDS is declared but nothing could be read from it`)
+const { KINDS: consoleKinds, KIND_LABEL } = await import('./src/lib/audit.js')
+if (JSON.stringify(serverKinds) !== JSON.stringify(consoleKinds)) {
+  throw new Error(`KIND_LABEL in src/lib/audit.js has the kinds ${consoleKinds}, the server's are ${serverKinds}`)
+}
+for (const kind of consoleKinds) {
+  if (!KIND_LABEL[kind] || KIND_LABEL[kind] === kind) {
+    throw new Error(`src/lib/audit.js has no readable label for the kind ${kind}`)
+  }
+}
+console.log(`ok: the audit log filters by the ${serverKinds.length} kinds the server records`)

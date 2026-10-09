@@ -1,0 +1,137 @@
+{
+  "entries": [
+    {
+      "id": 214,
+      "at": "2026-10-09T15:42:07.318402Z",
+      "actor": "fikri.ramadhan",
+      "actor_method": "oidc",
+      "action": "update",
+      "object_kind": "route",
+      "workspace": "payments",
+      "before": { "name": "ledger-read", "service": "ledger", "hosts": ["pay.example.com"], "paths": [{ "type": "prefix", "value": "/ledger" }], "methods": ["GET"], "priority": 10 },
+      "after": { "name": "ledger-read", "service": "ledger", "hosts": ["pay.example.com"], "paths": [{ "type": "prefix", "value": "/ledger" }], "methods": ["GET", "HEAD"], "priority": 20 }
+    },
+    {
+      "id": 213,
+      "at": "2026-10-09T09:03:51.640233Z",
+      "actor": "nadia.putri",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "policy",
+      "workspace": "default",
+      "before": null,
+      "after": { "target": "route:catch-all", "header": "x-partner-key" }
+    },
+    {
+      "id": 212,
+      "at": "2026-10-08T16:20:44.902117Z",
+      "actor": "nadia.putri",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "consumer_key",
+      "workspace": "default",
+      "before": null,
+      "after": { "consumer": "mobile-app", "prefix": "gpak_3f9a1c0e", "expires_at": null }
+    },
+    {
+      "id": 211,
+      "at": "2026-10-07T10:42:33.871905Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "data_plane_token",
+      "workspace": null,
+      "before": null,
+      "after": { "data_plane": "edge-eu-1", "prefix": "gpdp_b7d2e481" }
+    },
+    {
+      "id": 210,
+      "at": "2026-10-07T08:15:02.554120Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "update",
+      "object_kind": "user",
+      "workspace": "storefront",
+      "before": { "workspace": "storefront", "role": null },
+      "after": { "workspace": "storefront", "role": "viewer" }
+    },
+    {
+      "id": 209,
+      "at": "2026-10-06T14:31:19.209733Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "group_mapping",
+      "workspace": "storefront",
+      "before": null,
+      "after": { "group": "storefront-readers", "workspace": "storefront", "role": "viewer" }
+    },
+    {
+      "id": 208,
+      "at": "2026-10-06T14:05:48.209733Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "data_plane",
+      "workspace": null,
+      "before": null,
+      "after": { "name": "edge-staging", "tokens": ["gpdp_c41e9b07"] }
+    },
+    {
+      "id": 207,
+      "at": "2026-10-03T11:47:26.098374Z",
+      "actor": "andre.kusuma",
+      "actor_method": "local",
+      "action": "update",
+      "object_kind": "service",
+      "workspace": "payments",
+      "before": { "name": "ledger", "protocol": "http", "host": "ledger.payments.svc", "port": 8080, "connect_timeout_ms": null, "read_timeout_ms": 10000 },
+      "after": { "name": "ledger", "protocol": "http", "host": "ledger.payments.svc", "port": 8080, "connect_timeout_ms": 1500, "read_timeout_ms": 15000 }
+    },
+    {
+      "id": 206,
+      "at": "2026-10-02T17:12:40.126553Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "update",
+      "object_kind": "user",
+      "workspace": null,
+      "before": null,
+      "after": { "password": "reset" }
+    },
+    {
+      "id": 205,
+      "at": "2026-09-30T13:58:05.312840Z",
+      "actor": "fikri.ramadhan",
+      "actor_method": "oidc",
+      "action": "delete",
+      "object_kind": "consumer",
+      "workspace": "default",
+      "before": { "name": "legacy-partner", "keys": ["gpak_51d0a9e2", "gpak_e08c6f13"] },
+      "after": null
+    },
+    {
+      "id": 204,
+      "at": "2026-09-28T09:20:11.945027Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "workspace",
+      "workspace": null,
+      "before": null,
+      "after": { "name": "storefront" }
+    },
+    {
+      "id": 203,
+      "at": "2026-09-26T07:55:18.250619Z",
+      "actor": "david",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "user",
+      "workspace": null,
+      "before": null,
+      "after": { "username": "andre.kusuma", "superuser": false }
+    }
+  ],
+  "next": null
+}

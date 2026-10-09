@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
 mod accounts;
+mod audit;
 mod configuration;
 mod consumers;
 mod data_planes;
@@ -25,7 +26,7 @@ mod workspaces;
 pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
-pub use settings::SignedUp;
+pub use settings::{SignUp, SignedUp, MAX_WAITING_SIGN_UPS};
 
 /// Applied in order, recorded in `_migrations`. Schema migration is permanent work;
 /// embedding them in the binary is what keeps the schema and the code that queries it shipped

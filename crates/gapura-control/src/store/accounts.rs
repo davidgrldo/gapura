@@ -49,12 +49,14 @@ async fn bound_lock_waits(tx: &Transaction<'_>) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// The PHC string for `password`, made off the async workers and under the bound sign-ins are
-/// checked under: argon2 takes 19 MiB and about 20 ms each time.
+/// The PHC string for `password`, made off the async workers and under the bound and queue
+/// sign-ins are checked under: argon2 takes 19 MiB and about 20 ms each time. `Busy` when the
+/// queue is full.
 async fn hashed(password: String) -> Result<String, WriteError> {
-    crate::password::hash_bounded(password)
-        .await
-        .map_err(WriteError::Store)
+    match crate::password::hash_or_busy(password).await {
+        Ok(hashed) => hashed.map_err(WriteError::Store),
+        Err(crate::password::Busy) => Err(WriteError::Busy),
+    }
 }
 
 /// The refusal of a caller whose own account is gone: deleted by a superuser after their
@@ -123,7 +125,6 @@ async fn decide(
         last_sign_in: None,
         must_change_password: false,
         sessions_valid_after: None,
-        signup_note: None,
     };
     accounts::guard(&actor, &target, &change, enabled_superusers)?;
     Ok((actor, target))
@@ -435,13 +436,9 @@ impl Store {
         {
             Ok(true) => {}
             Ok(false) => return Err(WriteError::Field(accounts::wrong_current())),
-            // Not a verdict on the password: answered as the store being unavailable, a 503
-            // the caller can retry, and given back to the sign-in throttle.
-            Err(crate::password::Busy) => {
-                return Err(WriteError::Store(anyhow::anyhow!(
-                    "too many password checks are waiting"
-                )))
-            }
+            // Not a verdict on the password: a 503 the caller can retry, given back to the
+            // sign-in throttle.
+            Err(crate::password::Busy) => return Err(WriteError::Busy),
         }
         accounts::new_password(&username, &change).map_err(WriteError::Field)?;
         let hash = hashed(change.new.clone()).await?;

@@ -578,7 +578,6 @@ mod tests {
             last_sign_in: None,
             must_change_password: false,
             sessions_valid_after: None,
-            signup_note: None,
         }
     }
 
