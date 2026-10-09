@@ -582,12 +582,13 @@ fn now_seconds() -> u64 {
         .as_secs()
 }
 
-/// When a store-mode session is issued: `signed_in_at`, the database's time at sign-in, but
-/// never earlier than `now_millis()`. A cut-off and the issue time must come from one clock, the
-/// database's, or a sign-in just after a cut-off is refused for as long as that clock runs ahead
-/// of this one.
-fn issued_at_or_after(signed_in_at: i64) -> u64 {
-    now_millis().max(u64::try_from(signed_in_at).unwrap_or(0))
+/// When a store-mode session is issued: `signed_in_at`, the database's time at sign-in, and only
+/// that. A cut-off is stamped by the database's clock, so the issue time it is compared with must
+/// come from the same clock: taking this process's clock instead, or the later of the two, lets a
+/// session opened just before a reset survive it whenever this clock runs ahead, and refuses one
+/// opened just after whenever it runs behind.
+fn issued_at_from_database(signed_in_at: i64) -> u64 {
+    u64::try_from(signed_in_at).unwrap_or(0)
 }
 
 /// When a session is issued, to the millisecond, which `sessions_valid_after` is compared with.
@@ -886,7 +887,7 @@ async fn store_login(
         .record_sign_in(account.id, &account.password_hash)
         .await
     {
-        Ok(Some(signed_in_at)) => issued_at_or_after(signed_in_at),
+        Ok(Some(signed_in_at)) => issued_at_from_database(signed_in_at),
         // The hash it verified was replaced meanwhile, by a reset or a change: this password no
         // longer opens the account, and a session issued now could postdate the cut-off.
         Ok(None) => return refused_local("Wrong username or password."),
@@ -909,7 +910,7 @@ async fn store_login(
 
 /// The `Set-Cookie` value of a fresh session for `subject`, issued at `issued_at` (Unix
 /// milliseconds): `now_millis()` without a store, and with one never earlier than the database's
-/// clock, which stamps every cut-off (see `issued_at_or_after`).
+/// clock, which stamps every cut-off (see `issued_at_from_database`).
 pub(crate) fn session_cookie(
     state: &AppState,
     subject: String,
@@ -1213,7 +1214,7 @@ pub async fn callback(
                     (
                         account.id.to_string(),
                         Vec::new(),
-                        issued_at_or_after(account.signed_in_at),
+                        issued_at_from_database(account.signed_in_at),
                     )
                 }
                 Err(error) => {
