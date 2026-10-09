@@ -1442,6 +1442,7 @@ dependencies = [
  "gapura-core",
  "hmac 0.12.1",
  "hyper-util",
+ "jsonwebtoken",
  "k8s-openapi",
  "kube",
  "mime_guess",

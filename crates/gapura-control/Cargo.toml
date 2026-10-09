@@ -63,3 +63,6 @@ uuid = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tower = { workspace = true }
 rcgen = { workspace = true }
+# `tests/jwt.rs` signs tokens with a key rcgen generates, to check what the compiled policy
+# accepts; verifying is `gapura_core::jwt`'s.
+jsonwebtoken = { workspace = true }
