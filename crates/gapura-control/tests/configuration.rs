@@ -1266,10 +1266,12 @@ async fn a_save_that_changes_nothing_writes_nothing() {
     let mut route = row(&app, ROUTES, "orders-api", s.ed).await;
     route.as_object_mut().unwrap().remove("key_auth");
     route.as_object_mut().unwrap().remove("jwt");
+    route.as_object_mut().unwrap().remove("rate_limit");
     let mut service = row(&app, SERVICES, "orders", s.ed).await;
     service.as_object_mut().unwrap().remove("routes");
     service.as_object_mut().unwrap().remove("key_auth");
     service.as_object_mut().unwrap().remove("jwt");
+    service.as_object_mut().unwrap().remove("rate_limit");
     ok(
         &app,
         "PUT",
@@ -1394,6 +1396,7 @@ async fn an_https_service_s_tls_settings_are_stored_audited_and_served() {
     listed.as_object_mut().unwrap().remove("routes");
     listed.as_object_mut().unwrap().remove("key_auth");
     listed.as_object_mut().unwrap().remove("jwt");
+    listed.as_object_mut().unwrap().remove("rate_limit");
     ok(
         &app,
         "PUT",
@@ -1685,7 +1688,7 @@ async fn a_replace_that_names_no_tls_keeps_the_service_s_tls_settings() {
     // Sending the row back without `tls` changes nothing, so writes nothing.
     let before = everything(&store).await;
     let mut listed = listed;
-    for added in ["routes", "key_auth", "jwt", "tls"] {
+    for added in ["routes", "key_auth", "jwt", "rate_limit", "tls"] {
         listed.as_object_mut().unwrap().remove(added);
     }
     ok(
@@ -1857,6 +1860,7 @@ async fn a_route_s_headers_are_stored_audited_and_served() {
     let mut listed = row(&app, ROUTES, "beta", s.ed).await;
     listed.as_object_mut().unwrap().remove("key_auth");
     listed.as_object_mut().unwrap().remove("jwt");
+    listed.as_object_mut().unwrap().remove("rate_limit");
     ok(
         &app,
         "PUT",
@@ -1943,7 +1947,7 @@ async fn a_replace_that_names_no_headers_keeps_them_and_an_empty_list_clears_the
     // Sending the row back without `headers` changes nothing, so writes nothing.
     let before = everything(&store).await;
     let mut listed = listed;
-    for added in ["key_auth", "jwt", "headers"] {
+    for added in ["key_auth", "jwt", "rate_limit", "headers"] {
         listed.as_object_mut().unwrap().remove(added);
     }
     ok(

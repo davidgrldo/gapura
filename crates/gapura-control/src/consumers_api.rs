@@ -1,5 +1,6 @@
-//! `/api/workspaces/{ws}/consumers`, `/key-auth` and `/jwt`: store mode's consumers, their API
-//! keys, and the requirements that a request carry one or a JWT, per workspace.
+//! `/api/workspaces/{ws}/consumers`, `/key-auth`, `/jwt` and `/rate-limit`: store mode's
+//! consumers, their API keys, the requirements that a request carry one or a JWT, and the limits
+//! on how many requests come, per workspace.
 //!
 //! The same shape as `configuration_api`, whose helpers these use: the caller first, then the
 //! path, then the workspace and the role the action needs, then the body, then the store, which
@@ -228,7 +229,7 @@ pub async fn put_key_auth(
     }
 }
 
-/// `?target=`, as `delete_key_auth` and `delete_jwt` read it.
+/// `?target=`, as `delete_key_auth`, `delete_jwt` and `delete_rate_limit` read it.
 #[derive(Deserialize)]
 pub struct TargetQuery {
     target: String,
@@ -366,6 +367,87 @@ pub async fn delete_jwt(
     };
     match target_in(query) {
         Ok(target) => written(store.delete_jwt(caller.me.id, workspace, &target).await),
+        Err(e) => field_error(e),
+    }
+}
+
+/// `GET /api/workspaces/{ws}/rate-limit`: where the workspace limits requests, and to how many.
+pub async fn list_rate_limit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: Result<Path<String>, PathRejection>,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Read) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    match store.rate_limits(workspace).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => unavailable(&e),
+    }
+}
+
+/// `PUT /api/workspaces/{ws}/rate-limit`: limit requests on the workspace, a service or a route.
+pub async fn put_rate_limit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: Result<Path<String>, PathRejection>,
+    raw: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let input: consumers::RateLimitInput = match body(raw, "a request limit") {
+        Ok(i) => i,
+        Err(r) => return *r,
+    };
+    let target = match Target::parse(&input.target) {
+        Ok(t) => t,
+        Err(e) => return field_error(e),
+    };
+    match consumers::rate_limit(&input) {
+        Ok(limit) => written(
+            store
+                .put_rate_limit(caller.me.id, workspace, &target, limit)
+                .await,
+        ),
+        Err(e) => field_error(e),
+    }
+}
+
+/// `DELETE /api/workspaces/{ws}/rate-limit?target=…`: stop limiting requests there.
+pub async fn delete_rate_limit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: Result<Path<String>, PathRejection>,
+    query: Result<Query<TargetQuery>, QueryRejection>,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    match target_in(query) {
+        Ok(target) => written(
+            store
+                .delete_rate_limit(caller.me.id, workspace, &target)
+                .await,
+        ),
         Err(e) => field_error(e),
     }
 }

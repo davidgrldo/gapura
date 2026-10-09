@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use gapura_core::config::{JwtPolicy, KeyAuthPolicy, KvMatch, PathMatch, Plugin, Protocol};
-use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+use gapura_core::store::{
+    StoreCredential, StorePlugin, StoreRateLimit, StoreRoute, StoreService, StoreSnapshot,
+};
 use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
 
@@ -275,8 +277,11 @@ impl Store {
         // Only the ones attached to a route or a service, or to neither. A policy scoped to a
         // consumer needs consumers, which this phase does not have yet. A row that is selected and
         // cannot be read fails the whole snapshot: see `parse_plugin` for why that, and not
-        // leaving the row out, is the safe direction.
-        let plugins = tx
+        // leaving the row out, is the safe direction. A `rate_limit` row is a policy row too, but
+        // not a plugin the data plane runs: it goes to `rate_limits`, which set the rule's field.
+        let mut plugins = Vec::new();
+        let mut rate_limits = Vec::new();
+        let rows = tx
             .query(
                 "select w.name as workspace, p.name, p.config, r.name as route, s.name as service,
                         coalesce(r.workspace_id <> p.workspace_id, false)
@@ -289,34 +294,42 @@ impl Store {
                   order by w.name, p.name, p.id",
                 &[],
             )
-            .await?
-            .into_iter()
-            .map(|r| {
-                let name: String = r.get("name");
-                let config: serde_json::Value = r.get("config");
-                let workspace: String = r.get("workspace");
-                let route: Option<String> = r.get("route");
-                let service: Option<String> = r.get("service");
-                // The foreign keys allow a policy to name another workspace's route or service.
-                // Compiled, it would attach to a same-named route in its own workspace instead --
-                // the wrong target, silently -- so it fails the snapshot like any unreadable row.
-                if r.get::<_, bool>("foreign_target") {
-                    anyhow::bail!(
-                        "policy {name:?} in workspace {workspace:?} names a route or service of \
-                         another workspace"
-                    );
-                }
-                let plugin = parse_plugin(&name, config).with_context(|| {
-                    format!("policy {name:?} on route {route:?} service {service:?} cannot be read")
-                })?;
-                Ok(StorePlugin {
+            .await?;
+        for r in rows {
+            let name: String = r.get("name");
+            let config: serde_json::Value = r.get("config");
+            let workspace: String = r.get("workspace");
+            let route: Option<String> = r.get("route");
+            let service: Option<String> = r.get("service");
+            // The foreign keys allow a policy to name another workspace's route or service.
+            // Compiled, it would attach to a same-named route in its own workspace instead --
+            // the wrong target, silently -- so it fails the snapshot like any unreadable row.
+            if r.get::<_, bool>("foreign_target") {
+                anyhow::bail!(
+                    "policy {name:?} in workspace {workspace:?} names a route or service of \
+                     another workspace"
+                );
+            }
+            let context =
+                || format!("policy {name:?} on route {route:?} service {service:?} cannot be read");
+            if name == RATE_LIMIT {
+                let limit = parse_rate_limit(config).with_context(context)?;
+                rate_limits.push(StoreRateLimit {
                     workspace,
                     route,
                     service,
-                    plugin,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                    limit,
+                });
+                continue;
+            }
+            let plugin = parse_plugin(&name, config).with_context(context)?;
+            plugins.push(StorePlugin {
+                workspace,
+                route,
+                service,
+                plugin,
+            });
+        }
 
         // Expired keys are left out here rather than checked at request time: the data plane
         // holds a map, not a clock over rows, so a key that has expired is one the next
@@ -349,6 +362,7 @@ impl Store {
                 routes,
                 plugins,
                 credentials,
+                rate_limits,
             },
         ))
     }
@@ -519,6 +533,21 @@ fn parse_plugin(name: &str, config: serde_json::Value) -> Result<Plugin> {
     }
 }
 
+/// The policy row name of a request limit.
+pub(crate) const RATE_LIMIT: &str = "rate_limit";
+
+/// A `rate_limit` row into the limit the data plane enforces, on the terms of `parse_plugin`: a
+/// configuration that is not one the API could have written is an error, never a row left out,
+/// so a route keeps the limit it was last served rather than losing it.
+fn parse_rate_limit(config: serde_json::Value) -> Result<gapura_core::config::RateLimit> {
+    crate::consumers::Limit::from_config(config)
+        .map(crate::consumers::Limit::rate_limit)
+        .context(
+            "the configuration does not fit a rate_limit policy: a limit from 1 to 1000000 and \
+             a window_ms of 1000, 60000 or 3600000",
+        )
+}
+
 /// `[{"type":"prefix","value":"/v1"}]`. An empty list is valid and means every path.
 ///
 /// An entry that is not one of the three known shapes is an error, never an entry left out.
@@ -666,6 +695,31 @@ mod tests {
         );
         assert!(parse_plugin("key_auth", json!({"header": 7})).is_err());
         assert!(parse_plugin("oauth2", json!({})).is_err(), "unknown name");
+    }
+
+    #[test]
+    fn a_rate_limit_is_read_only_in_the_shape_the_api_writes() {
+        assert_eq!(
+            parse_rate_limit(json!({"limit": 120, "window_ms": 60_000})).unwrap(),
+            gapura_core::config::RateLimit {
+                limit: 120,
+                window_ms: 60_000
+            }
+        );
+        for bad in [
+            json!({"limit": 0, "window_ms": 60_000}),
+            json!({"limit": 10, "window_ms": 0}),
+            json!({"limit": 10, "window_ms": 30_000}),
+            json!({"limit": 10}),
+            json!({"limit": 10, "window_ms": 1_000, "by": "consumer"}),
+            json!({}),
+        ] {
+            assert!(parse_rate_limit(bad.clone()).is_err(), "accepted {bad}");
+        }
+        assert!(
+            parse_plugin(RATE_LIMIT, json!({"limit": 1, "window_ms": 1_000})).is_err(),
+            "a limit is not a plugin the data plane runs"
+        );
     }
 
     #[test]

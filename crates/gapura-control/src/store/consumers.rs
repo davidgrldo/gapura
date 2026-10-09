@@ -1,4 +1,5 @@
-//! Consumers, their keys, and key_auth and JWT policies as the console reads and writes them.
+//! Consumers, their keys, and key_auth, JWT and rate_limit policies as the console reads and
+//! writes them.
 //!
 //! Each write is one transaction in the services slice's order: rights re-read locked and
 //! decided by `configuration::allowed`; the changed row locked; one audit row. A key is stored as
@@ -7,16 +8,17 @@
 //!
 //! A policy write takes its locks in one order: the caller's grant rows `FOR SHARE`; the service
 //! or route it targets `FOR SHARE`, so the target cannot be deleted under it; the policy row
-//! `FOR UPDATE`; `config_state`, through the trigger. Only an enabled `key_auth` or `jwt` row with
-//! no consumer is a policy here, as it is to the compiler; a disabled one, which only SQL written
+//! `FOR UPDATE`; `config_state`, through the trigger. Only an enabled `key_auth`, `jwt` or
+//! `rate_limit` row with no consumer is a policy here, as it is to the compiler; a disabled one, which only SQL written
 //! by hand can make, reads as none, and switching the requirement on takes it over.
 
 use super::configuration::{decide, json, updated_at};
 use super::grants::{audit, retrying, Entry};
-use super::{hash, hex, Store, WriteError, PREFIX_LEN};
+use super::{hash, hex, Store, WriteError, PREFIX_LEN, RATE_LIMIT};
 use crate::configuration::Action;
 use crate::consumers::{
-    usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, PolicyView, Target,
+    usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, Limit, PolicyView,
+    RateLimitView, Target,
 };
 use crate::grants::Refusal;
 use anyhow::{Context, Result};
@@ -117,6 +119,22 @@ fn jwt_audit(target: &Target, policy: &JwtPolicy) -> serde_json::Value {
 /// fails the compiler too, so it is an error here, not a requirement shown as none.
 fn stored_jwt(config: serde_json::Value) -> anyhow::Result<JwtPolicy> {
     serde_json::from_value(config).context("a jwt policy does not fit its shape")
+}
+
+/// The `{target, kind, limit, per}` an audit row records of a request limit.
+fn rate_limit_audit(target: &Target, limit: Limit) -> serde_json::Value {
+    serde_json::json!({
+        "target": target.as_text(),
+        "kind": "rate_limit",
+        "limit": limit.limit,
+        "per": limit.per,
+    })
+}
+
+/// A stored `rate_limit` configuration as the limit the compiler reads it as. One that does not
+/// fit fails the compiler too, so it is an error here, not a limit shown as none.
+fn stored_rate_limit(config: serde_json::Value) -> anyhow::Result<Limit> {
+    Limit::from_config(config).context("a rate_limit policy does not fit its shape")
 }
 
 impl Store {
@@ -765,6 +783,167 @@ impl Store {
         let before = match stored_jwt(config) {
             Ok(policy) => jwt_audit(target, &policy),
             Err(_) => serde_json::json!({ "target": target.as_text(), "kind": "jwt" }),
+        };
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "delete",
+                object_kind: "policy",
+                object_id: Some(id),
+                workspace: Some(workspace),
+                before: Some(before),
+                after: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// A workspace's request limits, in the order `policies` lists key requirements.
+    pub async fn rate_limits(&self, workspace: Uuid) -> Result<Vec<RateLimitView>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "select p.config, s.name as service, r.name as route
+                   from plugins p
+                   left join services s on s.id = p.service_id
+                   left join routes r on r.id = p.route_id
+                  where p.workspace_id = $1 and p.name = $2 and p.consumer_id is null
+                    and p.enabled
+                  order by case when p.service_id is not null then 1
+                                when p.route_id is not null then 2
+                                else 0 end,
+                           coalesce(s.name, r.name)",
+                &[&workspace, &RATE_LIMIT],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let target = target_of(row.get("service"), row.get("route"));
+                let limit = stored_rate_limit(row.get("config"))?;
+                Ok(RateLimitView {
+                    target: target.as_text(),
+                    limit: limit.limit,
+                    per: limit.per,
+                })
+            })
+            .collect()
+    }
+
+    /// Limits requests on `target` to `limit`, which needs the editor role. The same limit again
+    /// writes nothing.
+    pub async fn put_rate_limit(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+        limit: Limit,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_put_rate_limit(caller, workspace, target, limit)).await
+    }
+
+    async fn try_put_rate_limit(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+        limit: Limit,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let resolved = target_row(&tx, workspace, target).await?;
+        let config = limit.config();
+        let (action, id, before) = match plugin_row(&tx, workspace, resolved, RATE_LIMIT).await? {
+            Some((id, current, enabled)) => {
+                let current = Limit::from_config(current);
+                // Nothing to write, so nothing to audit and nothing for the data planes to reload.
+                if enabled && current == Some(limit) {
+                    return Ok(());
+                }
+                tx.execute(
+                    "update plugins set config = $2, enabled = true, updated_at = now()
+                      where id = $1",
+                    &[&id, &config],
+                )
+                .await?;
+                // A disabled row is no limit, so taking it over is audited as creating one.
+                let before = if enabled {
+                    current.map(|c| rate_limit_audit(target, c))
+                } else {
+                    None
+                };
+                (if enabled { "update" } else { "create" }, id, before)
+            }
+            // Two writers meet at the unique index, as switching key_auth on does.
+            None => {
+                let (service, route) = match resolved {
+                    Some(("service_id", id)) => (Some(id), None),
+                    Some((_, id)) => (None, Some(id)),
+                    None => (None, None),
+                };
+                let row = tx
+                    .query_one(
+                        "insert into plugins (workspace_id, name, config, service_id, route_id)
+                         values ($1, $2, $3, $4, $5)
+                         returning id",
+                        &[&workspace, &RATE_LIMIT, &config, &service, &route],
+                    )
+                    .await?;
+                ("create", row.get("id"), None)
+            }
+        };
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action,
+                object_kind: "policy",
+                object_id: Some(id),
+                workspace: Some(workspace),
+                before,
+                after: Some(rate_limit_audit(target, limit)),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stops limiting requests on `target`, which needs the editor role, like limiting them.
+    pub async fn delete_rate_limit(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_delete_rate_limit(caller, workspace, target)).await
+    }
+
+    async fn try_delete_rate_limit(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let resolved = target_row(&tx, workspace, target).await?;
+        let Some((id, config, true)) = plugin_row(&tx, workspace, resolved, RATE_LIMIT).await?
+        else {
+            return Err(
+                Refusal::NotFound(format!("{} has no request limit.", target.as_text())).into(),
+            );
+        };
+        tx.execute("delete from plugins where id = $1", &[&id])
+            .await?;
+        // A row the compiler could not read is recorded by what it was, as far as it goes.
+        let before = match Limit::from_config(config) {
+            Some(limit) => rate_limit_audit(target, limit),
+            None => serde_json::json!({ "target": target.as_text(), "kind": "rate_limit" }),
         };
         audit(
             &tx,
