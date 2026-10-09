@@ -18,6 +18,10 @@ use axum::{
 /// and line breaks.
 const MAX_SERVICE_BODY: usize = MAX_BODY + 2 * crate::configuration::MAX_CA_PEM_BYTES;
 
+/// The most a JWT requirement may hold, the same way: a JWKS at its limit
+/// (`consumers::MAX_JWKS_BYTES`) written as a JSON string, whose escaped quotes at most double it.
+const MAX_JWT_BODY: usize = MAX_BODY + 2 * crate::consumers::MAX_JWKS_BYTES;
+
 pub fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -125,7 +129,7 @@ pub fn router_with(state: AppState) -> Router {
                 .delete(crate::configuration_api::delete_route)
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
         )
-        // Consumers, their keys, and where a key is required, the same way.
+        // Consumers, their keys, and where a key or a JWT is required, the same way.
         .route(
             "/api/workspaces/{ws}/consumers",
             get(crate::consumers_api::list_consumers)
@@ -150,6 +154,13 @@ pub fn router_with(state: AppState) -> Router {
                 .put(crate::consumers_api::put_key_auth)
                 .delete(crate::consumers_api::delete_key_auth)
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
+        .route(
+            "/api/workspaces/{ws}/jwt",
+            get(crate::consumers_api::list_jwt)
+                .put(crate::consumers_api::put_jwt)
+                .delete(crate::consumers_api::delete_jwt)
+                .layer(DefaultBodyLimit::max(MAX_JWT_BODY)),
         )
         // Data planes and their tokens, across every workspace. Only registering reads a body.
         .route(

@@ -17,8 +17,8 @@ use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
-    self, Action, HeaderMatch, HeadersOnReplace, KeyAuthView, PathMatch, Protocol, Route,
-    RouteView, Service, ServiceView, Tls, TlsOnReplace,
+    self, Action, HeaderMatch, HeadersOnReplace, JwtRequirementView, KeyAuthView, PathMatch,
+    Protocol, Route, RouteView, Service, ServiceView, Tls, TlsOnReplace,
 };
 use crate::grants::Refusal;
 use anyhow::Result;
@@ -187,73 +187,100 @@ async fn no_policies(
     }
 }
 
-/// A workspace's key requirements, by what they are attached to: the policies the compiler reads,
-/// enabled `key_auth` rows with no consumer.
-#[derive(Default)]
-struct KeyAuths {
-    workspace: Option<String>,
-    services: HashMap<Uuid, String>,
-    routes: HashMap<Uuid, String>,
+/// A workspace's policies of one name, by what they are attached to: the policies the compiler
+/// reads, enabled rows with no consumer, each as the value a list shows of it.
+struct Attached<T> {
+    workspace: Option<T>,
+    services: HashMap<Uuid, T>,
+    routes: HashMap<Uuid, T>,
 }
 
-impl KeyAuths {
-    async fn read(client: &tokio_postgres::Client, workspace: Uuid) -> Result<KeyAuths> {
+impl<T: Clone> Attached<T> {
+    async fn read(
+        client: &tokio_postgres::Client,
+        workspace: Uuid,
+        name: &str,
+        value: impl Fn(serde_json::Value) -> Result<T>,
+    ) -> Result<Attached<T>> {
         let rows = client
             .query(
-                "select route_id, service_id, config->>'header' as header from plugins
-                  where workspace_id = $1 and name = 'key_auth' and consumer_id is null
+                "select route_id, service_id, config from plugins
+                  where workspace_id = $1 and name = $2 and consumer_id is null
                     and enabled",
-                &[&workspace],
+                &[&workspace, &name],
             )
             .await?;
-        let mut found = KeyAuths::default();
+        let mut found = Attached {
+            workspace: None,
+            services: HashMap::new(),
+            routes: HashMap::new(),
+        };
         for row in rows {
-            // The compiler refuses such a row too, so it is an error here, not a requirement
-            // listed with no header.
-            let header: Option<String> = row.get("header");
-            let header =
-                header.ok_or_else(|| anyhow::anyhow!("a key_auth policy has no header"))?;
+            let v = value(row.get("config"))?;
             let route: Option<Uuid> = row.get("route_id");
             let service: Option<Uuid> = row.get("service_id");
             match (route, service) {
-                (Some(route), _) => found.routes.insert(route, header),
-                (None, Some(service)) => found.services.insert(service, header),
-                (None, None) => found.workspace.replace(header),
+                (Some(route), _) => found.routes.insert(route, v),
+                (None, Some(service)) => found.services.insert(service, v),
+                (None, None) => found.workspace.replace(v),
             };
         }
         Ok(found)
     }
 
-    fn view(header: &str, from: &'static str) -> KeyAuthView {
-        KeyAuthView {
-            header: header.to_string(),
-            from,
-        }
+    /// A service's own policy, else the workspace's, and which it is.
+    fn service(&self, service: Uuid) -> Option<(T, &'static str)> {
+        let own = self.services.get(&service).map(|v| (v.clone(), "service"));
+        own.or_else(|| self.workspace.clone().map(|v| (v, "workspace")))
     }
 
-    /// A service's own requirement, else the workspace's.
-    fn service(&self, service: Uuid) -> Option<KeyAuthView> {
-        let own = self
-            .services
-            .get(&service)
-            .map(|h| Self::view(h, "service"));
-        own.or_else(|| {
-            self.workspace
-                .as_deref()
-                .map(|h| Self::view(h, "workspace"))
-        })
-    }
-
-    /// A route's own requirement, else its service's, else the workspace's.
-    fn route(&self, route: Uuid, service: Uuid) -> Option<KeyAuthView> {
-        let own = self.routes.get(&route).map(|h| Self::view(h, "route"));
+    /// A route's own policy, else its service's, else the workspace's, and which it is.
+    fn route(&self, route: Uuid, service: Uuid) -> Option<(T, &'static str)> {
+        let own = self.routes.get(&route).map(|v| (v.clone(), "route"));
         own.or_else(|| self.service(service))
     }
 }
 
+/// The key and JWT requirements of a workspace, as its service and route lists show them.
+struct Requirements {
+    key_auth: Attached<String>,
+    jwt: Attached<Option<String>>,
+}
+
+impl Requirements {
+    async fn read(client: &tokio_postgres::Client, workspace: Uuid) -> Result<Requirements> {
+        let key_auth = Attached::read(client, workspace, "key_auth", |config| {
+            // The compiler refuses such a row too, so it is an error here, not a requirement
+            // listed with no header.
+            config
+                .get("header")
+                .and_then(|h| h.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("a key_auth policy has no header"))
+        })
+        .await?;
+        let jwt = Attached::read(client, workspace, "jwt", |config| {
+            // Likewise a configuration that does not fit a jwt policy.
+            serde_json::from_value::<gapura_core::config::JwtPolicy>(config)
+                .map(|p| p.issuer)
+                .map_err(|_| anyhow::anyhow!("a jwt policy does not fit its shape"))
+        })
+        .await?;
+        Ok(Requirements { key_auth, jwt })
+    }
+
+    fn key_auth((header, from): (String, &'static str)) -> KeyAuthView {
+        KeyAuthView { header, from }
+    }
+
+    fn jwt((issuer, from): (Option<String>, &'static str)) -> JwtRequirementView {
+        JwtRequirementView { issuer, from }
+    }
+}
+
 impl Store {
-    /// A workspace's services, by name, each with how many routes use it and the key
-    /// requirement it carries.
+    /// A workspace's services, by name, each with how many routes use it and the key and JWT
+    /// requirements it carries.
     pub async fn services(&self, workspace: Uuid) -> Result<Vec<ServiceView>> {
         let client = self.pool.get().await?;
         let rows = client
@@ -269,20 +296,24 @@ impl Store {
                 &[&workspace],
             )
             .await?;
-        let key_auths = KeyAuths::read(&client, workspace).await?;
+        let found = Requirements::read(&client, workspace).await?;
         Ok(rows
             .iter()
             .map(|r| ServiceView {
                 service: service_from(r),
                 routes: r.get("routes"),
                 updated_at: r.get("updated_at"),
-                key_auth: key_auths.service(r.get("id")),
+                key_auth: found
+                    .key_auth
+                    .service(r.get("id"))
+                    .map(Requirements::key_auth),
+                jwt: found.jwt.service(r.get("id")).map(Requirements::jwt),
             })
             .collect())
     }
 
     /// A workspace's routes, in the order the data plane matches them: priority, then name, each
-    /// with the key requirement that applies to it. A
+    /// with the key and JWT requirements that apply to it. A
     /// route with no service, which only SQL written by hand can make, is not listed, just as
     /// the compiler does not serve it.
     pub async fn routes(&self, workspace: Uuid) -> Result<Vec<RouteView>> {
@@ -301,14 +332,19 @@ impl Store {
                 &[&workspace],
             )
             .await?;
-        let key_auths = KeyAuths::read(&client, workspace).await?;
+        let found = Requirements::read(&client, workspace).await?;
         rows.iter()
             .map(|r| {
+                let (id, service) = (r.get("id"), r.get("service_id"));
                 Ok(RouteView {
                     route: route_from(r)?,
                     updated_at: r.get("updated_at"),
                     service_updated_at: r.get("service_updated_at"),
-                    key_auth: key_auths.route(r.get("id"), r.get("service_id")),
+                    key_auth: found
+                        .key_auth
+                        .route(id, service)
+                        .map(Requirements::key_auth),
+                    jwt: found.jwt.route(id, service).map(Requirements::jwt),
                 })
             })
             .collect()

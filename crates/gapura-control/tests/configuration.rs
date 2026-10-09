@@ -1261,13 +1261,15 @@ async fn a_save_that_changes_nothing_writes_nothing() {
     ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
     let before = everything(&store).await;
 
-    // Each row as the list shows it, without what the list adds: the key requirement, and the
-    // service's count of routes.
+    // Each row as the list shows it, without what the list adds: the key and JWT requirements,
+    // and the service's count of routes.
     let mut route = row(&app, ROUTES, "orders-api", s.ed).await;
     route.as_object_mut().unwrap().remove("key_auth");
+    route.as_object_mut().unwrap().remove("jwt");
     let mut service = row(&app, SERVICES, "orders", s.ed).await;
     service.as_object_mut().unwrap().remove("routes");
     service.as_object_mut().unwrap().remove("key_auth");
+    service.as_object_mut().unwrap().remove("jwt");
     ok(
         &app,
         "PUT",
@@ -1391,6 +1393,7 @@ async fn an_https_service_s_tls_settings_are_stored_audited_and_served() {
     let mut listed = row(&app, SERVICES, "own-ca", s.ed).await;
     listed.as_object_mut().unwrap().remove("routes");
     listed.as_object_mut().unwrap().remove("key_auth");
+    listed.as_object_mut().unwrap().remove("jwt");
     ok(
         &app,
         "PUT",
@@ -1682,7 +1685,7 @@ async fn a_replace_that_names_no_tls_keeps_the_service_s_tls_settings() {
     // Sending the row back without `tls` changes nothing, so writes nothing.
     let before = everything(&store).await;
     let mut listed = listed;
-    for added in ["routes", "key_auth", "tls"] {
+    for added in ["routes", "key_auth", "jwt", "tls"] {
         listed.as_object_mut().unwrap().remove(added);
     }
     ok(
@@ -1853,6 +1856,7 @@ async fn a_route_s_headers_are_stored_audited_and_served() {
     let before = everything(&store).await;
     let mut listed = row(&app, ROUTES, "beta", s.ed).await;
     listed.as_object_mut().unwrap().remove("key_auth");
+    listed.as_object_mut().unwrap().remove("jwt");
     ok(
         &app,
         "PUT",
@@ -1939,7 +1943,7 @@ async fn a_replace_that_names_no_headers_keeps_them_and_an_empty_list_clears_the
     // Sending the row back without `headers` changes nothing, so writes nothing.
     let before = everything(&store).await;
     let mut listed = listed;
-    for added in ["key_auth", "headers"] {
+    for added in ["key_auth", "jwt", "headers"] {
         listed.as_object_mut().unwrap().remove(added);
     }
     ok(

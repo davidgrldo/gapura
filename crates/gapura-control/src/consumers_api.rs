@@ -1,5 +1,5 @@
-//! `/api/workspaces/{ws}/consumers` and `/key-auth`: store mode's consumers, their API keys, and
-//! the requirement that a request carry one, per workspace.
+//! `/api/workspaces/{ws}/consumers`, `/key-auth` and `/jwt`: store mode's consumers, their API
+//! keys, and the requirements that a request carry one or a JWT, per workspace.
 //!
 //! The same shape as `configuration_api`, whose helpers these use: the caller first, then the
 //! path, then the workspace and the role the action needs, then the body, then the store, which
@@ -228,7 +228,7 @@ pub async fn put_key_auth(
     }
 }
 
-/// `?target=`, as `delete_key_auth` reads it.
+/// `?target=`, as `delete_key_auth` and `delete_jwt` read it.
 #[derive(Deserialize)]
 pub struct TargetQuery {
     target: String,
@@ -264,6 +264,108 @@ pub async fn delete_key_auth(
                 .delete_key_auth(caller.me.id, workspace, &target)
                 .await,
         ),
+        Err(e) => field_error(e),
+    }
+}
+
+/// `?target=`, which `list_jwt` reads when it is there.
+#[derive(Deserialize)]
+pub struct MaybeTarget {
+    target: Option<String>,
+}
+
+/// `GET /api/workspaces/{ws}/jwt`: where the workspace requires a JWT, the issuer and audience it
+/// asks for and how many keys verify it. With `?target=…`, that target's own requirement with
+/// its JWKS, which the console edits.
+pub async fn list_jwt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: Result<Path<String>, PathRejection>,
+    query: Result<Query<MaybeTarget>, QueryRejection>,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Read) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let target = match query {
+        Ok(Query(MaybeTarget { target: None })) => {
+            return match store.jwt_policies(workspace).await {
+                Ok(list) => Json(list).into_response(),
+                Err(e) => unavailable(&e),
+            }
+        }
+        Ok(Query(MaybeTarget { target: Some(t) })) => Target::parse(&t),
+        Err(_) => Target::parse(""),
+    };
+    let target = match target {
+        Ok(t) => t,
+        Err(e) => return field_error(e),
+    };
+    match store.jwt_policy(workspace, &target).await {
+        Ok(Some(one)) => Json(one).into_response(),
+        Ok(None) => Refusal::NotFound(format!("{} has no JWT requirement.", target.as_text()))
+            .into_response(),
+        Err(e) => unavailable(&e),
+    }
+}
+
+/// `PUT /api/workspaces/{ws}/jwt`: require a JWT on the workspace, a service or a route.
+pub async fn put_jwt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: Result<Path<String>, PathRejection>,
+    raw: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let input: consumers::JwtInput = match body(raw, "a JWT requirement") {
+        Ok(i) => i,
+        Err(r) => return *r,
+    };
+    let target = match Target::parse(&input.target) {
+        Ok(t) => t,
+        Err(e) => return field_error(e),
+    };
+    match consumers::jwt(&input) {
+        Ok(policy) => written(
+            store
+                .put_jwt(caller.me.id, workspace, &target, &policy)
+                .await,
+        ),
+        Err(e) => field_error(e),
+    }
+}
+
+/// `DELETE /api/workspaces/{ws}/jwt?target=…`: stop requiring a JWT there.
+pub async fn delete_jwt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: Result<Path<String>, PathRejection>,
+    query: Result<Query<TargetQuery>, QueryRejection>,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path(ws)) = ws else { return unnamed() };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    match target_in(query) {
+        Ok(target) => written(store.delete_jwt(caller.me.id, workspace, &target).await),
         Err(e) => field_error(e),
     }
 }
