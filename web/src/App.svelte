@@ -17,17 +17,19 @@
   import ChoosePassword from './lib/ChoosePassword.svelte'
   import Failure from './lib/Failure.svelte'
   import Home from './lib/Home.svelte'
+  // Each screen is its own chunk, fetched when it is first opened: the console's one bundle had
+  // grown past what a first visit should download, and most readers open two or three screens.
+  const Overview = () => import('./routes/Overview.svelte')
+  const Routes = () => import('./routes/Routes.svelte')
+  const Users = () => import('./routes/Users.svelte')
+  const Roles = () => import('./routes/Roles.svelte')
+  const Services = () => import('./routes/Services.svelte')
+  const StoreRoutes = () => import('./routes/StoreRoutes.svelte')
+  const Consumers = () => import('./routes/Consumers.svelte')
+  const DataPlanes = () => import('./routes/DataPlanes.svelte')
+  const Audit = () => import('./routes/Audit.svelte')
+  const Workspaces = () => import('./routes/Workspaces.svelte')
   import { get } from './lib/api.js'
-  import Overview from './routes/Overview.svelte'
-  import Routes from './routes/Routes.svelte'
-  import Users from './routes/Users.svelte'
-  import Roles from './routes/Roles.svelte'
-  import Services from './routes/Services.svelte'
-  import StoreRoutes from './routes/StoreRoutes.svelte'
-  import Consumers from './routes/Consumers.svelte'
-  import DataPlanes from './routes/DataPlanes.svelte'
-  import Audit from './routes/Audit.svelte'
-  import Workspaces from './routes/Workspaces.svelte'
 
   // A handful of screens does not earn a router dependency. The server already answers any
   // path it does not own with index.html (see `resolve` in crates/gapura-control/src/assets.rs),
@@ -211,7 +213,20 @@
                administers, and the reader's own id. `refresh` asks /api/me again, for a page whose
                change alters it. -->
           {#key current.path}
-            <current.component {me} refresh={refreshMe} />
+            {#await current.component()}
+              <div class="space-y-3" aria-busy="true">
+                <span class="sr-only">Loading</span>
+                <Skeleton class="h-7 w-40" />
+                <Skeleton class="h-24 w-full" />
+              </div>
+            {:then screen}
+              <screen.default {me} refresh={refreshMe} />
+            {:catch error}
+              <!-- A chunk that will not load is usually a console upgraded under an open tab: the
+                   old page names files the new build no longer has. Reloading fetches the new one. -->
+              <Failure {error} what="this page" />
+              <p class="mt-2 text-sm text-muted-foreground">If the console was just upgraded, reload the page.</p>
+            {/await}
           {/key}
         {:else}
           <Home {me} />
