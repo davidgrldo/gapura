@@ -23,7 +23,7 @@ pub struct Extracted {
 impl Extracted {
     /// `Err` carries why the request target cannot be routed at all; the caller answers 400.
     pub fn from_request(req: &RequestHeader) -> Result<Self, &'static str> {
-        let host = host_of(req).unwrap_or_default();
+        let host = host_of(req)?.unwrap_or_default();
         let raw = req.uri.path();
         let path = normalize_path(raw)?;
         let path_normalized = path != raw;
@@ -124,18 +124,40 @@ pub fn normalize_path(raw: &str) -> Result<String, &'static str> {
     Ok(out)
 }
 
-/// Host from the request target (absolute-form) or the Host header, normalized.
-pub fn host_of(req: &RequestHeader) -> Option<String> {
-    let raw = match req.uri.host() {
-        Some(h) => h.to_string(),
-        None => req
-            .headers
-            .get(http::header::HOST)?
-            .to_str()
-            .ok()?
-            .to_string(),
-    };
-    normalize_host(&raw)
+/// Host from the request target (absolute-form, or `:authority` under HTTP/2) or the Host
+/// header, normalized; `Ok(None)` when neither carries a usable host.
+///
+/// The route is matched on this host, but the backend receives the client's own `Host`
+/// line(s). Where those could name a different host the match and the forward disagree, and a
+/// backend that dispatches by vhost serves a route whose policy was never checked. So `Err`,
+/// answered 400, for the requests RFC 9112 section 3.2 and RFC 9113 section 8.3.1 call
+/// malformed:
+///
+/// - More than one `Host` line: which one a backend reads is its own choice.
+/// - A `Host` line that disagrees with the target's authority. Hosts are compared after
+///   [`normalize_host`], which drops the port, so `Host: a.example:443` agrees with
+///   `:authority: a.example`. That is deliberate rather than a default-port rule: routing
+///   never looks at the port, and a single `Host` line already reaches the backend with
+///   whatever port the client wrote, so refusing on a port mismatch would close nothing and
+///   would refuse clients that spell the default port out. A host that does not normalize on
+///   one side and does on the other counts as disagreeing.
+pub fn host_of(req: &RequestHeader) -> Result<Option<String>, &'static str> {
+    let mut lines = req.headers.get_all(http::header::HOST).iter();
+    let line = lines.next();
+    if lines.next().is_some() {
+        return Err("more than one Host header");
+    }
+    let from_line = line.and_then(|v| v.to_str().ok()).and_then(normalize_host);
+    match req.uri.host() {
+        None => Ok(from_line),
+        Some(authority) => {
+            let from_target = normalize_host(authority);
+            if line.is_some() && from_line != from_target {
+                return Err("the Host header disagrees with the request target");
+            }
+            Ok(from_target)
+        }
+    }
 }
 
 /// Lowercase, strip `:port` and one trailing dot. Reject empty hosts, hosts containing `*`,
@@ -276,6 +298,65 @@ mod tests {
         let mut r = RequestHeader::build("GET", b"/", None).unwrap();
         r.set_uri("http://x/admin".parse().unwrap());
         assert_eq!(Extracted::from_request(&r).unwrap().path, "/admin");
+    }
+
+    #[test]
+    fn more_than_one_host_line_is_refused() {
+        // #161: matched on the first line, the backend may read the last.
+        let mut r = req("/", Some("public.example.com"));
+        r.append_header("Host", "admin.example.com").unwrap();
+        assert!(host_of(&r).is_err());
+        assert!(Extracted::from_request(&r).is_err());
+        // Even two identical lines: RFC 9112 calls the request malformed either way.
+        let mut r = req("/", Some("a.example.com"));
+        r.append_header("Host", "a.example.com").unwrap();
+        assert!(host_of(&r).is_err());
+    }
+
+    #[test]
+    fn a_host_line_must_agree_with_the_target_authority() {
+        let with = |target: &str, host: Option<&str>| {
+            let mut r = RequestHeader::build("GET", b"/", None).unwrap();
+            r.set_uri(target.parse().unwrap());
+            if let Some(h) = host {
+                r.insert_header("Host", h).unwrap();
+            }
+            host_of(&r)
+        };
+        // #161: matched as public, forwarded as admin.
+        assert!(with("https://public.example.com/", Some("admin.example.com")).is_err());
+        // Agreement is judged on normalized hosts: case, a trailing dot and the port aside.
+        for host in [
+            "public.example.com",
+            "Public.Example.COM",
+            "public.example.com.",
+            "public.example.com:443",
+            "public.example.com:8443",
+        ] {
+            assert_eq!(
+                with("https://public.example.com/", Some(host)),
+                Ok(Some("public.example.com".to_string())),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            with("http://[0:0:0:0:0:0:0:1]:8080/", Some("[::1]")),
+            Ok(Some("[::1]".to_string()))
+        );
+        // A host usable on one side only is a disagreement, not a fallback.
+        assert!(with("https://public.example.com/", Some("*.example.com")).is_err());
+        assert!(with("https://public.example.com/", Some("")).is_err());
+        // No Host line: the target's authority alone, as before.
+        assert_eq!(
+            with("https://public.example.com/", None),
+            Ok(Some("public.example.com".to_string()))
+        );
+        // No authority: the one Host line alone, as before.
+        assert_eq!(
+            host_of(&req("/", Some("Echo.Example.com:80"))),
+            Ok(Some("echo.example.com".to_string()))
+        );
+        assert_eq!(host_of(&req("/", None)), Ok(None));
     }
 
     #[test]

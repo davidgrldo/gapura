@@ -286,13 +286,46 @@ fn effective_client_ip(
     trusted_client_headers: &[String],
 ) -> Option<std::net::IpAddr> {
     session.client_addr().and_then(|a| a.as_inet()).map(|a| {
-        let forwarded_for = header_str(session.req_header(), "x-forwarded-for");
-        // First configured single-IP header present on the request, in flag order.
-        let named = trusted_client_headers
-            .iter()
-            .find_map(|name| header_str(session.req_header(), name.as_str()));
-        client::client_ip(a.ip(), forwarded_for, trusted, named)
+        client_ip_of(
+            session.req_header(),
+            a.ip(),
+            trusted,
+            trusted_client_headers,
+        )
     })
+}
+
+/// [`effective_client_ip`] for a peer already known, apart from the session so it is testable.
+fn client_ip_of(
+    req: &RequestHeader,
+    peer: std::net::IpAddr,
+    trusted: &[client::Cidr],
+    trusted_client_headers: &[String],
+) -> std::net::IpAddr {
+    let forwarded_for = forwarded_for(req);
+    // First configured single-IP header present on the request, in flag order.
+    let named = trusted_client_headers
+        .iter()
+        .find_map(|name| header_str(req, name.as_str()));
+    client::client_ip(peer, forwarded_for.as_deref(), trusted, named)
+}
+
+/// Every `X-Forwarded-For` field line, in order, as the one comma-joined list RFC 9110 section
+/// 5.3 says they are. Reading only the first line trusted the client: a proxy that adds its own
+/// line rather than appending to the client's (HAProxy's `option forwardfor`) leaves the first
+/// line entirely client-written, and the right-to-left walk then started inside it. A line that
+/// is not valid UTF-8 is kept, lossily, rather than dropped, so it stays in its place in the
+/// chain as a hop the walk cannot parse and skips -- dropping it could move a client-written
+/// line into the place of a proxy's.
+fn forwarded_for(req: &RequestHeader) -> Option<String> {
+    let mut lines = req.headers.get_all("x-forwarded-for").iter();
+    let first = lines.next()?;
+    let mut joined = String::from_utf8_lossy(first.as_bytes()).into_owned();
+    for line in lines {
+        joined.push_str(", ");
+        joined.push_str(&String::from_utf8_lossy(line.as_bytes()));
+    }
+    Some(joined)
 }
 
 fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
@@ -427,6 +460,8 @@ impl ProxyHttp for GapuraProxy {
             Err(why) => {
                 // No route is consulted: a target that cannot be normalised has no path a
                 // policy could be attached to, and guessing one is the bypass this refuses.
+                // The same holds for a host the backend may read differently from the one we
+                // would match (two Host lines, or one that disagrees with the authority).
                 tracing::debug!(reason = why, "refusing a request target");
                 ctx.local_status = Some(400);
                 write_local(session, 400, &ctx.request_id).await?;
@@ -757,7 +792,9 @@ impl ProxyHttp for GapuraProxy {
             .and_then(|a| a.as_inet())
             .map(|a| a.ip().to_string())
         {
-            let value = match header_str(upstream, "x-forwarded-for") {
+            // Appended to every inbound line, joined: rebuilding from the first line alone
+            // dropped the hops on the others, the real one included, from what upstreams see.
+            let value = match forwarded_for(upstream) {
                 Some(existing) => format!("{existing}, {ip}"),
                 None => ip,
             };
@@ -1099,6 +1136,34 @@ mod tests {
         );
         assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
         assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-1");
+    }
+
+    #[test]
+    fn every_forwarded_for_line_is_read_in_order() {
+        // #160: behind a proxy that adds its own line instead of appending, the first line is
+        // the client's. Reading it alone named whatever address the client wrote.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("X-Forwarded-For", "6.6.6.6").unwrap();
+        req.append_header("X-Forwarded-For", "203.0.113.7").unwrap();
+        assert_eq!(forwarded_for(&req).as_deref(), Some("6.6.6.6, 203.0.113.7"));
+        let proxy: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+        let trusted = vec!["10.0.0.0/8".parse::<client::Cidr>().unwrap()];
+        assert_eq!(
+            client_ip_of(&req, proxy, &trusted, &[]),
+            "203.0.113.7".parse::<std::net::IpAddr>().unwrap(),
+            "the proxy's line names the client; the client's own line is never reached"
+        );
+        // One line behaves as before, and no line at all falls back to the peer.
+        let mut one = RequestHeader::build("GET", b"/", None).unwrap();
+        one.insert_header("X-Forwarded-For", "6.6.6.6, 203.0.113.7")
+            .unwrap();
+        assert_eq!(
+            client_ip_of(&one, proxy, &trusted, &[]),
+            client_ip_of(&req, proxy, &trusted, &[])
+        );
+        let none = RequestHeader::build("GET", b"/", None).unwrap();
+        assert_eq!(forwarded_for(&none), None);
+        assert_eq!(client_ip_of(&none, proxy, &trusted, &[]), proxy);
     }
 
     #[test]

@@ -1033,6 +1033,65 @@ async fn a_trusted_proxy_may_name_the_client_in_the_access_log() {
     );
 }
 
+/// #160: a trusted proxy that adds its own `X-Forwarded-For` line instead of appending to the
+/// client's. The client's line comes first and must never be read as the client.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_forwarded_for_line_is_walked_behind_a_trusted_proxy() {
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &["--trusted-proxy", "127.0.0.0/8"],
+    )
+    .await;
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api/x"))
+        .header("x-forwarded-for", "6.6.6.6")
+        .header("x-forwarded-for", "198.51.100.5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rid = r.headers()["x-request-id"].to_str().unwrap().to_string();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        body["headers"]["x-forwarded-for"], "6.6.6.6, 198.51.100.5, 127.0.0.1",
+        "every inbound line is kept, in order, with the peer appended"
+    );
+    let line = gw.access_log(&rid).await;
+    assert_eq!(line["client_ip"], "198.51.100.5", "{line}");
+}
+
+/// #161: matched on the first `Host` line, a backend could serve the second. Two lines are a
+/// malformed request and are refused before any route is consulted.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_host_lines_are_refused_as_400() {
+    let (gw, _c) = setup().await;
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+        .await
+        .unwrap();
+    sock.write_all(
+        concat!(
+            "GET /api/x HTTP/1.1\r\n",
+            "Host: echo.test\r\n",
+            "Host: other.test\r\n",
+            "X-Request-Id: two-hosts\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut response = Vec::new();
+    sock.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    let line = gw.access_log("two-hosts").await;
+    assert_eq!(line["status"], 400, "{line}");
+    assert_eq!(line["route"], "-", "no route is consulted: {line}");
+    assert!(line["upstream"].is_null(), "{line}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn debug_status_serves_the_computed_patches() {
     let (gw, _c) = setup().await;
