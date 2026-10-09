@@ -27,6 +27,22 @@ means what it usually does, moving from one version below to a later one. Releas
   account is next cut off. Nobody may disable, delete or demote themselves or the last enabled
   superuser, and an identity-provider account is disabled rather than deleted or reset. Migration
   0007 adds two columns to `users`.
+- A flood of new clients on one route no longer resets the rate-limit counters of other routes.
+  The table of windows dropped every window outside the current route's bucket once it held 65,536
+  keys, and buckets of routes with different window lengths are on different scales, so a per-hour
+  limit came back to full after a burst on a per-second route. Each window now carries its own
+  end and only ended windows are dropped. The sweep also ran on every request while that many
+  windows were live; it now runs only once the table has doubled since the last one (#159).
+- The data plane reads every `X-Forwarded-For` line, in order, as one list. It read only the
+  first, which behind a proxy that adds its own line (HAProxy's `option forwardfor`) is entirely
+  the client's, so a client could name itself in the rate limit and the access log. The forwarded
+  header now appends to all inbound lines rather than to the first alone (#160).
+- A request with more than one `Host` header, or whose `Host` names a different host than the
+  request target's authority (`:authority` under HTTP/2), is answered 400 before any route is
+  matched. The route was matched on the authority or the first line, while the backend received the
+  client's own lines, so a backend that dispatches by host could serve a route whose policy was
+  never checked. Hosts are compared as routing compares them, so a port alone does not differ
+  (#161).
 - The console has a Data planes page under Gateways. Anyone with a role sees each data plane's
   status (connected within the last two minutes, not seen for how long, or never), whether it holds
   the configuration served now, the address it called from as the control plane sees it, and its
