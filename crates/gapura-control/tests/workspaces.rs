@@ -20,8 +20,10 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use gapura_control::configuration::{Protocol, Service};
-use gapura_control::grants::Refusal;
+use gapura_control::access::Role;
+use gapura_control::configuration::{Protocol, Route, Service};
+use gapura_control::consumers::Target;
+use gapura_control::grants::{Refusal, RoleChanges};
 use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::{Store, WriteError};
@@ -619,9 +621,26 @@ async fn deleting_an_empty_workspace_takes_its_grants_with_it() {
     assert_eq!(entry["workspace_id"], serde_json::Value::Null);
     assert_eq!(
         entry["before"],
-        serde_json::json!({ "name": "payments", "role_grants": 2, "group_mappings": 1 })
+        serde_json::json!({
+            "name": "payments",
+            "role_grants": [
+                { "user": "ada", "role": "admin" },
+                { "user": "vi", "role": "editor" },
+            ],
+            "group_mappings": [{ "group": "platform", "role": "viewer" }],
+        })
     );
     assert_eq!(entry["after"], serde_json::Value::Null);
+    // The entries that named it were found by an index, not by reading the whole trail.
+    let indexed: bool = store
+        .client()
+        .await
+        .unwrap()
+        .query_one("select to_regclass('audit_log_workspace') is not null", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(indexed);
 
     // Gone, so a second delete finds nothing, and writes nothing.
     let before = everything(&store).await;
@@ -793,9 +812,76 @@ async fn a_delete_counts_what_was_written_while_it_waited() {
     assert_eq!(names(&app, s.root).await, ["default", "payments"]);
 }
 
-/// A service written into a workspace that is deleted while the write waits for it: refused as
-/// for a workspace that does not exist, even to a superuser, and nothing is written. The test's
-/// transaction stands in for the delete, holding the workspace as it does.
+/// Every store write that adds to a workspace, for the race below.
+#[derive(Clone, Copy, Debug)]
+enum Writer {
+    Service,
+    Route,
+    Consumer,
+    Key,
+    KeyAuth,
+    Grant,
+    Mapping,
+}
+
+/// `writer`'s write into `workspace` as `caller`, through the store method the console's handler
+/// calls. `vi` is whom a grant is for.
+async fn write(
+    store: &Store,
+    writer: Writer,
+    caller: Uuid,
+    workspace: Uuid,
+    vi: Uuid,
+) -> Result<(), WriteError> {
+    match writer {
+        Writer::Service => {
+            let service = Service {
+                name: "billing".into(),
+                protocol: Protocol::Http,
+                host: "billing.internal".into(),
+                port: 8080,
+                connect_timeout_ms: None,
+                read_timeout_ms: None,
+            };
+            store.create_service(caller, workspace, &service).await
+        }
+        Writer::Route => {
+            let route = Route {
+                name: "orders-api".into(),
+                service: "orders".into(),
+                hosts: vec!["api.example.com".into()],
+                paths: Vec::new(),
+                methods: Vec::new(),
+                priority: 0,
+            };
+            store.create_route(caller, workspace, &route).await
+        }
+        Writer::Consumer => store.create_consumer(caller, workspace, "other").await,
+        Writer::Key => store
+            .issue_key(caller, workspace, "shop", None)
+            .await
+            .map(|_| ()),
+        Writer::KeyAuth => {
+            store
+                .put_key_auth(caller, workspace, &Target::Workspace, "x-api-key")
+                .await
+        }
+        Writer::Grant => {
+            let wanted = RoleChanges::from([(workspace, Some(Role::Editor))]);
+            store.set_direct_roles(caller, vi, &wanted).await
+        }
+        Writer::Mapping => {
+            store
+                .put_group_mapping(caller, workspace, "platform", Role::Viewer)
+                .await
+        }
+    }
+}
+
+/// Each write into a workspace, started while a delete holds it: each waits at the workspace's
+/// row, then, once the delete has committed, finds the workspace gone and is refused, even to a
+/// superuser, and writes nothing. So no write can slip into a workspace between a delete's count
+/// and its cascade. The test's transaction stands in for the delete, holding the row as it does.
 #[tokio::test]
 async fn a_write_that_waited_for_a_delete_finds_the_workspace_gone() {
     let Some((store, _guard)) = fresh_store().await else {
@@ -803,43 +889,115 @@ async fn a_write_that_waited_for_a_delete_finds_the_workspace_gone() {
     };
     let app = console(Some(store.clone()));
     let s = seed(&store).await;
-    ok(&app, "POST", WORKSPACES, s.root, &named("payments")).await;
-    let payments = id_of(&store, "payments").await;
-    let mut holder = store.client().await.unwrap();
-    let hold = holder.transaction().await.unwrap();
-    hold.query(
-        "select id from workspaces where id = $1 for update",
-        &[&payments],
-    )
-    .await
-    .unwrap();
-    let writing = {
-        let store = store.clone();
-        let root = s.root;
-        tokio::spawn(async move {
-            let service = Service {
-                name: "orders".into(),
-                protocol: Protocol::Http,
-                host: "orders.internal".into(),
-                port: 8080,
-                connect_timeout_ms: None,
-                read_timeout_ms: None,
-            };
-            store.create_service(root, payments, &service).await
-        })
+    const NO_ROLE: &str = "You hold no role in that workspace.";
+    let not_theirs = Refusal::outside_your_workspaces().sentence().to_string();
+    for (n, (writer, refusal)) in [
+        (Writer::Service, NO_ROLE),
+        (Writer::Route, NO_ROLE),
+        (Writer::Consumer, NO_ROLE),
+        (Writer::Key, NO_ROLE),
+        (Writer::KeyAuth, NO_ROLE),
+        (Writer::Grant, not_theirs.as_str()),
+        (Writer::Mapping, not_theirs.as_str()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // A workspace of its own each time, with what the writes name: the route's service and
+        // the key's consumer.
+        let name = format!("w{n}");
+        ok(&app, "POST", WORKSPACES, s.root, &named(&name)).await;
+        let id = id_of(&store, &name).await;
+        ok(
+            &app,
+            "POST",
+            &format!("{}/services", workspace(&name)),
+            s.root,
+            SERVICE,
+        )
+        .await;
+        ok(
+            &app,
+            "POST",
+            &format!("{}/consumers", workspace(&name)),
+            s.root,
+            r#"{"name":"shop"}"#,
+        )
+        .await;
+        let audited = audit_count(&store).await;
+        let mut holder = store.client().await.unwrap();
+        let hold = holder.transaction().await.unwrap();
+        hold.query("select id from workspaces where id = $1 for update", &[&id])
+            .await
+            .unwrap();
+        let writing = {
+            let store = store.clone();
+            let (root, vi) = (s.root, s.vi);
+            tokio::spawn(async move { write(&store, writer, root, id, vi).await })
+        };
+        queued(&store, 1).await;
+        assert!(!writing.is_finished(), "{writer:?} did not wait");
+        hold.execute("delete from workspaces where id = $1", &[&id])
+            .await
+            .unwrap();
+        hold.commit().await.unwrap();
+        match writing.await.unwrap() {
+            Err(WriteError::Refused(Refusal::Forbidden(sentence))) => {
+                assert_eq!(sentence, refusal, "{writer:?}")
+            }
+            other => panic!("{writer:?} was not refused: {other:?}"),
+        }
+        let left: i64 = store
+            .client()
+            .await
+            .unwrap()
+            .query_one(
+                "select (select count(*) from services where workspace_id = $1)
+                      + (select count(*) from routes where workspace_id = $1)
+                      + (select count(*) from consumers where workspace_id = $1)
+                      + (select count(*) from consumer_keys)
+                      + (select count(*) from plugins where workspace_id = $1)
+                      + (select count(*) from role_bindings where workspace_id = $1)
+                      + (select count(*) from group_bindings where workspace_id = $1)",
+                &[&id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(left, 0, "{writer:?}");
+        assert_eq!(audit_count(&store).await, audited, "{writer:?}");
+    }
+}
+
+/// A superuser deleted after their session was read is told their account is gone, not the
+/// grants' sentence about workspaces they administer.
+#[tokio::test]
+async fn a_caller_deleted_meanwhile_is_told_so() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
     };
-    queued(&store, 1).await;
-    hold.execute("delete from workspaces where id = $1", &[&payments])
+    let s = seed(&store).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute("delete from users where id = $1", &[&s.root])
         .await
         .unwrap();
-    hold.commit().await.unwrap();
-    match writing.await.unwrap() {
-        Err(WriteError::Refused(Refusal::Forbidden(sentence))) => {
-            assert_eq!(sentence, "You hold no role in that workspace.")
+    let before = everything(&store).await;
+    for result in [
+        store.create_workspace(s.root, "payments").await,
+        store.rename_workspace(s.root, "default", "main").await,
+        store.delete_workspace(s.root, "default").await,
+    ] {
+        match result {
+            Err(WriteError::Refused(Refusal::Forbidden(sentence))) => {
+                assert_eq!(sentence, "Your account no longer exists.")
+            }
+            other => panic!("not refused: {other:?}"),
         }
-        other => panic!("not refused: {other:?}"),
     }
-    assert_eq!(everything(&store).await["services"], 0);
+    assert_eq!(everything(&store).await, before);
 }
 
 #[tokio::test]

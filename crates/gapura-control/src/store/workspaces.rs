@@ -4,24 +4,30 @@
 //! one), and takes its locks in one order:
 //!
 //! 1. the caller, read again by `rights` (`FOR SHARE`) and decided by `workspaces::may_write`;
-//! 2. on a rename, the workspace `FOR UPDATE`; on a delete, every workspace `FOR UPDATE`, in id
-//!    order;
-//! 3. the write; on a rename, `config_state`; the audit row.
+//! 2. on a delete, the advisory lock that deletes take one at a time;
+//! 3. on a rename or a delete, the workspace `FOR UPDATE`;
+//! 4. the write; on a rename, `config_state`; the audit row.
 //!
 //! Every write to what a workspace holds (services, routes, consumers, policies, grants and
-//! mappings) reads that workspace `FOR SHARE` through `rights` before it writes anything there,
-//! and several of them in id order. So under a delete's `FOR UPDATE` none of them can add a row
-//! to the workspace: one that got its share first finishes first, and the delete's counts,
-//! read by statements that begin only once its lock is granted, see what it committed; one that
-//! comes after waits, then finds the workspace gone and is refused. The emptiness the delete
-//! decides on is the emptiness it deletes. Nothing in this binary writes certificates; one
-//! written by hand meanwhile would go with the workspace, as anything it holds goes by
-//! `on delete cascade`.
+//! mappings) reads that workspace `FOR SHARE` through `rights` before it writes anything there.
+//! So under a delete's `FOR UPDATE` none of them can add a row to the workspace: one that got its
+//! share first finishes first, and the delete's counts, read by statements that begin only once
+//! its lock is granted, see what it committed; one that comes after waits, then finds the
+//! workspace gone and is refused. The emptiness the delete decides on is the emptiness it
+//! deletes. Nothing in this binary writes certificates; one written by hand meanwhile would go
+//! with the workspace, as anything it holds goes by `on delete cascade`.
 //!
-//! Those writes share-lock the workspace in id order and update-lock no workspace, and a delete
-//! update-locks in the same order, so the two queue rather than cross. The caller's row comes
-//! first here, unlike in the accounts' writes, because nothing that holds a workspace's row waits
-//! for a user's row `FOR UPDATE`: the accounts' writes, which take users that way, lock no
+//! The last workspace is kept by the advisory lock rather than by locking every workspace row,
+//! which would hold up writes into every other workspace for as long as a delete runs. Deletes
+//! take it one at a time, and only they make fewer workspaces, so the count a delete reads after
+//! taking it cannot fall before it commits: two deleting the last two at once queue there, and the
+//! second, once the first has committed, counts one. A create meanwhile is not held up, and can
+//! only make one more.
+//!
+//! The writes into a workspace update-lock no workspace, so they and a delete or rename queue at
+//! the workspace's row rather than cross; nothing else takes the advisory lock. The caller's row
+//! comes first here, unlike in the accounts' writes, because nothing that holds a workspace's row
+//! waits for a user's row `FOR UPDATE`: the accounts' writes, which take users that way, lock no
 //! workspace.
 
 use super::configuration::updated_at;
@@ -38,10 +44,21 @@ use uuid::Uuid;
 /// Step 1 of every write: the caller read again inside `tx`, locked, and refused unless they may
 /// change workspaces.
 async fn decide(tx: &Transaction<'_>, caller: Uuid) -> Result<User, WriteError> {
-    let (actor, _) = rights(tx, caller, &BTreeSet::new()).await?;
+    let actor = match rights(tx, caller, &BTreeSet::new()).await {
+        Ok((actor, _)) => actor,
+        // `rights` words a caller whose row is gone for a change to roles; deleted by a superuser
+        // since their session was read, they are told so instead.
+        Err(WriteError::Refused(r)) if r == Refusal::outside_your_workspaces() => {
+            return Err(Refusal::Forbidden("Your account no longer exists.".into()).into())
+        }
+        Err(e) => return Err(e),
+    };
     workspaces::may_write(&actor)?;
     Ok(actor)
 }
+
+/// The advisory lock deletes take one at a time: see the module's comment.
+const DELETES_LOCK: &str = "select pg_advisory_xact_lock(hashtext('gapura workspace delete'))";
 
 fn no_such(name: &str) -> WriteError {
     Refusal::NotFound(format!("There is no workspace named {name}.")).into()
@@ -96,7 +113,7 @@ impl Store {
                             as members
                        from workspaces w
                       where $1::uuid[] is null or w.id = any($1)
-                      order by w.name",
+                      order by w.name collate \"C\"",
                     updated_at("w.created_at"),
                 ),
                 &[&only],
@@ -224,7 +241,7 @@ impl Store {
     }
 
     /// Deletes the workspace called `name`, as a superuser: only an empty one, and never the last.
-    /// The grants and group mappings into it go with it, and the audit entry counts them.
+    /// The grants and group mappings into it go with it, and the audit entry lists them.
     pub async fn delete_workspace(&self, caller: Uuid, name: &str) -> Result<(), WriteError> {
         retrying(move || self.try_delete_workspace(caller, name)).await
     }
@@ -233,32 +250,41 @@ impl Store {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller).await?;
-        // Every workspace, not only this one, so the count cannot change before this commits.
-        // Two deleting the last two at once queue at the first row; the second, once the first
-        // has committed, skips the row it deleted and counts one. A create meanwhile is not held
-        // up, and can only make one more.
-        let all = tx
-            .query(
-                "select id, name from workspaces order by id for update",
-                &[],
+        tx.execute(DELETES_LOCK, &[]).await?;
+        let Some(row) = tx
+            .query_opt(
+                "select id from workspaces where name = $1 for update",
+                &[&name],
             )
-            .await?;
-        let Some(id) = all
-            .iter()
-            .find(|row| row.get::<_, &str>("name") == name)
-            .map(|row| row.get::<_, Uuid>("id"))
+            .await?
         else {
             return Err(no_such(name));
         };
-        workspaces::not_the_last(name, all.len())?;
-        // Read under the lock above: see the module's comment.
+        let id: Uuid = row.get("id");
+        // A plain count: no other delete can run until this one commits, so none of these rows
+        // can go meanwhile.
+        let workspaces: i64 = tx
+            .query_one("select count(*) from workspaces", &[])
+            .await?
+            .get(0);
+        workspaces::not_the_last(name, usize::try_from(workspaces).unwrap_or(0))?;
+        // Read under the row's lock: see the module's comment. So are the grants and mappings,
+        // whose writes share-lock the workspace too, so the audit entry lists what went.
         let row = tx
             .query_one(
                 &format!(
                     "select {CONTENTS},
-                            (select count(*) from role_bindings where workspace_id = w.id)
-                            as role_grants,
-                            (select count(*) from group_bindings where workspace_id = w.id)
+                            (select coalesce(jsonb_agg(jsonb_build_object(
+                                        'user', coalesce(u.username, u.display_name, u.oidc_subject),
+                                        'role', b.role::text)
+                                    order by coalesce(u.username, u.display_name, u.oidc_subject)
+                                             collate \"C\", u.id), '[]')
+                               from role_bindings b join users u on u.id = b.user_id
+                              where b.workspace_id = w.id) as role_grants,
+                            (select coalesce(jsonb_agg(jsonb_build_object(
+                                        'group', g.group_name, 'role', g.role::text)
+                                    order by g.group_name collate \"C\"), '[]')
+                               from group_bindings g where g.workspace_id = w.id)
                             as group_mappings
                        from workspaces w where w.id = $1"
                 ),
@@ -266,8 +292,8 @@ impl Store {
             )
             .await?;
         workspaces::emptiness(name, &contents(&row))?;
-        let role_grants: i64 = row.get("role_grants");
-        let group_mappings: i64 = row.get("group_mappings");
+        let role_grants: serde_json::Value = row.get("role_grants");
+        let group_mappings: serde_json::Value = row.get("group_mappings");
         // The grants and mappings go with it by `on delete cascade`, and its audit entries keep
         // their rows with no workspace.
         tx.execute("delete from workspaces where id = $1", &[&id])

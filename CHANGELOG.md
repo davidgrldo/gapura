@@ -15,11 +15,17 @@ means what it usually does, moving from one version below to a later one. Releas
   counts the workspace's services, routes, consumers, policies and certificates, and its members:
   direct grants plus group mappings into it. A rename keeps the workspace's id, so its
   configuration, grants and audit entries follow it; the configuration served to data planes names
-  workspaces, so they are sent the new name, under a new tag, at their next poll. Only an empty
-  workspace is deleted, since everything a workspace holds would go with it: otherwise the answer
-  is 409, naming what is left. The grants and group mappings into it go with it, and its audit
-  entry counts them. The last workspace is never deleted. Two deletes at once cannot take the
-  last two, and nothing written into a workspace while its delete waits slips past the count.
+  workspaces, so they are sent the new name, under a new tag, at their next poll. That includes
+  each route's id, `workspace/name`, which is the `route` label of the data plane's Prometheus
+  metrics and the route an access-log line names: after a rename, each route's series start anew
+  under the new name, and a query, panel or alert that picks a route by name needs the new one.
+  The shipped Grafana dashboard and alerts add routes up rather than pick one, so they are
+  unaffected. Only an empty workspace is deleted, since everything a
+  workspace holds would go with it: otherwise the answer is 409, naming what is left. The grants
+  and group mappings into it go with it, and its audit entry lists them. The last workspace is
+  never deleted. Two deletes at once cannot take the last two, and nothing written into a
+  workspace while its delete waits slips past the count. Migration 0008 indexes the audit log by
+  workspace, so a delete does not read the whole trail.
 - An HTTPRoute that names none of Gapura's Gateways is no longer compiled. Its RegularExpression
   paths were built on every translation all the same, so one route attached to nothing, holding 128
   patterns like `/0\w{100}`, held up configuration for the whole gateway for 18 seconds per change.

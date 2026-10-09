@@ -9,7 +9,7 @@
 //! so there these answer 404.
 
 use crate::access_api::CallerError;
-use crate::configuration_api::{body, caller_of, field_error, unavailable};
+use crate::configuration_api::{body, caller_of, field_error};
 use crate::grants::Refusal;
 use crate::grants_api::unsaved;
 use crate::state::AppState;
@@ -40,6 +40,20 @@ fn early(error: CallerError) -> Response {
             crate::api::refuse(StatusCode::NOT_FOUND, NO_WORKSPACES)
         }
         other => crate::configuration_api::early(other),
+    }
+}
+
+/// What the list answers when the store cannot be read, for its caller or for the list itself:
+/// a read, so not the writes' "could not save this change".
+const UNREAD: &str = "The console could not read workspaces. Try again in a moment.";
+
+/// `early`, for the list: a store that cannot be read says so as a read.
+fn early_read(error: CallerError) -> Response {
+    match error {
+        CallerError::Status(StatusCode::SERVICE_UNAVAILABLE) => {
+            crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, UNREAD)
+        }
+        other => early(other),
     }
 }
 
@@ -81,7 +95,7 @@ fn workspace(ws: Result<Path<String>, PathRejection>) -> Result<String, Refusal>
 pub async fn list_workspaces(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
-        Err(error) => return early(error),
+        Err(error) => return early_read(error),
     };
     let only = match workspaces::may_list(&caller.rows, &caller.me) {
         Ok(only) => only,
@@ -89,7 +103,14 @@ pub async fn list_workspaces(State(state): State<AppState>, headers: HeaderMap) 
     };
     match store.workspaces(only.as_ref()).await {
         Ok(list) => Json(list).into_response(),
-        Err(e) => unavailable(&e),
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                sqlstate = sqlstate(&error).map(SqlState::code),
+                "reading workspaces failed"
+            );
+            early_read(StatusCode::SERVICE_UNAVAILABLE.into())
+        }
     }
 }
 
@@ -180,6 +201,17 @@ mod tests {
     #[tokio::test]
     async fn without_a_store_there_are_no_workspaces() {
         let (status, sentence) = sentence_of(early(StatusCode::NOT_FOUND.into())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(sentence, NO_WORKSPACES);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_says_it_could_not_read() {
+        let (status, sentence) =
+            sentence_of(early_read(StatusCode::SERVICE_UNAVAILABLE.into())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(sentence, UNREAD);
+        let (status, sentence) = sentence_of(early_read(StatusCode::NOT_FOUND.into())).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(sentence, NO_WORKSPACES);
     }
