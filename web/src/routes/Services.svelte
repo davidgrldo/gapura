@@ -5,7 +5,7 @@
   import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
-  import { base, ms, upstream } from '../lib/configuration.js'
+  import { PER_SHORT, base, ms, upstream } from '../lib/configuration.js'
   import { can, remembered } from '../lib/workspace.js'
   import Lock from 'phosphor-svelte/lib/Lock'
 
@@ -45,6 +45,9 @@
   // The JWT tag beside it says the same of a token, and whose. An issuer is missing only from a
   // requirement written by hand in SQL, which accepts any.
   const tokened = (row) => `Requires a JWT from ${row.jwt.issuer ?? 'any issuer'} (from the ${row.jwt.from})`
+  // The limit tag after it says how many requests a client may make there, and where that is set.
+  const limited = (row) =>
+    `At most ${row.rate_limit.limit} requests per ${row.rate_limit.per} per client (from the ${row.rate_limit.from})`
 </script>
 
 <h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Services</h1>
@@ -96,6 +99,12 @@
                     <span class="inline-flex font-sans" title={tokened(s)}>
                       <Tag tone="idle"><span aria-hidden="true">JWT</span></Tag>
                       <span class="sr-only">, requires a JWT from {s.jwt.issuer ?? 'any issuer'} (from the {s.jwt.from})</span>
+                    </span>
+                  {/if}
+                  {#if s.rate_limit}
+                    <span class="inline-flex font-sans" title={limited(s)}>
+                      <Tag tone="idle"><span aria-hidden="true">{s.rate_limit.limit}/{PER_SHORT[s.rate_limit.per]}</span></Tag>
+                      <span class="sr-only">, at most {s.rate_limit.limit} requests per {s.rate_limit.per} per client (from the {s.rate_limit.from})</span>
                     </span>
                   {/if}
                 </span>

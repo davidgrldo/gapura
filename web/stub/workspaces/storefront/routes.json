@@ -16,7 +16,8 @@
     "priority": 20,
     "updated_at": "2026-09-19T13:49:55.602317Z",
     "key_auth": null,
-    "jwt": null
+    "jwt": null,
+    "rate_limit": null
   },
   {
     "name": "catalog-api",
@@ -39,7 +40,8 @@
     "priority": 10,
     "updated_at": "2026-09-18T09:33:08.215764Z",
     "key_auth": null,
-    "jwt": null
+    "jwt": null,
+    "rate_limit": null
   },
   {
     "name": "catalog-assets",
@@ -56,6 +58,7 @@
     "priority": 0,
     "updated_at": "2026-09-18T09:35:41.488902Z",
     "key_auth": null,
-    "jwt": null
+    "jwt": null,
+    "rate_limit": null
   }
 ]

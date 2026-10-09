@@ -265,6 +265,29 @@ if (Number(maxHeaders[1]) !== MAX_HEADERS) {
 }
 console.log('ok: the route form offers the methods, path types and header count the server accepts')
 
+// The request-limit control's bounds and windows are consumers.rs's, read from it for the same
+// reason: a window the server adds and this console does not offer could not be chosen, and one
+// this console offers that the server does not know is refused.
+const CONSUMERS = '../crates/gapura-control/src/consumers.rs'
+const consumersSource = readFileSync(CONSUMERS, 'utf8')
+const { MAX_RATE_LIMIT, PER, PER_SHORT } = await import('./src/lib/configuration.js')
+const maxRateLimit = consumersSource.match(/pub const MAX_RATE_LIMIT: u32 = ([\d_]+);/)
+if (!maxRateLimit) throw new Error(`${CONSUMERS} has no MAX_RATE_LIMIT`)
+if (Number(maxRateLimit[1].replaceAll('_', '')) !== MAX_RATE_LIMIT) {
+  throw new Error(`MAX_RATE_LIMIT in src/lib/configuration.js is ${MAX_RATE_LIMIT}, the server's is ${maxRateLimit[1]}`)
+}
+const perDeclaration = consumersSource.match(/#\[serde\(rename_all = "lowercase"\)\]\s*pub enum Per \{([\s\S]*?)\n\}/)
+if (!perDeclaration) throw new Error(`${CONSUMERS}: no lowercase-serialised "pub enum Per" to read the windows from`)
+const serverPer = [...perDeclaration[1].matchAll(/^ {4}([A-Z][A-Za-z0-9]*),$/gm)].map((m) => m[1].toLowerCase())
+if (serverPer.length === 0) throw new Error(`${CONSUMERS}: found "pub enum Per" but could not read any variants out of it`)
+if (JSON.stringify(serverPer) !== JSON.stringify(PER)) {
+  throw new Error(`PER in src/lib/configuration.js is ${PER}, the server's windows are ${serverPer}`)
+}
+for (const per of PER) {
+  if (!PER_SHORT[per]) throw new Error(`PER_SHORT in src/lib/configuration.js has no tag for ${per}`)
+}
+console.log('ok: the request-limit control offers the bounds and windows the server accepts')
+
 // The sheets offer a Reload button when a 409's sentence contains "Reload" (that is how they
 // tell a stale save from any other conflict), so the server's stale-edit sentence has to keep
 // the word. Reworded without it, the button would silently stop appearing.
