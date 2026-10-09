@@ -14,6 +14,16 @@
     "methods": [
       "POST"
     ],
+    "headers": [
+      {
+        "name": "x-api-version",
+        "value": "2"
+      },
+      {
+        "name": "x-tenant",
+        "value": "acme retail"
+      }
+    ],
     "priority": 30,
     "updated_at": "2026-09-25T11:24:05.312840Z",
     "key_auth": null
@@ -34,6 +44,7 @@
       "GET",
       "HEAD"
     ],
+    "headers": [],
     "priority": 20,
     "updated_at": "2026-09-25T11:22:51.945027Z",
     "key_auth": null
@@ -53,6 +64,7 @@
     "methods": [
       "POST"
     ],
+    "headers": [],
     "priority": 10,
     "updated_at": "2026-09-22T07:58:40.126553Z",
     "key_auth": null

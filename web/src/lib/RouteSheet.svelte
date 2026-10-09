@@ -6,7 +6,7 @@
   import NativeSelect from './NativeSelect.svelte'
   import KeyAuthControl from './KeyAuthControl.svelte'
   import { write } from './api.js'
-  import { METHODS, PATH_LABEL, PATH_TYPES, base } from './configuration.js'
+  import { MAX_HEADERS, METHODS, PATH_LABEL, PATH_TYPES, base } from './configuration.js'
   import { can } from './workspace.js'
   import Plus from 'phosphor-svelte/lib/Plus'
 
@@ -51,6 +51,7 @@
   let priority = $state(0)
   let hosts = $state([])
   let paths = $state([])
+  let headers = $state([])
   let checked = $state({})
   let saving = $state(false)
   // `{ sentence, field, stale }` from a refused write; `field` puts the sentence beside its input.
@@ -72,6 +73,8 @@
     hosts = route ? [...route.hosts] : ['']
     // A new route starts with one prefix path to fill in, the commonest case.
     paths = route ? route.paths.map((p) => ({ ...p })) : [{ type: 'prefix', value: '/' }]
+    // A new route starts with none: most routes match any headers.
+    headers = route ? (route.headers ?? []).map((h) => ({ ...h })) : []
     checked = Object.fromEntries(METHODS.map((m) => [m, route?.methods.includes(m) ?? false]))
     saving = false
     error = undefined
@@ -80,18 +83,21 @@
 
   // The id of the input a refused field belongs to, or undefined when this form draws none for it
   // (`updated_at`, or a row that is no longer there), in which case the sentence goes in the
-  // footer. The server names a field as `hosts[2]`, `paths[1].value` or `methods[0]`; the
-  // methods group takes any of the last, and its first checkbox stands for it.
+  // footer. The server names a field as `hosts[2]`, `paths[1].value`, `headers[0].name` or
+  // `methods[0]`; the methods group takes any of the last, and its first checkbox stands for it.
   function target(field) {
     if (typeof field !== 'string') return undefined
     if (field === 'name' || field === 'service' || field === 'priority') return `${id}-${field}`
     if (field === 'hosts') return `${id}-add-host`
     if (field === 'paths') return `${id}-add-path`
+    if (field === 'headers') return `${id}-add-header`
     if (field === 'methods' || /^methods\[\d+\]$/.test(field)) return `${id}-method-${METHODS[0]}`
     const host = /^hosts\[(\d+)\]$/.exec(field)
     if (host) return Number(host[1]) < hosts.length ? `${id}-host-${host[1]}` : undefined
     const path = /^paths\[(\d+)\]\.(type|value)$/.exec(field)
     if (path) return Number(path[1]) < paths.length ? `${id}-path-${path[1]}-${path[2]}` : undefined
+    const header = /^headers\[(\d+)\]\.(name|value)$/.exec(field)
+    if (header) return Number(header[1]) < headers.length ? `${id}-header-${header[1]}-${header[2]}` : undefined
     return undefined
   }
   const shown = $derived(target(error?.field) !== undefined)
@@ -159,6 +165,12 @@
     // the empty ones are gone, so they are taken out of the form too.
     const sent = hosts.map((h) => h.trim()).filter(Boolean)
     paths = paths.map((p) => ({ type: p.type, value: p.value.trim() })).filter((p) => p.value !== '')
+    // A header row left wholly blank is dropped the same way; one with only half filled in is
+    // sent, for the server to name the half that is missing. A client strips the whitespace
+    // around a header's value before it is compared, so a value is trimmed as a path is.
+    headers = headers
+      .map((h) => ({ name: h.name.trim(), value: h.value.trim() }))
+      .filter((h) => h.name !== '' || h.value !== '')
     // Rows that are all blank are not "any host": an empty list is that, and it should take
     // removing every row on purpose, for a superuser as for anyone, rather than an unfilled row
     // quietly becoming a route for every host.
@@ -194,6 +206,9 @@
       hosts,
       paths,
       methods: METHODS.filter((m) => checked[m]),
+      // Always sent, the empty list included: a PUT without `headers` keeps the stored ones, so
+      // leaving it out would make removing the last row do nothing.
+      headers,
     }
     if (mode === 'edit') send('PUT', here(), { ...body, updated_at: route.updated_at })
     else send('POST', base(workspace, 'routes'), body)
@@ -214,6 +229,12 @@
     paths.splice(i, 1)
     await tick()
     document.getElementById(paths.length > 0 ? `${id}-path-${Math.min(i, paths.length - 1)}-value` : `${id}-add-path`)?.focus()
+  }
+  async function dropHeader(i) {
+    if (error?.field?.startsWith('headers[')) error = undefined
+    headers.splice(i, 1)
+    await tick()
+    document.getElementById(headers.length > 0 ? `${id}-header-${Math.min(i, headers.length - 1)}-name` : `${id}-add-header`)?.focus()
   }
 
   async function remove() {
@@ -292,7 +313,7 @@
       </Sheet.Title>
       <Sheet.Description>
         Which requests go to a service. A request matches when it matches any host, any path and
-        any method listed; an empty list matches everything.
+        any method listed, and carries every header listed; an empty list matches everything.
       </Sheet.Description>
     </Sheet.Header>
     <!-- The key requirement is its own form below the sheet's, applied on its own, and scrolls
@@ -383,6 +404,29 @@
             </div>
             {@render problem('methods')}
             <p class="text-xs text-muted-foreground">None ticked: any method.</p>
+          </fieldset>
+
+          <fieldset class="grid gap-2">
+            <legend class="mb-1.5 font-medium">Headers</legend>
+            {#each headers as header, i (i)}
+              <div class="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)_auto] gap-2">
+                <Input id="{id}-header-{i}-name" class="font-mono" aria-label="Header {i + 1} name" bind:value={header.name} placeholder="x-version" autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`headers[${i}].name`)} aria-describedby={described(`headers[${i}].name`)} />
+                <Input id="{id}-header-{i}-value" class="font-mono" aria-label="Header {i + 1} value" bind:value={header.value} placeholder="2" autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid(`headers[${i}].value`)} aria-describedby={described(`headers[${i}].value`)} />
+                {#if editable}
+                <Button variant="ghost" size="sm" aria-label="Remove header {i + 1}" onclick={() => dropHeader(i)}>Remove</Button>
+                {/if}
+              </div>
+              {@render problem(`headers[${i}].name`)}
+              {@render problem(`headers[${i}].value`)}
+            {/each}
+            {#if editable}
+            <Button id="{id}-add-header" variant="outline" size="sm" class="justify-self-start" disabled={headers.length >= MAX_HEADERS} onclick={() => headers.length < MAX_HEADERS && headers.push({ name: '', value: '' })} aria-invalid={invalid('headers')} aria-describedby={described('headers')}><Plus aria-hidden="true" />Add header</Button>
+            {/if}
+            {@render problem('headers')}
+            <p class="text-xs text-muted-foreground">
+              Every header listed must be present with exactly this value. None: any headers.
+              {#if headers.length >= MAX_HEADERS}At most {MAX_HEADERS}.{/if}
+            </p>
           </fieldset>
         </fieldset>
       </form>

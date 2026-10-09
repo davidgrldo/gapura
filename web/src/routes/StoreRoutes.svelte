@@ -2,6 +2,7 @@
   import { get } from '../lib/api.js'
   import Failure from '../lib/Failure.svelte'
   import RouteSheet from '../lib/RouteSheet.svelte'
+  import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
   import { anyOf, base } from '../lib/configuration.js'
@@ -106,6 +107,7 @@
             <Table.Head>Hosts</Table.Head>
             <Table.Head>Paths</Table.Head>
             <Table.Head>Methods</Table.Head>
+            <Table.Head>Headers</Table.Head>
             <Table.Head class="text-right">Priority</Table.Head>
             <Table.Head><span class="sr-only">Actions</span></Table.Head>
           </Table.Row>
@@ -126,6 +128,21 @@
               <Table.Cell class="font-mono">{anyOf(r.hosts)}</Table.Cell>
               <Table.Cell class="font-mono">{paths(r.paths)}</Table.Cell>
               <Table.Cell class="font-mono">{anyOf(r.methods)}</Table.Cell>
+              <Table.Cell class="font-mono">
+                <!-- Each header a chip of its own, since a value may hold spaces and commas that
+                     would blur a joined list. The chips wrap within a column of bounded width, and
+                     a long value breaks inside its chip only once it no longer fits the column:
+                     breaking anywhere would let the table squeeze the column to a sliver. -->
+                {#if (r.headers ?? []).length === 0}
+                  any
+                {:else}
+                  <span class="flex min-w-48 max-w-72 flex-wrap gap-1.5">
+                    {#each r.headers as h (h.name)}
+                      <Tag class="max-w-full font-mono whitespace-normal wrap-break-word">{h.name}: {h.value}</Tag>
+                    {/each}
+                  </span>
+                {/if}
+              </Table.Cell>
               <Table.Cell class="text-right tabular-nums">{r.priority}</Table.Cell>
               <Table.Cell class="text-right">
                 <RouteSheet mode="edit" route={r} services={answer.services} {workspace} {role} superuser={me.superuser} onsaved={load} onremoved={focusHeading} />
