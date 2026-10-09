@@ -152,6 +152,8 @@ pub fn router_with(state: AppState) -> Router {
             "/api/data-planes/{name}/tokens/{prefix}",
             delete(crate::data_planes_api::revoke_data_plane_token),
         )
+        // The audit log, read-only: each reader sees the entries of the workspaces they reach.
+        .route("/api/audit", get(crate::audit_api::audit_log))
         .route("/api/routes", get(routes))
         .route("/api/overview", get(overview))
         // Explicit routes above always win a match first, so this only ever runs for a path
