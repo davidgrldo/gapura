@@ -785,6 +785,50 @@ async fn disable_and_enable() {
     no_hash_audited(&store).await;
 }
 
+/// A sign-in just after a cut-off, with the database's clock two seconds ahead of the console's:
+/// the session is issued by that clock too, so it stands. The skew is made, not found, so the
+/// test does not depend on how far apart this host's clocks happen to be: the console's store
+/// connects with a `search_path` that finds a `clock_timestamp()` two seconds fast before
+/// `pg_catalog`'s.
+#[tokio::test]
+async fn a_sign_in_after_a_cut_off_stands_when_the_database_clock_runs_ahead() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "create schema if not exists skew;
+             create or replace function skew.clock_timestamp() returns timestamptz
+                 language sql as $$ select pg_catalog.clock_timestamp() + interval '2 seconds' $$;",
+        )
+        .await
+        .unwrap();
+    let url = std::env::var("GAPURA_TEST_DATABASE_URL").unwrap();
+    let joiner = if url.contains('?') { '&' } else { '?' };
+    let ahead = Arc::new(
+        Store::connect(&format!(
+            "{url}{joiner}options=-c%20search_path%3Dpublic%2Cskew%2Cpg_catalog"
+        ))
+        .await
+        .expect("connecting"),
+    );
+    let app = console(Some(ahead));
+    let root = cookie(s.root);
+    let status = user_path(s.ada, "/status");
+    ok(&app, "PUT", &status, &root, r#"{"disabled":true}"#).await;
+    ok(&app, "PUT", &status, &root, r#"{"disabled":false}"#).await;
+    let ada = signed_in(&app, "ada", PASSWORD).await;
+    assert_eq!(
+        status_of(&app, ME, &ada).await,
+        StatusCode::OK,
+        "a session issued just after the cut-off is refused"
+    );
+}
+
 #[tokio::test]
 async fn the_guards() {
     let Some((store, _guard)) = fresh_store().await else {
@@ -1115,7 +1159,11 @@ async fn a_sign_in_that_raced_a_reset_is_not_recorded() {
     temporary(&app, &user_path(s.ada, "/password"), &cookie(s.root), "").await;
     let before = everything(&store).await;
     assert!(
-        !store.record_sign_in(s.ada, &verified).await.unwrap(),
+        store
+            .record_sign_in(s.ada, &verified)
+            .await
+            .unwrap()
+            .is_none(),
         "a sign-in against the replaced hash is recorded"
     );
     let unstamped: bool = store
@@ -1138,7 +1186,8 @@ async fn a_sign_in_that_raced_a_reset_is_not_recorded() {
         .unwrap()
         .unwrap()
         .password_hash;
-    assert!(store.record_sign_in(s.ada, &current).await.unwrap());
+    let signed_in_at = store.record_sign_in(s.ada, &current).await.unwrap();
+    assert!(signed_in_at.is_some_and(|t| t > 0));
 }
 
 #[tokio::test]

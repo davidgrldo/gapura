@@ -34,10 +34,10 @@ import tailwindcss from '@tailwindcss/vite'
 //
 // A workspace's services and routes are the same for every persona: web/stub/workspaces/<name>/
 // holds that workspace's services.json and routes.json, as `GET /api/workspaces/<name>/services`
-// and `/routes` answer them, `updated_at` and each service's `routes` count included. The three
-// workspaces are the ones the personas hold roles in, so each persona's pages show what its
-// me.json says it may see; a workspace with no folder answers 404, as the server does for one the
-// caller holds no role in.
+// and `/routes` answer them, `updated_at` and each service's `routes` count included. The
+// workspaces are the ones the personas hold roles in (sandbox, an empty one, only the superuser's),
+// so each persona's pages show what its me.json says it may see; a workspace with no folder answers
+// 404, as the server does for one the caller holds no role in.
 //
 // The same folder holds that workspace's consumers.json, as `GET /api/workspaces/<name>/consumers`
 // answers it (each consumer's keys newest first, a key's prefix and times and `expired` flag, never
@@ -64,6 +64,11 @@ import tailwindcss from '@tailwindcss/vite'
 // both shown once like the real ones; changing the status or superuser flag, deleting an account
 // and changing your own password answer 204 and store nothing. web/stub/as-must-change/ is the
 // account that has just been given a temporary password and may do nothing but choose another.
+// The workspaces list is a persona's own, web/stub/as-<persona>/workspaces.json, as
+// `GET /api/workspaces` answers it: every workspace to the superuser, the ones they administer to
+// the admin, and 403 to the rest. Its counts tell the same story as the workspace folders, users.json
+// and roles.json; sandbox is the empty one, which the superuser can delete. Creating, renaming and
+// deleting a workspace answer 204 and store nothing.
 // What a write does is proven against Postgres by the Rust tests, and by a pass against a real
 // server. Each answers only the method the server serves it on, so a form that sends the wrong
 // one fails here as it would there.
@@ -74,7 +79,12 @@ function stubApi() {
     '/api/data-planes': 'data-planes.json',
     '/api/audit': 'audit.json',
   }
-  const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
+  const personal = {
+    '/api/me': 'me.json',
+    '/api/users': 'users.json',
+    '/api/roles': 'roles.json',
+    '/api/workspaces': 'workspaces.json',
+  }
   // `/api/workspaces/<name>/services`, `/routes`, `/consumers` and `/key-auth`, and one row of
   // the first three by name. Only the first three are created by POST; `/key-auth` is put and
   // deleted whole.
@@ -103,6 +113,9 @@ function stubApi() {
     ['PUT', keyAuth],
     ['DELETE', keyAuth],
     ['DELETE', dataPlaneWrites],
+    ['POST', /^\/api\/workspaces$/],
+    ['PUT', /^\/api\/workspaces\/[^/]+$/],
+    ['DELETE', /^\/api\/workspaces\/[^/]+$/],
   ]
   return {
     name: 'gapura-stub-api',
