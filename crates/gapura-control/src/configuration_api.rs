@@ -9,7 +9,7 @@
 
 use crate::access_api::{store_caller, CallerError, StoreCaller};
 use crate::configuration::{
-    self, Action, FieldError, RouteInput, ServiceInput, TlsOnReplace, Write,
+    self, Action, FieldError, HeadersOnReplace, RouteInput, ServiceInput, TlsOnReplace, Write,
 };
 use crate::grants::Refusal;
 use crate::grants_api::{unreadable, unsaved, NOT_SAVED};
@@ -352,6 +352,13 @@ pub async fn replace_route(
         Err(r) => return *r,
     };
     let service_seen = input.service_updated_at.clone();
+    // A replace that names no headers keeps the stored ones, as one that names no TLS settings
+    // keeps a service's: the console before it had the list must not erase them.
+    let headers = if input.headers.is_some() {
+        HeadersOnReplace::AsSent
+    } else {
+        HeadersOnReplace::Kept
+    };
     match configuration::route(input, Write::Replace) {
         Ok((route, Some(seen))) => written(
             store
@@ -362,6 +369,7 @@ pub async fn replace_route(
                     &route,
                     &seen,
                     service_seen.as_deref(),
+                    headers,
                 )
                 .await,
         ),

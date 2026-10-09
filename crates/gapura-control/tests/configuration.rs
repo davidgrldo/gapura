@@ -1721,3 +1721,357 @@ async fn a_replace_that_names_no_tls_keeps_the_service_s_tls_settings() {
     .await;
     assert_eq!(row(&app, SERVICES, "secure", s.vi).await["tls"], defaults);
 }
+
+/// A route `beta` to `orders` on `api.example.com`, two paths and one method, with `headers` as
+/// given (JSON, or nothing).
+fn header_route(headers: Option<serde_json::Value>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "name": "beta", "service": "orders", "hosts": ["api.example.com"],
+        "paths": [{"type": "prefix", "value": "/orders"}, {"type": "exact", "value": "/health"}],
+        "methods": ["GET"]
+    });
+    if let Some(headers) = headers {
+        body["headers"] = headers;
+    }
+    body
+}
+
+/// The `headers` of every route audit entry, oldest first, as (before, after).
+async fn audited_headers(store: &Store) -> Vec<(serde_json::Value, serde_json::Value)> {
+    store
+        .client()
+        .await
+        .unwrap()
+        .query(
+            "select coalesce(before->'headers', 'null'), coalesce(after->'headers', 'null')
+               from audit_log where object_kind = 'route' order by id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect()
+}
+
+/// The header matches the compiled configuration gives `route`: those of each of its rule's
+/// matches and of each of its port entries, which must all agree.
+async fn served_headers(store: &Store, route: &str) -> Vec<(String, String)> {
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let config = gapura_core::store::compile(&snapshot, &Default::default());
+    let (index, rule) = config.listeners[0]
+        .rules
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.route == route)
+        .unwrap_or_else(|| panic!("no rule {route}"));
+    let mut all: Vec<Vec<(String, String)>> = rule
+        .matches
+        .iter()
+        .map(|m| &m.headers)
+        .chain(
+            config.ports[&80]
+                .iter()
+                .filter(|e| e.rule == index)
+                .map(|e| &e.matcher.headers),
+        )
+        .map(|hs| {
+            hs.iter()
+                .map(|h| (h.name.clone(), h.value.clone()))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        all.len(),
+        4,
+        "two paths, one method, one host: two matches, two entries"
+    );
+    let first = all.pop().unwrap();
+    assert!(all.iter().all(|hs| *hs == first), "{all:?} vs {first:?}");
+    first
+}
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_route_s_headers_are_stored_audited_and_served() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &header_route(Some(serde_json::json!([
+            {"name": "X-Version", "value": "2"},
+            {"name": "x-env", "value": "Beta 1"}
+        ])))
+        .to_string(),
+    )
+    .await;
+    // Without `headers`: none.
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    let stored = serde_json::json!([
+        {"name": "x-version", "value": "2"},
+        {"name": "x-env", "value": "Beta 1"}
+    ]);
+    assert_eq!(row(&app, ROUTES, "beta", s.vi).await["headers"], stored);
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["headers"],
+        serde_json::json!([])
+    );
+    let column: serde_json::Value = store
+        .client()
+        .await
+        .unwrap()
+        .query_one("select headers from routes where name = 'beta'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(column, stored, "stored as the snapshot reads it");
+    assert_eq!(
+        audited_headers(&store).await,
+        [
+            (serde_json::Value::Null, stored.clone()),
+            (serde_json::Value::Null, serde_json::json!([])),
+        ]
+    );
+    assert_eq!(
+        served_headers(&store, "default/beta").await,
+        pairs(&[("x-version", "2"), ("x-env", "Beta 1")])
+    );
+
+    // A replace that sends back what it read writes nothing.
+    let before = everything(&store).await;
+    let mut listed = row(&app, ROUTES, "beta", s.ed).await;
+    listed.as_object_mut().unwrap().remove("key_auth");
+    ok(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/beta"),
+        s.ed,
+        &listed.to_string(),
+    )
+    .await;
+    assert_eq!(everything(&store).await, before);
+
+    // A replace that names other headers writes them, and the audit entry shows both lists.
+    let mut body = header_route(Some(
+        serde_json::json!([{"name": "X-Version", "value": "3"}]),
+    ));
+    body["updated_at"] = seen(&app, ROUTES, "beta", s.ed).await.into();
+    ok(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/beta"),
+        s.ed,
+        &body.to_string(),
+    )
+    .await;
+    let three = serde_json::json!([{"name": "x-version", "value": "3"}]);
+    assert_eq!(row(&app, ROUTES, "beta", s.vi).await["headers"], three);
+    assert_eq!(audited_headers(&store).await.last(), Some(&(stored, three)));
+    assert_eq!(
+        served_headers(&store, "default/beta").await,
+        pairs(&[("x-version", "3")])
+    );
+}
+
+#[tokio::test]
+async fn a_replace_that_names_no_headers_keeps_them_and_an_empty_list_clears_them() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    let headers = serde_json::json!([{"name": "x-version", "value": "2"}]);
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &header_route(Some(headers.clone())).to_string(),
+    )
+    .await;
+    let put = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let mut body = body;
+            body["updated_at"] = seen(&app, ROUTES, "beta", s.ed).await.into();
+            ok(
+                &app,
+                "PUT",
+                &format!("{ROUTES}/beta"),
+                s.ed,
+                &body.to_string(),
+            )
+            .await;
+        }
+    };
+
+    // A priority change from a client that sends no `headers`, as the console did before it had
+    // the list.
+    let mut body = header_route(None);
+    body["priority"] = 7.into();
+    put(body).await;
+    let listed = row(&app, ROUTES, "beta", s.vi).await;
+    assert_eq!(listed["priority"], 7);
+    assert_eq!(listed["headers"], headers, "kept, not cleared");
+    assert_eq!(
+        audited_headers(&store).await.last(),
+        Some(&(headers.clone(), headers.clone())),
+        "the audit entry shows them kept"
+    );
+    assert_eq!(
+        served_headers(&store, "default/beta").await,
+        pairs(&[("x-version", "2")])
+    );
+
+    // Sending the row back without `headers` changes nothing, so writes nothing.
+    let before = everything(&store).await;
+    let mut listed = listed;
+    for added in ["key_auth", "headers"] {
+        listed.as_object_mut().unwrap().remove(added);
+    }
+    ok(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/beta"),
+        s.ed,
+        &listed.to_string(),
+    )
+    .await;
+    assert_eq!(everything(&store).await, before);
+
+    // An empty list clears them.
+    let mut body = header_route(Some(serde_json::json!([])));
+    body["priority"] = 7.into();
+    put(body).await;
+    assert_eq!(
+        row(&app, ROUTES, "beta", s.vi).await["headers"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        audited_headers(&store).await.last(),
+        Some(&(headers, serde_json::json!([])))
+    );
+    assert!(served_headers(&store, "default/beta").await.is_empty());
+}
+
+#[tokio::test]
+async fn bad_headers_are_named_and_nothing_is_written() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    let before = everything(&store).await;
+    let one = |name: &str, value: &str| serde_json::json!([{"name": name, "value": value}]);
+    let cases: Vec<(serde_json::Value, &str)> = vec![
+        (one("x version", "2"), "headers[0].name"),
+        (one("x-version:", "2"), "headers[0].name"),
+        (one("", "2"), "headers[0].name"),
+        (one(&"x".repeat(65), "2"), "headers[0].name"),
+        (one("Host", "api.example.com"), "headers[0].name"),
+        (
+            serde_json::json!([
+                {"name": "x-version", "value": "2"},
+                {"name": "X-Version", "value": "3"}
+            ]),
+            "headers[1].name",
+        ),
+        (one("x-version", ""), "headers[0].value"),
+        (one("x-version", " 2"), "headers[0].value"),
+        (one("x-version", "2 "), "headers[0].value"),
+        (one("x-version", "2\n"), "headers[0].value"),
+        (one("x-version", "zwei\u{e4}"), "headers[0].value"),
+        (one("x-version", &"2".repeat(1025)), "headers[0].value"),
+        (
+            serde_json::Value::Array(
+                (0..17)
+                    .map(|i| serde_json::json!({"name": format!("x-{i}"), "value": "1"}))
+                    .collect(),
+            ),
+            "headers",
+        ),
+    ];
+    for (headers, expected) in cases {
+        let body = header_route(Some(headers)).to_string();
+        let (status, answer) =
+            send(&app, "POST", ROUTES, Some(s.ed), FROM_THE_CONSOLE, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(json(&answer)["field"], expected, "{answer}");
+    }
+    let (status, answer) = send(
+        &app,
+        "POST",
+        ROUTES,
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &header_route(Some(
+            serde_json::json!([{"name": "x-version", "value": "2", "type": "regex"}]),
+        ))
+        .to_string(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unknown fields are refused: {answer}"
+    );
+
+    // A replace is checked the same way.
+    let mut body: serde_json::Value = json(ROUTE);
+    body["headers"] = serde_json::json!([
+        {"name": "x-version", "value": "2"},
+        {"name": "x-VERSION", "value": "2"}
+    ]);
+    body["updated_at"] = seen(&app, ROUTES, "orders-api", s.ed).await.into();
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/orders-api"),
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &body.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(json(&answer)["field"], "headers[1].name");
+    assert_eq!(
+        sentence(&answer),
+        "Each header is matched once; this one is already listed."
+    );
+    assert_eq!(everything(&store).await, before, "a refusal writes nothing");
+
+    // The limits themselves fit.
+    let at_limit = serde_json::Value::Array(
+        (0..16)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("x-{i}-{}", "n".repeat(58)),
+                    "value": format!("a\tb {}", "v".repeat(1020))
+                })
+            })
+            .collect(),
+    );
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &header_route(Some(at_limit)).to_string(),
+    )
+    .await;
+}

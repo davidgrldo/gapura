@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
-use gapura_core::config::{JwtPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
+use gapura_core::config::{JwtPolicy, KeyAuthPolicy, KvMatch, PathMatch, Plugin, Protocol};
 use gapura_core::store::{StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot};
 use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
@@ -229,7 +229,8 @@ impl Store {
         let routes = tx
             .query(
                 "select w.name as workspace, r.name, s.name as service, r.hosts, r.methods,
-                        r.paths, r.priority, r.workspace_id <> s.workspace_id as foreign_service
+                        r.paths, r.headers, r.priority,
+                        r.workspace_id <> s.workspace_id as foreign_service
                    from routes r
                    join services s   on s.id = r.service_id
                    join workspaces w on w.id = r.workspace_id
@@ -254,6 +255,10 @@ impl Store {
                 let paths: serde_json::Value = r.get("paths");
                 let paths = parse_paths(&paths)
                     .with_context(|| format!("route {name:?} has paths this binary cannot read"))?;
+                let headers: serde_json::Value = r.get("headers");
+                let headers = parse_headers(&headers).with_context(|| {
+                    format!("route {name:?} has headers this binary cannot read")
+                })?;
                 Ok(StoreRoute {
                     workspace,
                     name,
@@ -261,6 +266,7 @@ impl Store {
                     hosts: r.get("hosts"),
                     methods: r.get("methods"),
                     paths,
+                    headers,
                     priority: r.get("priority"),
                 })
             })
@@ -552,6 +558,32 @@ fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
         .collect()
 }
 
+/// `[{"name":"x-version","value":"2"}]`. An empty list is valid and means any headers.
+///
+/// An entry that is not that shape is an error, never an entry left out: every header is an AND
+/// on the route, so dropping one would widen it to requests it was written to refuse.
+fn parse_headers(v: &serde_json::Value) -> Result<Vec<KvMatch>> {
+    let entries = v
+        .as_array()
+        .with_context(|| format!("headers is not a list: {v}"))?;
+    entries
+        .iter()
+        .map(|e| {
+            let text = |key: &str| {
+                e.get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .with_context(|| format!("header entry has no {key}: {e}"))
+            };
+            Ok(KvMatch {
+                name: text("name")?,
+                value: text("value")?,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,6 +633,28 @@ mod tests {
             {"type": "glob", "value": "/admin/*"},
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn header_entries_are_read_and_an_unreadable_one_is_an_error() {
+        assert_eq!(
+            parse_headers(&json!([{"name": "x-version", "value": "2"}])).unwrap(),
+            vec![KvMatch {
+                name: "x-version".into(),
+                value: "2".into(),
+            }]
+        );
+        assert!(parse_headers(&json!([])).unwrap().is_empty());
+        for bad in [
+            json!([{"name": "x-version"}]),
+            json!([{"value": "2"}]),
+            json!([{"name": "", "value": "2"}]),
+            json!([{"name": "x-version", "value": 2}]),
+            json!({"name": "x-version", "value": "2"}),
+            json!(null),
+        ] {
+            assert!(parse_headers(&bad).is_err(), "accepted {bad}");
+        }
     }
 
     #[test]

@@ -18,6 +18,11 @@ pub const MAX_PATHS: usize = 32;
 /// one, since it means any.
 pub const MAX_COMBINATIONS: usize = 1024;
 pub const MAX_PATH_CHARS: usize = 1024;
+/// The most header matches one route may carry. Each is an AND on every request the route sees,
+/// so a long list is a mistake more often than a need.
+pub const MAX_HEADERS: usize = 16;
+pub const MAX_HEADER_NAME_CHARS: usize = 64;
+pub const MAX_HEADER_VALUE_CHARS: usize = 1024;
 pub const MAX_TIMEOUT_MS: i32 = 3_600_000;
 /// The largest CA bundle a service may carry: room for dozens of certificates, and a bound on
 /// what every configuration served to every data plane repeats.
@@ -200,6 +205,15 @@ pub struct PathInput {
     pub value: String,
 }
 
+/// One header a route requires, as a request sends it and as the store keeps it: `routes.headers`
+/// holds a list of exactly this shape, which is the shape the snapshot reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderMatch {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteInput {
@@ -211,6 +225,10 @@ pub struct RouteInput {
     pub paths: Vec<PathInput>,
     #[serde(default)]
     pub methods: Vec<String>,
+    /// Absent on a create = none; absent on a replace = the headers the route has, so a client
+    /// that does not know about them cannot erase them. See [`HeadersOnReplace`].
+    #[serde(default)]
+    pub headers: Option<Vec<HeaderMatch>>,
     #[serde(default)]
     pub priority: i32,
     /// Required on `PUT`, the value last read; refused on `POST`.
@@ -240,7 +258,19 @@ pub struct Route {
     pub hosts: Vec<String>,
     pub paths: Vec<PathMatch>,
     pub methods: Vec<String>,
+    /// Every one must be present with exactly this value. Names lowercased; empty = any headers.
+    pub headers: Vec<HeaderMatch>,
     pub priority: i32,
+}
+
+/// Whether a replace writes the headers it validated or keeps the ones the route has, as
+/// [`TlsOnReplace`] does for a service's TLS settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadersOnReplace {
+    /// The request sent `headers`, perhaps empty: write what it says.
+    AsSent,
+    /// The request named no `headers`: keep the stored ones.
+    Kept,
 }
 
 /// The key requirement that applies to a service or route, and where it comes from: the most
@@ -567,6 +597,70 @@ fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError>
     Ok(value)
 }
 
+/// Whether `value` is an HTTP field name: one or more RFC 9110 token characters, which are
+/// letters, digits and ``! # $ % & ' * + - . ^ _ ` | ~``.
+pub(crate) fn header_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c))
+}
+
+/// A route's header matches: names lowercased, each at most once ignoring case, and values the
+/// data plane can compare. A value is matched exactly against the field value a client sends,
+/// which HTTP strips of surrounding whitespace, so a value that starts or ends with any could
+/// never match.
+fn headers(input: Vec<HeaderMatch>) -> Result<Vec<HeaderMatch>, FieldError> {
+    if input.len() > MAX_HEADERS {
+        return Err(field(
+            "headers",
+            format!("A route matches at most {MAX_HEADERS} headers."),
+        ));
+    }
+    let mut out: Vec<HeaderMatch> = Vec::with_capacity(input.len());
+    for (i, header) in input.into_iter().enumerate() {
+        let at = format!("headers[{i}].name");
+        if header.name.len() > MAX_HEADER_NAME_CHARS || !header_token(&header.name) {
+            return Err(field(
+                at,
+                format!(
+                    "Use a header name of 1 to {MAX_HEADER_NAME_CHARS} letters, digits and - _ . ! # $ % & ' * + ^ ` | ~, with no spaces or colons."
+                ),
+            ));
+        }
+        let name = header.name.to_ascii_lowercase();
+        if name == "host" {
+            return Err(field(
+                at,
+                "A route matches the host through its hosts; list it there.",
+            ));
+        }
+        if out.iter().any(|h| h.name == name) {
+            return Err(field(
+                at,
+                "Each header is matched once; this one is already listed.",
+            ));
+        }
+        let value = header.value;
+        let visible = |c: char| ('\u{21}'..='\u{7e}').contains(&c);
+        if value.is_empty()
+            || value.chars().count() > MAX_HEADER_VALUE_CHARS
+            || !value.chars().all(|c| visible(c) || c == ' ' || c == '\t')
+            || !value.starts_with(visible)
+            || !value.ends_with(visible)
+        {
+            return Err(field(
+                format!("headers[{i}].value"),
+                format!(
+                    "Use a value of 1 to {MAX_HEADER_VALUE_CHARS} visible ASCII characters; spaces and tabs only between them."
+                ),
+            ));
+        }
+        out.push(HeaderMatch { name, value });
+    }
+    Ok(out)
+}
+
 /// Whether two route hosts, normalised (lowercase, with an optional leading `*.`), can name the
 /// same request host. A host is claimed by the first workspace that routes it; another
 /// workspace's route may not name an overlapping host, because every workspace's routes share
@@ -670,6 +764,7 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
             methods.push(upper);
         }
     }
+    let headers = headers(input.headers.unwrap_or_default())?;
     let combinations = hosts.len().max(1) * paths.len().max(1) * methods.len().max(1);
     if combinations > MAX_COMBINATIONS {
         return Err(field(
@@ -686,6 +781,7 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
         hosts,
         paths,
         methods,
+        headers,
         priority: input.priority,
     };
     Ok((route, updated_at(kind, input.updated_at)?))
@@ -1034,6 +1130,10 @@ mod tests {
                 },
             ],
             methods: vec!["get".into(), "POST".into(), "GET".into()],
+            headers: Some(vec![HeaderMatch {
+                name: "X-Version".into(),
+                value: "2".into(),
+            }]),
             priority: 5,
             updated_at: Some("2026-10-07T03:00:00.000000Z".into()),
             service_updated_at: Some("2026-10-07T02:00:00.000000Z".into()),
@@ -1075,14 +1175,120 @@ mod tests {
         assert_eq!(route(input, Write::Replace).unwrap_err().field, "paths");
     }
 
+    fn header(name: &str, value: &str) -> HeaderMatch {
+        HeaderMatch {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    fn route_with_headers(headers: Vec<HeaderMatch>) -> RouteInput {
+        RouteInput {
+            headers: Some(headers),
+            ..route_input()
+        }
+    }
+
+    #[test]
+    fn header_names_are_lowercased_and_values_kept_as_written() {
+        let (r, _) = route(
+            route_with_headers(vec![header("X-Version", "2"), header("x-Env", "Beta 1")]),
+            Write::Replace,
+        )
+        .unwrap();
+        assert_eq!(
+            r.headers,
+            [header("x-version", "2"), header("x-env", "Beta 1")]
+        );
+        // Absent is none, which is what a create stores.
+        let input = RouteInput {
+            headers: None,
+            ..route_input()
+        };
+        assert!(route(input, Write::Create).is_err_and(|e| e.field == "updated_at"));
+        let input = RouteInput {
+            headers: None,
+            updated_at: None,
+            ..route_input()
+        };
+        assert!(route(input, Write::Create).unwrap().0.headers.is_empty());
+    }
+
+    #[test]
+    fn each_bad_header_is_named() {
+        let long_name = "x".repeat(MAX_HEADER_NAME_CHARS + 1);
+        let long_value = "v".repeat(MAX_HEADER_VALUE_CHARS + 1);
+        let cases: Vec<(Vec<HeaderMatch>, &str)> = vec![
+            (vec![header("", "1")], "headers[0].name"),
+            (vec![header("x version", "1")], "headers[0].name"),
+            (vec![header("x-version:", "1")], "headers[0].name"),
+            (vec![header("x-vérsion", "1")], "headers[0].name"),
+            (vec![header(&long_name, "1")], "headers[0].name"),
+            (vec![header("Host", "a.example")], "headers[0].name"),
+            (
+                vec![
+                    header("x-a", "1"),
+                    header("X-Version", "2"),
+                    header("x-VERSION", "2"),
+                ],
+                "headers[2].name",
+            ),
+            (vec![header("x-a", "")], "headers[0].value"),
+            (vec![header("x-a", " 1")], "headers[0].value"),
+            (vec![header("x-a", "1\t")], "headers[0].value"),
+            (vec![header("x-a", "1\u{1}2")], "headers[0].value"),
+            (vec![header("x-a", "1\r\n2")], "headers[0].value"),
+            (vec![header("x-a", "1\u{7f}")], "headers[0].value"),
+            (vec![header("x-a", "café")], "headers[0].value"),
+            (
+                vec![header("x-ok", "1"), header("x-a", &long_value)],
+                "headers[1].value",
+            ),
+            (
+                (0..=MAX_HEADERS)
+                    .map(|i| header(&format!("x-{i}"), "1"))
+                    .collect(),
+                "headers",
+            ),
+        ];
+        for (headers, expected) in cases {
+            let error = route(route_with_headers(headers.clone()), Write::Replace).unwrap_err();
+            assert_eq!(error.field, expected, "{headers:?}");
+        }
+        let error = route(
+            route_with_headers(vec![header("x-a", "1"), header("X-A", "1")]),
+            Write::Replace,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.sentence,
+            "Each header is matched once; this one is already listed."
+        );
+    }
+
+    #[test]
+    fn the_header_limits_themselves_are_accepted() {
+        let mut headers: Vec<HeaderMatch> = (1..MAX_HEADERS)
+            .map(|i| header(&format!("x-{i}"), "1"))
+            .collect();
+        headers.push(header(
+            &"!#$%&'*+-.^_`|~0aZ".repeat(4)[..MAX_HEADER_NAME_CHARS],
+            &format!("a \tb{}", "v".repeat(MAX_HEADER_VALUE_CHARS - 4)),
+        ));
+        let (r, _) = route(route_with_headers(headers), Write::Replace).unwrap();
+        assert_eq!(r.headers.len(), MAX_HEADERS);
+    }
+
     #[test]
     fn empty_lists_mean_any() {
         let mut input = route_input();
         input.hosts.clear();
         input.paths.clear();
         input.methods.clear();
+        input.headers = Some(Vec::new());
         let (r, _) = route(input, Write::Replace).unwrap();
         assert!(r.hosts.is_empty() && r.paths.is_empty() && r.methods.is_empty());
+        assert!(r.headers.is_empty());
     }
 
     fn path(kind: &str, value: &str) -> PathInput {

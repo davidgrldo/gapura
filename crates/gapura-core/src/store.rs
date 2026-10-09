@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, ListenerConfig, PathMatch, Plugin,
-    PortEntry, Protocol, ResolveTarget, Rewrite, RouteMatch, RouteRule, Timeouts, WeightedBackend,
+    Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, KvMatch, ListenerConfig, PathMatch,
+    Plugin, PortEntry, Protocol, ResolveTarget, Rewrite, RouteMatch, RouteRule, Timeouts,
+    WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -71,6 +72,11 @@ pub struct StoreRoute {
     pub paths: Vec<PathMatch>,
     #[serde(default)]
     pub methods: Vec<String>,
+    /// Request headers that must all be present with exactly these values -- an AND, unlike the
+    /// lists above, and on every host, path and method combination. Names are matched ignoring
+    /// case and compiled lowercase; values are compared exactly. Empty means any headers.
+    #[serde(default)]
+    pub headers: Vec<KvMatch>,
     /// Higher wins. Explicit rather than derived from match specificity, so an operator can see
     /// and set the order; ties break on name so the output never depends on row order.
     #[serde(default)]
@@ -416,6 +422,7 @@ fn route_id(route: &StoreRoute) -> String {
 }
 
 /// Kong's OR-of-each-list into Gateway API's list-of-AND-matches: one entry per combination.
+/// The header matches are already an AND, so every combination carries all of them.
 fn expand(route: &StoreRoute) -> Vec<RouteMatch> {
     let paths = if route.paths.is_empty() {
         vec![PathMatch::Prefix("/".to_string())]
@@ -427,12 +434,22 @@ fn expand(route: &StoreRoute) -> Vec<RouteMatch> {
     } else {
         route.methods.iter().map(|m| Some(m.clone())).collect()
     };
+    // Lowercase, as `RouteMatch` documents and the Gateway API path writes them: the data plane
+    // compares names ignoring case either way, but one spelling keeps equal routes equal bytes.
+    let headers: Vec<KvMatch> = route
+        .headers
+        .iter()
+        .map(|h| KvMatch {
+            name: h.name.to_ascii_lowercase(),
+            value: h.value.clone(),
+        })
+        .collect();
     let mut out = Vec::with_capacity(paths.len() * methods.len());
     for path in &paths {
         for method in &methods {
             out.push(RouteMatch {
                 path: path.clone(),
-                headers: Vec::new(),
+                headers: headers.clone(),
                 query: Vec::new(),
                 method: method.clone(),
             });
@@ -469,6 +486,7 @@ mod tests {
             hosts: Vec::new(),
             paths: vec![PathMatch::Prefix(path.into())],
             methods: Vec::new(),
+            headers: Vec::new(),
             priority,
         }
     }
@@ -974,6 +992,7 @@ mod tests {
                     PathMatch::Exact("/health".into()),
                 ],
                 methods: vec!["GET".into(), "POST".into()],
+                headers: Vec::new(),
                 priority: 0,
             }],
         };
@@ -986,6 +1005,118 @@ mod tests {
         // So is the method list.
         assert_eq!(hit(&cfg, 80, "a.example", "/v1/x", "DELETE"), None);
     }
+
+    fn hit_with<'a>(cfg: &'a Config, path: &str, headers: &[(&str, &str)]) -> Option<&'a str> {
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        let query: Vec<(String, String)> = Vec::new();
+        cfg.match_port_with(
+            80,
+            &RequestAttrs {
+                host: "any",
+                path,
+                method: "GET",
+                headers: &headers,
+                query: &query,
+            },
+            &RegexMap::default(),
+        )
+        .map(|m| m.rule.route.as_str())
+    }
+
+    fn kv(name: &str, value: &str) -> KvMatch {
+        KvMatch {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    /// The header list is an AND, so it is not one more axis of the expansion: every host, path
+    /// and method combination carries all of it, with the names lowercased as `RouteMatch` keeps
+    /// them.
+    #[test]
+    fn a_route_s_headers_reach_every_match_it_expands_to_with_lowercase_names() {
+        let mut beta = route("beta", "orders", "/v1", 0);
+        beta.hosts = vec!["a.example".into(), "b.example".into()];
+        beta.paths.push(PathMatch::Exact("/health".into()));
+        beta.methods = vec!["GET".into(), "POST".into()];
+        beta.headers = vec![kv("X-Version", "2"), kv("x-Env", "Beta")];
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![beta],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let want = vec![kv("x-version", "2"), kv("x-env", "Beta")];
+        assert_eq!(cfg.ports[&80].len(), 8);
+        for entry in &cfg.ports[&80] {
+            assert_eq!(entry.matcher.headers, want);
+        }
+        let rule = &cfg.listeners[0].rules[0];
+        assert_eq!(rule.matches.len(), 4);
+        for m in &rule.matches {
+            assert_eq!(m.headers, want);
+        }
+    }
+
+    #[test]
+    fn a_route_with_headers_matches_only_requests_that_carry_every_one_exactly() {
+        let mut beta = route("beta", "orders", "/", 0);
+        beta.headers = vec![kv("X-Version", "2"), kv("x-env", "Beta")];
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![beta, route("stable", "orders", "/", 0)],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        // The beta route sorts first on name; a request without its headers falls through.
+        assert_eq!(
+            hit_with(&cfg, "/x", &[("x-version", "2"), ("X-Env", "Beta")]),
+            Some("beta")
+        );
+        assert_eq!(hit_with(&cfg, "/x", &[("x-version", "2")]), Some("stable"));
+        // The value is compared exactly, case and all.
+        assert_eq!(
+            hit_with(&cfg, "/x", &[("x-version", "2"), ("x-env", "beta")]),
+            Some("stable")
+        );
+        assert_eq!(hit_with(&cfg, "/x", &[]), Some("stable"));
+    }
+
+    /// The ETag is the digest of the compiled bytes, so a route without headers must compile to
+    /// exactly what it did before routes had them -- including a route read from a snapshot
+    /// written before the field existed -- or every data plane refetches on upgrade for nothing.
+    #[test]
+    fn a_route_without_headers_compiles_exactly_as_before() {
+        let older: StoreRoute = serde_json::from_value(serde_json::json!({
+            "name": "api", "service": "orders",
+            "paths": [{"Prefix": "/v1"}], "methods": ["GET"], "priority": 0
+        }))
+        .expect("an older snapshot's route still reads");
+        assert!(older.headers.is_empty());
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 8080)],
+            routes: vec![older],
+            ..Default::default()
+        };
+        let body = serde_json::to_vec(&compile(&snap, &StoreSettings::default())).unwrap();
+        let digest: String = Sha256::digest(&body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest,
+            PRE_HEADERS_DIGEST,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    /// What the compiler made of that snapshot before routes had headers, computed at the time.
+    const PRE_HEADERS_DIGEST: &str =
+        "1081010dd85af1cc25660773d6f1f352c96ed5e32b59d29b43415a255b8cf4b2";
 
     fn jwt(issuer: &str) -> Plugin {
         Plugin::Jwt(crate::config::JwtPolicy {
