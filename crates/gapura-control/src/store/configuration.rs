@@ -85,6 +85,12 @@ pub(super) async fn decide(
     action: Action,
 ) -> Result<User, WriteError> {
     let (actor, rows) = rights(tx, caller, &BTreeSet::from([workspace])).await?;
+    // Deleted since the handler found it, by a delete this read waited for: answered as the
+    // handler answers a workspace that does not exist, where a superuser, who holds a role in
+    // every workspace, would otherwise go on to a write the foreign key refuses.
+    if !rows.workspaces.iter().any(|w| w.id == workspace) {
+        return Err(configuration::no_role().into());
+    }
     configuration::allowed(&rows, &actor, workspace, action)?;
     Ok(actor)
 }

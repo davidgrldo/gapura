@@ -20,6 +20,7 @@ mod data_planes;
 mod grants;
 mod identity;
 mod tls;
+mod workspaces;
 pub(crate) use grants::sqlstate;
 pub use grants::WriteError;
 pub use identity::{LocalAccount, OidcAccount};
@@ -55,6 +56,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0007_accounts",
         include_str!("../../migrations/0007_accounts.sql"),
+    ),
+    (
+        "0008_audit_workspace_index",
+        include_str!("../../migrations/0008_audit_workspace_index.sql"),
     ),
 ];
 
