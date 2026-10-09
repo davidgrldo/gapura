@@ -48,13 +48,16 @@ import tailwindcss from '@tailwindcss/vite'
 // JWKS as the text it was pasted as: `GET /api/workspaces/<name>/jwt` answers it without the JWKS
 // and with how many keys it lists, and `?target=` answers one of them whole, or 404 when that
 // target has none. The rows' `jwt` tells the same story, as their `key_auth` does.
+// rate-limit.json holds the request limits set there, `[{ target, limit, per }]`, as
+// `GET /api/workspaces/<name>/rate-limit` answers it, and the rows' `rate_limit` tells the same story.
 //
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
 // service or route created on its list, replaced or deleted by name, a consumer created or
-// deleted, a key revoked, an API-key or JWT requirement put or removed — answer 204 and store nothing,
-// for every persona, so the lists read back as they were. Issuing a key is the one write that
-// answers with a body, as the server does: a made-up key, shown once like the real one, and the
-// expiry the request asked for. That is enough to look at the forms and at what follows a save.
+// deleted, a key revoked, an API-key or JWT requirement or a request limit put or removed — answer
+// 204 and store nothing, for every persona, so the lists read back as they were. Issuing a key is
+// the one write that answers with a body, as the server does: a made-up key, shown once like the
+// real one, and the expiry the request asked for. That is enough to look at the forms and at what
+// follows a save.
 // Data planes are the same for every persona too: web/stub/data-planes.json is `GET /api/data-planes`,
 // sorted by name, one row per data plane with its status, whether it holds the configuration served
 // now, the address it called from and its tokens (a prefix and times, never the token). Registering
@@ -95,15 +98,16 @@ function stubApi() {
     '/api/workspaces': 'workspaces.json',
     '/api/settings': 'settings.json',
   }
-  // `/api/workspaces/<name>/services`, `/routes`, `/consumers` and `/key-auth`, and one row of
-  // the first three by name. Only the first three are created by POST; `/key-auth` is put and
-  // deleted whole.
-  const lists = /^\/api\/workspaces\/([^/]+)\/(services|routes|consumers|key-auth)$/
+  // `/api/workspaces/<name>/services`, `/routes`, `/consumers`, `/key-auth` and `/rate-limit`, and
+  // one row of the first three by name. Only the first three are created by POST; `/key-auth` and
+  // `/rate-limit` are put and deleted whole.
+  const lists = /^\/api\/workspaces\/([^/]+)\/(services|routes|consumers|key-auth|rate-limit)$/
   const rows = /^\/api\/workspaces\/[^/]+\/(services|routes|consumers)\/[^/]+$/
   const keys = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys$/
   const revoke = /^\/api\/workspaces\/[^/]+\/consumers\/[^/]+\/keys\/[^/]+$/
   const keyAuth = /^\/api\/workspaces\/[^/]+\/key-auth$/
   const jwt = /^\/api\/workspaces\/([^/]+)\/jwt$/
+  const rateLimit = /^\/api\/workspaces\/[^/]+\/rate-limit$/
   // Registering a data plane and issuing it another token both answer with a token.
   const issued = /^\/api\/data-planes(\/[^/]+\/tokens)?$/
   const dataPlaneWrites = /^\/api\/data-planes\/[^/]+(\/tokens\/[^/]+)?$/
@@ -125,6 +129,8 @@ function stubApi() {
     ['DELETE', keyAuth],
     ['PUT', jwt],
     ['DELETE', jwt],
+    ['PUT', rateLimit],
+    ['DELETE', rateLimit],
     ['DELETE', dataPlaneWrites],
     ['POST', /^\/api\/workspaces$/],
     ['PUT', /^\/api\/workspaces\/[^/]+$/],

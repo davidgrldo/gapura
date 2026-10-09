@@ -22,7 +22,8 @@
       "header": "x-api-key",
       "from": "service"
     },
-    "jwt": null
+    "jwt": null,
+    "rate_limit": null
   },
   {
     "name": "catch-all",
@@ -37,6 +38,11 @@
       "header": "x-partner-key",
       "from": "route"
     },
-    "jwt": null
+    "jwt": null,
+    "rate_limit": {
+      "limit": 120,
+      "per": "minute",
+      "from": "service"
+    }
   }
 ]

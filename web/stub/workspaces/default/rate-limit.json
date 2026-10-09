@@ -1,0 +1,7 @@
+[
+  {
+    "target": "service:whoami",
+    "limit": 120,
+    "per": "minute"
+  }
+]

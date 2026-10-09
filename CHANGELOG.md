@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console can limit requests. A "Limit requests" control sits under "Require a JWT" in the
+  service and route sheets and, for the whole workspace, on the Consumers page: a number of
+  requests (1 to 1 000 000) per second, minute or hour, with the reminder that it is per client
+  address and counted by each gateway replica separately, so with 3 replicas a client can make up
+  to 3 × the limit. Apply puts it, or removes it when switched off, and is offered only once
+  something changed; a refusal lands on the input it is about. A broader limit shows read-only,
+  with where it comes from. A tag such as "120/min" beside a service or route says it is limited.
+  Roles are as for the API key: a viewer reads, an editor switches it.
 - The console can require a JWT. A "Require a JWT" control sits under "Require an API key" in the
   service and route sheets and, for the whole workspace, on the Consumers page: an issuer
   (required), an audience (left empty, the control warns that any audience is accepted) and the
