@@ -56,6 +56,9 @@ import tailwindcss from '@tailwindcss/vite'
 // now, the address it called from and its tokens (a prefix and times, never the token). Registering
 // one and issuing another token answer with a made-up token, shown once like the real one; deleting a
 // data plane or revoking a token answers 204 and stores nothing.
+// The audit log is the same for every persona and the same whatever the query asks:
+// web/stub/audit.json is one page of `GET /api/audit`, newest first, with `next` null, so the
+// filters reload it as it is and Load older is never offered.
 // Account administration answers the same way for every persona. Creating an account answers with a
 // made-up temporary password next to the new id and name, and resetting one answers with another,
 // both shown once like the real ones; changing the status or superuser flag, deleting an account
@@ -69,6 +72,7 @@ function stubApi() {
     '/api/overview': 'overview.json',
     '/api/routes': 'routes.json',
     '/api/data-planes': 'data-planes.json',
+    '/api/audit': 'audit.json',
   }
   const personal = { '/api/me': 'me.json', '/api/users': 'users.json', '/api/roles': 'roles.json' }
   // `/api/workspaces/<name>/services`, `/routes`, `/consumers` and `/key-auth`, and one row of

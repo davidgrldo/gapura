@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console has an Audit log page under Activity, for superusers and anyone with a role. It
+  lists every change made through the console, newest first: when, who (and whether they signed in
+  through the identity provider), whether it was created, changed or deleted, what it was and its
+  workspace. A row opens to show the object before and after as JSON, with the top-level fields
+  that changed named above them. It filters by workspace (and, for a superuser, the entries with no
+  workspace) and by kind, and reads older entries a page at a time with Load older. The build now
+  fails if the kinds it offers drift from the server's.
 - The control plane has an API for reading the audit log: `GET /api/audit`, newest first, a page
   at a time (`limit` 1 to 200, default 50; `before` the `next` of the page before, which is null on
   the last page). Each entry says when, who and how they signed in, the action, the kind of object,
