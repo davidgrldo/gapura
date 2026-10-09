@@ -11,6 +11,7 @@
   import Path from 'phosphor-svelte/lib/Path'
   import Key from 'phosphor-svelte/lib/Key'
   import Broadcast from 'phosphor-svelte/lib/Broadcast'
+  import Stack from 'phosphor-svelte/lib/Stack'
   import AppSidebar from './lib/AppSidebar.svelte'
   import ChoosePassword from './lib/ChoosePassword.svelte'
   import Failure from './lib/Failure.svelte'
@@ -24,6 +25,7 @@
   import StoreRoutes from './routes/StoreRoutes.svelte'
   import Consumers from './routes/Consumers.svelte'
   import DataPlanes from './routes/DataPlanes.svelte'
+  import Workspaces from './routes/Workspaces.svelte'
 
   // A handful of screens does not earn a router dependency. The server already answers any
   // path it does not own with index.html (see `resolve` in crates/gapura-control/src/assets.rs),
@@ -48,6 +50,17 @@
   }
   readMe()
 
+  // Asked again after a page changes something /api/me reports, such as the workspaces: the
+  // pickers and the access pages read them from here. A failure keeps the answer already on
+  // screen rather than replacing every page with it, since the change itself was made. Settles
+  // once the answer is taken or has failed, and never rejects.
+  function refreshMe() {
+    return get('/api/me').then(
+      (answer) => (me = answer),
+      () => {},
+    )
+  }
+
   // An account on a temporary password is shown only the page that replaces it: every other
   // store API refuses it until it has.
   const choosing = $derived(me?.must_change_password === true)
@@ -68,6 +81,7 @@
   const ACCESS = [
     { path: '/users', label: 'Users', icon: UsersThree, component: Users },
     { path: '/roles', label: 'Roles', icon: ShieldCheck, component: Roles },
+    { path: '/workspaces', label: 'Workspaces', icon: Stack, component: Workspaces },
   ]
 
   // The navigation this account gets. The cluster pages read Kubernetes and the gateway's admin
@@ -189,9 +203,10 @@
                re-runs its fetch. Without the key, Svelte would reuse the instance and the reader
                would be looking at whatever it loaded the first time. Every screen is handed who
                is signed in: the access screens' forms need the workspaces the reader
-               administers, and the reader's own id. -->
+               administers, and the reader's own id. `refresh` asks /api/me again, for a page whose
+               change alters it. -->
           {#key current.path}
-            <current.component {me} />
+            <current.component {me} refresh={refreshMe} />
           {/key}
         {:else}
           <Home {me} />
