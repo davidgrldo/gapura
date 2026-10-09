@@ -1,7 +1,8 @@
 //! Step 3a of translation: HTTPRoute rules -> RouteRule (matches, filters, backends, timeouts).
 //! Any unsupported value rejects the whole route (Gateway API: Accepted=False, UnsupportedValue).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::config::RateLimit;
 use crate::config::{
@@ -151,6 +152,41 @@ fn parse_timeout(value: Option<&str>) -> Result<Option<u64>, Unsupported> {
     }
 }
 
+/// How many path patterns `check_path_regex` remembers. Enough for every distinct pattern of a
+/// large cluster; past it the memo is emptied and refills, so a flood of distinct patterns costs
+/// compiles again rather than memory. An entry is at most a pattern (Gateway API caps a path
+/// value at 1024 bytes) plus an error message, so a full memo stays around a few MB.
+const PATH_REGEX_MEMO_CAPACITY: usize = 4096;
+
+/// Whether a RegularExpression path compiles, remembered across translations by pattern.
+///
+/// Translation reruns on every change in the cluster, and an attached route's patterns are the
+/// same from one run to the next. Even under `PATH_REGEX_SIZE_LIMIT` a pattern with Unicode
+/// classes takes milliseconds, so a route with many of them would pay that on every reconcile.
+/// The verdict depends only on the pattern string (the limits are constants), so remembering it
+/// keeps translation a pure function. Only the verdict is kept, not the `Regex`: the data plane
+/// builds its own per generation, and a compiled program would make each entry up to the size
+/// limit instead of a few hundred bytes.
+fn check_path_regex(pattern: &str) -> Result<(), regex::Error> {
+    static MEMO: OnceLock<Mutex<HashMap<String, Result<(), regex::Error>>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    // A panic elsewhere while holding the lock cannot leave a wrong verdict behind (an insert is
+    // the only write), so a poisoned memo is still good to use.
+    let lock = || memo.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(verdict) = lock().get(pattern) {
+        return verdict.clone();
+    }
+    // Compiled outside the lock: concurrent translations never wait on each other's patterns,
+    // at worst two of them compile the same one.
+    let verdict = crate::matcher::compile_path_regex(pattern).map(drop);
+    let mut memo = lock();
+    if memo.len() >= PATH_REGEX_MEMO_CAPACITY {
+        memo.clear();
+    }
+    memo.insert(pattern.to_string(), verdict.clone());
+    verdict
+}
+
 fn compile_match(m: &HttpRouteMatch) -> Result<RouteMatch, Unsupported> {
     let path = match &m.path {
         None => PathMatch::Prefix("/".to_string()),
@@ -162,7 +198,7 @@ fn compile_match(m: &HttpRouteMatch) -> Result<RouteMatch, Unsupported> {
                 "RegularExpression" => {
                     // Validate here so an invalid pattern keeps the Unsupported path; the data
                     // plane compiles the pattern again into its per-generation side map.
-                    if let Err(e) = crate::matcher::compile_path_regex(&value) {
+                    if let Err(e) = check_path_regex(&value) {
                         return Err(Unsupported(format!(
                             "path match RegularExpression {value:?} does not compile: {e}"
                         )));

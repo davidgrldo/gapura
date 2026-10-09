@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An HTTPRoute that names none of Gapura's Gateways is no longer compiled. Its RegularExpression
+  paths were built on every translation all the same, so one route attached to nothing, holding 128
+  patterns like `/0\w{100}`, held up configuration for the whole gateway for 18 seconds per change.
+  Path regexes now compile once each, within a 4 MiB program -- the limit the console already put
+  on store-mode regexes, now the data plane's too, where it was regex's 10 MiB default -- and a
+  1 MiB DFA cache; a pattern over that is refused with `UnsupportedValue` like an invalid one, and
+  verdicts are remembered across translations. A Kubernetes-mode pattern between 4 and 10 MiB that
+  was accepted before is now refused; `/users/[\w-]{1,64}`, about 3.1 MiB, still fits (#156).
 - The console's Users page creates accounts. A superuser makes a local account, is shown its
   temporary password once, and the person chooses their own at first sign-in. In a person's sheet a
   superuser resets a password, disables and enables, makes and removes superusers and deletes local

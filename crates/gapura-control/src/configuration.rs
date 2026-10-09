@@ -350,17 +350,11 @@ fn regex_reason(error: &impl std::fmt::Display) -> String {
     reason.chars().take(200).collect()
 }
 
-/// The most a console regex may compile to, in bytes. Generous, since Unicode classes such as
-/// `\w` are large, and well under what `a{1000}{1000}` costs. It applies to what the console
-/// writes only: the shared `compile_path_regex` stays as every reader of a snapshot has it.
-const REGEX_SIZE_LIMIT: usize = 4 * 1024 * 1024;
-
-/// A console regex: it must pass the data plane's own rules, and also fit `REGEX_SIZE_LIMIT`.
+/// A console regex: it must pass the data plane's own rules, size limit included
+/// (`gapura_core::matcher::PATH_REGEX_SIZE_LIMIT`). One limit for both, because a pattern the
+/// console accepted and the snapshot then refused would fail `/v1/config` for every workspace.
 fn console_regex(value: &str) -> Result<(), String> {
-    gapura_core::matcher::compile_path_regex(value).map_err(|e| regex_reason(&e))?;
-    regex::RegexBuilder::new(&format!("^(?:{value})$"))
-        .size_limit(REGEX_SIZE_LIMIT)
-        .build()
+    gapura_core::matcher::compile_path_regex(value)
         .map(drop)
         .map_err(|e| regex_reason(&e))
 }
