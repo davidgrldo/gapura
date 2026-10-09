@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's Users page has the sign-up switch for superusers, above the list: it says whether
+  sign-up is open and opens or closes it, asking first before opening. An account that wrote a
+  note when it signed itself up carries a "Signed up" tag, and its sheet shows what it wrote above
+  the roles. A superuser can Decline an account that holds no role, after a question: a local
+  account is deleted and an identity-provider account is disabled.
 - A superuser can open sign-up (`GET`/`PUT /api/settings`, `{"sign_up_open": true}`); it is closed
   on a fresh install, and each change is one audit entry. While it is open, the sign-in page links
   to `/auth/signup`, where anyone reaching the console creates a local account with a username, a
