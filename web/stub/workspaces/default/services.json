@@ -7,6 +7,11 @@
     "connect_timeout_ms": 2000,
     "read_timeout_ms": null,
     "routes": 1,
+    "tls": {
+      "verify": true,
+      "ca_pem": "-----BEGIN CERTIFICATE-----\nNOT-A-REAL-CERTIFICATE-STUB-ONLY-FOR-LOOKING-AT-THE-CONSOLE\n-----END CERTIFICATE-----\n",
+      "sni": "docs.example"
+    },
     "updated_at": "2026-09-30T08:12:44.120031Z",
     "key_auth": {
       "header": "x-api-key",
@@ -21,6 +26,11 @@
     "connect_timeout_ms": null,
     "read_timeout_ms": null,
     "routes": 0,
+    "tls": {
+      "verify": true,
+      "ca_pem": null,
+      "sni": null
+    },
     "updated_at": "2026-10-01T10:02:09.504112Z",
     "key_auth": null
   },
@@ -32,6 +42,11 @@
     "connect_timeout_ms": 1000,
     "read_timeout_ms": 5000,
     "routes": 1,
+    "tls": {
+      "verify": true,
+      "ca_pem": null,
+      "sni": null
+    },
     "updated_at": "2026-09-28T14:40:31.880245Z",
     "key_auth": null
   }

@@ -9,6 +9,7 @@
   import { base } from './configuration.js'
   import { can } from './workspace.js'
   import Plus from 'phosphor-svelte/lib/Plus'
+  import Warning from 'phosphor-svelte/lib/Warning'
 
   // The Services page's one sheet:
   // - `create` is New service, for editors and admins;
@@ -39,6 +40,11 @@
   let port = $state('')
   let connect = $state('')
   let read = $state('')
+  // How an https upstream is reached. Kept while the protocol reads http, so switching back does
+  // not lose them, but only sent for https: the server drops an http service's settings.
+  let verify = $state(true)
+  let ca = $state('')
+  let sni = $state('')
   let saving = $state(false)
   // `{ sentence, field, stale }` from a refused write; `field` puts the sentence beside its input.
   let error = $state(undefined)
@@ -57,6 +63,9 @@
     port = service ? String(service.port) : ''
     connect = service?.connect_timeout_ms == null ? '' : String(service.connect_timeout_ms)
     read = service?.read_timeout_ms == null ? '' : String(service.read_timeout_ms)
+    verify = service?.tls?.verify ?? true
+    ca = service?.tls?.ca_pem ?? ''
+    sni = service?.tls?.sni ?? ''
     saving = false
     error = undefined
     deleting = false
@@ -71,11 +80,22 @@
     port: 'port',
     connect_timeout_ms: 'connect',
     read_timeout_ms: 'read',
+    // `tls` is the settings as a whole: an http service carrying any that are not the defaults.
+    tls: 'verify',
+    'tls.ca_pem': 'ca',
+    'tls.sni': 'sni',
   }
-  const shown = $derived(Object.hasOwn(INPUT, error?.field ?? ''))
+  // The TLS inputs are only drawn for https; a refusal naming one of them after the protocol was
+  // switched to http has its sentence in the footer instead.
+  const drawn = (field) => Object.hasOwn(INPUT, field) && (protocol === 'https' || !field.startsWith('tls'))
+  const shown = $derived(drawn(error?.field ?? ''))
 
   const invalid = (field) => error?.field === field
   const described = (field) => (invalid(field) ? `${id}-${field}-error` : undefined)
+  // An input's help line and, when it was refused, the sentence why.
+  const helped = (field, help) => [help, described(field)].filter(Boolean).join(' ')
+  // Trimmed, and empty is none: the system's CAs, or the host as the server name.
+  const text = (value) => value.trim() || null
   // Delete is not asked while routes use the service: the server refuses it, so the question
   // would only lead to a refusal. The sentence says what to do instead.
   const inUse = $derived(mode === 'edit' ? (service?.routes ?? 0) : 0)
@@ -146,6 +166,9 @@
       connect_timeout_ms: optional(connect),
       read_timeout_ms: optional(read),
     }
+    // Only an https service carries TLS settings. An http one sends none: on a create that is the
+    // defaults, and on a replace of a service that was https the server drops what it had.
+    if (protocol === 'https') body.tls = { verify, ca_pem: text(ca), sni: text(sni) }
     if (mode === 'edit') send('PUT', here(), { ...body, updated_at: service.updated_at })
     else send('POST', base(workspace, 'services'), body)
   }
@@ -274,9 +297,54 @@
           {@render problem('connect_timeout_ms')}
           {@render problem('read_timeout_ms')}
           <p class="text-xs text-muted-foreground">
-            https is verified against the system's trusted certificates, so it needs a host name,
-            not an IP address. IPv6 is not accepted. Empty timeouts use the gateway's defaults.
+            https needs a host name, not an IP address. IPv6 is not accepted. Empty timeouts use
+            the gateway's defaults.
           </p>
+          {#if protocol === 'https'}
+            <fieldset class="grid gap-4 rounded-lg border p-3">
+              <legend class="px-1 font-medium">TLS to the upstream</legend>
+              <div class="grid gap-1.5">
+                <label class="flex items-center gap-2">
+                  <input id="{id}-verify" type="checkbox" bind:checked={verify} aria-invalid={invalid('tls')} aria-describedby={helped('tls', verify ? undefined : `${id}-insecure`) || undefined} />
+                  Verify the upstream's certificate
+                </label>
+                <!-- Polite, so unchecking the box is answered with what it means. -->
+                <div aria-live="polite">
+                  {#if !verify}
+                    <p id="{id}-insecure" class="flex items-start gap-1.5 rounded-md bg-warning-soft px-2 py-1 text-xs text-warning">
+                      <Warning aria-hidden="true" class="mt-px size-3.5 shrink-0" />
+                      Anyone on the path to the upstream can read and change this traffic.
+                    </p>
+                  {/if}
+                </div>
+                {@render problem('tls')}
+              </div>
+              <div class="grid gap-1.5">
+                <label for="{id}-ca" class="font-medium">CA certificates (PEM)</label>
+                <!-- No textarea in the kit: Input's look, grown to several lines. Scrolling stays
+                     on when it is disabled, so a viewer can read a long bundle. -->
+                <textarea
+                  id="{id}-ca"
+                  rows="4"
+                  class="dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 disabled:bg-input/50 dark:disabled:bg-input/80 w-full min-w-0 rounded-lg border bg-transparent px-2.5 py-1.5 font-mono text-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:ring-3 aria-invalid:ring-3 disabled:cursor-not-allowed disabled:opacity-50"
+                  bind:value={ca}
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  aria-invalid={invalid('tls.ca_pem')}
+                  aria-describedby={helped('tls.ca_pem', `${id}-ca-help`)}
+                ></textarea>
+                <p id="{id}-ca-help" class="text-xs text-muted-foreground">Empty: the system's trusted CAs.</p>
+                {@render problem('tls.ca_pem')}
+              </div>
+              <div class="grid gap-1.5">
+                <label for="{id}-sni" class="font-medium">Server name (SNI)</label>
+                <Input id="{id}-sni" class="font-mono" bind:value={sni} placeholder={host.trim() || undefined} autocomplete="off" autocapitalize="off" spellcheck="false" aria-invalid={invalid('tls.sni')} aria-describedby={helped('tls.sni', `${id}-sni-help`)} />
+                <p id="{id}-sni-help" class="text-xs text-muted-foreground">Empty: the host above.</p>
+                {@render problem('tls.sni')}
+              </div>
+            </fieldset>
+          {/if}
         </fieldset>
       </form>
       {#if mode === 'edit'}
