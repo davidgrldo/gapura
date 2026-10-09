@@ -8,6 +8,18 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The control plane has an API for workspaces: list (`GET /api/workspaces`), create
+  (`POST /api/workspaces`), rename (`PUT /api/workspaces/{ws}`) and delete
+  (`DELETE /api/workspaces/{ws}`). Creating, renaming and deleting are a superuser's (ADR 5); a
+  workspace admin lists the workspaces they administer, and nobody else sees the list. Each row
+  counts the workspace's services, routes, consumers, policies and certificates, and its members:
+  direct grants plus group mappings into it. A rename keeps the workspace's id, so its
+  configuration, grants and audit entries follow it; the configuration served to data planes names
+  workspaces, so they are sent the new name, under a new tag, at their next poll. Only an empty
+  workspace is deleted, since everything a workspace holds would go with it: otherwise the answer
+  is 409, naming what is left. The grants and group mappings into it go with it, and its audit
+  entry counts them. The last workspace is never deleted. Two deletes at once cannot take the
+  last two, and nothing written into a workspace while its delete waits slips past the count.
 - An HTTPRoute that names none of Gapura's Gateways is no longer compiled. Its RegularExpression
   paths were built on every translation all the same, so one route attached to nothing, holding 128
   patterns like `/0\w{100}`, held up configuration for the whole gateway for 18 seconds per change.
