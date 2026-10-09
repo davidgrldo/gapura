@@ -349,6 +349,7 @@ impl Store {
                 routes,
                 plugins,
                 credentials,
+                rate_limits: Vec::new(),
             },
         ))
     }

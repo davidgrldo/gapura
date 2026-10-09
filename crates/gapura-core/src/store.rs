@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{
     Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, KvMatch, ListenerConfig, PathMatch,
-    Plugin, PortEntry, Protocol, ResolveTarget, Rewrite, RouteMatch, RouteRule, Timeouts,
-    WeightedBackend,
+    Plugin, PortEntry, Protocol, RateLimit, ResolveTarget, Rewrite, RouteMatch, RouteRule,
+    Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -100,6 +100,25 @@ pub struct StorePlugin {
     pub plugin: Plugin,
 }
 
+/// A request limit, attached as a [`StorePlugin`] is: to one route, to every route of one service,
+/// or to neither and so to every route in the workspace, the most specific winning.
+///
+/// Not a [`Plugin`]: the data plane enforces [`RouteRule::rate_limit`], the field the Kubernetes
+/// `gapura.dev/rate-limit` annotation sets, rather than running something from the plugin list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreRateLimit {
+    /// The workspace this limit belongs to; it applies to routes of that workspace only.
+    #[serde(default)]
+    pub workspace: String,
+    /// [`StoreRoute::name`], when this is attached to one route.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// [`StoreService::name`], when this is attached to every route using one service.
+    #[serde(default)]
+    pub service: Option<String>,
+    pub limit: RateLimit,
+}
+
 /// One issued API key. The hash, never the key: the console shows a key once when it mints it
 /// and stores only this, so nothing downstream -- including the data plane's disk cache -- ever
 /// holds something that could be presented.
@@ -123,6 +142,8 @@ pub struct StoreSnapshot {
     pub plugins: Vec<StorePlugin>,
     #[serde(default)]
     pub credentials: Vec<StoreCredential>,
+    #[serde(default)]
+    pub rate_limits: Vec<StoreRateLimit>,
 }
 
 /// Runtime settings that are the data plane's, not the store's: which ports this process bound.
@@ -230,7 +251,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
                 backend_request_ms: service.read_timeout_ms.map(u64::from),
                 request_ms: None,
             },
-            rate_limit: None,
+            rate_limit: rate_limit_for(&snap.rate_limits, route),
             plugins,
         });
 
@@ -305,18 +326,13 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
     let mut chosen: Vec<(u8, &Plugin)> = Vec::new();
     for p in all {
-        // A policy belongs to one workspace. Without this a policy attached to neither a route
-        // nor a service -- "every route in the workspace" -- applied to every route in every
-        // workspace, and a route-level one applied to a same-named route anywhere.
-        if p.workspace != route.workspace {
+        let Some(rank) = rank(
+            &p.workspace,
+            p.route.as_deref(),
+            p.service.as_deref(),
+            route,
+        ) else {
             continue;
-        }
-        let rank = match (&p.route, &p.service) {
-            (Some(r), _) if *r == route.name => 2,
-            (Some(_), _) => continue,
-            (None, Some(s)) if *s == route.service => 1,
-            (None, Some(_)) => continue,
-            (None, None) => 0,
         };
         match chosen.iter_mut().find(|(_, c)| same_kind(c, &p.plugin)) {
             Some(slot) if slot.0 < rank => *slot = (rank, &p.plugin),
@@ -338,6 +354,49 @@ fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
             other => other.clone(),
         })
         .collect()
+}
+
+/// The request limit that applies to one route: the most specific, as [`plugins_for`] picks a
+/// policy of one kind, and the first of two equally specific ones. `None` when there is none,
+/// which is no limit.
+fn rate_limit_for(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimit> {
+    let mut chosen: Option<(u8, &RateLimit)> = None;
+    for l in all {
+        let Some(rank) = rank(
+            &l.workspace,
+            l.route.as_deref(),
+            l.service.as_deref(),
+            route,
+        ) else {
+            continue;
+        };
+        if chosen.is_none_or(|(best, _)| best < rank) {
+            chosen = Some((rank, &l.limit));
+        }
+    }
+    chosen.map(|(_, limit)| limit.clone())
+}
+
+/// How specifically a policy attached to `on_route` or `on_service` in `workspace` applies to
+/// `route`: 2 on the route itself, 1 on its service, 0 on the whole workspace, `None` when it
+/// does not apply at all.
+fn rank(
+    workspace: &str,
+    on_route: Option<&str>,
+    on_service: Option<&str>,
+    route: &StoreRoute,
+) -> Option<u8> {
+    // A policy belongs to one workspace. Without this a policy attached to neither a route nor a
+    // service -- "every route in the workspace" -- applied to every route in every workspace, and
+    // a route-level one applied to a same-named route anywhere.
+    if workspace != route.workspace {
+        return None;
+    }
+    match (on_route, on_service) {
+        (Some(r), _) => (r == route.name).then_some(2),
+        (None, Some(s)) => (s == route.service).then_some(1),
+        (None, None) => Some(0),
+    }
 }
 
 /// Two policies of the same kind compete; two of different kinds both run.
@@ -774,6 +833,7 @@ mod tests {
                     workspace: "team-b".into(),
                 },
             ],
+            rate_limits: Vec::new(),
         };
         let cfg = compile(&snap, &StoreSettings::default());
         let [Plugin::KeyAuth(policy)] = plugins_on(&cfg, "team-a/api") else {
@@ -876,6 +936,7 @@ mod tests {
     fn a_compiled_config_actually_routes() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/orders", 0)],
@@ -894,6 +955,7 @@ mod tests {
     fn a_service_becomes_a_cluster_the_data_plane_must_resolve() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/", 0)],
@@ -919,6 +981,7 @@ mod tests {
     fn higher_priority_wins_over_a_route_that_also_matches() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("v1", "v1.internal", 80), svc("v2", "v2.internal", 80)],
             routes: vec![
@@ -937,12 +1000,14 @@ mod tests {
         let services = vec![svc("a", "a.internal", 80), svc("b", "b.internal", 80)];
         let forwards = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: services.clone(),
             routes: vec![route("aaa", "a", "/", 5), route("bbb", "b", "/", 5)],
         };
         let backwards = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services,
             routes: vec![route("bbb", "b", "/", 5), route("aaa", "a", "/", 5)],
@@ -964,6 +1029,7 @@ mod tests {
     fn a_route_naming_a_missing_service_is_dropped() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("ghost", "does-not-exist", "/", 0)],
@@ -980,6 +1046,7 @@ mod tests {
     fn hosts_paths_and_methods_expand_into_every_combination() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![StoreRoute {
@@ -1143,6 +1210,7 @@ mod tests {
     fn a_policy_on_the_route_wins_over_one_on_its_service_and_one_on_everything() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1176,6 +1244,7 @@ mod tests {
     fn a_service_policy_wins_over_a_global_one_when_the_route_has_none() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1204,6 +1273,7 @@ mod tests {
     fn a_policy_attached_elsewhere_does_not_apply_here() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             services: vec![svc("orders", "a", 80), svc("billing", "b", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1233,6 +1303,7 @@ mod tests {
         // would change.
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1254,11 +1325,160 @@ mod tests {
         assert_eq!(got.len(), 1, "two of one kind compete rather than stacking");
     }
 
+    fn limit(limit: u32, window_ms: u64) -> RateLimit {
+        RateLimit { limit, window_ms }
+    }
+
+    fn rate_limit(
+        ws: &str,
+        route: Option<&str>,
+        service: Option<&str>,
+        per_minute: u32,
+    ) -> StoreRateLimit {
+        StoreRateLimit {
+            workspace: ws.into(),
+            route: route.map(str::to_string),
+            service: service.map(str::to_string),
+            limit: limit(per_minute, 60_000),
+        }
+    }
+
+    fn rate_limit_on(cfg: &Config, route_id: &str) -> Option<RateLimit> {
+        cfg.listeners[0]
+            .rules
+            .iter()
+            .find(|r| r.route == route_id)
+            .unwrap_or_else(|| panic!("no rule {route_id}"))
+            .rate_limit
+            .clone()
+    }
+
+    /// A limit on the workspace reaches every rule of that workspace, on every listener, and no
+    /// rule of another; it is the rule's field, not a plugin.
+    #[test]
+    fn a_stored_rate_limit_reaches_the_rules_it_covers() {
+        let snap = StoreSnapshot {
+            services: vec![
+                ws_svc("a", "orders", "a.internal"),
+                ws_svc("b", "orders", "b.internal"),
+            ],
+            routes: vec![
+                ws_route("a", "api", "orders", "a.example"),
+                ws_route("a", "web", "orders", "w.example"),
+                ws_route("b", "api", "orders", "b.example"),
+            ],
+            rate_limits: vec![StoreRateLimit {
+                limit: limit(5, 1_000),
+                ..rate_limit("a", None, None, 0)
+            }],
+            ..Default::default()
+        };
+        let cfg = compile(
+            &snap,
+            &StoreSettings {
+                http_ports: vec![80, 8080],
+            },
+        );
+        for listener in &cfg.listeners {
+            for rule in &listener.rules {
+                let want = rule.route.starts_with("a/").then(|| limit(5, 1_000));
+                assert_eq!(rule.rate_limit, want, "{}", rule.route);
+                assert!(rule.plugins.is_empty(), "{}", rule.route);
+            }
+        }
+    }
+
+    /// Route over service over workspace, as for every policy, and a limit attached to another
+    /// route, another service or the same names in another workspace does not apply.
+    #[test]
+    fn the_most_specific_rate_limit_applies() {
+        let routes = vec![
+            ws_route("a", "api", "orders", "a.example"),
+            ws_route("a", "web", "orders", "w.example"),
+            ws_route("a", "pay", "billing", "p.example"),
+        ];
+        let services = vec![
+            ws_svc("a", "orders", "o.internal"),
+            ws_svc("a", "billing", "b.internal"),
+        ];
+        let snap = StoreSnapshot {
+            services: services.clone(),
+            routes: routes.clone(),
+            rate_limits: vec![
+                rate_limit("a", None, None, 10),
+                rate_limit("a", None, Some("orders"), 20),
+                rate_limit("a", Some("api"), None, 30),
+                // Elsewhere: another workspace's same names, and a route that is not here.
+                rate_limit("b", Some("pay"), None, 99),
+                rate_limit("b", None, Some("billing"), 99),
+                rate_limit("a", Some("other"), None, 99),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(rate_limit_on(&cfg, "a/api"), Some(limit(30, 60_000)));
+        assert_eq!(rate_limit_on(&cfg, "a/web"), Some(limit(20, 60_000)));
+        assert_eq!(rate_limit_on(&cfg, "a/pay"), Some(limit(10, 60_000)));
+
+        // Row order decides nothing between different specificities.
+        let mut reversed = snap.clone();
+        reversed.rate_limits.reverse();
+        assert_eq!(compile(&reversed, &StoreSettings::default()), cfg);
+
+        // Only the elsewhere ones: no limit at all.
+        let elsewhere = StoreSnapshot {
+            services,
+            routes,
+            rate_limits: snap.rate_limits[3..].to_vec(),
+            ..Default::default()
+        };
+        let cfg = compile(&elsewhere, &StoreSettings::default());
+        for route in ["a/api", "a/web", "a/pay"] {
+            assert_eq!(rate_limit_on(&cfg, route), None, "{route}");
+        }
+    }
+
+    /// A limit and a policy are independent: a route-level limit leaves a workspace-level policy
+    /// in place, and a policy leaves the limit alone.
+    #[test]
+    fn a_rate_limit_and_a_policy_both_apply() {
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            plugins: vec![key_auth("", None)],
+            rate_limits: vec![rate_limit("", Some("api"), None, 7)],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(rate_limit_on(&cfg, "api"), Some(limit(7, 60_000)));
+        assert!(matches!(plugins_on(&cfg, "api"), [Plugin::KeyAuth(_)]));
+    }
+
+    /// A snapshot written before limits existed still reads, and compiles to no limit.
+    #[test]
+    fn a_snapshot_without_rate_limits_reads_as_none() {
+        let older: StoreSnapshot = serde_json::from_value(serde_json::json!({
+            "services": [], "routes": [], "plugins": [], "credentials": []
+        }))
+        .expect("an older snapshot still reads");
+        assert!(older.rate_limits.is_empty());
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            ..older
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(rate_limit_on(&cfg, "api"), None);
+        let body = serde_json::to_string(&cfg).unwrap();
+        assert!(!body.contains("rate_limit"), "{body}");
+    }
+
     /// Every bound port carries every route, and each listener's table indexes its own listener.
     #[test]
     fn every_bound_port_gets_the_same_routes() {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
+            rate_limits: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
