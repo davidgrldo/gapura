@@ -8,6 +8,8 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A console sign-in just after a reset, disable or demotion is no longer refused while the
+  database's clock runs ahead of the console's: a session is now issued by that clock too.
 - An HTTPRoute that names none of Gapura's Gateways is no longer compiled. Its RegularExpression
   paths were built on every translation all the same, so one route attached to nothing, holding 128
   patterns like `/0\w{100}`, held up configuration for the whole gateway for 18 seconds per change.

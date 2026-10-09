@@ -582,6 +582,14 @@ fn now_seconds() -> u64 {
         .as_secs()
 }
 
+/// When a store-mode session is issued: `signed_in_at`, the database's time at sign-in, but
+/// never earlier than `now_millis()`. A cut-off and the issue time must come from one clock, the
+/// database's, or a sign-in just after a cut-off is refused for as long as that clock runs ahead
+/// of this one.
+fn issued_at_or_after(signed_in_at: i64) -> u64 {
+    now_millis().max(u64::try_from(signed_in_at).unwrap_or(0))
+}
+
 /// When a session is issued, to the millisecond, which `sessions_valid_after` is compared with.
 pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -779,7 +787,13 @@ pub async fn login_local(
         match state.local_users.verify(&form.username, &form.password) {
             Some(groups) => {
                 tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
-                session_response(&state, form.username, groups, pending.return_to.as_deref())
+                session_response(
+                    &state,
+                    form.username,
+                    groups,
+                    pending.return_to.as_deref(),
+                    now_millis(),
+                )
             }
             None => refused_local("That email and password do not match."),
         }
@@ -868,31 +882,34 @@ async fn store_login(
     let Some(account) = account.filter(|a| matches && !a.disabled) else {
         return refused_local("Wrong username or password.");
     };
-    match store
+    let issued_at = match store
         .record_sign_in(account.id, &account.password_hash)
         .await
     {
-        Ok(true) => {}
+        Ok(Some(signed_in_at)) => issued_at_or_after(signed_in_at),
         // The hash it verified was replaced meanwhile, by a reset or a change: this password no
         // longer opens the account, and a session issued now could postdate the cut-off.
-        Ok(false) => return refused_local("Wrong username or password."),
+        Ok(None) => return refused_local("Wrong username or password."),
         Err(error) => {
-            // The sign-in itself is good; only the "last sign-in" column misses it.
+            // The sign-in itself is good; only the "last sign-in" column misses it, and the
+            // session is issued by the console's clock.
             tracing::warn!(%error, "recording a sign-in failed");
+            now_millis()
         }
-    }
+    };
     tracing::info!(user = %account.id, "signed in");
     session_response(
         state,
         account.id.to_string(),
         Vec::new(),
         return_to.as_deref(),
+        issued_at,
     )
 }
 
 /// The `Set-Cookie` value of a fresh session for `subject`, issued at `issued_at` (Unix
-/// milliseconds), which is `now_millis()` but where the session must not fall before a cut-off
-/// read from the database's clock.
+/// milliseconds): `now_millis()` without a store, and with one never earlier than the database's
+/// clock, which stamps every cut-off (see `issued_at_or_after`).
 pub(crate) fn session_cookie(
     state: &AppState,
     subject: String,
@@ -913,14 +930,16 @@ pub(crate) fn session_cookie(
     )
 }
 
-/// A redirect to where the reader was going, carrying a fresh session for `subject`.
+/// A redirect to where the reader was going, carrying a fresh session for `subject`, issued
+/// at `issued_at` (see `session_cookie`).
 fn session_response(
     state: &AppState,
     subject: String,
     groups: Vec<String>,
     return_to: Option<&str>,
+    issued_at: u64,
 ) -> Response {
-    let cookie = session_cookie(state, subject, groups, now_millis());
+    let cookie = session_cookie(state, subject, groups, issued_at);
     let destination = return_to
         .filter(|p| safe_return_path(p))
         .unwrap_or(AFTER_LOGIN);
@@ -1174,10 +1193,10 @@ pub async fn callback(
     // In store mode the session names the account's row, not the provider's subject: the row is
     // what roles are granted to, and every request reads it back, groups included. The cookie
     // carries none, so it grants nothing if ever shown to a console that reads them from it.
-    let (subject, groups) = match &state.store {
+    let (subject, groups, issued_at) = match &state.store {
         None => {
             tracing::info!(subject = %subject, groups = groups.len(), "signed in");
-            (subject, groups)
+            (subject, groups, now_millis())
         }
         Some(store) => {
             let name = display_name(&as_json, &subject);
@@ -1191,7 +1210,11 @@ pub async fn callback(
                 }
                 Ok(account) => {
                     tracing::info!(user = %account.id, groups = groups.len(), "signed in");
-                    (account.id.to_string(), Vec::new())
+                    (
+                        account.id.to_string(),
+                        Vec::new(),
+                        issued_at_or_after(account.signed_in_at),
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(%error, "recording a signed-in OIDC account failed");
@@ -1201,7 +1224,7 @@ pub async fn callback(
         }
     };
 
-    let cookie = session_cookie(&state, subject, groups, now_millis());
+    let cookie = session_cookie(&state, subject, groups, issued_at);
     let destination = pending
         .return_to
         .as_deref()
