@@ -13,13 +13,40 @@ use crate::hostname;
 /// next to the round-robin cursors and parsed TLS certs.
 pub type RegexMap = HashMap<String, Arc<regex::Regex>>;
 
+/// The most a path regex may compile to, in bytes (`RegexBuilder::size_limit`; the default is
+/// 10 MiB). Realistic gateway paths are far below it: `^/api/v[0-9]+/.*` is about 1.5 KB,
+/// `/users/\w+/posts/\d+` about 55 KB (Unicode `\w` is the big part), three `[^/]{1,64}`
+/// segments about 200 KB, and `/\w{10}` just fits. Compile time grows with the program, so this
+/// is what bounds the work one pattern can cost: `/\w{100}` (about 5 MB, ~150 ms to compile
+/// under the default) is refused after a fraction of that. Envoy's RE2 default program size is
+/// stricter still.
+pub const PATH_REGEX_SIZE_LIMIT: usize = 512 * 1024;
+
+/// The most memory each search cache of a path regex may give its lazy DFA, in bytes
+/// (`RegexBuilder::dfa_size_limit`; the default is 2 MiB). The data plane holds one cache per
+/// pattern per thread, so this bounds memory per request thread rather than compile time. A
+/// pattern whose DFA would not fit still matches correctly, only through a slower engine.
+pub const PATH_REGEX_DFA_SIZE_LIMIT: usize = 1024 * 1024;
+
 /// A path pattern must match the whole path, as Envoy and Istio treat Gateway API's
 /// RegularExpression: `/admin` matches `/admin` and not `/x/admin-y`. A pattern meant as a prefix
-/// says so with a trailing `.*`. The raw pattern is compiled first so one with an unbalanced `)`
-/// is refused instead of escaping the anchoring group.
+/// says so with a trailing `.*`. A pattern whose program exceeds `PATH_REGEX_SIZE_LIMIT` is
+/// refused with `regex::Error::CompiledTooBig`, as an invalid one is with `Syntax`.
 pub fn compile_path_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    regex::Regex::new(pattern)?;
-    regex::Regex::new(&format!("^(?:{pattern})$"))
+    // The raw pattern must parse on its own, so one with an unbalanced `)` is refused instead of
+    // escaping the anchoring group (`a)|(b` would otherwise anchor only half of itself). Only its
+    // syntax matters here: a size limit of zero stops the build right after parsing, so this
+    // check costs microseconds even for a pattern whose program is huge, and the full compile
+    // below is paid once, not twice.
+    if let Err(e @ regex::Error::Syntax(_)) =
+        regex::RegexBuilder::new(pattern).size_limit(0).build()
+    {
+        return Err(e);
+    }
+    regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
+        .size_limit(PATH_REGEX_SIZE_LIMIT)
+        .dfa_size_limit(PATH_REGEX_DFA_SIZE_LIMIT)
+        .build()
 }
 
 /// Compile every `PathMatch::Regex` pattern of the port tables into a side map, and report the
@@ -589,6 +616,43 @@ mod tests {
         assert!(compile_path_regex("a)|(b").is_err());
         assert!(compile_path_regex("/a|/b").unwrap().is_match("/b"));
         assert!(!compile_path_regex("/a|/b").unwrap().is_match("/bx"));
+        // The syntax-only pre-check reports the parse error itself, not a size error.
+        assert!(matches!(
+            compile_path_regex("a)|(b"),
+            Err(regex::Error::Syntax(_))
+        ));
+    }
+
+    #[test]
+    fn a_path_regex_over_the_size_limit_is_refused_not_compiled() {
+        // About 5 MB of program under the default limit, and ~150 ms to build: the shape of
+        // pattern behind #156. It must come back as an error, quickly, never as a Regex.
+        let started = std::time::Instant::now();
+        let err = compile_path_regex(r"/0\w{100}").unwrap_err();
+        assert!(
+            matches!(err, regex::Error::CompiledTooBig(PATH_REGEX_SIZE_LIMIT)),
+            "{err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "refusal took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn realistic_path_regexes_fit_the_size_limit() {
+        for p in [
+            "^/api/v[0-9]+/.*",
+            r"/users/\w+/posts/\d+",
+            r"/v\d+/[\p{L}\p{N}_-]+/(items|orders|users)/[^/]+/?",
+            "/[^/]{1,64}/[^/]{1,64}/[^/]{1,64}",
+            "/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+            r"/(?i)static/.*\.(css|js|png|svg|woff2?)",
+            r"/\w{10}",
+        ] {
+            assert!(compile_path_regex(p).is_ok(), "{p} must compile");
+        }
     }
 
     #[test]
