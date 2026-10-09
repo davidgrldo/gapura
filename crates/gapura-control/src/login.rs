@@ -720,6 +720,15 @@ fn query_escape(path: &str) -> String {
         .collect()
 }
 
+/// The most `POST /auth/login` reads, in bytes. Nobody has signed in yet when it is read, so
+/// whatever it is, anyone can make the console buffer it.
+///
+/// 16 KiB holds the largest form this console ever issues, with room to spare: a state carrying
+/// a 2048-byte return path is about 5.5 KiB once JSON-escaped, sealed and base64-encoded, a
+/// password of `MAX_PASSWORD_BYTES` is at most 3 KiB percent-encoded, and a username or an email
+/// well under 1 KiB. Anything larger was not typed into the form; it gets a 413.
+pub(crate) const MAX_LOGIN_FORM: usize = 16 * 1024;
+
 /// `POST /auth/login`: the form above lands here.
 #[derive(Deserialize)]
 pub struct LocalLogin {
@@ -2301,6 +2310,46 @@ mod local_login_flow_tests {
         assert_eq!(
             attempt("b%40x", "s3cret").await.status(),
             StatusCode::SEE_OTHER
+        );
+    }
+
+    #[tokio::test]
+    async fn a_form_larger_than_any_this_console_issues_is_refused_unread() {
+        // #158: a unique megabyte name per request used to be buffered, verified and kept.
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!("users:\n  - email: a@x\n    bcrypt: {hash}\n"));
+        let page = get(&state, "/auth/login").await;
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+        let name = "a".repeat(MAX_LOGIN_FORM);
+        let response = post(
+            &state,
+            "/auth/login",
+            format!("state={login_state}&email={name}&password=wrong"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // A form of the largest size this console issues still fits.
+        let return_to = format!("/{}", "\"".repeat(2047));
+        let big_state = Pending::begin(&state.session_key, Some(return_to)).state;
+        let password = "é".repeat(crate::password::MAX_PASSWORD_BYTES / 2);
+        let body = format!(
+            "state={big_state}&email=a%40x&password={}",
+            password
+                .bytes()
+                .map(|b| format!("%{b:02X}"))
+                .collect::<String>()
+        );
+        assert!(body.len() < MAX_LOGIN_FORM, "{} bytes", body.len());
+        assert_eq!(
+            post(&state, "/auth/login", body).await.status(),
+            StatusCode::UNAUTHORIZED
         );
     }
 

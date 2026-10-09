@@ -16,9 +16,13 @@ use axum::{
 pub fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        // The sign-in form answers anyone, so it gets the smallest cap that holds a real form,
+        // not axum's 2 MiB default: see `MAX_LOGIN_FORM`.
         .route(
             "/auth/login",
-            get(crate::login::begin).post(crate::login::login_local),
+            get(crate::login::begin)
+                .post(crate::login::login_local)
+                .layer(DefaultBodyLimit::max(crate::login::MAX_LOGIN_FORM)),
         )
         .route("/auth/callback", get(crate::login::callback))
         .route("/auth/logout", post(crate::login::logout))

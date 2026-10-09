@@ -45,6 +45,10 @@ means what it usually does, moving from one version below to a later one. Releas
   when each token was last used. `/v1/config` records those on each call; migration 0006 adds the
   two columns they need. `Store::issue_token`, which wrote no audit row, is now `seed_token`, for
   seeding and tests.
+- The sign-in throttle keeps a name only as a fixed-size SHA-256 digest of its lowercased form, and
+  `POST /auth/login` reads at most 16 KiB, answering 413 beyond it. A unique megabyte-long username
+  per request used to be buffered and kept until the counters held 100,000 entries, enough to
+  OOM-kill the console; an over-long name is still counted against its address and pair (#158).
 - The console has a Consumers page under Configuration, and an API-key requirement to go with it.
   Create consumers and issue them keys: a key is shown once, with a Copy button, and closing the
   dialog without copying asks first. A key may expire; revoke one, or delete the consumer. A

@@ -8,7 +8,9 @@
 //!   go on trying others: locking the account itself would hand anyone who knows a username a
 //!   way to keep it locked, and the account that hurts most is the local one kept for the day
 //!   the identity provider is down. Names are compared without case and counted whether or not
-//!   an account has them, so a lock proves nothing about the name.
+//!   an account has them, so a lock proves nothing about the name. A name is kept only as a
+//!   SHA-256 digest of its lowercased form: a fixed 32 bytes however long the name posted was,
+//!   so a flood of unique, long names costs the counters no more than one of short ones.
 //! - **An address.** Ten failures from one address in a minute refuse its sign-ins until the
 //!   minute is out, whatever names they try. A provider's refusal on the callback counts here,
 //!   naming no account.
@@ -50,13 +52,28 @@ const ADDRESS: Rule = Rule {
 /// addresses than this leaves its newest ones uncounted rather than growing without bound.
 const CAPACITY: usize = 100_000;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// What a counter counts. `Copy`, so it owns nothing on the heap: an entry costs the same
+/// whatever name it was made from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Key {
-    Pair(String, IpAddr),
+    /// The digest of a lowercased name, and an address.
+    Pair([u8; 32], IpAddr),
     Address(IpAddr),
 }
 
 impl Key {
+    /// The pair `name` at `addr`. Lowercased a character at a time straight into the digest,
+    /// so a long name is never copied, only read once.
+    fn pair(name: &str, addr: IpAddr) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let mut buf = [0u8; 4];
+        for c in name.chars().flat_map(char::to_lowercase) {
+            digest.update(c.encode_utf8(&mut buf).as_bytes());
+        }
+        Key::Pair(digest.finalize().into(), addr)
+    }
+
     fn rule(&self) -> &'static Rule {
         match self {
             Key::Pair(..) => &PAIR,
@@ -119,13 +136,13 @@ impl Throttle {
     /// A sign-in that succeeded clears its pair, so the person who finally typed it right is not
     /// still a strike from a lock. The address keeps its count: it is about the address.
     pub fn succeeded(&self, name: &str, addr: IpAddr) {
-        self.lock().remove(&Key::Pair(name.to_lowercase(), addr));
+        self.lock().remove(&Key::pair(name, addr));
     }
 
     fn wait_at(&self, name: Option<&str>, addr: IpAddr, now: Instant) -> Option<Duration> {
         let counters = self.lock();
         let keys = name
-            .map(|n| Key::Pair(n.to_lowercase(), addr))
+            .map(|n| Key::pair(n, addr))
             .into_iter()
             .chain([Key::Address(addr)]);
         keys.filter_map(|k| counters.get(&k).and_then(|c| c.locked(now)))
@@ -135,7 +152,7 @@ impl Throttle {
     fn failed_at(&self, name: Option<&str>, addr: IpAddr, now: Instant) {
         let mut counters = self.lock();
         let keys = name
-            .map(|n| Key::Pair(n.to_lowercase(), addr))
+            .map(|n| Key::pair(n, addr))
             .into_iter()
             .chain([Key::Address(addr)]);
         for key in keys {
@@ -259,6 +276,27 @@ mod tests {
             t.client(Some(ip("198.51.100.1")), Some("203.0.113.5")),
             ip("198.51.100.1")
         );
+    }
+
+    #[test]
+    fn a_long_name_costs_a_counter_no_more_than_a_short_one() {
+        // #158: the pair used to keep the whole lowercased name, so unique megabyte names each
+        // held megabytes until the map filled. A key is now a fixed size and owns no heap.
+        fn owns_no_heap<T: Copy>() {}
+        owns_no_heap::<Key>();
+        assert!(std::mem::size_of::<Key>() <= 64);
+        let here = ip("203.0.113.3");
+        let long = "M".repeat(1 << 20);
+        assert!(Key::pair(&long, here) == Key::pair(&long.to_lowercase(), here));
+        assert!(Key::pair(&long, here) != Key::pair(&long[1..], here));
+        // And it is still counted, against the pair and the address.
+        let t = Throttle::default();
+        let now = Instant::now();
+        for _ in 0..5 {
+            t.failed_at(Some(&long), here, now);
+        }
+        assert!(t.wait_at(Some(&long.to_lowercase()), here, now).is_some());
+        assert_eq!(t.lock().len(), 2, "one pair and one address");
     }
 
     #[test]
