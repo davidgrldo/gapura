@@ -8,7 +8,9 @@
 //! Kubernetes mode keeps no configuration in a store, so there these answer 404.
 
 use crate::access_api::{store_caller, CallerError, StoreCaller};
-use crate::configuration::{self, Action, FieldError, RouteInput, Write};
+use crate::configuration::{
+    self, Action, FieldError, RouteInput, ServiceInput, TlsOnReplace, Write,
+};
 use crate::grants::Refusal;
 use crate::grants_api::{unreadable, unsaved, NOT_SAVED};
 use crate::state::AppState;
@@ -228,14 +230,21 @@ pub async fn replace_service(
     if let Some(r) = refuse_name("service", &name) {
         return r;
     }
-    let input = match body(raw, "a service") {
+    let input: ServiceInput = match body(raw, "a service") {
         Ok(i) => i,
         Err(r) => return *r,
+    };
+    // A replace that names no TLS settings keeps the stored ones: a client that does not know
+    // about them -- the console before it had the fieldset -- must not erase them.
+    let tls = if input.tls.is_some() {
+        TlsOnReplace::AsSent
+    } else {
+        TlsOnReplace::Kept
     };
     match configuration::service(input, Write::Replace) {
         Ok((service, Some(seen))) => written(
             store
-                .replace_service(caller.me.id, workspace, &name, &service, &seen)
+                .replace_service(caller.me.id, workspace, &name, &service, &seen, tls)
                 .await,
         ),
         Ok((_, None)) => unseen(),

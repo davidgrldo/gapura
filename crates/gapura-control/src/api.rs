@@ -13,6 +13,11 @@ use axum::{
     Json, Router,
 };
 
+/// The most a service write may hold: what any other write may, plus a CA bundle at its limit
+/// (`configuration::MAX_CA_PEM_BYTES`) written as JSON, which at most doubles PEM's printable text
+/// and line breaks.
+const MAX_SERVICE_BODY: usize = MAX_BODY + 2 * crate::configuration::MAX_CA_PEM_BYTES;
+
 pub fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -95,18 +100,18 @@ pub fn router_with(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
         )
         // Store-mode configuration, per workspace. The ones that read a body cap it as the
-        // grants writes do.
+        // grants writes do, a service's with room for its CA bundle.
         .route(
             "/api/workspaces/{ws}/services",
             get(crate::configuration_api::list_services)
                 .post(crate::configuration_api::create_service)
-                .layer(DefaultBodyLimit::max(MAX_BODY)),
+                .layer(DefaultBodyLimit::max(MAX_SERVICE_BODY)),
         )
         .route(
             "/api/workspaces/{ws}/services/{name}",
             put(crate::configuration_api::replace_service)
                 .delete(crate::configuration_api::delete_service)
-                .layer(DefaultBodyLimit::max(MAX_BODY)),
+                .layer(DefaultBodyLimit::max(MAX_SERVICE_BODY)),
         )
         .route(
             "/api/workspaces/{ws}/routes",

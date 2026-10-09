@@ -17,7 +17,8 @@ use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
-    self, Action, KeyAuthView, PathMatch, Protocol, Route, RouteView, Service, ServiceView,
+    self, Action, KeyAuthView, PathMatch, Protocol, Route, RouteView, Service, ServiceView, Tls,
+    TlsOnReplace,
 };
 use crate::grants::Refusal;
 use anyhow::Result;
@@ -57,8 +58,17 @@ fn service_from(row: &tokio_postgres::Row) -> Service {
         port: row.get("port"),
         connect_timeout_ms: row.get("connect_timeout_ms"),
         read_timeout_ms: row.get("read_timeout_ms"),
+        tls: Tls {
+            verify: row.get("tls_verify"),
+            ca_pem: row.get("tls_ca_pem"),
+            sni: row.get("tls_sni"),
+        },
     }
 }
+
+/// The columns `service_from` reads, besides `name`.
+const SERVICE_COLUMNS: &str = "protocol, host, port, connect_timeout_ms, read_timeout_ms, \
+                               tls_verify, tls_ca_pem, tls_sni";
 
 /// A route row as the API shows it. A `paths` value this binary cannot read is an error, not an
 /// empty list, which would read as "every path".
@@ -246,7 +256,8 @@ impl Store {
             .query(
                 &format!(
                     "select s.id, s.name, s.protocol, s.host, s.port, s.connect_timeout_ms,
-                            s.read_timeout_ms, {} as updated_at,
+                            s.read_timeout_ms, s.tls_verify, s.tls_ca_pem, s.tls_sni,
+                            {} as updated_at,
                             (select count(*) from routes r where r.service_id = s.id) as routes
                        from services s where s.workspace_id = $1 order by s.name",
                     updated_at("s.updated_at")
@@ -321,8 +332,9 @@ impl Store {
         let Some(row) = tx
             .query_opt(
                 "insert into services (workspace_id, name, protocol, host, port,
-                                       connect_timeout_ms, read_timeout_ms)
-                 values ($1, $2, $3, $4, $5, $6, $7)
+                                       connect_timeout_ms, read_timeout_ms, tls_verify,
+                                       tls_ca_pem, tls_sni)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  on conflict (workspace_id, name) do nothing returning id",
                 &[
                     &workspace,
@@ -332,6 +344,9 @@ impl Store {
                     &s.port,
                     &s.connect_timeout_ms,
                     &s.read_timeout_ms,
+                    &s.tls.verify,
+                    &s.tls.ca_pem,
+                    &s.tls.sni,
                 ],
             )
             .await?
@@ -361,6 +376,7 @@ impl Store {
 
     /// Replaces the service called `current`, which may rename it, when `seen` is its
     /// `updated_at` as last read. Its routes follow it, since they hold its id, not its name.
+    /// `tls` says whether `s.tls` is written or the stored settings are kept.
     pub async fn replace_service(
         &self,
         caller: Uuid,
@@ -368,8 +384,9 @@ impl Store {
         current: &str,
         s: &Service,
         seen: &str,
+        tls: TlsOnReplace,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_replace_service(caller, workspace, current, s, seen)).await
+        retrying(move || self.try_replace_service(caller, workspace, current, s, seen, tls)).await
     }
 
     async fn try_replace_service(
@@ -379,6 +396,7 @@ impl Store {
         current: &str,
         s: &Service,
         seen: &str,
+        tls: TlsOnReplace,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
@@ -386,8 +404,7 @@ impl Store {
         let Some(row) = tx
             .query_opt(
                 &format!(
-                    "select id, name, protocol, host, port, connect_timeout_ms, read_timeout_ms,
-                            {} as updated_at
+                    "select id, name, {SERVICE_COLUMNS}, {} as updated_at
                        from services where workspace_id = $1 and name = $2 for update",
                     updated_at("updated_at")
                 ),
@@ -420,13 +437,20 @@ impl Store {
             .into());
         }
         let before = service_from(&row);
+        // Read under the `for update` above, so what is kept is what is there when this writes.
+        // An `http` service keeps nothing: it may only have the defaults, which `s` carries.
+        let mut s = s.clone();
+        if tls == TlsOnReplace::Kept && s.protocol == Protocol::Https {
+            s.tls = before.tls.clone();
+        }
         // Nothing to write, so nothing to audit and nothing for the data planes to reload.
-        if before == *s {
+        if before == s {
             return Ok(());
         }
         tx.execute(
             "update services set name = $2, protocol = $3, host = $4, port = $5,
-                    connect_timeout_ms = $6, read_timeout_ms = $7, updated_at = now()
+                    connect_timeout_ms = $6, read_timeout_ms = $7, tls_verify = $8,
+                    tls_ca_pem = $9, tls_sni = $10, updated_at = now()
               where id = $1",
             &[
                 &id,
@@ -436,6 +460,9 @@ impl Store {
                 &s.port,
                 &s.connect_timeout_ms,
                 &s.read_timeout_ms,
+                &s.tls.verify,
+                &s.tls.ca_pem,
+                &s.tls.sni,
             ],
         )
         .await?;
@@ -448,7 +475,7 @@ impl Store {
                 object_id: Some(id),
                 workspace: Some(workspace),
                 before: Some(json(&before)),
-                after: Some(json(s)),
+                after: Some(json(&s)),
             },
         )
         .await?;
@@ -478,8 +505,10 @@ impl Store {
         let actor = decide(&tx, caller, workspace, Action::Delete).await?;
         let Some(row) = tx
             .query_opt(
-                "select id, name, protocol, host, port, connect_timeout_ms, read_timeout_ms
-                   from services where workspace_id = $1 and name = $2 for update",
+                &format!(
+                    "select id, name, {SERVICE_COLUMNS}
+                       from services where workspace_id = $1 and name = $2 for update"
+                ),
                 &[&workspace, &name],
             )
             .await?

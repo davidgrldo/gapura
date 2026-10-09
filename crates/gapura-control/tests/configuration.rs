@@ -886,9 +886,10 @@ async fn a_request_is_judged_by_who_sent_it_before_it_is_judged_by_what_it_says(
     );
     let service = format!("{SERVICES}/orders");
     let route = format!("{ROUTES}/orders-api");
+    // Past even a service's cap, which leaves room for a CA bundle.
     let too_long = format!(
         r#"{{"name":"orders","protocol":"http","host":"{}","port":1}}"#,
-        "a".repeat(100_000)
+        "a".repeat(300_000)
     );
     let before = everything(&store).await;
 
@@ -1320,4 +1321,403 @@ async fn a_prefix_is_kept_without_its_trailing_slash() {
         route["paths"],
         serde_json::json!([{"type": "prefix", "value": "/orders"}])
     );
+}
+
+/// A CA certificate in PEM, as an operator pastes one.
+fn ca_pem() -> String {
+    rcgen::generate_simple_self_signed(vec!["ca.example".into()])
+        .unwrap()
+        .cert
+        .pem()
+}
+
+/// An `https` service named `name` to `api.internal:443`, with `tls` as given (JSON, or nothing).
+fn https_service(name: &str, tls: Option<serde_json::Value>) -> String {
+    let mut body = serde_json::json!({
+        "name": name, "protocol": "https", "host": "api.internal", "port": 443
+    });
+    if let Some(tls) = tls {
+        body["tls"] = tls;
+    }
+    body.to_string()
+}
+
+/// The `tls` of every service audit entry, oldest first, as (before, after).
+async fn audited_tls(store: &Store) -> Vec<(serde_json::Value, serde_json::Value)> {
+    store
+        .client()
+        .await
+        .unwrap()
+        .query(
+            "select coalesce(before->'tls', 'null'), coalesce(after->'tls', 'null')
+               from audit_log where object_kind = 'service' order by id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_https_service_s_tls_settings_are_stored_audited_and_served() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let pem = ca_pem();
+    ok(
+        &app,
+        "POST",
+        SERVICES,
+        s.ed,
+        &https_service(
+            "own-ca",
+            Some(serde_json::json!({"ca_pem": pem, "sni": "Origin.Example"})),
+        ),
+    )
+    .await;
+    // Without `tls`: the defaults, on the same address.
+    ok(&app, "POST", SERVICES, s.ed, &https_service("system", None)).await;
+    let own = serde_json::json!({"verify": true, "ca_pem": pem, "sni": "origin.example"});
+    let defaults = serde_json::json!({"verify": true, "ca_pem": null, "sni": null});
+    assert_eq!(row(&app, SERVICES, "own-ca", s.vi).await["tls"], own);
+    assert_eq!(row(&app, SERVICES, "system", s.vi).await["tls"], defaults);
+
+    // A replace that sends back what it read writes nothing.
+    let before = everything(&store).await;
+    let mut listed = row(&app, SERVICES, "own-ca", s.ed).await;
+    listed.as_object_mut().unwrap().remove("routes");
+    listed.as_object_mut().unwrap().remove("key_auth");
+    ok(
+        &app,
+        "PUT",
+        &format!("{SERVICES}/own-ca"),
+        s.ed,
+        &listed.to_string(),
+    )
+    .await;
+    assert_eq!(everything(&store).await, before);
+
+    // Each setting changes on its own.
+    let at = seen(&app, SERVICES, "own-ca", s.ed).await;
+    let mut body: serde_json::Value = json(&https_service(
+        "own-ca",
+        Some(serde_json::json!({"verify": false, "sni": "origin.example"})),
+    ));
+    body["updated_at"] = at.into();
+    ok(
+        &app,
+        "PUT",
+        &format!("{SERVICES}/own-ca"),
+        s.ed,
+        &body.to_string(),
+    )
+    .await;
+    let insecure = serde_json::json!({"verify": false, "ca_pem": null, "sni": "origin.example"});
+    assert_eq!(row(&app, SERVICES, "own-ca", s.vi).await["tls"], insecure);
+    assert_eq!(
+        audited_tls(&store).await,
+        [
+            (serde_json::Value::Null, own.clone()),
+            (serde_json::Value::Null, defaults.clone()),
+            (own, insecure),
+        ],
+        "the audit log records the settings, the CA bundle as stored, before and after"
+    );
+
+    // Both are served, each in a cluster of its own though they share an address.
+    for (name, host) in [("own-ca", "a.example.com"), ("system", "b.example.com")] {
+        ok(
+            &app,
+            "POST",
+            ROUTES,
+            s.ed,
+            &serde_json::json!({"name": name, "service": name, "hosts": [host]}).to_string(),
+        )
+        .await;
+    }
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let config = gapura_core::store::compile(
+        &snapshot,
+        &gapura_core::store::StoreSettings {
+            http_ports: vec![80],
+        },
+    );
+    let cluster_of = |route: &str| {
+        let rule = config.listeners[0]
+            .rules
+            .iter()
+            .find(|r| r.route == route)
+            .unwrap_or_else(|| panic!("no rule {route}"));
+        rule.backends[0].cluster.clone().expect("a cluster")
+    };
+    assert_eq!(
+        cluster_of("default/own-ca"),
+        "https://api.internal:443?sni=origin.example&insecure"
+    );
+    assert_eq!(cluster_of("default/system"), "https://api.internal:443");
+    let tls = |key: &str| config.clusters[key].tls.clone().expect("tls");
+    let served = tls("https://api.internal:443?sni=origin.example&insecure");
+    assert_eq!(
+        (served.sni.as_str(), served.ca_pem, served.insecure),
+        ("origin.example", None, true)
+    );
+    let served = tls("https://api.internal:443");
+    assert_eq!(
+        (served.sni.as_str(), served.ca_pem, served.insecure),
+        ("api.internal", None, false)
+    );
+
+    // And a CA bundle reaches the data planes as stored.
+    let at = seen(&app, SERVICES, "own-ca", s.ed).await;
+    let mut body: serde_json::Value = json(&https_service(
+        "own-ca",
+        Some(serde_json::json!({"ca_pem": pem})),
+    ));
+    body["updated_at"] = at.into();
+    ok(
+        &app,
+        "PUT",
+        &format!("{SERVICES}/own-ca"),
+        s.ed,
+        &body.to_string(),
+    )
+    .await;
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let config = gapura_core::store::compile(&snapshot, &Default::default());
+    let key = config
+        .clusters
+        .keys()
+        .find(|k| k.contains("?ca="))
+        .expect("a cluster keyed by its CA")
+        .clone();
+    let served = config.clusters[&key].tls.clone().expect("tls");
+    assert_eq!(
+        (
+            served.sni.as_str(),
+            served.ca_pem.as_deref(),
+            served.insecure
+        ),
+        ("api.internal", Some(pem.as_str()), false)
+    );
+}
+
+#[tokio::test]
+async fn bad_tls_settings_are_named_and_nothing_is_written() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    let before = everything(&store).await;
+    let pem = ca_pem();
+    let key = rcgen::KeyPair::generate().unwrap().serialize_pem();
+    let oversize = pem.repeat(65 * 1024 / pem.len() + 1);
+    let cases: Vec<(String, &str)> = vec![
+        (
+            serde_json::json!({
+                "name": "plain", "protocol": "http", "host": "orders.internal", "port": 80,
+                "tls": {"verify": false}
+            })
+            .to_string(),
+            "tls",
+        ),
+        (
+            https_service(
+                "s",
+                Some(serde_json::json!({"ca_pem": "not a certificate"})),
+            ),
+            "tls.ca_pem",
+        ),
+        (
+            https_service(
+                "s",
+                Some(serde_json::json!({"ca_pem": format!("{pem}{key}")})),
+            ),
+            "tls.ca_pem",
+        ),
+        (
+            https_service("s", Some(serde_json::json!({"ca_pem": oversize}))),
+            "tls.ca_pem",
+        ),
+        (
+            https_service("s", Some(serde_json::json!({"sni": "*.example.com"}))),
+            "tls.sni",
+        ),
+        (
+            https_service("s", Some(serde_json::json!({"sni": "origin.example:443"}))),
+            "tls.sni",
+        ),
+    ];
+    for (body, expected) in cases {
+        let (status, answer) =
+            send(&app, "POST", SERVICES, Some(s.ed), FROM_THE_CONSOLE, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(json(&answer)["field"], expected, "{answer}");
+    }
+    let (status, body) = send(
+        &app,
+        "POST",
+        SERVICES,
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &https_service("s", Some(serde_json::json!({"verify": true, "pin": "x"}))),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unknown fields are refused: {body}"
+    );
+
+    // An `http` service cannot be given settings by a replace either.
+    let at = seen(&app, SERVICES, "orders", s.ed).await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("{SERVICES}/orders"),
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &format!(
+            r#"{{"name":"orders","protocol":"http","host":"orders.internal","port":8080,"tls":{{"sni":"origin.example"}},"updated_at":"{at}"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(json(&body)["field"], "tls");
+    assert_eq!(everything(&store).await, before, "a refusal writes nothing");
+
+    // A bundle at the limit fits in a request.
+    let at_limit = pem.repeat(64 * 1024 / pem.len());
+    assert!(at_limit.len() > 60 * 1024);
+    ok(
+        &app,
+        "POST",
+        SERVICES,
+        s.ed,
+        &https_service("big", Some(serde_json::json!({"ca_pem": at_limit}))),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_replace_that_names_no_tls_keeps_the_service_s_tls_settings() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    let pem = ca_pem();
+    let settings = serde_json::json!({"verify": false, "ca_pem": pem, "sni": "origin.example"});
+    ok(
+        &app,
+        "POST",
+        SERVICES,
+        s.ed,
+        &https_service("secure", Some(settings.clone())),
+    )
+    .await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        r#"{"name":"secure","service":"secure","hosts":["a.example.com"]}"#,
+    )
+    .await;
+    let put = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let mut body = body;
+            body["updated_at"] = seen(&app, SERVICES, "secure", s.ed).await.into();
+            ok(
+                &app,
+                "PUT",
+                &format!("{SERVICES}/secure"),
+                s.ed,
+                &body.to_string(),
+            )
+            .await;
+        }
+    };
+    let served = || async {
+        let (_, snapshot) = store.snapshot().await.unwrap();
+        let config = gapura_core::store::compile(&snapshot, &Default::default());
+        let rule = config.listeners[0]
+            .rules
+            .iter()
+            .find(|r| r.route == "default/secure")
+            .expect("the route is served");
+        let key = rule.backends[0].cluster.clone().expect("a cluster");
+        let tls = config.clusters[&key].tls.clone().expect("tls");
+        (key, tls)
+    };
+
+    // A port change from a client that sends no `tls`, as the console did before it had one.
+    put(json(&https_service("secure", None).replace("443", "8443"))).await;
+    let listed = row(&app, SERVICES, "secure", s.vi).await;
+    assert_eq!(listed["port"], 8443);
+    assert_eq!(listed["tls"], settings, "kept, not reset");
+    let (key, tls) = served().await;
+    assert!(
+        key.starts_with("https://api.internal:8443?sni=origin.example&ca=")
+            && key.ends_with("&insecure"),
+        "{key}"
+    );
+    assert_eq!(
+        (tls.sni.as_str(), tls.ca_pem.as_deref(), tls.insecure),
+        ("origin.example", Some(pem.as_str()), true)
+    );
+    let audited = audited_tls(&store).await;
+    assert_eq!(
+        audited.last(),
+        Some(&(settings.clone(), settings.clone())),
+        "the audit entry shows them kept"
+    );
+
+    // Sending the row back without `tls` changes nothing, so writes nothing.
+    let before = everything(&store).await;
+    let mut listed = listed;
+    for added in ["routes", "key_auth", "tls"] {
+        listed.as_object_mut().unwrap().remove(added);
+    }
+    ok(
+        &app,
+        "PUT",
+        &format!("{SERVICES}/secure"),
+        s.ed,
+        &listed.to_string(),
+    )
+    .await;
+    assert_eq!(everything(&store).await, before);
+
+    // Naming `tls` replaces them: here, with the defaults.
+    put(json(
+        &https_service("secure", Some(serde_json::json!({"verify": true}))).replace("443", "8443"),
+    ))
+    .await;
+    let defaults = serde_json::json!({"verify": true, "ca_pem": null, "sni": null});
+    assert_eq!(row(&app, SERVICES, "secure", s.vi).await["tls"], defaults);
+    let (key, tls) = served().await;
+    assert_eq!(key, "https://api.internal:8443");
+    assert_eq!(
+        (tls.sni.as_str(), tls.ca_pem, tls.insecure),
+        ("api.internal", None, false)
+    );
+
+    // A service changed to `http` without `tls` drops settings that no longer apply.
+    put(json(&https_service(
+        "secure",
+        Some(serde_json::json!({"verify": false})),
+    )))
+    .await;
+    put(serde_json::json!({
+        "name": "secure", "protocol": "http", "host": "api.internal", "port": 8080
+    }))
+    .await;
+    assert_eq!(row(&app, SERVICES, "secure", s.vi).await["tls"], defaults);
 }

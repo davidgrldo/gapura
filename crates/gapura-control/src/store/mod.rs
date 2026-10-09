@@ -193,7 +193,8 @@ impl Store {
         let services = tx
             .query(
                 "select w.name as workspace, s.name, s.protocol, s.host, s.port,
-                        s.connect_timeout_ms, s.read_timeout_ms
+                        s.connect_timeout_ms, s.read_timeout_ms, s.tls_verify, s.tls_ca_pem,
+                        s.tls_sni
                    from services s join workspaces w on w.id = s.workspace_id
                   order by w.name, s.name",
                 &[],
@@ -218,6 +219,9 @@ impl Store {
                     read_timeout_ms: r
                         .get::<_, Option<i32>>("read_timeout_ms")
                         .and_then(|ms| u32::try_from(ms).ok()),
+                    tls_verify: r.get("tls_verify"),
+                    tls_ca_pem: r.get("tls_ca_pem"),
+                    tls_sni: r.get("tls_sni"),
                 }
             })
             .collect();
