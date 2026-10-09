@@ -16,6 +16,19 @@ means what it usually does, moving from one version below to a later one. Releas
   switched off, and a refusal lands on the input it is about. A broader requirement shows
   read-only, with where it comes from and its issuer. A "JWT" tag beside a service or route says it
   requires a token. Roles are as for the API key: a viewer reads, an editor switches it.
+- Store mode can limit requests. `/api/workspaces/{workspace}/rate-limit` lists the workspace's
+  limits as `{target, limit, per}`; PUT `{"target", "limit", "per"}` limits a route, a service or
+  the whole workspace to `limit` requests (1 to 1 000 000) per `second`, `minute` or `hour`, and
+  `DELETE ?target=` removes one. The limit is the one the `gapura.dev/rate-limit` annotation sets
+  in Kubernetes mode, with the same semantics: a fixed window per route and client address,
+  counted by each data plane replica on its own, so with 3 replicas a client can make up to
+  3 × the limit; there is no shared counter. The most specific limit applies (route over service
+  over workspace), and the service and route lists say which with
+  `rate_limit: {limit, per, from}`, or `null`. A viewer reads; an editor writes. The same limit
+  again writes nothing, removing none is a 404, and each change is a policy audit entry
+  `{target, kind: "rate_limit", limit, per}`. A `rate_limit` row stored by hand in any other shape
+  fails the configuration, as an unreadable `jwt` or `key_auth` row does, so the data planes keep
+  the limits they were last served.
 - The console's route sheet has a "Headers" list after Methods: rows of a name and a value, added
   up to 16 and removed one by one, each of which a request must carry with exactly that value; none
   matches any headers. A refusal's sentence lands on the name or value it names. The sheet always

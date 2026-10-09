@@ -18,8 +18,9 @@ use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
     self, Action, HeaderMatch, HeadersOnReplace, JwtRequirementView, KeyAuthView, PathMatch,
-    Protocol, Route, RouteView, Service, ServiceView, Tls, TlsOnReplace,
+    Protocol, RateLimitRequirementView, Route, RouteView, Service, ServiceView, Tls, TlsOnReplace,
 };
+use crate::consumers::Limit;
 use crate::grants::Refusal;
 use anyhow::Result;
 use std::collections::{BTreeSet, HashMap};
@@ -158,9 +159,10 @@ pub(super) fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
 }
 
 /// Refuses a delete while policies hang off the row. They go with it by `on delete cascade`, and
-/// that would drop a route's key-auth or JWT policy unseen: delete and create again, and the route
-/// answers without asking for credentials, with no audit entry saying the policy went. `column`
-/// is `route_id` or `service_id`, `kind` the word for the row.
+/// that would drop a route's key-auth or JWT policy or request limit unseen: delete and create
+/// again, and the route answers without asking for credentials, or without limit, with no audit
+/// entry saying the policy went. `column` is `route_id` or `service_id`, `kind` the word for the
+/// row.
 async fn no_policies(
     tx: &Transaction<'_>,
     column: &str,
@@ -241,10 +243,12 @@ impl<T: Clone> Attached<T> {
     }
 }
 
-/// The key and JWT requirements of a workspace, as its service and route lists show them.
+/// The key and JWT requirements and the request limits of a workspace, as its service and route
+/// lists show them.
 struct Requirements {
     key_auth: Attached<String>,
     jwt: Attached<Option<String>>,
+    rate_limit: Attached<Limit>,
 }
 
 impl Requirements {
@@ -266,7 +270,17 @@ impl Requirements {
                 .map_err(|_| anyhow::anyhow!("a jwt policy does not fit its shape"))
         })
         .await?;
-        Ok(Requirements { key_auth, jwt })
+        let rate_limit = Attached::read(client, workspace, "rate_limit", |config| {
+            // Likewise a configuration the compiler would not read as a limit.
+            Limit::from_config(config)
+                .ok_or_else(|| anyhow::anyhow!("a rate_limit policy does not fit its shape"))
+        })
+        .await?;
+        Ok(Requirements {
+            key_auth,
+            jwt,
+            rate_limit,
+        })
     }
 
     fn key_auth((header, from): (String, &'static str)) -> KeyAuthView {
@@ -276,11 +290,19 @@ impl Requirements {
     fn jwt((issuer, from): (Option<String>, &'static str)) -> JwtRequirementView {
         JwtRequirementView { issuer, from }
     }
+
+    fn rate_limit((limit, from): (Limit, &'static str)) -> RateLimitRequirementView {
+        RateLimitRequirementView {
+            limit: limit.limit,
+            per: limit.per,
+            from,
+        }
+    }
 }
 
 impl Store {
     /// A workspace's services, by name, each with how many routes use it and the key and JWT
-    /// requirements it carries.
+    /// requirements and the request limit it carries.
     pub async fn services(&self, workspace: Uuid) -> Result<Vec<ServiceView>> {
         let client = self.pool.get().await?;
         let rows = client
@@ -308,12 +330,16 @@ impl Store {
                     .service(r.get("id"))
                     .map(Requirements::key_auth),
                 jwt: found.jwt.service(r.get("id")).map(Requirements::jwt),
+                rate_limit: found
+                    .rate_limit
+                    .service(r.get("id"))
+                    .map(Requirements::rate_limit),
             })
             .collect())
     }
 
     /// A workspace's routes, in the order the data plane matches them: priority, then name, each
-    /// with the key and JWT requirements that apply to it. A
+    /// with the key and JWT requirements and the request limit that apply to it. A
     /// route with no service, which only SQL written by hand can make, is not listed, just as
     /// the compiler does not serve it.
     pub async fn routes(&self, workspace: Uuid) -> Result<Vec<RouteView>> {
@@ -345,6 +371,10 @@ impl Store {
                         .route(id, service)
                         .map(Requirements::key_auth),
                     jwt: found.jwt.route(id, service).map(Requirements::jwt),
+                    rate_limit: found
+                        .rate_limit
+                        .route(id, service)
+                        .map(Requirements::rate_limit),
                 })
             })
             .collect()
