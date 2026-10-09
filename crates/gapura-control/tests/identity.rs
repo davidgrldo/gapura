@@ -831,6 +831,7 @@ async fn a_temporary_password_opens_nothing_but_me() {
         ("DELETE", "/api/data-planes/d"),
         ("POST", "/api/data-planes/d/tokens"),
         ("DELETE", "/api/data-planes/d/tokens/p"),
+        ("GET", "/api/audit"),
         ("GET", "/api/routes"),
         ("GET", "/api/overview"),
     ];
