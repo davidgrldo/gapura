@@ -257,7 +257,13 @@ for (const [name, ours] of [['METHODS', METHODS], ['PATH_TYPES', PATH_TYPES]]) {
     throw new Error(`${name} in src/lib/configuration.js is ${ours}, the server's is ${theirs}`)
   }
 }
-console.log('ok: the route form offers the methods and path types the server accepts')
+const { MAX_HEADERS } = await import('./src/lib/configuration.js')
+const maxHeaders = configurationSource.match(/pub const MAX_HEADERS: usize = (\d+);/)
+if (!maxHeaders) throw new Error(`${CONFIGURATION} has no MAX_HEADERS`)
+if (Number(maxHeaders[1]) !== MAX_HEADERS) {
+  throw new Error(`MAX_HEADERS in src/lib/configuration.js is ${MAX_HEADERS}, the server's is ${maxHeaders[1]}`)
+}
+console.log('ok: the route form offers the methods, path types and header count the server accepts')
 
 // The sheets offer a Reload button when a 409's sentence contains "Reload" (that is how they
 // tell a stale save from any other conflict), so the server's stale-edit sentence has to keep

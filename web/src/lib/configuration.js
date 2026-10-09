@@ -3,6 +3,8 @@
 export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE']
 export const PATH_TYPES = ['prefix', 'exact', 'regex']
 export const PATH_LABEL = { prefix: 'Prefix', exact: 'Exact', regex: 'Regex' }
+// How many headers a route may match; the route sheet stops adding rows there.
+export const MAX_HEADERS = 16
 
 export const upstream = (s) => `${s.protocol}://${s.host}:${s.port}`
 export const ms = (value) => (value == null ? 'default' : `${value} ms`)
