@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
-use gapura_control::store::{Store, WriteError};
+use gapura_control::store::{SignUp, Store, MAX_WAITING_SIGN_UPS};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -400,14 +400,8 @@ async fn while_closed_the_page_says_so_and_a_post_creates_nothing() {
     assert!(page.contains(r#"href="/auth/login?sso=1""#), "{page}");
 
     // The store itself refuses while closed, whatever reaches it.
-    let refused = store.sign_up("maya", "x", None).await.unwrap_err();
-    assert!(
-        matches!(
-            refused,
-            WriteError::Refused(gapura_control::grants::Refusal::Forbidden(_))
-        ),
-        "{refused:?}"
-    );
+    let refused = store.sign_up("maya", "x", None).await.unwrap();
+    assert!(matches!(refused, SignUp::Closed), "{refused:?}");
     assert_eq!(everything(&store).await, before, "nothing written");
     let _ = s;
 }
@@ -652,7 +646,7 @@ async fn an_address_gets_five_sign_ups_in_ten_minutes() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{page}");
     assert_eq!(
         alert(&page),
-        r#"<p class="alert" role="alert">Too many failed attempts. Try again in 10 minutes."#
+        r#"<p class="alert" role="alert">Too many sign-ups from this address. Try again in 10 minutes."#
     );
     let retry: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
     assert!((590..=600).contains(&retry), "{retry}");
@@ -852,14 +846,8 @@ async fn a_sign_up_waiting_on_a_close_in_flight_is_refused() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!signing_up.is_finished(), "the sign-up waits for the close");
     closer.batch_execute("commit").await.unwrap();
-    let refused = signing_up.await.unwrap().unwrap_err();
-    assert!(
-        matches!(
-            refused,
-            WriteError::Refused(gapura_control::grants::Refusal::Forbidden(_))
-        ),
-        "{refused:?}"
-    );
+    let refused = signing_up.await.unwrap().unwrap();
+    assert!(matches!(refused, SignUp::Closed), "{refused:?}");
     let made: i64 = store
         .client()
         .await
@@ -907,4 +895,138 @@ async fn kubernetes_mode_has_no_settings_and_no_sign_up() {
     assert!(page.contains("There is no sign-up here"), "{page}");
     let (_, login) = get(&app, "/auth/login").await;
     assert!(!login.contains(LINK), "{login}");
+}
+
+const FULL: &str = "Sign-up is full: too many accounts are waiting for access. Ask a superuser.";
+
+#[tokio::test]
+async fn sign_up_is_full_while_too_many_of_its_accounts_wait() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = local(&store);
+    open(&app, s.root).await;
+    let db = store.client().await.unwrap();
+    db.execute(
+        "insert into users (username, password_hash, signed_up_at)
+         select 'w' || g, 'x', now() from generate_series(1, $1::bigint) g",
+        &[&MAX_WAITING_SIGN_UPS],
+    )
+    .await
+    .unwrap();
+    // Not counted: signed up but disabled, signed up and holding a role, and made by a superuser.
+    // Without them this would be full just the same; with them it is still exactly full.
+    db.batch_execute(
+        "insert into users (username, password_hash, signed_up_at, disabled_at)
+              values ('gone', 'x', now(), now());
+         insert into users (username, password_hash, signed_up_at) values ('kept', 'x', now());
+         insert into role_bindings (user_id, workspace_id, role)
+              select u.id, w.id, 'viewer' from users u, workspaces w
+               where u.username = 'kept' and w.name = 'default';
+         insert into users (username, password_hash) values ('made', 'x');",
+    )
+    .await
+    .unwrap();
+
+    let before = everything(&store).await;
+    let (status, headers, page) = sign_up(&app, &form("maya", "hello")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{page}");
+    assert!(page.contains(FULL), "{page}");
+    assert!(session_of(&headers).is_none());
+    assert_eq!(everything(&store).await, before, "nothing written");
+
+    // A role granted to one of them makes room for one.
+    db.execute(
+        "insert into role_bindings (user_id, workspace_id, role)
+         select u.id, w.id, 'viewer' from users u, workspaces w
+          where u.username = 'w1' and w.name = 'default'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sign_up(&app, &form("maya", "")).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let (status, _, page) = sign_up(&app, &form("ivan", "")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(page.contains(FULL), "full again: {page}");
+    // And so does disabling one.
+    db.execute(
+        "update users set disabled_at = now() where username = 'w2'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sign_up(&app, &form("ivan", "")).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let signed_up: i64 = db
+        .query_one(
+            "select count(*) from users where username in ('maya', 'ivan') and signed_up_at is not null",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(signed_up, 2, "sign-up stamps when");
+}
+
+#[tokio::test]
+async fn a_note_that_hides_or_reorders_text_is_refused() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = local(&store);
+    open(&app, s.root).await;
+    let before = everything(&store).await;
+    for note in [
+        "please grant \u{202E}nimda",
+        "zero\u{200B}width",
+        "line\u{2028}separator",
+    ] {
+        let (status, _, page) = sign_up(&app, &form("maya", note)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{note:?}: {page}");
+        assert!(
+            alert(&page).contains("A note can hold only plain text."),
+            "{page}"
+        );
+    }
+    assert_eq!(everything(&store).await, before, "nothing written");
+    // A text box's line breaks are kept, as `\n`.
+    let (status, _, _) = sign_up(&app, &form("maya", "first line\r\nsecond line")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let note: String = store
+        .client()
+        .await
+        .unwrap()
+        .query_one("select signup_note from users where username = 'maya'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(note, "first line\nsecond line");
+}
+
+#[tokio::test]
+async fn a_note_longer_than_500_characters_is_refused_by_the_table_too() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let error = store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "insert into users (username, password_hash, signup_note) values ('x', 'x', repeat('n', 501))",
+            &[],
+        )
+        .await
+        .expect_err("a note of 501 characters");
+    assert_eq!(
+        error.as_db_error().and_then(|d| d.constraint()),
+        Some("users_signup_note_length")
+    );
 }

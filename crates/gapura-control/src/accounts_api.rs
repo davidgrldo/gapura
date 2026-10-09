@@ -338,6 +338,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_hash_that_found_the_queue_full_is_busy_not_unsaved() {
+        // Creating, resetting and changing a password hash through `password::hash_or_busy`,
+        // which answers at once rather than waiting behind a full queue.
+        let (status, sentence) = sentence_of(written(Err(WriteError::Busy))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            sentence,
+            "The console is busy right now. Try again in a moment."
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_account_write_is_worded_for_accounts() {
         let (status, sentence) =
             sentence_of(written(Err(WriteError::Store(anyhow::anyhow!("down"))))).await;

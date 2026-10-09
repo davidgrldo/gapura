@@ -40,6 +40,9 @@ const CONTENDED: &str = "Someone else was changing the same roles at that moment
 /// failed on the wire may or may not have happened.
 pub(crate) const NOT_SAVED: &str = "The console could not save this change. Try again in a moment.";
 
+/// What a write is told when the password check or hash it needed found too many waiting.
+pub(crate) const BUSY: &str = "The console is busy right now. Try again in a moment.";
+
 /// What a route about accounts answers in Kubernetes mode, which keeps none.
 pub(crate) const NO_ACCOUNTS: &str = "This console keeps no accounts: it runs without a database.";
 
@@ -91,6 +94,7 @@ fn written(result: Result<(), WriteError>) -> Response {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(WriteError::Refused(refusal)) => refusal.into_response(),
         Err(WriteError::Field(error)) => crate::configuration_api::field_error(error),
+        Err(WriteError::Busy) => crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, BUSY),
         Err(WriteError::Store(error)) => {
             let code = sqlstate(&error);
             // An `anyhow::Error` shown with `%` prints only its outermost error, and for a

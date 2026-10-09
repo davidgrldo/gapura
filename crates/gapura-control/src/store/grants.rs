@@ -37,6 +37,9 @@ pub enum WriteError {
     Field(crate::configuration::FieldError),
     /// The store could not be read or written.
     Store(anyhow::Error),
+    /// Too many password checks and hashes were already waiting, so the one this write needed
+    /// was not made. Says nothing about the request; it may simply be tried again.
+    Busy,
 }
 
 impl From<Refusal> for WriteError {
@@ -217,7 +220,6 @@ pub(super) async fn rights(
         last_sign_in: None,
         must_change_password: false,
         sessions_valid_after: None,
-        signup_note: None,
     };
     let ids: Vec<Uuid> = concerned.iter().copied().collect();
     let workspaces: Vec<Workspace> = tx
