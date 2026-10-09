@@ -261,6 +261,7 @@ impl Store {
                     hosts: r.get("hosts"),
                     methods: r.get("methods"),
                     paths,
+                    headers: Vec::new(),
                     priority: r.get("priority"),
                 })
             })
