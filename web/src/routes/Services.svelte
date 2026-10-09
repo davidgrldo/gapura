@@ -2,6 +2,7 @@
   import { get } from '../lib/api.js'
   import Failure from '../lib/Failure.svelte'
   import ServiceSheet from '../lib/ServiceSheet.svelte'
+  import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
   import { base, ms, upstream } from '../lib/configuration.js'
@@ -90,7 +91,16 @@
                   {/if}
                 </span>
               </Table.Cell>
-              <Table.Cell class="font-mono">{upstream(s)}</Table.Cell>
+              <Table.Cell>
+                <!-- What an https upstream's TLS settings change from the defaults. A different
+                     SNI alone is not tagged: it changes the name, not whether the upstream is
+                     trusted. -->
+                <span class="inline-flex flex-wrap items-center gap-1.5">
+                  <span class="font-mono">{upstream(s)}</span>
+                  {#if s.protocol === 'https' && s.tls?.verify === false}<Tag tone="warn">verify off</Tag>{/if}
+                  {#if s.protocol === 'https' && s.tls?.ca_pem}<Tag>own CA</Tag>{/if}
+                </span>
+              </Table.Cell>
               <Table.Cell>{ms(s.connect_timeout_ms)}</Table.Cell>
               <Table.Cell>{ms(s.read_timeout_ms)}</Table.Cell>
               <Table.Cell class="text-right tabular-nums">{s.routes}</Table.Cell>
