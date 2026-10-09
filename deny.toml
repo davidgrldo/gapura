@@ -22,11 +22,15 @@ ignore = [
     # so the vulnerable path is unreachable. Revisit when pingora bumps prometheus.
     { id = "RUSTSEC-2024-0437", reason = "we encode metrics, we never parse protobuf input" },
     # The Marvin attack recovers an RSA *private* key from the timing of operations that use one.
-    # rsa 0.9 reaches us only through openidconnect, and gapura-control is an OIDC client: it
-    # verifies ID token signatures with the provider's public key (rsa::RsaPublicKey::verify) and
-    # never holds a private key of its own, so there is no secret for the sidechannel to leak.
-    # openidconnect's own RSA signing path, CoreRsaPrivateSigningKey, needs a PEM we never supply.
-    # Revisit if this crate ever signs anything with RSA, or if rsa ships a constant-time release.
+    # rsa 0.9 reaches us through openidconnect and through jsonwebtoken (its `rust_crypto`
+    # provider, which gapura-core uses to verify JWTs for the data plane and to read a JWKS for the
+    # control plane). Both only verify: gapura-control, as an OIDC client, checks ID token
+    # signatures with the provider's public key, and gapura_core::jwt checks tokens against the
+    # public keys of a JWKS. Nothing holds an RSA private key or signs with one, so there is no
+    # secret for the sidechannel to leak. openidconnect's own RSA signing path,
+    # CoreRsaPrivateSigningKey, needs a PEM we never supply, and jsonwebtoken's signing path is
+    # never called with an RSA key (the tests sign with P-256). Revisit if anything here ever signs
+    # with RSA, or if rsa ships a constant-time release.
     { id = "RUSTSEC-2023-0071", reason = "we verify with public keys and hold no RSA private key" },
 ]
 

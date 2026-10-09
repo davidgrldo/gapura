@@ -714,6 +714,41 @@ async fn bad_input_is_named_and_writes_nothing() {
         "none of it wrote anything"
     );
 
+    // A shared secret beside a public key is refused, by name; the public key alone is not.
+    let ours = ec_key("k1");
+    let mut with_secret = parse(&jwks(&[&ours]));
+    with_secret["keys"].as_array_mut().unwrap().push(json!({
+        "kty": "oct", "alg": "HS256", "kid": "k2", "k": "c2VjcmV0LWJ1dC1yZWFkYWJsZQ"
+    }));
+    let before = everything(&store).await;
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        JWT,
+        Some(s.ed),
+        &put("workspace", ISSUER, None, &with_secret.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(parse(&answer)["field"], "jwks");
+    assert_eq!(
+        sentence(&answer),
+        "Use public keys only: an oct key is a shared secret, and anyone who can read this workspace could read it."
+    );
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the secret was not stored"
+    );
+    ok(
+        &app,
+        "PUT",
+        JWT,
+        s.ed,
+        &put("workspace", ISSUER, None, &jwks(&[&ours])),
+    )
+    .await;
+
     // A JWKS at the limit is not too large, though its JSON-escaped body is more than any other
     // write may send.
     let at_limit = format!("{good}{}", " ".repeat(64 * 1024 - good.len()));

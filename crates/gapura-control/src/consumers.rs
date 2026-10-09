@@ -177,7 +177,8 @@ fn claim(value: Option<&str>, at: &str, sentence: &str) -> Result<Option<String>
 /// A JWT requirement: an issuer, which is required, since a policy without one accepts tokens
 /// from any issuer whose key it lists; an audience, which is not; and a JWKS document that
 /// `gapura_core::jwt` finds at least one usable key in, the reading the data plane gives it, so
-/// a document the data plane would verify nothing with is refused here rather than there.
+/// a document the data plane would verify nothing with is refused here rather than there. The
+/// document holds public keys only: viewers read it back, so it must hold no secret.
 pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
     let issuer_rule = format!(
         "Name the issuer tokens must carry as iss, in 1 to {MAX_CLAIM_CHARS} characters with no control characters."
@@ -195,21 +196,37 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
     if jwks.len() > MAX_JWKS_BYTES {
         return Err(field("jwks", "Paste at most 64 KiB of keys."));
     }
-    if let Err(e) = gapura_core::jwt::keys(jwks) {
-        return Err(field(
-            "jwks",
-            match e {
-                JwksError::Unreadable => "Paste a JWKS document: a JSON object with a keys array.",
-                JwksError::NoUsableKey { .. } => {
-                    "None of these keys can verify a token. Each needs an alg and key material the gateway reads."
-                }
-            },
-        ));
+    let refused = match gapura_core::jwt::keys(jwks) {
+        Err(JwksError::Unreadable) => {
+            Some("Paste a JWKS document: a JSON object with a keys array.")
+        }
+        // Before whether any key is usable: an oct key is refused even beside public ones.
+        _ if holds_a_shared_secret(jwks) => Some(
+            "Use public keys only: an oct key is a shared secret, and anyone who can read this workspace could read it.",
+        ),
+        Err(JwksError::NoUsableKey { .. }) => Some(
+            "None of these keys can verify a token. Each needs an alg and key material the gateway reads.",
+        ),
+        Ok(_) => None,
+    };
+    if let Some(sentence) = refused {
+        return Err(field("jwks", sentence));
     }
     Ok(JwtPolicy {
         issuer: Some(issuer),
         audience,
         jwks: jwks.to_string(),
+    })
+}
+
+/// Whether a JWKS document holds a symmetric (`kty: "oct"`) key: an HMAC secret, which a viewer of
+/// the workspace could read back. The data plane verifies with one, from SQL or Kubernetes, but
+/// the console never stores one.
+fn holds_a_shared_secret(jwks: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(jwks).is_ok_and(|document| {
+        document["keys"]
+            .as_array()
+            .is_some_and(|keys| keys.iter().any(|key| key["kty"] == "oct"))
     })
 }
 
@@ -385,7 +402,9 @@ mod tests {
         }
     }
 
-    const JWKS: &str = r#"{"keys":[{"kty":"oct","alg":"HS256","kid":"k1","k":"c2VjcmV0"}]}"#;
+    /// RFC 7517's example P-256 public key.
+    const JWKS: &str = r#"{"keys":[{"kty":"EC","crv":"P-256","alg":"ES256","kid":"k1","x":"MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4","y":"4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"}]}"#;
+    const OCT: &str = r#"{"kty":"oct","alg":"HS256","kid":"k2","k":"c2VjcmV0"}"#;
 
     #[test]
     fn a_jwt_requirement_names_an_issuer_and_a_usable_key() {
@@ -409,7 +428,7 @@ mod tests {
                 jwt_input(
                     Some("i"),
                     None,
-                    r#"{"keys":[{"kty":"oct","k":"c2VjcmV0"}]}"#,
+                    r#"{"keys":[{"kty":"EC","crv":"P-256","x":"MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4","y":"4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"}]}"#,
                 ),
                 "jwks",
             ),
@@ -425,6 +444,18 @@ mod tests {
             ..jwt_input(Some("i"), None, "")
         };
         assert_eq!(jwt(&missing).unwrap_err().field, "jwks");
+        // A shared secret is refused alone or beside a public key, and says why.
+        let public = &JWKS[JWKS.find('[').unwrap() + 1..JWKS.rfind(']').unwrap()];
+        for keys in [OCT.to_string(), format!("{public},{OCT}")] {
+            let e = jwt(&jwt_input(
+                Some("i"),
+                None,
+                &format!(r#"{{"keys":[{keys}]}}"#),
+            ))
+            .unwrap_err();
+            assert_eq!(e.field, "jwks", "{keys}");
+            assert!(e.sentence.starts_with("Use public keys only"), "{keys}");
+        }
         // Exactly at the limit is a length, not a refusal.
         assert!(jwt(&jwt_input(Some(&"a".repeat(MAX_CLAIM_CHARS)), None, JWKS)).is_ok());
     }

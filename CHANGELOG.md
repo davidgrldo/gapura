@@ -15,7 +15,9 @@ means what it usually does, moving from one version below to a later one. Releas
   stops requiring it. A requirement names an issuer (required: leaving it out would accept any
   issuer whose key is listed), optionally an audience, and a JWKS of at most 64 KiB in which the
   data plane's own verifier finds at least one usable key, so a key set that would refuse every
-  request is refused when it is written instead. A viewer reads; an editor writes. The same
+  request is refused when it is written instead. The JWKS holds public keys only: an `oct` key is a
+  shared secret, which every viewer of the workspace could read back, so it is refused (the data
+  plane still verifies with one written by SQL). A viewer reads; an editor writes. The same
   requirement again writes nothing; each change is an audit entry recording the target, issuer,
   audience and number of keys, not the keys. The most specific requirement applies, as for keys,
   and the service and route lists say which one with `jwt: {issuer, from}`. Reading a JWKS and
