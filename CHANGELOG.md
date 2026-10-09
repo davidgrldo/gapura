@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's service sheet shows an `https` service's upstream TLS settings, under "TLS to the
+  upstream": whether the upstream's certificate is verified (unchecking it says that anyone on the
+  path can read and change the traffic), its own CA certificates as PEM, and the server name it
+  sends, each optional and empty for the defaults. Editors change them and viewers read them; an
+  `http` service has none to show and sends none. The Services list tags an upstream "verify off"
+  or "own CA" beside its address.
 - A store route can match request headers. Routes read and write
   `headers: [{"name": "x-version", "value": "2"}]`: every header listed must be present with exactly
   that value (case-sensitive, as Gateway API's `Exact`), on every host, path and method the route

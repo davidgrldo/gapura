@@ -7,6 +7,11 @@
     "connect_timeout_ms": null,
     "read_timeout_ms": 30000,
     "routes": 1,
+    "tls": {
+      "verify": false,
+      "ca_pem": null,
+      "sni": null
+    },
     "updated_at": "2026-09-22T07:55:18.250619Z",
     "key_auth": null
   },
@@ -18,6 +23,11 @@
     "connect_timeout_ms": 1500,
     "read_timeout_ms": 15000,
     "routes": 2,
+    "tls": {
+      "verify": true,
+      "ca_pem": null,
+      "sni": null
+    },
     "updated_at": "2026-09-25T11:20:47.671203Z",
     "key_auth": null
   },
@@ -29,6 +39,11 @@
     "connect_timeout_ms": null,
     "read_timeout_ms": null,
     "routes": 0,
+    "tls": {
+      "verify": true,
+      "ca_pem": null,
+      "sni": null
+    },
     "updated_at": "2026-08-14T16:05:33.098374Z",
     "key_auth": null
   }
