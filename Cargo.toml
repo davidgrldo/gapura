@@ -50,6 +50,11 @@ rcgen = "0.13"
 tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# `rust_crypto` rather than `aws_lc_rs`: jsonwebtoken 11 makes the provider an explicit choice,
+# and this workspace already compiles OpenSSL from source for pingora. A second C crypto build
+# would cost every image another toolchain for a few signature checks. No `use_pem`: keys arrive
+# as JWKS documents, never as PEM.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -282,6 +282,16 @@ pub struct KeyAuthView {
     pub from: &'static str,
 }
 
+/// The JWT requirement that applies to a service or route, and where it comes from, picked as
+/// `KeyAuthView`'s is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct JwtRequirementView {
+    /// `None` only for a policy SQL written by hand stored without one: any issuer.
+    pub issuer: Option<String>,
+    /// `"route"`, `"service"` or `"workspace"`.
+    pub from: &'static str,
+}
+
 /// What the list endpoints answer with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceView {
@@ -292,6 +302,7 @@ pub struct ServiceView {
     pub updated_at: String,
     /// The requirement its routes inherit, unless a route has its own.
     pub key_auth: Option<KeyAuthView>,
+    pub jwt: Option<JwtRequirementView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -303,6 +314,7 @@ pub struct RouteView {
     /// re-creation of the service moves this and not the route's.
     pub service_updated_at: String,
     pub key_auth: Option<KeyAuthView>,
+    pub jwt: Option<JwtRequirementView>,
 }
 
 /// Whether this is a create or a replace, which decides what `updated_at` must be.

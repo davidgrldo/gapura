@@ -1,4 +1,4 @@
-//! Consumers, their keys and key_auth policies as the console reads and writes them.
+//! Consumers, their keys, and key_auth and JWT policies as the console reads and writes them.
 //!
 //! Each write is one transaction in the services slice's order: rights re-read locked and
 //! decided by `configuration::allowed`; the changed row locked; one audit row. A key is stored as
@@ -7,17 +7,20 @@
 //!
 //! A policy write takes its locks in one order: the caller's grant rows `FOR SHARE`; the service
 //! or route it targets `FOR SHARE`, so the target cannot be deleted under it; the policy row
-//! `FOR UPDATE`; `config_state`, through the trigger. Only an enabled `key_auth` row with no
-//! consumer is a policy here, as it is to the compiler; a disabled one, which only SQL written by
-//! hand can make, reads as none, and switching key_auth on takes it over.
+//! `FOR UPDATE`; `config_state`, through the trigger. Only an enabled `key_auth` or `jwt` row with
+//! no consumer is a policy here, as it is to the compiler; a disabled one, which only SQL written
+//! by hand can make, reads as none, and switching the requirement on takes it over.
 
 use super::configuration::{decide, json, updated_at};
 use super::grants::{audit, retrying, Entry};
 use super::{hash, hex, Store, WriteError, PREFIX_LEN};
 use crate::configuration::Action;
-use crate::consumers::{ConsumerView, IssuedKey, KeyView, PolicyView, Target};
+use crate::consumers::{
+    usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, PolicyView, Target,
+};
 use crate::grants::Refusal;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use gapura_core::config::JwtPolicy;
 use tokio_postgres::Transaction;
 use uuid::Uuid;
 
@@ -48,6 +51,39 @@ async fn target_row(
     Ok(Some((column, row.get("id"))))
 }
 
+/// The `name` policy row on a target `target_row` resolved, read `FOR UPDATE`: its id, its
+/// configuration and whether it is enabled.
+async fn plugin_row(
+    tx: &Transaction<'_>,
+    workspace: Uuid,
+    resolved: Option<(&str, Uuid)>,
+    name: &str,
+) -> Result<Option<(Uuid, serde_json::Value, bool)>, WriteError> {
+    let row = match resolved {
+        None => {
+            tx.query_opt(
+                "select id, config, enabled from plugins
+                  where workspace_id = $1 and name = $2 and service_id is null
+                    and route_id is null and consumer_id is null
+                    for update",
+                &[&workspace, &name],
+            )
+            .await?
+        }
+        Some((column, id)) => {
+            tx.query_opt(
+                &format!(
+                    "select id, config, enabled from plugins
+                      where {column} = $1 and name = $2 for update"
+                ),
+                &[&id, &name],
+            )
+            .await?
+        }
+    };
+    Ok(row.map(|r| (r.get("id"), r.get("config"), r.get("enabled"))))
+}
+
 /// The `key_auth` row on a target `target_row` resolved, read `FOR UPDATE`: its id, its header
 /// and whether it is enabled. A row with no header reads as `None`, which no header equals.
 async fn policy_row(
@@ -55,29 +91,32 @@ async fn policy_row(
     workspace: Uuid,
     resolved: Option<(&str, Uuid)>,
 ) -> Result<Option<(Uuid, Option<String>, bool)>, WriteError> {
-    let row = match resolved {
-        None => {
-            tx.query_opt(
-                "select id, config->>'header' as header, enabled from plugins
-                  where workspace_id = $1 and name = 'key_auth' and service_id is null
-                    and route_id is null and consumer_id is null
-                    for update",
-                &[&workspace],
-            )
-            .await?
-        }
-        Some((column, id)) => {
-            tx.query_opt(
-                &format!(
-                    "select id, config->>'header' as header, enabled from plugins
-                      where {column} = $1 and name = 'key_auth' for update"
-                ),
-                &[&id],
-            )
-            .await?
-        }
-    };
-    Ok(row.map(|r| (r.get("id"), r.get("header"), r.get("enabled"))))
+    let row = plugin_row(tx, workspace, resolved, "key_auth").await?;
+    Ok(row.map(|(id, config, enabled)| {
+        let header = config
+            .get("header")
+            .and_then(|h| h.as_str())
+            .map(str::to_string);
+        (id, header, enabled)
+    }))
+}
+
+/// The `{target, kind, issuer, audience, keys}` an audit row records of a JWT requirement: what
+/// it asks for, never the JWKS itself.
+fn jwt_audit(target: &Target, policy: &JwtPolicy) -> serde_json::Value {
+    serde_json::json!({
+        "target": target.as_text(),
+        "kind": "jwt",
+        "issuer": policy.issuer,
+        "audience": policy.audience,
+        "keys": usable_keys(&policy.jwks),
+    })
+}
+
+/// A stored `jwt` configuration as the policy the compiler reads it as. One that does not fit
+/// fails the compiler too, so it is an error here, not a requirement shown as none.
+fn stored_jwt(config: serde_json::Value) -> anyhow::Result<JwtPolicy> {
+    serde_json::from_value(config).context("a jwt policy does not fit its shape")
 }
 
 impl Store {
@@ -397,11 +436,7 @@ impl Store {
             .await?;
         rows.iter()
             .map(|row| {
-                let target = match (row.get("service"), row.get("route")) {
-                    (Some(service), _) => Target::Service(service),
-                    (None, Some(route)) => Target::Route(route),
-                    (None, None) => Target::Workspace,
-                };
+                let target = target_of(row.get("service"), row.get("route"));
                 // The compiler refuses such a row too, so it is an error here, not a policy
                 // listed with no header.
                 let header: Option<String> = row.get("header");
@@ -538,5 +573,222 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// A workspace's JWT requirements, in the order `policies` lists key requirements, each with
+    /// how many usable keys its JWKS holds.
+    pub async fn jwt_policies(&self, workspace: Uuid) -> Result<Vec<JwtView>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "select p.config, s.name as service, r.name as route
+                   from plugins p
+                   left join services s on s.id = p.service_id
+                   left join routes r on r.id = p.route_id
+                  where p.workspace_id = $1 and p.name = 'jwt' and p.consumer_id is null
+                    and p.enabled
+                  order by case when p.service_id is not null then 1
+                                when p.route_id is not null then 2
+                                else 0 end,
+                           coalesce(s.name, r.name)",
+                &[&workspace],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let target = target_of(row.get("service"), row.get("route"));
+                let policy = stored_jwt(row.get("config"))?;
+                Ok(JwtView {
+                    target: target.as_text(),
+                    keys: usable_keys(&policy.jwks),
+                    issuer: policy.issuer,
+                    audience: policy.audience,
+                })
+            })
+            .collect()
+    }
+
+    /// The JWT requirement on `target` itself, with its JWKS; `None` when it has none of its own.
+    pub async fn jwt_policy(
+        &self,
+        workspace: Uuid,
+        target: &Target,
+    ) -> Result<Option<JwtDocument>> {
+        let client = self.pool.get().await?;
+        let (join, filter, name) = match target {
+            Target::Workspace => (
+                "",
+                "p.service_id is null and p.route_id is null and $2::text is null",
+                None,
+            ),
+            Target::Service(name) => (
+                "join services t on t.id = p.service_id",
+                "t.name = $2",
+                Some(name.as_str()),
+            ),
+            Target::Route(name) => (
+                "join routes t on t.id = p.route_id",
+                "t.name = $2",
+                Some(name.as_str()),
+            ),
+        };
+        let row = client
+            .query_opt(
+                &format!(
+                    "select p.config from plugins p {join}
+                      where p.workspace_id = $1 and p.name = 'jwt' and p.consumer_id is null
+                        and p.enabled and {filter}"
+                ),
+                &[&workspace, &name],
+            )
+            .await?;
+        row.map(|row| {
+            let policy = stored_jwt(row.get("config"))?;
+            Ok(JwtDocument {
+                target: target.as_text(),
+                issuer: policy.issuer,
+                audience: policy.audience,
+                jwks: policy.jwks,
+            })
+        })
+        .transpose()
+    }
+
+    /// Requires a JWT on `target` that `policy` accepts, which needs the editor role. The same
+    /// requirement again writes nothing.
+    pub async fn put_jwt(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+        policy: &JwtPolicy,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_put_jwt(caller, workspace, target, policy)).await
+    }
+
+    async fn try_put_jwt(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+        policy: &JwtPolicy,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let resolved = target_row(&tx, workspace, target).await?;
+        let config = json(policy);
+        let (action, id, before) = match plugin_row(&tx, workspace, resolved, "jwt").await? {
+            Some((id, current, enabled)) => {
+                let current = stored_jwt(current).ok();
+                // Nothing to write, so nothing to audit and nothing for the data planes to reload.
+                if enabled && current.as_ref() == Some(policy) {
+                    return Ok(());
+                }
+                tx.execute(
+                    "update plugins set config = $2, enabled = true, updated_at = now()
+                      where id = $1",
+                    &[&id, &config],
+                )
+                .await?;
+                // A disabled row is no requirement, so taking it over is audited as creating one.
+                let before = if enabled {
+                    current.map(|c| jwt_audit(target, &c))
+                } else {
+                    None
+                };
+                (if enabled { "update" } else { "create" }, id, before)
+            }
+            // Two writers meet at the unique index, as switching key_auth on does.
+            None => {
+                let (service, route) = match resolved {
+                    Some(("service_id", id)) => (Some(id), None),
+                    Some((_, id)) => (None, Some(id)),
+                    None => (None, None),
+                };
+                let row = tx
+                    .query_one(
+                        "insert into plugins (workspace_id, name, config, service_id, route_id)
+                         values ($1, 'jwt', $2, $3, $4)
+                         returning id",
+                        &[&workspace, &config, &service, &route],
+                    )
+                    .await?;
+                ("create", row.get("id"), None)
+            }
+        };
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action,
+                object_kind: "policy",
+                object_id: Some(id),
+                workspace: Some(workspace),
+                before,
+                after: Some(jwt_audit(target, policy)),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stops requiring a JWT on `target`, which needs the editor role, like requiring one.
+    pub async fn delete_jwt(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_delete_jwt(caller, workspace, target)).await
+    }
+
+    async fn try_delete_jwt(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let resolved = target_row(&tx, workspace, target).await?;
+        let Some((id, config, true)) = plugin_row(&tx, workspace, resolved, "jwt").await? else {
+            return Err(
+                Refusal::NotFound(format!("{} has no JWT requirement.", target.as_text())).into(),
+            );
+        };
+        tx.execute("delete from plugins where id = $1", &[&id])
+            .await?;
+        // A row the compiler could not read is recorded by what it was, as far as it goes.
+        let before = match stored_jwt(config) {
+            Ok(policy) => jwt_audit(target, &policy),
+            Err(_) => serde_json::json!({ "target": target.as_text(), "kind": "jwt" }),
+        };
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "delete",
+                object_kind: "policy",
+                object_id: Some(id),
+                workspace: Some(workspace),
+                before: Some(before),
+                after: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+/// The target a policy row is attached to, from the names of its service and route.
+fn target_of(service: Option<String>, route: Option<String>) -> Target {
+    match (service, route) {
+        (Some(service), _) => Target::Service(service),
+        (None, Some(route)) => Target::Route(route),
+        (None, None) => Target::Workspace,
     }
 }

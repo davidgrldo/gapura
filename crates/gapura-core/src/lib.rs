@@ -4,7 +4,8 @@
 //! ReferenceGrant, Namespace, Service, EndpointSlice, Secret), loaded from JSON or YAML.
 //! Output: a routing [`Config`] for the data plane plus status patches for the API server,
 //! via [`translate()`]. Request matching lives in [`matcher`].
-//! No I/O, no clock, no async: everything is deterministic and covered by golden tests.
+//! No I/O, no clock, no async: everything is deterministic and covered by golden tests. The one
+//! exception is [`jwt::verify`], which reads the clock to check a token's expiry.
 
 pub mod client_ip;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod credentials;
 pub mod duration;
 pub mod hostname;
 pub mod input;
+pub mod jwt;
 pub mod matcher;
 pub mod snapshot;
 pub mod status;

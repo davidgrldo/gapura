@@ -3,49 +3,19 @@
 //! Keys are parsed once per configuration generation, not per request -- the same treatment
 //! `compile_regexes` gives path patterns and `ParsedCert` gives certificates. A JWKS document is
 //! a few hundred bytes of JSON and parsing one per request would put that on the hot path for no
-//! benefit, since it cannot change between swaps.
+//! benefit, since it cannot change between swaps. Reading a document and verifying a token are
+//! `gapura_core::jwt`'s, which the control plane reads a document with before it stores one.
 
 use std::collections::HashMap;
 
-use gapura_core::config::{Config, JwtPolicy, Plugin};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-
-/// Decoding keys by `kid`, plus the keys a JWKS offered without one.
-#[derive(Default)]
-pub struct JwtKeys {
-    by_kid: HashMap<String, (DecodingKey, Algorithm)>,
-    /// A JWKS is allowed to omit `kid`, and a token is allowed to omit the header. With one key
-    /// there is no ambiguity to resolve, so these are tried when a lookup by `kid` finds nothing.
-    anonymous: Vec<(DecodingKey, Algorithm)>,
-}
-
-/// Why a request was refused. Each maps to 401, but they are separated because "no token" and
-/// "a token signed by the wrong key" are different operator problems and the logs should say so.
-#[derive(Debug, PartialEq)]
-pub enum Refusal {
-    Missing,
-    Malformed,
-    UnknownKey,
-    BadSignature,
-    Claims,
-}
-
-impl Refusal {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Refusal::Missing => "missing",
-            Refusal::Malformed => "malformed",
-            Refusal::UnknownKey => "unknown_key",
-            Refusal::BadSignature => "bad_signature",
-            Refusal::Claims => "claims",
-        }
-    }
-}
+use gapura_core::config::{Config, Plugin};
+use gapura_core::jwt::JwksError;
+pub use gapura_core::jwt::{verify, Keys};
 
 /// Parse every JWKS the configuration mentions. Returns the number of keys a document offered
 /// that could not be parsed, so a swap can say so once rather than a request saying it forever.
-pub fn compile(config: &Config) -> (HashMap<String, JwtKeys>, usize) {
-    let mut out: HashMap<String, JwtKeys> = HashMap::new();
+pub fn compile(config: &Config) -> (HashMap<String, Keys>, usize) {
+    let mut out: HashMap<String, Keys> = HashMap::new();
     let mut skipped = 0;
     for listener in &config.listeners {
         for rule in &listener.rules {
@@ -65,31 +35,18 @@ pub fn compile(config: &Config) -> (HashMap<String, JwtKeys>, usize) {
     (out, skipped)
 }
 
-fn parse_jwks(document: &str) -> (JwtKeys, usize) {
-    let mut keys = JwtKeys::default();
-    let Ok(set) = serde_json::from_str::<jsonwebtoken::jwk::JwkSet>(document) else {
+fn parse_jwks(document: &str) -> (Keys, usize) {
+    match gapura_core::jwt::keys(document) {
+        Ok(keys) => {
+            let skipped = keys.skipped();
+            (keys, skipped)
+        }
         // One unparseable document, not one per key. A policy whose keys did not load refuses
         // every request, which is the safe direction: the alternative is letting traffic
         // through unverified because a configuration error made verification impossible.
-        return (keys, 1);
-    };
-    let mut skipped = 0;
-    for jwk in set.keys {
-        let alg = jwk
-            .common
-            .key_algorithm
-            .and_then(|a| a.to_string().parse::<Algorithm>().ok());
-        match (DecodingKey::from_jwk(&jwk), alg) {
-            (Ok(k), Some(alg)) => match &jwk.common.key_id {
-                Some(kid) => {
-                    keys.by_kid.insert(kid.clone(), (k, alg));
-                }
-                None => keys.anonymous.push((k, alg)),
-            },
-            _ => skipped += 1,
-        }
+        Err(JwksError::Unreadable) => (Keys::default(), 1),
+        Err(JwksError::NoUsableKey { skipped }) => (Keys::default(), skipped),
     }
-    (keys, skipped)
 }
 
 /// `Bearer <token>` from the Authorization header, case-insensitively on the scheme.
@@ -99,209 +56,49 @@ pub fn bearer(header: Option<&str>) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
-pub fn verify(policy: &JwtPolicy, keys: &JwtKeys, token: Option<&str>) -> Result<(), Refusal> {
-    let Some(token) = token else {
-        return Err(Refusal::Missing);
-    };
-    let header = jsonwebtoken::decode_header(token).map_err(|_| Refusal::Malformed)?;
-    let candidates: Vec<&(DecodingKey, Algorithm)> = match &header.kid {
-        Some(kid) => keys.by_kid.get(kid).into_iter().collect(),
-        None => keys.anonymous.iter().collect(),
-    };
-    if candidates.is_empty() {
-        return Err(Refusal::UnknownKey);
-    }
-
-    let mut last = Refusal::BadSignature;
-    for (key, alg) in candidates {
-        let mut validation = Validation::new(*alg);
-        match &policy.issuer {
-            Some(iss) => validation.set_issuer(&[iss]),
-            // Off explicitly. `jsonwebtoken` validates nothing it was not told to, and leaving
-            // that implicit is how a policy ends up accepting any issuer without anyone deciding.
-            None => validation.iss = None,
-        }
-        match &policy.audience {
-            Some(aud) => validation.set_audience(&[aud]),
-            None => validation.validate_aud = false,
-        }
-        // `set_issuer` and `set_audience` only say which values are acceptable when the claim
-        // is there; `jsonwebtoken` skips the check for a token that leaves the claim out. A
-        // policy that names an issuer or an audience means the claim is required, so say so.
-        let mut required = vec!["exp"];
-        if policy.issuer.is_some() {
-            required.push("iss");
-        }
-        if policy.audience.is_some() {
-            required.push("aud");
-        }
-        validation.set_required_spec_claims(&required);
-        // Off by default in `jsonwebtoken`; a token that says it is not valid yet is not.
-        validation.validate_nbf = true;
-        match jsonwebtoken::decode::<serde_json::Value>(token, key, &validation) {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                last = match e.kind() {
-                    jsonwebtoken::errors::ErrorKind::InvalidSignature => Refusal::BadSignature,
-                    _ => Refusal::Claims,
-                }
-            }
-        }
-    }
-    Err(last)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use gapura_core::config::JwtPolicy;
+    use gapura_core::jwt::Refusal;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use serde_json::json;
-
-    const SECRET: &[u8] = b"a-secret-long-enough-for-hs256-to-be-happy";
-
-    /// An `oct` JWKS, which is what an HMAC secret looks like published as a key set.
-    fn jwks(kid: Option<&str>) -> String {
-        let k = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(SECRET);
-        let mut key = json!({"kty": "oct", "alg": "HS256", "k": k});
-        if let Some(kid) = kid {
-            key["kid"] = json!(kid);
-        }
-        json!({"keys": [key]}).to_string()
-    }
-
-    fn token(kid: Option<&str>, claims: serde_json::Value) -> String {
-        let mut header = Header::new(Algorithm::HS256);
-        header.kid = kid.map(str::to_string);
-        encode(&header, &claims, &EncodingKey::from_secret(SECRET)).unwrap()
-    }
-
-    fn policy(jwks: String) -> JwtPolicy {
-        JwtPolicy {
-            issuer: Some("https://id.example".into()),
-            audience: Some("orders".into()),
-            jwks,
-        }
-    }
-
-    fn good_claims() -> serde_json::Value {
-        json!({
-            "iss": "https://id.example",
-            "aud": "orders",
-            "exp": 4102444800u64, // 2100
-        })
-    }
-
-    fn keys_for(p: &JwtPolicy) -> JwtKeys {
-        let (keys, bad) = parse_jwks(&p.jwks);
-        assert_eq!(bad, 0, "the fixture's own JWKS has to parse");
-        keys
-    }
-
-    #[test]
-    fn a_token_this_policy_accepts_is_accepted() {
-        let p = policy(jwks(Some("k1")));
-        let t = token(Some("k1"), good_claims());
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
-    }
-
-    #[test]
-    fn no_token_at_all_is_a_different_answer_from_a_bad_one() {
-        let p = policy(jwks(Some("k1")));
-        assert_eq!(verify(&p, &keys_for(&p), None), Err(Refusal::Missing));
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some("not-a-jwt")),
-            Err(Refusal::Malformed)
-        );
-    }
-
-    #[test]
-    fn a_signature_from_another_key_is_refused() {
-        let p = policy(jwks(Some("k1")));
-        let forged = encode(
-            &{
-                let mut h = Header::new(Algorithm::HS256);
-                h.kid = Some("k1".into());
-                h
-            },
-            &good_claims(),
-            &EncodingKey::from_secret(b"a-different-secret-entirely-not-ours"),
-        )
-        .unwrap();
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some(&forged)),
-            Err(Refusal::BadSignature)
-        );
-    }
-
-    #[test]
-    fn a_kid_the_policy_never_published_is_refused() {
-        let p = policy(jwks(Some("k1")));
-        let t = token(Some("k2"), good_claims());
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some(&t)),
-            Err(Refusal::UnknownKey)
-        );
-    }
-
-    /// A correctly signed token from the wrong issuer is the case that matters most: the
-    /// signature proves who minted it, and without this check any issuer whose key is listed
-    /// could mint tokens for this route.
-    #[test]
-    fn a_valid_signature_from_the_wrong_issuer_is_still_refused() {
-        let p = policy(jwks(Some("k1")));
-        let mut claims = good_claims();
-        claims["iss"] = json!("https://someone-else.example");
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some(&token(Some("k1"), claims))),
-            Err(Refusal::Claims)
-        );
-    }
-
-    #[test]
-    fn a_valid_signature_for_the_wrong_audience_is_still_refused() {
-        let p = policy(jwks(Some("k1")));
-        let mut claims = good_claims();
-        claims["aud"] = json!("billing");
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some(&token(Some("k1"), claims))),
-            Err(Refusal::Claims)
-        );
-    }
-
-    #[test]
-    fn an_expired_token_is_refused() {
-        let p = policy(jwks(Some("k1")));
-        let mut claims = good_claims();
-        claims["exp"] = json!(1000);
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some(&token(Some("k1"), claims))),
-            Err(Refusal::Claims)
-        );
-    }
-
-    /// A JWKS may omit `kid` and so may a token header. One key is unambiguous.
-    #[test]
-    fn a_key_set_without_key_ids_still_works() {
-        let p = policy(jwks(None));
-        assert_eq!(
-            verify(&p, &keys_for(&p), Some(&token(None, good_claims()))),
-            Ok(())
-        );
-    }
 
     /// The direction a configuration mistake must fail in. A policy whose keys did not load has
     /// no way to verify anything, and letting traffic past unverified would turn a typo into an
     /// open route.
     #[test]
     fn a_policy_whose_keys_did_not_load_refuses_everything() {
-        let p = policy("not a key set at all".into());
+        let p = JwtPolicy {
+            issuer: Some("https://id.example".into()),
+            audience: None,
+            jwks: "not a key set at all".into(),
+        };
         let (keys, bad) = parse_jwks(&p.jwks);
         assert_eq!(bad, 1, "and the swap gets told");
-        assert_eq!(
-            verify(&p, &keys, Some(&token(Some("k1"), good_claims()))),
-            Err(Refusal::UnknownKey)
-        );
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("k1".into());
+        let t = encode(
+            &header,
+            &json!({"iss": "https://id.example", "exp": 4102444800u64}),
+            &EncodingKey::from_secret(b"a-secret-long-enough-for-hs256-to-be-happy"),
+        )
+        .unwrap();
+        assert_eq!(verify(&p, &keys, Some(&t)), Err(Refusal::UnknownKey));
+    }
+
+    /// Every key a document offered that cannot be used is counted, whether or not another
+    /// key in it can be, so a swap says so either way.
+    #[test]
+    fn unusable_keys_are_counted_with_or_without_a_usable_one() {
+        let usable = json!({"kty": "oct", "alg": "HS256", "kid": "k1", "k": "c2VjcmV0"});
+        let unusable = json!({"kty": "oct", "k": "c2VjcmV0"});
+        let (keys, bad) = parse_jwks(&json!({"keys": [usable, unusable]}).to_string());
+        assert_eq!((keys.usable(), bad), (1, 1));
+        let (keys, bad) = parse_jwks(&json!({"keys": [unusable, unusable]}).to_string());
+        assert_eq!((keys.usable(), bad), (0, 2));
+        let (_, bad) = parse_jwks(r#"{"keys":[]}"#);
+        assert_eq!(bad, 0);
     }
 
     #[test]
@@ -312,52 +109,5 @@ mod tests {
         assert_eq!(bearer(Some("Basic abc")), None);
         assert_eq!(bearer(Some("abc")), None);
         assert_eq!(bearer(None), None);
-    }
-
-    #[test]
-    fn a_policy_that_names_an_audience_refuses_a_token_without_one() {
-        let p = policy(jwks(Some("k1")));
-        let mut claims = good_claims();
-        claims.as_object_mut().unwrap().remove("aud");
-        let t = token(Some("k1"), claims);
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Err(Refusal::Claims));
-    }
-
-    #[test]
-    fn a_policy_that_names_an_issuer_refuses_a_token_without_one() {
-        let p = policy(jwks(Some("k1")));
-        let mut claims = good_claims();
-        claims.as_object_mut().unwrap().remove("iss");
-        let t = token(Some("k1"), claims);
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Err(Refusal::Claims));
-    }
-
-    #[test]
-    fn a_policy_that_names_neither_does_not_require_them() {
-        let mut p = policy(jwks(Some("k1")));
-        p.issuer = None;
-        p.audience = None;
-        let t = token(Some("k1"), json!({"exp": 4102444800u64}));
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
-    }
-
-    #[test]
-    fn a_token_that_is_not_valid_yet_is_refused() {
-        let p = policy(jwks(Some("k1")));
-        let mut claims = good_claims();
-        claims["nbf"] = json!(4102444000u64); // still in the future in 2100's terms
-        let t = token(Some("k1"), claims);
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Err(Refusal::Claims));
-    }
-
-    #[test]
-    fn the_algorithm_comes_from_the_key_not_the_token() {
-        // A token claiming RS256 against an HS256 key is refused rather than verified with the
-        // key read as something it is not.
-        let p = policy(jwks(Some("k1")));
-        let mut header = Header::new(Algorithm::HS384);
-        header.kid = Some("k1".into());
-        let t = encode(&header, &good_claims(), &EncodingKey::from_secret(SECRET)).unwrap();
-        assert!(verify(&p, &keys_for(&p), Some(&t)).is_err());
     }
 }

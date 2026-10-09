@@ -1442,6 +1442,7 @@ dependencies = [
  "gapura-core",
  "hmac 0.12.1",
  "hyper-util",
+ "jsonwebtoken",
  "k8s-openapi",
  "kube",
  "mime_guess",
@@ -1472,6 +1473,7 @@ version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "insta",
+ "jsonwebtoken",
  "proptest",
  "regex",
  "serde",

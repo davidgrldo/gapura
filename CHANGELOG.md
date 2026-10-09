@@ -13,6 +13,20 @@ means what it usually does, moving from one version below to a later one. Releas
   matches any headers. A refusal's sentence lands on the name or value it names. The sheet always
   sends the full list, so removing the last row clears a route's headers. The Routes list has a
   Headers column, "any" or a `name: value` chip for each.
+- The control plane has an API for the `jwt` requirement, beside `/key-auth`:
+  `/api/workspaces/{workspace}/jwt` lists where a JWT is required, with each requirement's issuer,
+  audience and number of usable keys but never its JWKS; `?target=` reads one target's own
+  requirement with its JWKS; PUT requires a JWT on the workspace, a service or a route, and DELETE
+  stops requiring it. A requirement names an issuer (required: leaving it out would accept any
+  issuer whose key is listed), optionally an audience, and a JWKS of at most 64 KiB in which the
+  data plane's own verifier finds at least one usable key, so a key set that would refuse every
+  request is refused when it is written instead. The JWKS holds public keys only: an `oct` key is a
+  shared secret, which every viewer of the workspace could read back, so it is refused (the data
+  plane still verifies with one written by SQL). A viewer reads; an editor writes. The same
+  requirement again writes nothing; each change is an audit entry recording the target, issuer,
+  audience and number of keys, not the keys. The most specific requirement applies, as for keys,
+  and the service and route lists say which one with `jwt: {issuer, from}`. Reading a JWKS and
+  verifying a token moved from the data plane into `gapura-core`, unchanged.
 - The console's service sheet shows an `https` service's upstream TLS settings, under "TLS to the
   upstream": whether the upstream's certificate is verified (unchecking it says that anyone on the
   path can read and change the traffic), its own CA certificates as PEM, and the server name it
