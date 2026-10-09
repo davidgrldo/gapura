@@ -152,9 +152,14 @@
               <Tag class="max-w-full whitespace-normal wrap-anywhere">{held.workspace} · {ROLE_LABEL[held.role] ?? held.role}</Tag>
             {:else}
               <!-- A disabled account holds nothing anywhere, so "not in your workspaces" would
-                   suggest the reader is missing something. -->
+                   suggest the reader is missing something; nor would it to a superuser, whose
+                   workspaces are all of them. -->
               <span class="text-sm text-muted-foreground">
-                {user.status === 'disabled' ? 'Holds nothing while disabled' : 'Not in your workspaces'}
+                {user.status === 'disabled'
+                  ? 'Holds nothing while disabled'
+                  : me.superuser
+                    ? 'No role'
+                    : 'Not in your workspaces'}
               </span>
             {/each}
           </span>
@@ -180,7 +185,9 @@
             {:else if user.access.length === 0}
               <!-- The same sentence whether the account is waiting or holds roles elsewhere: the
                    reader is not told which. -->
-              <p class="text-muted-foreground">No role in the workspaces you administer.</p>
+              <p class="text-muted-foreground">
+                {me.superuser ? 'No role in any workspace.' : 'No role in the workspaces you administer.'}
+              </p>
             {:else}
               <!-- wrap-anywhere on the workspace and sources cells: a table sizes its columns
                    from the longest word, and a long group name would otherwise push the table
