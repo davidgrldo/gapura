@@ -21,7 +21,8 @@
     "key_auth": {
       "header": "x-api-key",
       "from": "service"
-    }
+    },
+    "jwt": null
   },
   {
     "name": "catch-all",
@@ -35,6 +36,7 @@
     "key_auth": {
       "header": "x-partner-key",
       "from": "route"
-    }
+    },
+    "jwt": null
   }
 ]
