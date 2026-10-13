@@ -159,7 +159,7 @@ pub async fn revoke_key(
             }
             // A prefix is exactly the length the list shows, of ASCII, which is also what keeps
             // the store from slicing a longer string in the middle of a character.
-            if prefix.len() != PREFIX_LEN || !prefix.is_ascii() {
+            if prefix.len() != PREFIX_LEN || !prefix.is_ascii() || prefix.contains('\0') {
                 return Refusal::NotFound(format!("There is no key {prefix} for {name}."))
                     .into_response();
             }
