@@ -913,10 +913,13 @@ async fn store_login(
         // longer opens the account, and a session issued now could postdate the cut-off.
         Ok(None) => return refused_local("Wrong username or password."),
         Err(error) => {
-            // The sign-in itself is good; only the "last sign-in" column misses it, and the
-            // session is issued by the console's clock.
-            tracing::warn!(%error, "recording a sign-in failed");
-            now_millis()
+            // The database is not answering. The sign-in itself may be good, but the
+            // replaced-password check record_sign_in also performs cannot run, and a
+            // session issued without it could postdate a password change that is mid-
+            // commit. The honest answer is the unavailable page, which refunds the
+            // attempt: the reader tries again, and the database answers or it does not.
+            tracing::warn!(%error, "recording a sign-in failed; refusing to issue a session");
+            return unavailable_page();
         }
     };
     tracing::info!(user = %account.id, "signed in");
