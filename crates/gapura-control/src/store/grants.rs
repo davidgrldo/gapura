@@ -40,6 +40,9 @@ pub enum WriteError {
     /// Too many password checks and hashes were already waiting, so the one this write needed
     /// was not made. Says nothing about the request; it may simply be tried again.
     Busy,
+    /// The caller's precondition does not match what is stored: someone else changed it
+    /// between the read and the write. Answered as 409.
+    Stale,
 }
 
 impl From<Refusal> for WriteError {

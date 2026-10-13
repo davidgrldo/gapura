@@ -342,7 +342,13 @@ pub async fn put_jwt(
     match consumers::jwt(&input) {
         Ok(policy) => written(
             store
-                .put_jwt(caller.me.id, workspace, &target, &policy)
+                .put_jwt(
+                    caller.me.id,
+                    workspace,
+                    &target,
+                    &policy,
+                    input.seen_updated_at.as_deref(),
+                )
                 .await,
         ),
         Err(e) => field_error(e),

@@ -161,6 +161,10 @@ pub struct JwtInput {
     pub audience: Option<String>,
     #[serde(default)]
     pub jwks: Option<String>,
+    /// The policy row's updated_at as this caller last read it; a mismatch answers 409
+    /// (#197), so a second editor's rotation cannot be silently undone by a stale sheet.
+    #[serde(default)]
+    pub seen_updated_at: Option<String>,
 }
 
 /// `value` trimmed, when it is 1 to `MAX_CLAIM_CHARS` characters with no control characters;
@@ -304,6 +308,9 @@ pub struct RateLimitInput {
     pub limit: Option<serde_json::Value>,
     #[serde(default)]
     pub per: Option<serde_json::Value>,
+    /// The policy row's updated_at as this caller last read it; a mismatch answers 409 (#197).
+    #[serde(default)]
+    pub seen_updated_at: Option<String>,
 }
 
 /// A request limit: at most `limit` requests per `per`, from each client address, counted by each
@@ -533,6 +540,7 @@ mod tests {
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
             jwks: Some(jwks.into()),
+            seen_updated_at: None,
         }
     }
 
@@ -599,6 +607,7 @@ mod tests {
             target: "workspace".into(),
             limit: Some(limit),
             per: Some(per),
+            seen_updated_at: None,
         }
     }
 
@@ -659,6 +668,7 @@ mod tests {
             target: "workspace".into(),
             limit: None,
             per: None,
+            seen_updated_at: None,
         };
         assert_eq!(rate_limit(&missing).unwrap_err().field, "limit");
     }

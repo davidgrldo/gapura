@@ -95,6 +95,10 @@ fn written(result: Result<(), WriteError>) -> Response {
         Err(WriteError::Refused(refusal)) => refusal.into_response(),
         Err(WriteError::Field(error)) => crate::configuration_api::field_error(error),
         Err(WriteError::Busy) => crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, BUSY),
+        Err(WriteError::Stale) => crate::api::refuse(
+            StatusCode::CONFLICT,
+            "Someone else changed this first. Reload and try again.",
+        ),
         Err(WriteError::Store(error)) => {
             let code = sqlstate(&error);
             // An `anyhow::Error` shown with `%` prints only its outermost error, and for a

@@ -60,11 +60,11 @@ async fn plugin_row(
     workspace: Uuid,
     resolved: Option<(&str, Uuid)>,
     name: &str,
-) -> Result<Option<(Uuid, serde_json::Value, bool)>, WriteError> {
+) -> Result<Option<(Uuid, serde_json::Value, bool, String)>, WriteError> {
     let row = match resolved {
         None => {
             tx.query_opt(
-                "select id, config, enabled from plugins
+                "select id, config, enabled, updated_at::text from plugins
                   where workspace_id = $1 and name = $2 and service_id is null
                     and route_id is null and consumer_id is null
                     for update",
@@ -75,7 +75,7 @@ async fn plugin_row(
         Some((column, id)) => {
             tx.query_opt(
                 &format!(
-                    "select id, config, enabled from plugins
+                    "select id, config, enabled, updated_at::text from plugins
                       where {column} = $1 and name = $2 for update"
                 ),
                 &[&id, &name],
@@ -83,7 +83,14 @@ async fn plugin_row(
             .await?
         }
     };
-    Ok(row.map(|r| (r.get("id"), r.get("config"), r.get("enabled"))))
+    Ok(row.map(|r| {
+        (
+            r.get("id"),
+            r.get("config"),
+            r.get("enabled"),
+            r.get("updated_at"),
+        )
+    }))
 }
 
 /// The `key_auth` row on a target `target_row` resolved, read `FOR UPDATE`: its id, its header
@@ -92,14 +99,14 @@ async fn policy_row(
     tx: &Transaction<'_>,
     workspace: Uuid,
     resolved: Option<(&str, Uuid)>,
-) -> Result<Option<(Uuid, Option<String>, bool)>, WriteError> {
+) -> Result<Option<(Uuid, Option<String>, bool, String)>, WriteError> {
     let row = plugin_row(tx, workspace, resolved, "key_auth").await?;
-    Ok(row.map(|(id, config, enabled)| {
+    Ok(row.map(|(id, config, enabled, updated_at)| {
         let header = config
             .get("header")
             .and_then(|h| h.as_str())
             .map(str::to_string);
-        (id, header, enabled)
+        (id, header, enabled, updated_at)
     }))
 }
 
@@ -498,10 +505,10 @@ impl Store {
         };
         let (action, id, before) = match policy_row(&tx, workspace, resolved).await? {
             // Nothing to write, so nothing to audit and nothing for the data planes to reload.
-            Some((_, Some(current), true)) if current == header => return Ok(()),
+            Some((_, Some(current), true, _)) if current == header => return Ok(()),
             // Another header, or a disabled row: that is no requirement, so taking it over is
             // audited as creating one.
-            Some((id, current, enabled)) => {
+            Some((id, current, enabled, _)) => {
                 tx.execute(
                     "update plugins set config = config || jsonb_build_object('header', $2::text),
                             enabled = true, updated_at = now()
@@ -569,7 +576,7 @@ impl Store {
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
-        let Some((id, header, true)) = policy_row(&tx, workspace, resolved).await? else {
+        let Some((id, header, true, _)) = policy_row(&tx, workspace, resolved).await? else {
             return Err(
                 Refusal::NotFound(format!("{} has no key requirement.", target.as_text())).into(),
             );
@@ -680,16 +687,29 @@ impl Store {
         workspace: Uuid,
         target: &Target,
         policy: &JwtPolicy,
+        seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_put_jwt(caller, workspace, target, policy)).await
+        // seen is moved into the closure (owned, not borrowed), because the Future must
+        // outlive the function. The other arguments stay borrowed from &self.
+        let seen = seen_updated_at.map(str::to_string);
+        retrying(move || {
+            let seen = seen.clone();
+            async move {
+                self.try_put_jwt(caller, workspace, target, policy, seen.as_deref())
+                    .await
+            }
+        })
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn try_put_jwt(
         &self,
         caller: Uuid,
         workspace: Uuid,
         target: &Target,
         policy: &JwtPolicy,
+        seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
@@ -697,7 +717,13 @@ impl Store {
         let resolved = target_row(&tx, workspace, target).await?;
         let config = json(policy);
         let (action, id, before) = match plugin_row(&tx, workspace, resolved, "jwt").await? {
-            Some((id, current, enabled)) => {
+            Some((id, current, enabled, stored_at)) => {
+                // #197: a second editor's rotation is undone silently by a stale sheet.
+                if let Some(seen) = &seen_updated_at {
+                    if *seen != stored_at {
+                        return Err(WriteError::Stale);
+                    }
+                }
                 let current = stored_jwt(current).ok();
                 // Nothing to write, so nothing to audit and nothing for the data planes to reload.
                 if enabled && current.as_ref() == Some(policy) {
@@ -772,7 +798,7 @@ impl Store {
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
-        let Some((id, config, true)) = plugin_row(&tx, workspace, resolved, "jwt").await? else {
+        let Some((id, config, true, _)) = plugin_row(&tx, workspace, resolved, "jwt").await? else {
             return Err(
                 Refusal::NotFound(format!("{} has no JWT requirement.", target.as_text())).into(),
             );
@@ -857,7 +883,7 @@ impl Store {
         let resolved = target_row(&tx, workspace, target).await?;
         let config = limit.config();
         let (action, id, before) = match plugin_row(&tx, workspace, resolved, RATE_LIMIT).await? {
-            Some((id, current, enabled)) => {
+            Some((id, current, enabled, _)) => {
                 let current = Limit::from_config(current);
                 // Nothing to write, so nothing to audit and nothing for the data planes to reload.
                 if enabled && current == Some(limit) {
@@ -932,7 +958,7 @@ impl Store {
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
-        let Some((id, config, true)) = plugin_row(&tx, workspace, resolved, RATE_LIMIT).await?
+        let Some((id, config, true, _)) = plugin_row(&tx, workspace, resolved, RATE_LIMIT).await?
         else {
             return Err(
                 Refusal::NotFound(format!("{} has no request limit.", target.as_text())).into(),
