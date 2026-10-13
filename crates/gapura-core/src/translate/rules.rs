@@ -33,6 +33,25 @@ pub(crate) struct Compiled {
     pub resolved_refs: Condition,
 }
 
+impl Compiled {
+    /// The shape a route no listener admits takes: no rules, and references that read
+    /// as resolved -- the admission decision does not depend on them, and a route refused
+    /// by every listener still carries the same ResolvedRefs=True it would have carried
+    /// had it compiled, because the reference check is the same either way.
+    pub(crate) fn not_admitted(generation: Option<i64>) -> Self {
+        Self {
+            rules: Vec::new(),
+            resolved_refs: Condition::new(
+                crate::status::types::RESOLVED_REFS,
+                crate::status::ConditionStatus::True,
+                crate::status::reasons::RESOLVED_REFS,
+                "All references resolved",
+                generation,
+            ),
+        }
+    }
+}
+
 pub(crate) fn compile(
     route: &HttpRoute,
     rref: &ObjectRef,

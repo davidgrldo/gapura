@@ -30,8 +30,32 @@ pub(crate) fn attach(
         if !ours {
             continue;
         }
-        let compiled = rules::compile(route, rref, snap, clusters);
+        // Admission before compilation (#186): a route that names our Gateway but whose
+        // namespace no listener admits is still compiled below, and compiling means
+        // regex paths that can cost tens of milliseconds each. Anyone who can create
+        // HTTPRoutes in any namespace can name our Gateway, get the compile, and stall
+        // every translation. Checking whether any listener admits the route first
+        // costs nothing: the admission check is namespace and kind comparisons.
+        let any_listener_admits = route.spec.parent_refs.iter().any(|pref| {
+            our_gateway(gateways, pref, rref).is_some_and(|i| {
+                let gw = &gateways[i];
+                let gw_ns = &gw.r#ref.namespace;
+                gw.listeners.iter().any(|l| {
+                    (pref.section_name.as_deref().is_none_or(|s| s == l.name))
+                        && (pref.port.is_none_or(|p| p == l.port))
+                        && allowed::namespace_ok(l.allowed.as_ref(), gw_ns, rref, snap)
+                        && allowed::kind_ok(l.allowed.as_ref())
+                })
+            })
+        });
+        // A route no listener admits gets NotAllowedByListeners from the attach loop below,
+        // which needs no compiled rules; compiling it only lets it stall translation.
         let generation = route.metadata.generation;
+        let compiled = if any_listener_admits {
+            rules::compile(route, rref, snap, clusters)
+        } else {
+            Ok(rules::Compiled::not_admitted(generation))
+        };
         let mut parents = Vec::new();
         let mut attached: BTreeSet<String> = BTreeSet::new();
         for pref in &route.spec.parent_refs {
