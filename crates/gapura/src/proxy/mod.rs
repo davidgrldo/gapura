@@ -632,7 +632,11 @@ impl ProxyHttp for GapuraProxy {
                 // must not cost the backend anything). Same client answer the access log
                 // records, so a limited request names the same client a served one would.
                 if let Some(rl) = &rt.config.listeners[listener].rules[rule].rate_limit {
-                    let route = rt.config.listeners[listener].rules[rule].route.clone();
+                    // Keyed per rule, not per route (#185): one HTTPRoute can carry rules with
+                    // different limits (/login at 5/h, / at 100/s), and a shared route key means
+                    // the rules reset each other's windows, so the tighter limit never trips.
+                    let r = &rt.config.listeners[listener].rules[rule];
+                    let route = format!("{}#{}", r.route, r.rule_index);
                     if let Some(ip) = effective_client_ip(
                         session,
                         &self.trusted_proxies,
