@@ -84,6 +84,9 @@ stringData:
 {{- if and (ne .Values.privilegedPorts "capability") (ne .Values.privilegedPorts "sysctl") (lt $port 1024) }}
 {{- fail (printf "console.service.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $port) }}
 {{- end }}
+{{- if and (ne .Values.privilegedPorts "capability") (ne .Values.privilegedPorts "sysctl") (lt $configPort 1024) }}
+{{- fail (printf "console.store.config.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $configPort) }}
+{{- end }}
 {{- $fullname := include "gapura.fullname" . }}
 {{- /* One name base for every -control object: the helper truncates, a raw fullname minus
        suffix makes a 67-character Service on a long release. */}}
@@ -193,7 +196,9 @@ spec:
   {{- else }}
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   {{- end }}
-  replicas: {{ (((.Values.console).replicaCount) | default 1) }}
+  {{- $rc := 1 }}
+  {{- if hasKey (.Values.console | default dict) "replicaCount" }}{{ $rc = .Values.console.replicaCount }}{{ end }}
+  replicas: {{ $rc }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "gapura.name" . }}
@@ -227,7 +232,7 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
-        {{- if and (eq .Values.privilegedPorts "sysctl") (lt $port 1024) }}
+        {{- if and (eq .Values.privilegedPorts "sysctl") (or (lt $port 1024) (lt $configPort 1024)) }}
         sysctls:
         - name: net.ipv4.ip_unprivileged_port_start
           value: "0"
@@ -338,7 +343,7 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
-            {{- if and (eq .Values.privilegedPorts "capability") (lt $port 1024) }}
+            {{- if and (eq .Values.privilegedPorts "capability") (or (lt $port 1024) (lt $configPort 1024)) }}
             add: ["NET_BIND_SERVICE"]
             {{- end }}
 {{- end }}
