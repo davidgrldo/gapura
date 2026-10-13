@@ -197,7 +197,7 @@ spec:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   {{- end }}
   {{- $rc := 1 }}
-  {{- if hasKey (.Values.console | default dict) "replicaCount" }}{{ $rc = .Values.console.replicaCount }}{{ end }}
+  {{- if hasKey ((.Values.console) | default dict) "replicaCount" }}{{ $rc = ((.Values.console).replicaCount) }}{{ end }}
   replicas: {{ $rc }}
   selector:
     matchLabels:
