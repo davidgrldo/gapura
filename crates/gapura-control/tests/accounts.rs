@@ -600,7 +600,7 @@ async fn a_temporary_password_opens_only_the_change_screen() {
     assert_eq!(entry["actor_name"], "maya");
     assert_eq!(
         entry["after"],
-        serde_json::json!({"account": "ada", "password": "changed"})
+        serde_json::json!({"account": "maya", "password": "changed"})
     );
     no_hash_audited(&store).await;
 }
