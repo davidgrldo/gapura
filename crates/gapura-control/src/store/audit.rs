@@ -58,6 +58,7 @@ impl Store {
                 id: row.get("id"),
                 at: row.get("at"),
                 actor: row.get("actor_name"),
+                actor_user_id: row.get("actor_user_id"),
                 actor_method: row.get("actor_method"),
                 action: row.get("action"),
                 object_kind: row.get("object_kind"),

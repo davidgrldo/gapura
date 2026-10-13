@@ -187,13 +187,15 @@ impl Query {
 }
 
 /// One entry, as the console shows it. `object_id` is left out: `before` and `after` carry the
-/// names a person reads.
+/// names a person reads, and the account an entry is about is now in those values too.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EntryView {
     pub id: i64,
     /// UTC, to the microsecond, as `updated_at` is everywhere else.
     pub at: String,
     pub actor: String,
+    /// The actor's account id; the name above can be shared or re-used, the id cannot be.
+    pub actor_user_id: Option<String>,
     /// `local` or `oidc`; `null` for an entry with no person behind it.
     pub actor_method: Option<String>,
     pub action: String,

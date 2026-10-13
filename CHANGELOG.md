@@ -8,6 +8,9 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The audit trail can say which account an entry is about (#191): account entries carry the
+  account's name alongside the field that changed, and every entry returns `actor_user_id` so
+  an actor whose name is shared or re-used can still be told apart by its stable id.
 - The console can limit requests. A "Limit requests" control sits under "Require a JWT" in the
   service and route sheets and, for the whole workspace, on the Consumers page: a number of
   requests (1 to 1 000 000) per second, minute or hour, with the reminder that it is per client

@@ -250,7 +250,7 @@ impl Store {
                 "update",
                 target.id,
                 None,
-                Some(serde_json::json!({ "password": "reset" })),
+                Some(serde_json::json!({ "account": target.name, "password": "reset" })),
             ),
         )
         .await?;
@@ -302,8 +302,8 @@ impl Store {
             entry(
                 "update",
                 target.id,
-                Some(serde_json::json!({ "disabled": target.disabled })),
-                Some(serde_json::json!({ "disabled": disabled })),
+                Some(serde_json::json!({ "account": target.name, "disabled": target.disabled })),
+                Some(serde_json::json!({ "account": target.name, "disabled": disabled })),
             ),
         )
         .await?;
@@ -349,8 +349,8 @@ impl Store {
             entry(
                 "update",
                 target.id,
-                Some(serde_json::json!({ "superuser": target.superuser })),
-                Some(serde_json::json!({ "superuser": superuser })),
+                Some(serde_json::json!({ "account": target.name, "superuser": target.superuser })),
+                Some(serde_json::json!({ "account": target.name, "superuser": superuser })),
             ),
         )
         .await?;
