@@ -771,12 +771,20 @@ mod tests {
         );
         assert_eq!(bucket(ip("::ffff:192.0.2.1")), ip("192.0.2.1"));
         assert_eq!(bucket(ip("192.0.2.1")), ip("192.0.2.1"));
-        // A sign-in still counts the address itself.
+        // A sign-in counts the /64, not the address: a different address inside the
+        // same prefix shares the counters, which is the fix #189 is about.
         let t = Throttle::default();
         for _ in 0..10 {
             t.failed_at(None, ip("2001:db8:1:2::1"), now);
         }
-        assert_eq!(t.wait_at(None, ip("2001:db8:1:2::2"), now), None);
+        assert!(
+            t.wait_at(None, ip("2001:db8:1:2::2"), now).is_some(),
+            "a neighbour in the same /64 shares the counters"
+        );
+        assert!(
+            t.wait_at(None, ip("2001:db8:1:3::1"), now).is_none(),
+            "a different /64 has its own counters"
+        );
     }
 
     #[test]
