@@ -404,7 +404,7 @@ impl Store {
         caller: Uuid,
         current: &str,
         new: &str,
-    ) -> Result<i64, WriteError> {
+    ) -> Result<(i64, Option<String>), WriteError> {
         let change = PasswordChange {
             current: current.to_string(),
             new: new.to_string(),
@@ -442,7 +442,7 @@ impl Store {
         }
         accounts::new_password(&username, &change).map_err(WriteError::Field)?;
         let hash = hashed(change.new.clone()).await?;
-        retrying(|| self.try_change_own_password(caller, &verified, &hash)).await
+        Ok(retrying(|| self.try_change_own_password(caller, &verified, &hash)).await?)
     }
 
     async fn try_change_own_password(
@@ -450,7 +450,7 @@ impl Store {
         caller: Uuid,
         verified: &str,
         hash: &str,
-    ) -> Result<i64, WriteError> {
+    ) -> Result<(i64, Option<String>), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         bound_lock_waits(&tx).await?;
@@ -460,7 +460,7 @@ impl Store {
                 "update users set password_hash = $3, must_change_password = false,
                                   sessions_valid_after = clock_timestamp()
                   where id = $1 and password_hash = $2
-              returning floor(extract(epoch from sessions_valid_after) * 1000)::bigint",
+              returning floor(extract(epoch from sessions_valid_after) * 1000)::bigint, username",
                 &[&caller, &verified, &hash],
             )
             .await?
@@ -469,6 +469,7 @@ impl Store {
             return Err(WriteError::Field(accounts::wrong_current()));
         };
         let cut_off: i64 = row.get(0);
+        let username: Option<String> = row.get("username");
         let actor = caller_rights(&tx, caller).await?;
         if actor.disabled {
             return Err(Refusal::Forbidden("This account is disabled.".into()).into());
@@ -480,11 +481,11 @@ impl Store {
                 "update",
                 caller,
                 None,
-                Some(serde_json::json!({ "password": "changed" })),
+                Some(serde_json::json!({ "account": username, "password": "changed" })),
             ),
         )
         .await?;
         tx.commit().await?;
-        Ok(cut_off)
+        Ok((cut_off, username))
     }
 }

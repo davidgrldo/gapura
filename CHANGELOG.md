@@ -8,6 +8,10 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The change-own-password audit entry names the account (#191): the username is read before
+  the write and carried into the entry beside "password: changed". A password change by a
+  user of the console can no longer be told apart from an admin's reset by its name — the
+  trail now says whose account it was.
 - Store mode caches regex verdicts by pattern (#187): the same patterns on every /v1/config
   poll no longer recompile on the async runtime, which an editor's regex-heavy routes could
   stall for every workspace (2–4 s per route per poll). The verdicts are written by every
