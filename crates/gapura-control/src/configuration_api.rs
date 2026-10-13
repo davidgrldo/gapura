@@ -64,6 +64,10 @@ pub(crate) fn written(result: Result<(), WriteError>) -> Response {
         Err(WriteError::Busy) => {
             crate::api::refuse(StatusCode::SERVICE_UNAVAILABLE, crate::grants_api::BUSY)
         }
+        Err(WriteError::Stale) => crate::api::refuse(
+            StatusCode::CONFLICT,
+            "Someone else changed this policy. Reload it and apply your change again.",
+        ),
         Err(WriteError::Store(error)) => {
             let code = sqlstate(&error);
             tracing::warn!(
