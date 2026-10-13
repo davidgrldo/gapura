@@ -36,7 +36,8 @@ impl Store {
         let rows = client
             .query(
                 &format!(
-                    "select a.id, {} as at, a.actor_name, a.actor_method, a.action,
+                    "select a.id, {} as at, a.actor_name, a.actor_user_id::text as actor_user_id,
+                            a.actor_method, a.action,
                             a.object_kind, w.name as workspace, a.before, a.after
                        from audit_log a
                        left join workspaces w on w.id = a.workspace_id

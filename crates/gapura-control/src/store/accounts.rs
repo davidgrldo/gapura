@@ -442,7 +442,7 @@ impl Store {
         }
         accounts::new_password(&username, &change).map_err(WriteError::Field)?;
         let hash = hashed(change.new.clone()).await?;
-        Ok(retrying(|| self.try_change_own_password(caller, &verified, &hash)).await?)
+        retrying(|| self.try_change_own_password(caller, &verified, &hash)).await
     }
 
     async fn try_change_own_password(
