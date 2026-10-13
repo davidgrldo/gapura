@@ -160,7 +160,12 @@ async fn create(
     let note = match checked {
         Ok(note) => note,
         Err(message) => {
-            attempt.failed();
+            // A form that does not pass its own checks is not a sign-up attempt; it is
+            // noise. Counting it (#193) means an actor with a cheap IPv6 prefix fills
+            // the throttle's capacity with garbage nobody will revisit, closing sign-up
+            // for every real person for about a day. The attempt is refunded, not
+            // failed, so the counter does not exist.
+            attempt.refund();
             return refused(StatusCode::BAD_REQUEST, &message);
         }
     };
