@@ -335,6 +335,11 @@ impl Throttle {
         let policy = self.policy;
         let mut counters = self.lock();
         let windows = (0..policy.address.len()).filter_map(|i| u8::try_from(i).ok());
+        // bucket(): an IPv6 /64 is the granularity limits work at. Without it, a client
+        // rotating source addresses inside one /64 gets fresh counters per address (#189),
+        // which makes both limits effectively off for IPv6 and fills the capacity with
+        // windows nobody will revisit.
+        let addr = bucket(addr);
         let keys: Vec<Key> = name
             .filter(|_| policy.pair.is_some())
             .map(|n| Key::pair(n, addr))

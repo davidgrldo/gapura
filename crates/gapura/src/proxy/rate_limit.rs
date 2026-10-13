@@ -62,6 +62,18 @@ impl RateLimiter {
     }
 
     fn check_at(&self, route: &str, ip: IpAddr, rl: &RateLimit, now_ms: u64) -> Outcome {
+        // An IPv6 /64 is the granularity the limit works at: without this, a client rotating
+        // source addresses inside one /64 gets a fresh window per address (#189), which
+        // makes the limit effectively off for IPv6 and fills the map with windows the
+        // sweep cannot reclaim until they expire.
+        let ip = match ip.to_canonical() {
+            std::net::IpAddr::V6(v6) => {
+                let mut octets = v6.octets();
+                octets[8..].fill(0);
+                std::net::IpAddr::from(octets)
+            }
+            v4 => v4,
+        };
         let window_ms = rl.window_ms.max(1);
         let ends_ms = (now_ms / window_ms + 1) * window_ms;
         let mut table = self.table.lock().unwrap();
@@ -158,15 +170,18 @@ mod tests {
 
     /// The distinct address `n` of a flood, as from one IPv6 /64.
     fn flood_ip(n: u32) -> IpAddr {
+        // The varying bits live in the /64 prefix, because the limiter keys on the
+        // prefix now: varying the low bits would collapse to one bucket after the
+        // normalization #189 added, and the flood would fill nothing.
         IpAddr::V6(std::net::Ipv6Addr::new(
             0x2001,
             0xdb8,
-            0,
-            0,
-            0,
-            0,
             (n >> 16) as u16,
             n as u16,
+            0,
+            0,
+            0,
+            0,
         ))
     }
 
