@@ -540,22 +540,44 @@ impl ProxyHttp for GapuraProxy {
                 for plugin in &rt.config.listeners[listener].rules[rule].plugins {
                     let refusal: Option<(&'static str, &'static str, String)> = match plugin {
                         gapura_core::config::Plugin::Jwt(policy) => {
-                            let presented = jwt::bearer(
-                                session
-                                    .req_header()
-                                    .headers
-                                    .get(http::header::AUTHORIZATION)
-                                    .and_then(|v| v.to_str().ok()),
-                            );
-                            // No keys for this document means it did not parse at swap time.
-                            // Refusing is the safe direction: the alternative is passing traffic
-                            // through unverified because a configuration error made verification
-                            // impossible.
-                            let empty = jwt::Keys::default();
-                            let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                            jwt::verify(policy, keys, presented)
-                                .err()
-                                .map(|r| ("jwt", r.as_str(), "Bearer".to_string()))
+                            // Every Authorization line, not just the first (#190): HTTP/2
+                            // permits the header across several lines, and a second unverified
+                            // line forwarded upstream is an authentication bypass.
+                            let lines: Vec<String> = session
+                                .req_header()
+                                .headers
+                                .get_all(http::header::AUTHORIZATION)
+                                .iter()
+                                .filter_map(|v| v.to_str().ok())
+                                .map(str::to_string)
+                                .collect();
+                            let presented: Option<String> = lines
+                                .iter()
+                                .filter_map(|l| jwt::bearer(Some(l)).map(str::to_string))
+                                .next();
+                            // If more than one line carries a bearer, refuse: forwarding
+                            // lines the check did not verify is the bypass.
+                            let bearer_count = lines
+                                .iter()
+                                .filter(|l| jwt::bearer(Some(l)).is_some())
+                                .count();
+                            if bearer_count > 1 {
+                                Some((
+                                    "jwt",
+                                    "multiple_bearer",
+                                    "one credential per request".into(),
+                                ))
+                            } else {
+                                // No keys for this document means it did not parse at swap time.
+                                // Refusing is the safe direction: the alternative is passing traffic
+                                // through unverified because a configuration error made verification
+                                // impossible.
+                                let empty = jwt::Keys::default();
+                                let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
+                                jwt::verify(policy, keys, presented.as_deref())
+                                    .err()
+                                    .map(|r| ("jwt", r.as_str(), "Bearer".to_string()))
+                            }
                         }
                         gapura_core::config::Plugin::KeyAuth(policy) => {
                             let presented = session
