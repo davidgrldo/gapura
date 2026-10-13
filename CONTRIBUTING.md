@@ -11,6 +11,51 @@ cheaper for both of us to disagree about an approach in a paragraph than in a th
 By contributing you agree that your work is licensed under [Apache-2.0](LICENSE), the same as the
 rest of the repository. There is no CLA and no sign-off requirement.
 
+## Getting started
+
+Fork the repository, clone your fork, and make sure the tests pass before you change anything:
+
+```bash
+git clone https://github.com/<your-username>/gapura
+cd gapura
+cargo test --workspace --locked
+```
+
+That passes on a machine with nothing else installed: `gapura-core` and `gapura` need no database
+and no cluster. The `gapura-control` tests that need a store skip silently until you give them
+one — locally a throwaway Postgres is enough:
+
+```bash
+docker run -d --name gapura-pg -p 5433:5432 -e POSTGRES_PASSWORD=x postgres:17-alpine
+GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control
+```
+
+CI runs both halves, and refuses to let the store tests skip there, so "it passed on my machine"
+without a database still means something — it just means you did not exercise the control plane.
+
+Then cut a branch with any short, descriptive name — the conventions live in the commits, not in
+the branch name:
+
+```bash
+git checkout -b rediscovery-failures
+```
+
+## What lives where
+
+| Path | What it is |
+| --- | --- |
+| `crates/gapura` | The data plane — the Pingora-based proxy that carries traffic. |
+| `crates/gapura-core` | The translation core: Gateway API resources in, routing `Config` and status patches out. A pure function, covered by golden tests (below). |
+| `crates/gapura-control` | The control plane — serves the console's API and reads on its behalf; the only part that talks to Postgres. |
+| `web/` | The console frontend (TypeScript, built with Node 22). |
+| `charts/gapura` | The Helm chart, with rendered golden output for every values file. |
+| `hack/` | The scripts CI runs: `check-identity.sh`, `chart-render.sh`, `conformance.sh`, the kind and k3s helpers. |
+| `conformance/` | Upstream Gateway API conformance configuration and the reports `./hack/conformance.sh` produces. |
+| `docs/` | The release process ([RELEASING.md](docs/RELEASING.md)), ADRs, diagrams. |
+
+Not sure which of those your change touches? Say so in the issue and someone will point you at
+the right one — that is a cheaper question than a patch in the wrong layer.
+
 ## Prerequisites
 
 **Rust.** `rust-toolchain.toml` pins the `stable` channel with `rustfmt` and `clippy`, so `rustup`
@@ -184,14 +229,33 @@ entries already there, which tell the reader what to check in their cluster befo
 
 Small, self-contained pull requests get reviewed sooner, because they can be reviewed in one sitting.
 
-## Reporting bugs and vulnerabilities
+## Reporting bugs and proposing features
 
-For an ordinary bug, open an issue with the version or commit, the Gateway API resources involved,
-what you expected, and what happened. A failing fixture is the best possible bug report.
+For an ordinary bug, search the [existing issues](../../issues) first, then open one with:
 
-**For a security issue, do not open a public issue.** Use GitHub's private vulnerability reporting,
-as described in [SECURITY.md](SECURITY.md).
+- the version or commit you are running;
+- the Gateway API resources involved, as YAML — redact hosts and secrets, keep the structure;
+- what you expected, and what happened instead;
+- the environment: Kubernetes version and flavour, chart or manual install, and the relevant
+  lines from the `gapura` (and, if the console is involved, `gapura-control`) logs.
+
+A failing fixture is the best possible bug report: a `tests/fixtures/<case>/input/` directory
+whose translation comes out wrong is something that can be reproduced and fixed without asking
+you anything.
+
+To propose a feature, open an issue describing the problem you want solved, not the
+implementation. If the problem is "the Gateway API spec says X and Gapura does Y", quote the
+section of the spec. Feature work follows the same rule as everything else: agreed in an issue
+first, then a patch — the intro above is that rule stated once more.
+
+**For a security issue, do not open a public issue.** Use GitHub's private vulnerability
+reporting, as described in [SECURITY.md](SECURITY.md).
 
 ## Code of conduct
 
 Participation in this project is governed by the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+## Questions
+
+Open an issue. There is no separate forum, and a question answered in an issue stays searchable
+for the next person with the same question.

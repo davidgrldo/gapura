@@ -1,0 +1,26 @@
+name: Feature proposal
+description: Ask for a change of behaviour — described as a problem, not an implementation.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem you want solved, not the implementation. If the problem is "the
+        Gateway API spec says X and Gapura does Y", quote the section of the spec. Large features
+        are agreed here first, then arrive as a patch — see
+        [CONTRIBUTING.md](https://github.com/davidgrldo/gapura/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what stands in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Relevant Gateway API spec section
+      description: If this is a conformance or spec-alignment issue, quote it. Delete this field otherwise.
+      render: text
+    validations:
+      required: false
