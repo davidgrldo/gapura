@@ -1,0 +1,62 @@
+name: Bug report
+description: Something in Gapura does not behave the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. A failing fixture is the best possible bug report — if you can
+        share the Gateway API resources that translate wrongly, this can be reproduced without
+        asking you anything. Redact hosts and secrets, keep the structure.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The `gapura` image tag, or the commit you are running.
+      placeholder: v0.4.1 / 1a2b3c4
+    validations:
+      required: true
+  - type: textarea
+    id: resources
+    attributes:
+      label: Gateway API resources involved
+      description: The YAML of the Gateway, HTTPRoute, or other resources involved.
+      placeholder: |
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: One or two sentences each is fine.
+    validations:
+      required: true
+  - type: input
+    id: cluster
+    attributes:
+      label: Kubernetes version and flavour
+      placeholder: v1.31.3, kind / v1.30.6, k3s
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Helm chart
+        - Manual manifests
+        - ./hack/kind-deploy.sh or ./hack/k3s-deploy.sh
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Lines from the `gapura` (and, if the console is involved, `gapura-control`) pods.
+      render: text
+    validations:
+      required: false
