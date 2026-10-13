@@ -220,14 +220,26 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
     })
 }
 
-/// Whether a JWKS document holds a symmetric (`kty: "oct"`) key: an HMAC secret, which a viewer of
-/// the workspace could read back. The data plane verifies with one, from SQL or Kubernetes, but
-/// the console never stores one.
+/// Whether a JWKS document holds a key the console must refuse to store: an HMAC secret (`kty:
+/// "oct"`), which a viewer of the workspace could read back, or a private key (`kty: "RSA"` or
+/// `"EC"` or `"OKP"` with `d`, `p`, `q`, or `dp`/`dq`/`qi` present), which is worse — it can
+/// *sign* tokens for every audience this gateway verifies. The data plane verifies with public
+/// keys, from SQL or Kubernetes; the console stores verification keys, never signing ones.
 fn holds_a_shared_secret(jwks: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(jwks).is_ok_and(|document| {
-        document["keys"]
-            .as_array()
-            .is_some_and(|keys| keys.iter().any(|key| key["kty"] == "oct"))
+        document["keys"].as_array().is_some_and(|keys| {
+            keys.iter().any(|key| {
+                if key["kty"] == "oct" {
+                    return true;
+                }
+                // JWK private parameters, per RFC 7517 section 4: `d` is the private key for
+                // EC and OKP, `p` and `q` the RSA primes, and dp/dq/qi the CRT exponents.
+                // Their presence means the document holds a signing key, not a verification one.
+                ["d", "p", "q", "dp", "dq", "qi"]
+                    .iter()
+                    .any(|field| key.get(*field).is_some_and(|v| !v.is_null()))
+            })
+        })
     })
 }
 
