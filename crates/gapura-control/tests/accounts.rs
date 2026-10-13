@@ -600,7 +600,7 @@ async fn a_temporary_password_opens_only_the_change_screen() {
     assert_eq!(entry["actor_name"], "maya");
     assert_eq!(
         entry["after"],
-        serde_json::json!({"account": "the-account", "password": "changed"})
+        serde_json::json!({"account": "ada", "password": "changed"})
     );
     no_hash_audited(&store).await;
 }
@@ -642,7 +642,7 @@ async fn a_reset_signs_out_open_sessions() {
     assert_eq!(entry["workspace_id"], serde_json::Value::Null);
     assert_eq!(
         entry["after"],
-        serde_json::json!({"account": "the-account", "password": "reset"})
+        serde_json::json!({"account": "ada", "password": "reset"})
     );
     for row in audit_text(&store).await {
         assert!(!row.contains(temporary_password), "{row}");
@@ -757,17 +757,17 @@ async fn disable_and_enable() {
     assert_eq!(entry["object_id"], serde_json::json!(s.ada));
     assert_eq!(
         entry["before"],
-        serde_json::json!({"account": "the-account", "disabled": false})
+        serde_json::json!({"account": "ada", "disabled": false})
     );
     assert_eq!(
         entry["after"],
-        serde_json::json!({"account": "the-account", "disabled": true})
+        serde_json::json!({"account": "ada", "disabled": true})
     );
 
     ok(&app, "PUT", &status, &root, r#"{"disabled":false}"#).await;
     assert_eq!(
         last_audit(&store).await["after"],
-        serde_json::json!({"account": "the-account", "disabled": false})
+        serde_json::json!({"account": "ada", "disabled": false})
     );
     let back = signed_in(&app, "ada", PASSWORD).await;
     assert_eq!(status_of(&app, ME, &back).await, StatusCode::OK);
