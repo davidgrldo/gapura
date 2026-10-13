@@ -78,6 +78,12 @@ const MIGRATION_LOCK: i64 = 0x6761_7075_7261_0001;
 
 pub struct Store {
     pool: Pool,
+    /// Regex verdicts by pattern, filled by every snapshot and never cleared (#187): a
+    /// pattern the console already validated does not recompile on the next poll. Each
+    /// entry is a pattern and a verdict; the shapes are bounded by the console's own
+    /// validation, and entries are checked on read.
+    regex_cache:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Result<(), String>>>>,
 }
 
 impl Store {
@@ -119,7 +125,10 @@ impl Store {
             .context("building the Postgres pool")?;
         // Fail at startup rather than on the first data plane's call.
         let _probe = pool.get().await.context("connecting to Postgres")?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            regex_cache: Default::default(),
+        })
     }
 
     pub async fn migrate(&self) -> Result<()> {
@@ -255,7 +264,7 @@ impl Store {
                     );
                 }
                 let paths: serde_json::Value = r.get("paths");
-                let paths = parse_paths(&paths)
+                let paths = parse_paths(&paths, &self.regex_cache)
                     .with_context(|| format!("route {name:?} has paths this binary cannot read"))?;
                 let headers: serde_json::Value = r.get("headers");
                 let headers = parse_headers(&headers).with_context(|| {
@@ -554,7 +563,10 @@ fn parse_rate_limit(config: serde_json::Value) -> Result<gapura_core::config::Ra
 /// Leaving one out is not harmless: drop every entry of a route and the empty list that remains
 /// means every path, so `[{"type":"PathPrefix","value":"/admin"}]` -- the Gateway API spelling,
 /// and the obvious mistake to make -- would turn a route for `/admin` into a catch-all.
-fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
+fn parse_paths(
+    v: &serde_json::Value,
+    cache: &std::sync::Mutex<std::collections::HashMap<String, Result<(), String>>>,
+) -> Result<Vec<PathMatch>> {
     let entries = v
         .as_array()
         .with_context(|| format!("paths is not a list: {v}"))?;
@@ -573,11 +585,26 @@ fn parse_paths(v: &serde_json::Value) -> Result<Vec<PathMatch>> {
                 Some("exact") => Ok(PathMatch::Exact(value)),
                 Some("prefix") => Ok(PathMatch::Prefix(value)),
                 Some("regex") => {
-                    // Refused here rather than skipped by the data plane, where a pattern that
-                    // does not compile would leave its route matching nothing.
-                    gapura_core::matcher::compile_path_regex(&value)
-                        .with_context(|| format!("path regex {value:?} does not compile"))?;
-                    Ok(PathMatch::Regex(value))
+                    // A verdict from a previous snapshot is reused (#187): the console's routes
+                    // are the same patterns on every poll, and compiling each on the async
+                    // runtime stalls /v1/config for every workspace.
+                    let verdict = {
+                        let mut cache = cache.lock().unwrap();
+                        match cache.get(&value).cloned() {
+                            Some(v) => v,
+                            None => {
+                                let v = gapura_core::matcher::compile_path_regex(&value)
+                                    .map(|_| ())
+                                    .map_err(|e| e.to_string());
+                                cache.insert(value.clone(), v.clone());
+                                v
+                            }
+                        }
+                    };
+                    match verdict {
+                        Ok(()) => Ok(PathMatch::Regex(value)),
+                        Err(e) => anyhow::bail!("path regex {value:?} does not compile: {e}"),
+                    }
                 }
                 other => {
                     anyhow::bail!("path type {other:?} is not one of exact, prefix, regex: {e}")
@@ -620,11 +647,15 @@ mod tests {
 
     #[test]
     fn known_path_shapes_are_read() {
-        let paths = parse_paths(&json!([
-            {"type": "exact", "value": "/a"},
-            {"type": "prefix", "value": "/b"},
-            {"type": "regex", "value": "^/c$"},
-        ]))
+        let cache = Default::default();
+        let paths = parse_paths(
+            &json!([
+                {"type": "exact", "value": "/a"},
+                {"type": "prefix", "value": "/b"},
+                {"type": "regex", "value": "^/c$"},
+            ]),
+            &cache,
+        )
         .unwrap();
         assert_eq!(
             paths,
@@ -638,7 +669,9 @@ mod tests {
 
     #[test]
     fn an_empty_path_list_is_valid_and_means_every_path() {
-        assert!(parse_paths(&json!([])).unwrap().is_empty());
+        assert!(parse_paths(&json!([]), &Default::default())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -653,14 +686,20 @@ mod tests {
             json!({"type": "prefix", "value": "/admin"}),
             json!(null),
         ] {
-            assert!(parse_paths(&bad).is_err(), "accepted {bad}");
+            assert!(
+                parse_paths(&bad, &Default::default()).is_err(),
+                "accepted {bad}"
+            );
         }
         // One bad entry among good ones still fails: a route that matches part of what was
         // written is as wrong as one that matches all of it.
-        assert!(parse_paths(&json!([
-            {"type": "prefix", "value": "/ok"},
-            {"type": "glob", "value": "/admin/*"},
-        ]))
+        assert!(parse_paths(
+            &json!([
+                {"type": "prefix", "value": "/ok"},
+                {"type": "glob", "value": "/admin/*"},
+            ]),
+            &Default::default()
+        )
         .is_err());
     }
 

@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Store mode caches regex verdicts by pattern (#187): the same patterns on every /v1/config
+  poll no longer recompile on the async runtime, which an editor's regex-heavy routes could
+  stall for every workspace (2–4 s per route per poll). The verdicts are written by every
+  snapshot and read on the next; a pattern that fails still recompiles, so a fix to a bad
+  pattern is picked up immediately.
 - The audit trail can say which account an entry is about (#191): account entries carry the
   account's name alongside the field that changed, and every entry returns `actor_user_id` so
   an actor whose name is shared or re-used can still be told apart by its stable id.
