@@ -212,7 +212,15 @@
       // leaving it out would make removing the last row do nothing.
       headers,
     }
-    // service_updated_at: the stamp of the service this route points at, so a stale tab\n    // that names a service someone re-created gets 409 instead of silently moving to\n    // the new upstream (#137, whose server half shipped; this is the client half #184).\n    if (mode === 'edit')\n      send('PUT', here(), {\n        ...body,\n        updated_at: route.updated_at,\n        service_updated_at: route.service_updated_at,\n      })
+    // service_updated_at: the stamp of the service this route points at, so a stale tab
+    // that names a service someone re-created gets 409 instead of silently moving to
+    // the new upstream (#137, whose server half shipped; this is the client half #184).
+    if (mode === 'edit')
+      send('PUT', here(), {
+        ...body,
+        updated_at: route.updated_at,
+        service_updated_at: route.service_updated_at,
+      })
     else send('POST', base(workspace, 'routes'), body)
   }
 
