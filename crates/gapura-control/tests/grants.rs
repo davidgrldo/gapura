@@ -492,8 +492,9 @@ async fn giving_changing_and_removing_a_direct_grant_each_leave_one_audit_entry(
             "workspace_id": s.payments,
             // A direct grant's entry always holds an object on both sides, with `role` null on
             // the side that has no grant, so neither column is ever SQL NULL.
-            "before": {"workspace": "payments", "role": before},
-            "after": {"workspace": "payments", "role": after},
+            // And it names whose grant changed, as account entries do (#224).
+            "before": {"account": "wes", "account_id": s.wes, "workspace": "payments", "role": before},
+            "after": {"account": "wes", "account_id": s.wes, "workspace": "payments", "role": after},
             "before_is_null": false, "after_is_null": false,
         })
     };
@@ -584,8 +585,8 @@ async fn a_superuser_grants_in_every_workspace_in_one_change() {
                 "actor_user_id": s.root, "actor_name": "root", "actor_method": "local",
                 "action": "update", "object_kind": "user", "object_id": s.wes,
                 "workspace_id": workspace,
-                "before": {"workspace": name, "role": null},
-                "after": {"workspace": name, "role": role},
+                "before": {"account": "wes", "account_id": s.wes, "workspace": name, "role": null},
+                "after": {"account": "wes", "account_id": s.wes, "workspace": name, "role": role},
                 "before_is_null": false, "after_is_null": false,
             })
         })
@@ -1102,7 +1103,9 @@ async fn a_grant_made_meanwhile_is_what_the_write_replaces() {
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["before"],
-        serde_json::json!({"workspace": "payments", "role": "editor"}),
+        serde_json::json!({
+            "account": "wes", "account_id": s.wes, "workspace": "payments", "role": "editor",
+        }),
         "the entry names what it replaced, not an empty slot"
     );
 }

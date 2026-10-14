@@ -374,17 +374,19 @@ impl Store {
         let tx = client.transaction().await?;
         let concerned: BTreeSet<Uuid> = wanted.keys().copied().collect();
         let allowed = authorise_again(&tx, caller, &concerned).await?;
-        // Only now, so a refused request says nothing about whether the account exists.
-        if tx
+        // Only now, so a refused request says nothing about whether the account exists. The name
+        // is read under the same lock, for the audit entries to say whose grant changed.
+        let Some(account) = tx
             .query_opt(
-                "select 1 from users where id = $1 for key share",
+                "select coalesce(username, display_name, oidc_subject) as name
+                   from users where id = $1 for key share",
                 &[&target],
             )
             .await?
-            .is_none()
-        {
+            .map(|row| row.get::<_, String>("name"))
+        else {
             return Err(Refusal::NotFound("There is no such account.".into()).into());
-        }
+        };
         let ids: Vec<Uuid> = concerned.into_iter().collect();
         let mut held = BTreeMap::new();
         for row in tx
@@ -434,8 +436,8 @@ impl Store {
                     object_kind: "user",
                     object_id: Some(target),
                     workspace: Some(workspace),
-                    before: Some(grants::direct_audit(name, change.before)),
-                    after: Some(grants::direct_audit(name, change.after)),
+                    before: Some(grants::direct_audit(&account, target, name, change.before)),
+                    after: Some(grants::direct_audit(&account, target, name, change.after)),
                 },
             )
             .await?;
