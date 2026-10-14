@@ -43,9 +43,9 @@
         const limited = limits.find((r) => r.target === 'workspace')
         answer = {
           consumers,
-          keyAuth: own ? { header: own.header, from: 'workspace' } : null,
+          keyAuth: own ? { header: own.header, from: 'workspace', updated_at: own.updated_at } : null,
           jwt: token ? { issuer: token.issuer, from: 'workspace' } : null,
-          rateLimit: limited ? { limit: limited.limit, per: limited.per, from: 'workspace' } : null,
+          rateLimit: limited ? { limit: limited.limit, per: limited.per, from: 'workspace', updated_at: limited.updated_at } : null,
         }
         failed = undefined
       },
