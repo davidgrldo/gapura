@@ -18,8 +18,9 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 #[derive(Default)]
 pub struct Keys {
     by_kid: HashMap<String, (DecodingKey, Algorithm)>,
-    /// A JWKS is allowed to omit `kid`, and a token is allowed to omit the header. With one key
-    /// there is no ambiguity to resolve, so these are tried when a lookup by `kid` finds nothing.
+    /// A JWKS is allowed to omit `kid`, and a token is allowed to omit the header. These are
+    /// tried for a token without a `kid`, and for one whose `kid` names no key in `by_kid`: an
+    /// IdP that stamps `kid` on its tokens but publishes a key without one still verifies.
     anonymous: Vec<(DecodingKey, Algorithm)>,
     /// Keys the document offered that could not be used.
     skipped: usize,
@@ -33,7 +34,8 @@ impl Keys {
     }
 
     /// How many keys the document offered that cannot verify anything: a key type this verifier
-    /// does not read, key material that does not parse, or no `alg` it knows.
+    /// does not read, key material that does not parse, no `alg` it knows, or an `alg` the key's
+    /// type or curve contradicts.
     pub fn skipped(&self) -> usize {
         self.skipped
     }
@@ -51,9 +53,11 @@ pub enum JwksError {
 }
 
 /// The keys `jwks` holds that a token can be verified with. A key is usable when `jsonwebtoken`
-/// reads its material and it names an `alg` this verifier knows; the algorithm comes from the
-/// key, never from a token. A document with at least one usable key is `Ok` and says how many it
-/// skipped.
+/// reads its material, it names an `alg` this verifier knows, and that `alg` fits the key: an
+/// RSA key labelled ES256, or a P-384 key labelled ES256, would be refused by `jsonwebtoken` at
+/// every verification, so it counts as skipped here rather than usable. The algorithm comes from
+/// the key, never from a token. A document with at least one usable key is `Ok` and says how many
+/// it skipped.
 pub fn keys(jwks: &str) -> Result<Keys, JwksError> {
     let set = serde_json::from_str::<jsonwebtoken::jwk::JwkSet>(jwks)
         .map_err(|_| JwksError::Unreadable)?;
@@ -64,7 +68,7 @@ pub fn keys(jwks: &str) -> Result<Keys, JwksError> {
             .key_algorithm
             .and_then(|a| a.to_string().parse::<Algorithm>().ok());
         match (DecodingKey::from_jwk(&jwk), alg) {
-            (Ok(k), Some(alg)) => match &jwk.common.key_id {
+            (Ok(k), Some(alg)) if fits(&jwk, &k, alg) => match &jwk.common.key_id {
                 Some(kid) => {
                     keys.by_kid.insert(kid.clone(), (k, alg));
                 }
@@ -79,6 +83,23 @@ pub fn keys(jwks: &str) -> Result<Keys, JwksError> {
         });
     }
     Ok(keys)
+}
+
+/// Whether `alg` is one `key` can verify: the same family (HMAC, RSA, EC, EdDSA), and for a
+/// curve-based key the curve that algorithm is defined over.
+fn fits(jwk: &jsonwebtoken::jwk::Jwk, key: &DecodingKey, alg: Algorithm) -> bool {
+    use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve};
+    if key.family() != alg.family() {
+        return false;
+    }
+    match (&jwk.algorithm, alg) {
+        (AlgorithmParameters::EllipticCurve(p), Algorithm::ES256) => p.curve == EllipticCurve::P256,
+        (AlgorithmParameters::EllipticCurve(p), Algorithm::ES384) => p.curve == EllipticCurve::P384,
+        (AlgorithmParameters::OctetKeyPair(p), Algorithm::EdDSA) => {
+            p.curve == EllipticCurve::Ed25519
+        }
+        _ => true,
+    }
 }
 
 /// Why a request was refused. Each maps to 401, but they are separated because "no token" and
@@ -110,10 +131,13 @@ pub fn verify(policy: &JwtPolicy, keys: &Keys, token: Option<&str>) -> Result<()
         return Err(Refusal::Missing);
     };
     let header = jsonwebtoken::decode_header(token).map_err(|_| Refusal::Malformed)?;
-    let candidates: Vec<&(DecodingKey, Algorithm)> = match &header.kid {
-        Some(kid) => keys.by_kid.get(kid).into_iter().collect(),
-        None => keys.anonymous.iter().collect(),
-    };
+    // A `kid` that names a key gets that key alone; one that names nothing falls back to the
+    // keys published without a `kid`, as a token without a `kid` does.
+    let candidates: Vec<&(DecodingKey, Algorithm)> =
+        match header.kid.as_ref().and_then(|kid| keys.by_kid.get(kid)) {
+            Some(key) => vec![key],
+            None => keys.anonymous.iter().collect(),
+        };
     if candidates.is_empty() {
         return Err(Refusal::UnknownKey);
     }
@@ -324,6 +348,87 @@ mod tests {
             verify(&p, &keys_for(&p), Some(&token(None, good_claims()))),
             Ok(())
         );
+    }
+
+    /// The `Keys` doc promises it: an IdP that stamps `kid` on its tokens but publishes its one
+    /// key without one is not refused as `unknown_key`.
+    #[test]
+    fn a_kid_no_key_carries_falls_back_to_the_keys_without_one() {
+        let p = policy(jwks(None));
+        let t = token(Some("abc"), good_claims());
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
+    }
+
+    /// The fallback is for a `kid` nothing answers to. A `kid` that names a key gets that key
+    /// alone, and a bad signature against it is not retried against the anonymous ones.
+    #[test]
+    fn a_kid_that_names_a_key_does_not_fall_back() {
+        let other = json!({
+            "kty": "oct",
+            "alg": "HS256",
+            "kid": "k1",
+            "k": base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(b"a-different-secret-entirely-not-ours"),
+        });
+        let p = policy(json!({"keys": [other, oct(None)]}).to_string());
+        let t = token(Some("k1"), good_claims());
+        assert_eq!(
+            verify(&p, &keys_for(&p), Some(&t)),
+            Err(Refusal::BadSignature)
+        );
+    }
+
+    // Public key material from RFC 7517, appendix A.1. `keys` only has to read it, not verify
+    // with it, so the curve it is really on does not matter to the tests that relabel it.
+    const EC_X: &str = "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4";
+    const EC_Y: &str = "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM";
+
+    fn ec(crv: &str, alg: &str) -> serde_json::Value {
+        json!({"kty": "EC", "crv": crv, "alg": alg, "x": EC_X, "y": EC_Y, "kid": "e"})
+    }
+
+    fn rsa(alg: &str) -> serde_json::Value {
+        json!({"kty": "RSA", "alg": alg, "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw", "e": "AQAB", "kid": "r"})
+    }
+
+    #[test]
+    fn a_key_whose_alg_fits_its_type_and_curve_is_usable() {
+        for key in [
+            ec("P-256", "ES256"),
+            ec("P-384", "ES384"),
+            rsa("RS256"),
+            rsa("PS256"),
+        ] {
+            let document = json!({"keys": [key]}).to_string();
+            let read = keys(&document).unwrap_or_else(|e| panic!("{document}: {e}"));
+            assert_eq!((read.usable(), read.skipped()), (1, 0), "{document}");
+        }
+    }
+
+    /// `jsonwebtoken` refuses such a pair at every verification, so a document holding only
+    /// these must be refused when it is written, not discovered when every request is a 401.
+    #[test]
+    fn a_key_whose_alg_contradicts_its_type_or_curve_is_skipped() {
+        for key in [
+            rsa("ES256"),
+            rsa("HS256"),
+            ec("P-256", "RS256"),
+            ec("P-384", "ES256"),
+            ec("P-256", "ES384"),
+            ec("P-256", "EdDSA"),
+            json!({"kty": "oct", "alg": "RS256", "k": "AAAA"}),
+        ] {
+            let document = json!({"keys": [key]}).to_string();
+            assert_eq!(
+                keys(&document).err(),
+                Some(JwksError::NoUsableKey { skipped: 1 }),
+                "{document}"
+            );
+        }
+        // Beside a key that fits, it is counted as skipped rather than refusing the document.
+        let document = json!({"keys": [ec("P-384", "ES256"), rsa("RS256")]}).to_string();
+        let read = keys(&document).unwrap();
+        assert_eq!((read.usable(), read.skipped()), (1, 1));
     }
 
     /// The direction a configuration mistake must fail in. A policy whose keys did not load has

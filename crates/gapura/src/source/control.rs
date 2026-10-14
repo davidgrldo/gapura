@@ -64,7 +64,7 @@ impl ControlSource {
         match serde_json::from_slice::<Cached>(&bytes) {
             Ok(cached) => {
                 let served = self.store.load().config.clone();
-                let config = resolve(cached.config.clone(), &served, lookup).await;
+                let config = resolve(cached.config.clone(), &served, lookup, LOOKUP_TIMEOUT).await;
                 self.store.swap_from_cache(config);
                 tracing::info!(
                     version = %cached.version,
@@ -172,7 +172,7 @@ impl ControlSource {
             // result differs, so a quiet cluster does not churn the runtime.
             if let Some(config) = &latest {
                 let served = self.store.load().config.clone();
-                let resolved = resolve(config.clone(), &served, lookup).await;
+                let resolved = resolve(config.clone(), &served, lookup, LOOKUP_TIMEOUT).await;
                 if served != resolved {
                     self.store.swap(resolved, Vec::new());
                 }
@@ -186,6 +186,15 @@ impl ControlSource {
     }
 }
 
+/// How long one backend name may take to resolve before it counts as a resolver error.
+///
+/// Resolution runs on the same tick as the configuration poll, so a name whose authoritative DNS
+/// stops answering would otherwise hold back every poll behind it -- and with them a revoked key
+/// or a removed route -- for as long as glibc's retries take, which `ndots:5` and a search list
+/// multiply into tens of seconds. A few seconds is far longer than a healthy in-cluster or
+/// upstream lookup needs, and short beside the default poll interval.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Fill in `Cluster::endpoints` for every cluster that names a host instead.
 ///
 /// Only the data plane can do this. Data planes in another network are deliberately supported,
@@ -198,16 +207,41 @@ impl ControlSource {
 /// `config` cannot supply them: it is the control plane's configuration, whose resolve clusters
 /// are always empty by construction, so leaving them alone on error -- what this used to do --
 /// swapped in an empty cluster and turned a CoreDNS restart into a 503 for every such backend.
-async fn resolve<F, Fut>(mut config: Config, served: &Config, lookup: F) -> Config
+/// A lookup that outlasts `timeout` is a resolver error too.
+///
+/// Every cluster is looked up at once, so one name that hangs costs a tick at most `timeout`,
+/// not `timeout` for each name behind it.
+async fn resolve<F, Fut>(
+    mut config: Config,
+    served: &Config,
+    lookup: F,
+    timeout: Duration,
+) -> Config
 where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
 {
-    for (key, cluster) in config.clusters.iter_mut() {
-        let Some(target) = cluster.resolve.clone() else {
+    let lookups = config.clusters.iter().filter_map(|(key, cluster)| {
+        let target = cluster.resolve.clone()?;
+        let pending =
+            tokio::time::timeout(timeout, lookup(format!("{}:{}", target.host, target.port)));
+        Some(async move {
+            let result = pending.await.unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("no answer within {timeout:?}"),
+                ))
+            });
+            (key.clone(), target, result)
+        })
+    });
+    let results = futures::future::join_all(lookups).await;
+
+    for (key, target, result) in results {
+        let Some(cluster) = config.clusters.get_mut(&key) else {
             continue;
         };
-        match lookup(format!("{}:{}", target.host, target.port)).await {
+        match result {
             Ok(addrs) => {
                 let mut endpoints: Vec<Endpoint> = addrs
                     .into_iter()
@@ -226,7 +260,7 @@ where
             Err(e) => {
                 let kept = served
                     .clusters
-                    .get(key)
+                    .get(&key)
                     .filter(|c| c.resolve == cluster.resolve)
                     .map(|c| c.endpoints.clone())
                     .unwrap_or_default();
@@ -410,9 +444,12 @@ mod tests {
     async fn a_successful_resolution_replaces_the_addresses() {
         let from_control_plane = resolve_config("orders.apps", vec![]);
         let served = resolve_config("orders.apps", vec![ep("10.0.0.1")]);
-        let got = resolve(from_control_plane, &served, |t| {
-            resolves_to(t, &["10.0.0.9"])
-        })
+        let got = resolve(
+            from_control_plane,
+            &served,
+            |t| resolves_to(t, &["10.0.0.9"]),
+            LOOKUP_TIMEOUT,
+        )
         .await;
         assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.9")]);
     }
@@ -424,7 +461,7 @@ mod tests {
         // a resolver hiccup into a 503 for every request to this backend.
         let from_control_plane = resolve_config("orders.apps", vec![]);
         let served = resolve_config("orders.apps", vec![ep("10.0.0.5")]);
-        let got = resolve(from_control_plane, &served, resolver_down).await;
+        let got = resolve(from_control_plane, &served, resolver_down, LOOKUP_TIMEOUT).await;
         assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.5")]);
     }
 
@@ -434,8 +471,74 @@ mod tests {
         // belong to the old host and must not be sent the new host's traffic.
         let from_control_plane = resolve_config("orders-v2.apps", vec![]);
         let served = resolve_config("orders.apps", vec![ep("10.0.0.5")]);
-        let got = resolve(from_control_plane, &served, resolver_down).await;
+        let got = resolve(from_control_plane, &served, resolver_down, LOOKUP_TIMEOUT).await;
         assert!(got.clusters["store/orders"].endpoints.is_empty());
+    }
+
+    async fn resolver_hangs(_: String) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        std::future::pending().await
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_never_answers_is_a_resolver_error() {
+        // An authoritative server that stops answering must cost one tick a bounded wait, and
+        // the backend its addresses already served, not hold every later poll behind it.
+        let from_control_plane = resolve_config("orders.apps", vec![]);
+        let served = resolve_config("orders.apps", vec![ep("10.0.0.5")]);
+        let got = tokio::time::timeout(
+            Duration::from_secs(10),
+            resolve(
+                from_control_plane,
+                &served,
+                resolver_hangs,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("resolve must give up on a lookup that never answers");
+        assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.5")]);
+    }
+
+    #[tokio::test]
+    async fn clusters_are_looked_up_at_once_not_one_after_another() {
+        use gapura_core::config::{Cluster, ResolveTarget};
+        // Each lookup answers only once every lookup has started. Run one after another, the
+        // first would wait for the second forever and every cluster would time out instead.
+        let mut config = Config::default();
+        for name in ["a", "b", "c"] {
+            config.clusters.insert(
+                format!("store/{name}"),
+                Cluster {
+                    endpoints: vec![],
+                    tls: None,
+                    resolve: Some(ResolveTarget {
+                        host: format!("{name}.apps"),
+                        port: 8080,
+                    }),
+                },
+            );
+        }
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let got = resolve(
+            config,
+            &Config::default(),
+            |t| {
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    resolves_to(t, &["10.0.0.9"]).await
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        for name in ["a", "b", "c"] {
+            assert_eq!(
+                got.clusters[&format!("store/{name}")].endpoints,
+                vec![ep("10.0.0.9")],
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

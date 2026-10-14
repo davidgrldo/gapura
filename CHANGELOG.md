@@ -12,6 +12,16 @@ means what it usually does, moving from one version below to a later one. Releas
   the write and carried into the entry beside "password: changed". A password change by a
   user of the console can no longer be told apart from an admin's reset by its name — the
   trail now says whose account it was.
+- Control-plane mode resolves backend names concurrently, each bounded by a 3 s timeout (#215):
+  a lookup that outlasts it counts as a resolver error and keeps the addresses already served.
+  One upstream whose DNS stopped answering used to hold every configuration poll behind it, and
+  with them a revoked key or a removed route, for as long as the resolver retried each name.
+- A JWT whose `kid` names no published key falls back to the keys published without a `kid`
+  (#221), as the documentation already said. An IdP that stamps `kid` on its tokens but
+  publishes its one key without one no longer gets 401 `unknown_key` on every request.
+- A JWKS key whose `kty` or `crv` contradicts its `alg` is skipped rather than counted usable
+  (#222): an RSA key labelled ES256, or a P-384 key labelled ES256. The console refuses a
+  document holding only such keys, where it used to accept it and every token was then refused.
 - Store mode caches regex verdicts by pattern (#187): the same patterns on every /v1/config
   poll no longer recompile on the async runtime, which an editor's regex-heavy routes could
   stall for every workspace (2–4 s per route per poll). The verdicts are written by every
