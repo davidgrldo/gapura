@@ -50,6 +50,20 @@ pub struct GatewaySpec {
     pub gateway_class_name: String,
     pub listeners: Vec<Listener>,
     pub infrastructure: Option<GatewayInfrastructure>,
+    /// Requested static addresses. Not implemented: read so the Gateway can say it did not get
+    /// them (`UnsupportedAddress` or `AddressNotAssigned`) instead of looking fully served.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<GatewaySpecAddress>,
+}
+
+/// One entry of `spec.addresses`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GatewaySpecAddress {
+    /// `IPAddress` (the CRD default), `Hostname`, or an implementation-specific type.
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+    pub value: String,
 }
 
 /// `spec.infrastructure`. Only `parametersRef` is modeled: setting it means the Gateway asks for
@@ -131,6 +145,30 @@ pub struct RouteGroupKind {
 pub struct HttpRoute {
     pub metadata: ObjectMeta,
     pub spec: HttpRouteSpec,
+    /// Only which controllers hold a `status.parents` entry is read (the Kubernetes source
+    /// projects nothing else): it lets translation withdraw our entries from a route that no
+    /// longer names one of our Gateways, even after a restart.
+    #[serde(skip_serializing_if = "HttpRouteStatus::is_empty")]
+    pub status: HttpRouteStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HttpRouteStatus {
+    pub parents: Vec<RouteParentStatusRef>,
+}
+
+impl HttpRouteStatus {
+    fn is_empty(&self) -> bool {
+        self.parents.is_empty()
+    }
+}
+
+/// The part of a `status.parents` entry translation reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RouteParentStatusRef {
+    pub controller_name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -281,6 +319,10 @@ pub struct HttpBackendRef {
     pub namespace: Option<String>,
     pub port: Option<u16>,
     pub weight: Option<i32>,
+    /// Per-backend filters. Not implemented: read so a non-empty list can refuse the route
+    /// instead of being dropped, which forwarded traffic as though the filters did not exist.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<HttpRouteFilter>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -105,6 +105,18 @@ fn remap_overridden_listeners(
     }
 }
 
+/// Whether a requested address is a published one. IP addresses compare parsed, so
+/// `2001:db8::1` and `2001:DB8:0::1` are the same; hostnames compare case-insensitively.
+fn same_address(published: &str, requested: &str) -> bool {
+    match (
+        published.parse::<std::net::IpAddr>(),
+        requested.parse::<std::net::IpAddr>(),
+    ) {
+        (Ok(p), Ok(r)) => p == r,
+        _ => published.eq_ignore_ascii_case(requested),
+    }
+}
+
 /// The "namespace/name" a listener id ("namespace/name/listener") belongs to: listeners of one
 /// Gateway share a remap target. An id without the two separators has no Gateway prefix to
 /// speak of and stands for itself.
@@ -273,7 +285,29 @@ fn assemble(
                 generation,
             ),
         };
-        let programmed = if any_programmed {
+        let published = addresses_for(settings, &gw.r#ref);
+        let unassigned: Vec<&str> = gw
+            .requested_addresses
+            .iter()
+            .filter(|a| !published.iter().any(|p| same_address(p, a)))
+            .map(String::as_str)
+            .collect();
+        let programmed = if any_programmed && !unassigned.is_empty() {
+            // Gapura cannot assign an address (#220): the listeners are served, but only on the
+            // published addresses, and the Gateway must not look like it got what it asked for.
+            Condition::new(
+                types::PROGRAMMED,
+                ConditionStatus::False,
+                listeners::ADDRESS_NOT_ASSIGNED,
+                format!(
+                    "spec.addresses {} cannot be assigned: static addresses are not supported, \
+                     the Gateway is served on {:?}",
+                    unassigned.join(", "),
+                    published
+                ),
+                generation,
+            )
+        } else if any_programmed {
             Condition::new(
                 types::PROGRAMMED,
                 ConditionStatus::True,
@@ -294,7 +328,7 @@ fn assemble(
             namespace: gw.r#ref.namespace.clone(),
             name: gw.r#ref.name.clone(),
             uid: gw.uid.clone(),
-            addresses: addresses_for(settings, &gw.r#ref),
+            addresses: published,
             conditions: vec![accepted, programmed],
             listeners: listener_status,
         });

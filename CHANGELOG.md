@@ -17,6 +17,21 @@ means what it usually does, moving from one version below to a later one. Releas
   stall for every workspace (2–4 s per route per poll). The verdicts are written by every
   snapshot and read on the next; a pattern that fails still recompiles, so a fix to a bad
   pattern is picked up immediately.
+- A route on a wildcard listener can no longer take over a more specific sibling listener's
+  host (#218): effective hostnames that a more specific listener of the same Gateway, port and
+  protocol also matches are dropped from the route's attachment to the less specific one, so
+  a route on `*.example.com` naming `admin.example.com` no longer competes with the
+  `admin.example.com` listener's routes, whatever its allowedRoutes said. A route left with no
+  hostname there does not attach and reports `Accepted=False`, `NoMatchingListenerHostname`.
+- `backendRefs[].filters` are no longer silently dropped (#219): a backendRef with filters
+  makes the route `Accepted=False`, `UnsupportedValue`, instead of forwarding traffic as
+  though the filters did not exist.
+- Gateway `spec.addresses` is read (#220): an address type other than `IPAddress` or
+  `Hostname` refuses the Gateway with `Accepted=False`, `UnsupportedAddress`, and a requested
+  address that is not among the published ones sets `Programmed=False`, `AddressNotAssigned`.
+- Status is withdrawn from an HTTPRoute that stops naming a Gapura Gateway (#214): its
+  `status.parents` entries of ours are removed and other controllers' are kept, also when the
+  change happened while Gapura was not running.
 - The audit trail can say which account an entry is about (#191): account entries carry the
   account's name alongside the field that changed, and every entry returns `actor_user_id` so
   an actor whose name is shared or re-used can still be told apart by its stable id.
