@@ -296,9 +296,17 @@ mod tests {
         assert!(checks.enter().await.is_ok());
     }
 
-    #[test]
-    fn the_check_semaphore_has_the_fixed_size() {
-        assert_eq!(CHECKING.permits.available_permits(), MAX_CONCURRENT_CHECKS);
+    #[tokio::test]
+    async fn the_check_semaphore_has_the_fixed_size() {
+        // Other tests check passwords through the same queue at the same time, so count the
+        // places by taking them all, not by reading how many happen to be free right now.
+        let all = CHECKING
+            .permits
+            .acquire_many(MAX_CONCURRENT_CHECKS as u32)
+            .await
+            .unwrap();
+        assert!(CHECKING.permits.try_acquire().is_err());
+        drop(all);
     }
 
     use super::*;
