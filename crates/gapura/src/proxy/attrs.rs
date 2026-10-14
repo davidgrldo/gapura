@@ -77,7 +77,9 @@ impl Extracted {
 ///   sent as UTF-8 is matched and forwarded as the same UTF-8.
 /// - Repeated slashes are merged.
 /// - A `.` or `..` segment, after decoding, is refused rather than resolved: a browser never
-///   sends one, and resolving it is the backend's semantics to guess at.
+///   sends one, and resolving it is the backend's semantics to guess at. So is one that carries
+///   path parameters (`..;x`, `.;`): servlet containers strip `;params` from each segment before
+///   resolving dot segments, so Tomcat serves `/public/..;/admin` as `/admin` (#213).
 pub fn normalize_path(raw: &str) -> Result<String, &'static str> {
     if raw.is_empty() {
         return Ok("/".to_string());
@@ -118,10 +120,45 @@ pub fn normalize_path(raw: &str) -> Result<String, &'static str> {
         }
         out.push(c);
     }
-    if out.split('/').any(|seg| seg == "." || seg == "..") {
+    if out
+        .split('/')
+        .map(without_params)
+        .any(|seg| seg == "." || seg == "..")
+    {
         return Err("a dot segment in the path");
     }
     Ok(out)
+}
+
+/// A path segment without its `;params`, the way a servlet container reads it.
+fn without_params(segment: &str) -> &str {
+    segment.split_once(';').map_or(segment, |(name, _)| name)
+}
+
+/// `path` with every segment's `;params` removed and the slashes merged again, or `None` when
+/// it carries no `;` at all. This is the path a servlet container resolves `path` to: Tomcat
+/// serves `/admin;x/secret` as `/admin/secret`. The caller matches routes on it as well, and
+/// refuses a request whose two matches disagree (#213) -- otherwise `/admin;x/secret` misses an
+/// `/admin` rule, falls through to a catch-all, and is served as `/admin/secret` unchecked.
+pub fn without_path_params(path: &str) -> Option<String> {
+    if !path.contains(';') {
+        return None;
+    }
+    let mut out = String::with_capacity(path.len());
+    for (i, segment) in path.split('/').map(without_params).enumerate() {
+        if i > 0 {
+            if out.ends_with('/') {
+                // An empty segment, `/;x/`, collapses like a repeated slash.
+                if !segment.is_empty() {
+                    out.push_str(segment);
+                }
+                continue;
+            }
+            out.push('/');
+        }
+        out.push_str(segment);
+    }
+    Some(out)
 }
 
 /// Host from the request target (absolute-form, or `:authority` under HTTP/2) or the Host
@@ -426,6 +463,45 @@ mod path_tests {
         }
         // Dots inside a segment are just characters.
         assert_eq!(normalize_path("/v1.2/..x/x..").unwrap(), "/v1.2/..x/x..");
+    }
+
+    #[test]
+    fn dot_segments_with_path_parameters_are_refused() {
+        // #213: Tomcat and Jetty strip `;params` before resolving dot segments, so they serve
+        // `/public/..;/admin/secret` as `/admin/secret` while we matched it as `/public`.
+        for p in [
+            "/public/..;/admin/secret",
+            "/public/..;x=1/admin",
+            "/public/.;/admin",
+            "/public/%2e%2e;/admin",
+            "/public/.%2E;jsessionid=1/admin",
+            "/..;",
+        ] {
+            assert!(normalize_path(p).is_err(), "{p}");
+        }
+        // Parameters on an ordinary segment, and dots after the `;`, are just characters.
+        for p in ["/shop;jsessionid=1/cart", "/a;..", "/a/x..;y", "/a/;/b"] {
+            assert_eq!(normalize_path(p).unwrap(), p, "{p}");
+        }
+    }
+
+    #[test]
+    fn path_parameters_are_stripped_the_way_a_servlet_container_does() {
+        use super::without_path_params;
+        assert_eq!(without_path_params("/admin/secret"), None);
+        assert_eq!(
+            without_path_params("/admin;x/secret").as_deref(),
+            Some("/admin/secret")
+        );
+        assert_eq!(
+            without_path_params("/shop;jsessionid=1").as_deref(),
+            Some("/shop")
+        );
+        assert_eq!(
+            without_path_params("/;x/admin;y=1;z/").as_deref(),
+            Some("/admin/")
+        );
+        assert_eq!(without_path_params("/;").as_deref(), Some("/"));
     }
 
     #[test]
