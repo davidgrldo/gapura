@@ -20,6 +20,19 @@ means what it usually does, moving from one version below to a later one. Releas
 - The audit trail can say which account an entry is about (#191): account entries carry the
   account's name alongside the field that changed, and every entry returns `actor_user_id` so
   an actor whose name is shared or re-used can still be told apart by its stable id.
+- Direct-grant audit entries say whose grant changed (#224): each side of the entry now names
+  the account, as account entries do, and carries its id, read under the same lock as the
+  write. The console's audit log shows an entry's `account` beside its kind, so grants and
+  account changes are named without expanding them.
+- Kubernetes mode no longer loops at sign-in for someone in many identity-provider groups (#225):
+  a session keeps only the groups the role mapping names, the only ones it is ever read for, so
+  hundreds of Entra ID GUIDs or Keycloak paths no longer make a cookie the browser silently
+  drops. A session still too large for a cookie is refused with a page saying why, instead of a
+  redirect that starts the sign-in over.
+- Kubernetes-mode local sign-in checks bcrypt passwords off the async workers (#226), under the
+  same bounded queue as store mode: a burst of attempts against the users file waits its turn,
+  or is told the sign-in is busy (503), instead of occupying every worker and starving other
+  requests, health checks included.
 - The console can limit requests. A "Limit requests" control sits under "Require a JWT" in the
   service and route sheets and, for the whole workspace, on the Consumers page: a number of
   requests (1 to 1 000 000) per second, minute or hour, with the reminder that it is per client
