@@ -289,6 +289,53 @@ fn put(target: &str, limit: u32, per: &str) -> String {
     json!({"target": target, "limit": limit, "per": per}).to_string()
 }
 
+/// The `updated_at` the list shows for `target`'s own limit, if it has one.
+async fn stamp(app: &axum::Router, target: &str, as_: Uuid) -> Option<String> {
+    read(app, LIMITS, as_)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["target"] == target)
+        .map(|row| row["updated_at"].as_str().expect("a stamp").to_string())
+}
+
+/// `body`, a PUT, sending `seen` as the stamp it read, when there is one.
+fn seen(body: &str, seen: Option<&str>) -> String {
+    let mut body = parse(body);
+    if let Some(seen) = seen {
+        body["seen_updated_at"] = json!(seen);
+    }
+    body.to_string()
+}
+
+/// A PUT the console makes: from a fresh read of the list, so with the stamp of the limit set on
+/// its target when there is one (#223). It must succeed.
+async fn apply(app: &axum::Router, as_: Uuid, body: &str) {
+    let target = parse(body)["target"].as_str().unwrap().to_string();
+    let read_at = stamp(app, &target, as_).await;
+    ok(app, "PUT", LIMITS, as_, &seen(body, read_at.as_deref())).await;
+}
+
+/// `value` with the `updated_at` of each row, or of the one object, taken out once it is checked
+/// to be a stamp in the API's format: what the rows say, compared without when it was said.
+fn unstamped(mut value: serde_json::Value) -> serde_json::Value {
+    fn take(row: &mut serde_json::Value) {
+        let shown = row.to_string();
+        let stamp = row.as_object_mut().and_then(|o| o.remove("updated_at"));
+        let stamp = stamp
+            .as_ref()
+            .and_then(|s| s.as_str())
+            .unwrap_or_else(|| panic!("no updated_at in {shown}"));
+        assert!(stamp.len() == 27 && stamp.ends_with('Z'), "{stamp}");
+    }
+    match &mut value {
+        serde_json::Value::Array(rows) => rows.iter_mut().for_each(take),
+        one => take(one),
+    }
+    value
+}
+
 fn per_minute(limit: u32) -> Option<RateLimit> {
     Some(RateLimit {
         limit,
@@ -308,7 +355,7 @@ async fn the_compiled_rule_carries_the_limit() {
     assert_eq!(limit_on(&compiled(&store).await, COMPILED_ROUTE), None);
 
     for (per, window_ms) in [("second", 1_000), ("minute", 60_000), ("hour", 3_600_000)] {
-        ok(&app, "PUT", LIMITS, s.ed, &put("route:orders-api", 20, per)).await;
+        apply(&app, s.ed, &put("route:orders-api", 20, per)).await;
         let config = compiled(&store).await;
         assert_eq!(
             limit_on(&config, COMPILED_ROUTE),
@@ -322,14 +369,7 @@ async fn the_compiled_rule_carries_the_limit() {
         assert!(rule.plugins.is_empty(), "a limit is not a plugin");
     }
     // At the bound, not past it.
-    ok(
-        &app,
-        "PUT",
-        LIMITS,
-        s.ed,
-        &put("route:orders-api", 1_000_000, "hour"),
-    )
-    .await;
+    apply(&app, s.ed, &put("route:orders-api", 1_000_000, "hour")).await;
     assert_eq!(
         limit_on(&compiled(&store).await, COMPILED_ROUTE),
         Some(RateLimit {
@@ -366,7 +406,7 @@ async fn each_target_kind_is_listed() {
     )
     .await;
     assert_eq!(
-        read(&app, LIMITS, s.vi).await,
+        unstamped(read(&app, LIMITS, s.vi).await),
         json!([
             {"target": "workspace", "limit": 1000, "per": "hour"},
             {"target": "service:orders", "limit": 120, "per": "minute"},
@@ -441,12 +481,22 @@ async fn the_most_specific_limit_applies() {
             "the key requirement still applies"
         );
         let route = row(&app, ROUTES, "orders-api", s.vi).await;
+        // The stamp is that of the limit that applies, wherever it is set.
+        let set_on = match from {
+            "route" => "route:orders-api",
+            "service" => "service:orders",
+            _ => "workspace",
+        };
         assert_eq!(
-            route["rate_limit"],
+            route["rate_limit"]["updated_at"].as_str(),
+            stamp(&app, set_on, s.vi).await.as_deref()
+        );
+        assert_eq!(
+            unstamped(route["rate_limit"].clone()),
             json!({"limit": limit, "per": "minute", "from": from})
         );
         assert_eq!(
-            route["key_auth"],
+            unstamped(route["key_auth"].clone()),
             json!({"header": "x-api-key", "from": "workspace"})
         );
         if let Some(target) = then_delete {
@@ -461,25 +511,20 @@ async fn the_most_specific_limit_applies() {
         }
     }
     // The service shows its own limit or the workspace's, never a route's.
+    let service_limit =
+        || async { unstamped(row(&app, SERVICES, "orders", s.vi).await["rate_limit"].clone()) };
     assert_eq!(
-        row(&app, SERVICES, "orders", s.vi).await["rate_limit"],
+        service_limit().await,
         json!({"limit": 10, "per": "minute", "from": "workspace"})
     );
-    ok(
-        &app,
-        "PUT",
-        LIMITS,
-        s.ed,
-        &put("route:orders-api", 5, "second"),
-    )
-    .await;
+    apply(&app, s.ed, &put("route:orders-api", 5, "second")).await;
     assert_eq!(
-        row(&app, SERVICES, "orders", s.vi).await["rate_limit"],
+        service_limit().await,
         json!({"limit": 10, "per": "minute", "from": "workspace"})
     );
-    ok(&app, "PUT", LIMITS, s.ed, &put("service:orders", 7, "hour")).await;
+    apply(&app, s.ed, &put("service:orders", 7, "hour")).await;
     assert_eq!(
-        row(&app, SERVICES, "orders", s.vi).await["rate_limit"],
+        service_limit().await,
         json!({"limit": 7, "per": "hour", "from": "service"})
     );
 
@@ -516,17 +561,10 @@ async fn the_audit_records_each_change_and_a_save_of_nothing_writes_nothing() {
     ok(&app, "PUT", LIMITS, s.ed, &first).await;
 
     let before = everything(&store).await;
-    ok(&app, "PUT", LIMITS, s.ada, &first).await;
+    apply(&app, s.ada, &first).await;
     assert_eq!(everything(&store).await, before, "a save of nothing");
 
-    ok(
-        &app,
-        "PUT",
-        LIMITS,
-        s.ed,
-        &put("service:orders", 100, "second"),
-    )
-    .await;
+    apply(&app, s.ed, &put("service:orders", 100, "second")).await;
     ok(
         &app,
         "DELETE",
@@ -563,6 +601,77 @@ async fn the_audit_records_each_change_and_a_save_of_nothing_writes_nothing() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(sentence(&body), "service:orders has no request limit.");
     assert_eq!(everything(&store).await, before);
+}
+
+/// #223: a PUT replaces a limit only with the stamp the list showed for it. Without one (the
+/// caller saw none), with an older one, or with one for a limit removed since: 409, and nothing
+/// is written.
+#[tokio::test]
+async fn a_limit_is_replaced_only_from_a_fresh_read() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let target = "route:orders-api";
+    let old = "2026-01-01T00:00:00.000000Z";
+    let stale = |body: String| {
+        let app = &app;
+        async move {
+            let (status, answer) = send(app, "PUT", LIMITS, Some(s.ed), &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}: {answer}");
+            assert_eq!(
+                sentence(&answer),
+                "Someone else changed this policy. Reload it and apply your change again."
+            );
+        }
+    };
+
+    let before = everything(&store).await;
+    stale(seen(&put(target, 10, "minute"), Some(old))).await;
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "none set: a stamp is stale"
+    );
+    ok(&app, "PUT", LIMITS, s.ed, &put(target, 10, "minute")).await;
+    let first = stamp(&app, target, s.vi).await;
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["rate_limit"]["updated_at"].as_str(),
+        first.as_deref()
+    );
+
+    let before = everything(&store).await;
+    stale(put(target, 20, "minute")).await;
+    stale(seen(&put(target, 20, "minute"), Some(old))).await;
+    assert_eq!(everything(&store).await, before);
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ada,
+        &seen(&put(target, 20, "minute"), first.as_deref()),
+    )
+    .await;
+    // A sheet opened before that change cannot undo it.
+    stale(seen(&put(target, 10, "second"), first.as_deref())).await;
+    assert_eq!(
+        limit_on(&compiled(&store).await, COMPILED_ROUTE),
+        per_minute(20)
+    );
+
+    let last = stamp(&app, target, s.vi).await;
+    ok(
+        &app,
+        "DELETE",
+        &format!("{LIMITS}?target={target}"),
+        s.ada,
+        "",
+    )
+    .await;
+    let before = everything(&store).await;
+    stale(seen(&put(target, 10, "minute"), last.as_deref())).await;
+    assert_eq!(everything(&store).await, before, "removed since: stale");
 }
 
 #[tokio::test]
@@ -759,7 +868,8 @@ async fn a_viewer_reads_an_editor_writes_and_no_role_is_refused() {
 /// A `rate_limit` row only SQL written by hand could store -- a window the API never writes, a
 /// limit of zero, a field it does not know -- fails the snapshot, so the data planes keep the
 /// configuration they have rather than lose the limit, and the lists say they cannot read it
-/// rather than show no limit. The API then takes the row over with a limit it can read.
+/// rather than show no limit. The API then takes the row over with a limit it can read, sending no
+/// stamp, since no read could show one (#223).
 #[tokio::test]
 async fn a_stored_limit_in_another_shape_fails_the_snapshot() {
     let Some((store, _guard)) = fresh_store().await else {

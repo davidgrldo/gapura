@@ -57,8 +57,13 @@
   // A refusal leaves the list possibly out of date; it is fetched when the sheet closes, not
   // while the reader is reading why.
   let staleOnClose = false
+  // The row's stamp as the form was filled, which a save sends back. Not the live prop: the
+  // policy controls in this sheet reload the list, which hands the sheet a fresher row, and
+  // saving these fields with its stamp would overwrite a change the form never showed (#229).
+  let seen = undefined
 
   function reset() {
+    seen = service?.updated_at
     name = service?.name ?? ''
     protocol = service?.protocol ?? 'http'
     host = service?.host ?? ''
@@ -171,7 +176,7 @@
     // Only an https service carries TLS settings. An http one sends none: on a create that is the
     // defaults, and on a replace of a service that was https the server drops what it had.
     if (protocol === 'https') body.tls = { verify, ca_pem: text(ca), sni: text(sni) }
-    if (mode === 'edit') send('PUT', here(), { ...body, updated_at: service.updated_at })
+    if (mode === 'edit') send('PUT', here(), { ...body, updated_at: seen })
     else send('POST', base(workspace, 'services'), body)
   }
 

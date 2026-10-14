@@ -190,7 +190,8 @@ async fn no_policies(
 }
 
 /// A workspace's policies of one name, by what they are attached to: the policies the compiler
-/// reads, enabled rows with no consumer, each as the value a list shows of it.
+/// reads, enabled rows with no consumer, each as the value a list shows of it beside the row's
+/// `updated_at`, which a policy write sends back.
 struct Attached<T> {
     workspace: Option<T>,
     services: HashMap<Uuid, T>,
@@ -203,12 +204,15 @@ impl<T: Clone> Attached<T> {
         workspace: Uuid,
         name: &str,
         value: impl Fn(serde_json::Value) -> Result<T>,
-    ) -> Result<Attached<T>> {
+    ) -> Result<Attached<(T, String)>> {
         let rows = client
             .query(
-                "select route_id, service_id, config from plugins
-                  where workspace_id = $1 and name = $2 and consumer_id is null
-                    and enabled",
+                &format!(
+                    "select route_id, service_id, config, {} as updated_at from plugins
+                      where workspace_id = $1 and name = $2 and consumer_id is null
+                        and enabled",
+                    updated_at("updated_at")
+                ),
                 &[&workspace, &name],
             )
             .await?;
@@ -218,7 +222,7 @@ impl<T: Clone> Attached<T> {
             routes: HashMap::new(),
         };
         for row in rows {
-            let v = value(row.get("config"))?;
+            let v = (value(row.get("config"))?, row.get("updated_at"));
             let route: Option<Uuid> = row.get("route_id");
             let service: Option<Uuid> = row.get("service_id");
             match (route, service) {
@@ -246,9 +250,9 @@ impl<T: Clone> Attached<T> {
 /// The key and JWT requirements and the request limits of a workspace, as its service and route
 /// lists show them.
 struct Requirements {
-    key_auth: Attached<String>,
-    jwt: Attached<Option<String>>,
-    rate_limit: Attached<Limit>,
+    key_auth: Attached<(String, String)>,
+    jwt: Attached<(Option<String>, String)>,
+    rate_limit: Attached<(Limit, String)>,
 }
 
 impl Requirements {
@@ -283,19 +287,26 @@ impl Requirements {
         })
     }
 
-    fn key_auth((header, from): (String, &'static str)) -> KeyAuthView {
-        KeyAuthView { header, from }
+    fn key_auth(((header, updated_at), from): ((String, String), &'static str)) -> KeyAuthView {
+        KeyAuthView {
+            header,
+            from,
+            updated_at,
+        }
     }
 
-    fn jwt((issuer, from): (Option<String>, &'static str)) -> JwtRequirementView {
+    fn jwt(((issuer, _), from): ((Option<String>, String), &'static str)) -> JwtRequirementView {
         JwtRequirementView { issuer, from }
     }
 
-    fn rate_limit((limit, from): (Limit, &'static str)) -> RateLimitRequirementView {
+    fn rate_limit(
+        ((limit, updated_at), from): ((Limit, String), &'static str),
+    ) -> RateLimitRequirementView {
         RateLimitRequirementView {
             limit: limit.limit,
             per: limit.per,
             from,
+            updated_at,
         }
     }
 }

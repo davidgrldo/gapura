@@ -280,6 +280,9 @@ pub struct KeyAuthView {
     pub header: String,
     /// `"route"`, `"service"` or `"workspace"`.
     pub from: &'static str,
+    /// The policy row's own stamp, which a `PUT` to the target it is set on sends back as
+    /// `seen_updated_at`.
+    pub updated_at: String,
 }
 
 /// The JWT requirement that applies to a service or route, and where it comes from, picked as
@@ -300,6 +303,8 @@ pub struct RateLimitRequirementView {
     pub per: crate::consumers::Per,
     /// `"route"`, `"service"` or `"workspace"`.
     pub from: &'static str,
+    /// The policy row's own stamp, as `KeyAuthView`'s.
+    pub updated_at: String,
 }
 
 /// What the list endpoints answer with.
@@ -612,7 +617,13 @@ fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError>
             Some(_) => {}
         }
     }
-    let mut value = value.to_string();
+    // The data plane also writes the hex of an escape it keeps in uppercase, and compares bytes,
+    // so `%2f` is stored as `%2F`, the form a request for either arrives in (#227).
+    let mut bytes = bytes.to_vec();
+    for (i, _) in value.match_indices('%') {
+        bytes[i + 1..i + 3].make_ascii_uppercase();
+    }
+    let mut value = String::from_utf8(bytes).expect("only ASCII hex digits were uppercased");
     if kind == "prefix" {
         while value.len() > 1 && value.ends_with('/') {
             value.pop();
@@ -657,6 +668,17 @@ fn headers(input: Vec<HeaderMatch>) -> Result<Vec<HeaderMatch>, FieldError> {
             return Err(field(
                 at,
                 "A route matches the host through its hosts; list it there.",
+            ));
+        }
+        // Routes are matched before key_auth runs and before the data plane replaces the
+        // client's own consumer header, so a match on it would read what the client claims
+        // (#228).
+        if name == gapura_core::credentials::CONSUMER_HEADER {
+            return Err(field(
+                at,
+                format!(
+                    "The gateway sets {name} after a route is matched, so a route cannot match on it."
+                ),
             ));
         }
         if out.iter().any(|h| h.name == name) {
@@ -1250,6 +1272,10 @@ mod tests {
             (vec![header(&long_name, "1")], "headers[0].name"),
             (vec![header("Host", "a.example")], "headers[0].name"),
             (
+                vec![header("X-Consumer-Username", "admin")],
+                "headers[0].name",
+            ),
+            (
                 vec![
                     header("x-a", "1"),
                     header("X-Version", "2"),
@@ -1410,6 +1436,40 @@ mod tests {
             Write::Replace
         )
         .is_ok());
+    }
+
+    /// #227: the data plane's `normalize_path` uppercases the hex of an escape it keeps, so
+    /// `/files/a%2fb` arrives as `/files/a%2Fb`; the route stores that form, or it never matches.
+    #[test]
+    fn a_kept_escape_is_stored_as_the_gateway_normalises_it() {
+        for kind in ["prefix", "exact"] {
+            for (value, stored) in [
+                ("/files/a%2fb", "/files/a%2Fb"),
+                ("/caf%c3%a9", "/caf%C3%A9"),
+                ("/a%2F%3a", "/a%2F%3A"),
+            ] {
+                let (r, _) =
+                    route(route_with_paths(vec![path(kind, value)]), Write::Replace).unwrap();
+                assert_eq!(r.paths[0].value, stored, "{kind} {value:?}");
+            }
+        }
+        // A regex is the author's own pattern, and its escapes are left as written.
+        let (r, _) = route(
+            route_with_paths(vec![path("regex", "/a%2fb")]),
+            Write::Replace,
+        )
+        .unwrap();
+        assert_eq!(r.paths[0].value, "/a%2fb");
+    }
+
+    #[test]
+    fn a_header_match_cannot_name_the_consumer_header() {
+        let err = headers(vec![header("x-consumer-USERNAME", "admin")]).unwrap_err();
+        assert_eq!(err.field, "headers[0].name");
+        assert_eq!(
+            err.sentence,
+            "The gateway sets x-consumer-username after a route is matched, so a route cannot match on it."
+        );
     }
 
     #[test]

@@ -28,6 +28,26 @@ means what it usually does, moving from one version below to a later one. Releas
   something changed; a refusal lands on the input it is about. A broader limit shows read-only,
   with where it comes from. A tag such as "120/min" beside a service or route says it is limited.
   Roles are as for the API key: a viewer reads, an editor switches it.
+- Policy writes refuse a stale read (#223, completing #197). The key-auth and rate-limit lists,
+  the `key_auth` and `rate_limit` of each service and route row, and a target's JWT document now
+  carry the policy row's `updated_at`, in the format services and routes use; a PUT to
+  `key-auth`, `jwt` or `rate-limit` sends it back as `seen_updated_at`. Replacing an existing
+  requirement without it, or with any other stamp, answers 409 and writes nothing, and so does a
+  stamp sent where no requirement is set any more; a PUT without one still switches a
+  requirement on where there is none. The API key, JWT and request-limit controls send the stamp
+  they read and offer Reload on that 409, so an editor rotating a JWKS is no longer undone by
+  another's stale sheet. Removing a requirement takes no stamp, as deleting a service or route
+  does not.
+- The service and route sheets save with the stamps they were opened with (#229). Switching a
+  policy in the sheet reloads the list, which used to hand the open sheet the row's newest
+  `updated_at`, so a save after it overwrote any change made meanwhile instead of answering 409.
+- A store-mode route path with a lowercase percent-escape now matches (#227). The gateway
+  uppercases the hex of the escapes it keeps before matching, so `/files/a%2fb` is stored as
+  `/files/a%2Fb`, the form requests arrive in; before, it was stored as written and matched
+  nothing.
+- A route can no longer match on `x-consumer-username` (#228). Routes are matched before key-auth
+  runs and before the gateway replaces the client's own header, so such a match read whatever the
+  client claimed; it is refused beside the header's name, as `host` is.
 - The console can require a JWT. A "Require a JWT" control sits under "Require an API key" in the
   service and route sheets and, for the whole workspace, on the Consumers page: an issuer
   (required), an audience (left empty, the control warns that any audience is accepted) and the
