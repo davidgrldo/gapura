@@ -278,7 +278,7 @@ pub async fn change_password(
         Ok(attempt) => attempt,
         Err(wait) => return throttled(wait),
     };
-    let cut_off = match store
+    let (cut_off, _username) = match store
         .change_own_password(caller.me.id, &input.current, &input.new)
         .await
     {

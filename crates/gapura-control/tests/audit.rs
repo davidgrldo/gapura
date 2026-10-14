@@ -264,6 +264,7 @@ struct Seed {
     vi: Uuid,
     pat: Uuid,
     nobody: Uuid,
+    oli: Uuid,
 }
 
 async fn seed(store: &Store) -> Seed {
@@ -343,6 +344,7 @@ async fn seed(store: &Store) -> Seed {
         vi: ids["vi"],
         pat: ids["pat"],
         nobody: ids["nobody"],
+        oli,
     }
 }
 
@@ -417,6 +419,7 @@ async fn an_entry_reads_as_it_was_recorded() {
             "id": id,
             "at": at,
             "actor": "oli",
+            "actor_user_id": s.oli.to_string(),
             "actor_method": "oidc",
             "action": "create",
             "object_kind": "consumer",

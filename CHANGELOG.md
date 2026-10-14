@@ -8,6 +8,18 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The change-own-password audit entry names the account (#191): the username is read before
+  the write and carried into the entry beside "password: changed". A password change by a
+  user of the console can no longer be told apart from an admin's reset by its name — the
+  trail now says whose account it was.
+- Store mode caches regex verdicts by pattern (#187): the same patterns on every /v1/config
+  poll no longer recompile on the async runtime, which an editor's regex-heavy routes could
+  stall for every workspace (2–4 s per route per poll). The verdicts are written by every
+  snapshot and read on the next; a pattern that fails still recompiles, so a fix to a bad
+  pattern is picked up immediately.
+- The audit trail can say which account an entry is about (#191): account entries carry the
+  account's name alongside the field that changed, and every entry returns `actor_user_id` so
+  an actor whose name is shared or re-used can still be told apart by its stable id.
 - The console can limit requests. A "Limit requests" control sits under "Require a JWT" in the
   service and route sheets and, for the whole workspace, on the Consumers page: a number of
   requests (1 to 1 000 000) per second, minute or hour, with the reminder that it is per client
