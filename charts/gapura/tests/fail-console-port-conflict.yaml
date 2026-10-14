@@ -1,0 +1,11 @@
+# expect: console.service.port and console.store.config.port are both 8081
+# Store mode with the console's port on the config endpoint's default: both listeners would
+# bind 0.0.0.0:8081 and the pod would crash-loop, so the render fails instead (#233).
+console:
+  enabled: true
+  service:
+    port: 8081
+  store:
+    existingSecret: gapura-console-db
+  sessionKey:
+    existingSecret: gapura-console-session

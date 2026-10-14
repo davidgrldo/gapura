@@ -1,4 +1,19 @@
-{{- if (.Values.podDisruptionBudget).enabled }}
+{{- /* A PDB whose minAvailable covers every replica allows no disruption at all: with
+       replicaCount 1 and the default minAvailable 1, `kubectl drain`, cluster-autoscaler
+       scale-down and node upgrades hang on this release (#232). Such a budget protects nothing
+       a single replica could keep anyway, so it is left out rather than refused: lowering
+       replicaCount for a small cluster should not need a second setting. A percentage counts
+       the way the disruption controller does, rounded up. */}}
+{{- $replicas := int .Values.replicaCount }}
+{{- $min := (.Values.podDisruptionBudget).minAvailable }}
+{{- $minPods := 0 }}
+{{- if and (kindIs "string" $min) (hasSuffix "%" $min) }}
+{{- $pct := int (trimSuffix "%" $min) }}
+{{- $minPods = div (add (mul $replicas $pct) 99) 100 }}
+{{- else }}
+{{- $minPods = int $min }}
+{{- end }}
+{{- if and (.Values.podDisruptionBudget).enabled (gt $replicas (int $minPods)) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
