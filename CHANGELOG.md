@@ -8,6 +8,9 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- CI hardening (#234, #235 follow-ups): a new `workflows` job lints the workflows with zizmor and
+  actionlint, so a template expanded inside a `run:` script fails CI, and the k3s leg installs
+  into a namespace enforcing the restricted Pod Security level and runs `helm test` there.
 - Routes stored before #242 are served safely (#227, #228). An exact or prefix path stored with
   a lowercase percent-escape (`/files/a%2fb`) is served with uppercase hex, the form the gateway
   normalises a request's path to, so it matches again. A route with a header match on

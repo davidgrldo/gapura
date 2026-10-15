@@ -1,0 +1,9 @@
+# zizmor, run by the workflows job in ci.yml. Everything not named here runs at its defaults.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Actions are pinned to a major tag (actions/checkout@v7), the style every workflow here
+        # uses; zizmor's default would demand a commit hash for each, which is a policy change to
+        # make on its own rather than a finding. A `uses:` with no ref at all still fails.
+        "*": ref-pin

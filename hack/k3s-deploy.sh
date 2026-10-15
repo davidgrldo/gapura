@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the image, import it into a k3d cluster, install the chart with the values a stock k3s
-# cluster needs, and prove a request goes through the gateway. Needs: docker, k3d, kubectl, helm.
+# cluster needs into a namespace enforcing the restricted Pod Security level, prove a request goes
+# through the gateway, and run the chart's helm test there. Needs: docker, k3d, kubectl, helm.
 #
 # Why this exists next to hack/kind-deploy.sh: kind is vanilla Kubernetes with no LoadBalancer at
 # all, and k3s is where a lot of Gateway API gateways actually run. k3d is real k3s in docker, and
@@ -57,8 +58,23 @@ docker exec "$NODE" "${CTR[@]}" images import /tmp/gapura-image.tar
 docker exec "$NODE" rm -f /tmp/gapura-image.tar
 docker exec "$NODE" "${CTR[@]}" images ls | grep -F "$IMAGE"
 
+# The release namespace enforces the restricted Pod Security level, as a hardened cluster's would:
+# a pod the chart asks for that restricted refuses -- the gateway itself, or the helm-test
+# fixtures, which it once refused (#234) -- fails here instead of in an adopter's cluster. The
+# gateway needs nothing weaker: restricted lets a container that drops ALL add NET_BIND_SERVICE
+# back, and that is all it takes to bind 80 and 443 as non-root, so one namespace serves for
+# both the release and its tests. `warn` too, because enforce judges pods only: a Deployment
+# whose pods it would refuse is accepted and then never becomes available, and the warning is
+# what names the reason when it is applied.
+kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
+kubectl label namespace "$NS" --overwrite \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=latest
+
 helm upgrade --install gapura charts/gapura \
-  --namespace "$NS" --create-namespace \
+  --namespace "$NS" \
   --set "image.repository=${IMAGE%%:*}" --set "image.tag=${IMAGE##*:}" \
   --set service.type=NodePort \
   --set "service.nodePorts.http=${HTTP_PORT}" --set service.nodePorts.https=30443 \
@@ -117,4 +133,16 @@ for attempt in $(seq 15); do
 done
 curl -sS http://127.0.0.1:19090/readyz
 curl -s http://127.0.0.1:19090/metrics | grep -E '^gapura_(requests_total|leader|config_reloads_total)' | head -5
+
+echo "==> helm test, in the namespace enforcing restricted"
+# The chart's own smoke test: a throwaway Gateway, route and echo backend, and a curl pod that
+# needs a request routed through this release. Those are the pods #234 was about -- refused by
+# restricted, and helm test timed out as if the gateway were broken. --logs prints the curl
+# pod's output, pass or fail; a refused pod has no output, so on failure the namespace's events
+# are printed too, which is where the refusal is spelled out.
+if ! helm test gapura --namespace "$NS" --timeout 5m --logs; then
+  echo "helm test failed; recent events in $NS:" >&2
+  kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2
+  exit 1
+fi
 echo "==> done"
