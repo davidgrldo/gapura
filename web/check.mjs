@@ -326,3 +326,26 @@ for (const kind of consoleKinds) {
   }
 }
 console.log(`ok: the audit log filters by the ${serverKinds.length} kinds the server records`)
+
+// #229: a sheet keeps the `updated_at` it opened with and sends that one, not the stamp of
+// whatever list was read since. A policy toggle reloads the list under an open sheet, so a save
+// that read the live prop would carry a fresh stamp and overwrite someone else's change instead
+// of being refused as stale. There is no component test here, so the source is the check: the
+// stamp is captured in `reset()`, which runs when the sheet opens, and the save sends it.
+for (const [file, row, sent] of [
+  ['src/lib/ServiceSheet.svelte', 'service', /updated_at:\s*seen\b/],
+  ['src/lib/RouteSheet.svelte', 'route', /updated_at:\s*seen\.updated_at\b/],
+]) {
+  const source = readFileSync(file, 'utf8')
+  const reset = source.match(/function reset\(\)\s*\{([\s\S]*?)\n  \}/)
+  if (!reset) throw new Error(`${file}: no reset() to capture the stamp the sheet opened with`)
+  if (!new RegExp(`seen\\s*=[^\\n]*${row}[^\\n]*updated_at`).test(reset[1])) {
+    throw new Error(`${file}: reset() no longer records the ${row}'s updated_at in \`seen\` when the sheet opens`)
+  }
+  if (!sent.test(source)) throw new Error(`${file}: the save no longer sends the stamp kept in \`seen\``)
+  // Outside reset(), where the capture itself rightly reads the prop.
+  if (new RegExp(`updated_at:\\s*${row}\\??\\.updated_at`).test(source.replace(reset[0], ''))) {
+    throw new Error(`${file}: the save sends the live ${row}.updated_at, which a policy toggle refreshes under an open sheet`)
+  }
+}
+console.log('ok: the service and route sheets save with the stamp they opened with')
