@@ -55,9 +55,21 @@
 {{- fail "console.sessionKey.existingSecret must name a Secret holding the session-signing key (>= 32 bytes, base64 accepted): the chart does not create one, because a key generated at install time would rotate on every upgrade" }}
 {{- end }}
 {{- $usersSecret := "" }}
+{{- /* The users file as the chart renders it, kept in a variable so the pod template can carry
+       its checksum: the console reads the file once at startup, and without a pod-template change
+       `helm upgrade` replaced the Secret and rolled nothing -- a removed user or a rotated leaked
+       hash kept signing in until some unrelated restart (#230). */}}
+{{- $usersFile := "" }}
 {{- if $localFile }}
 {{- $usersSecret = ((((.Values.console).auth).local).existingSecret) | default (printf "%s-control-users" (include "gapura.fullname" . | trunc 49 | trimSuffix "-")) }}
 {{- if not ((((.Values.console).auth).local).existingSecret) }}
+{{- /* toJson, not bare interpolation: a group "*" renders as `- *`, an invalid YAML alias the
+      console cannot parse its users file over, and "team #1" reads as `team` with the rest
+      taken for a comment, so its grants silently never match. */}}
+{{- $usersFile = "users:\n" }}
+{{- range $localUsers }}
+{{- $usersFile = printf "%s  - email: %s\n    bcrypt: %s\n    groups: %s\n" $usersFile (.email | toJson) (.bcryptHash | toJson) ((.groups | default list) | toJson) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Secret
@@ -68,15 +80,7 @@ metadata:
 type: Opaque
 stringData:
   users.yaml: |
-    users:
-{{- /* toJson, not bare interpolation: a group "*" renders as `- *`, an invalid YAML alias the
-      console cannot parse its users file over, and "team #1" reads as `team` with the rest
-      taken for a comment, so its grants silently never match. */}}
-{{- range $localUsers }}
-      - email: {{ .email | toJson }}
-        bcrypt: {{ .bcryptHash | toJson }}
-        groups: {{ (.groups | default list) | toJson }}
-{{- end }}
+    {{- $usersFile | trimSuffix "\n" | nindent 4 }}
 {{- end }}
 {{- end }}
 {{- $port := int (((.Values.console).service).port | default 8080) }}
@@ -86,6 +90,11 @@ stringData:
 {{- end }}
 {{- if and (ne .Values.privilegedPorts "capability") (ne .Values.privilegedPorts "sysctl") (lt $configPort 1024) }}
 {{- fail (printf "console.store.config.port %d is below 1024 and the nonroot console cannot bind it: raise the port, or set privilegedPorts to capability or sysctl" $configPort) }}
+{{- end }}
+{{- /* Both listeners bind 0.0.0.0: equal ports render a pod whose second bind fails with
+       "address in use" and crash-loops (#233). */}}
+{{- if and $store (eq $port $configPort) }}
+{{- fail (printf "console.service.port and console.store.config.port are both %d: the console and its configuration endpoint are separate listeners and need ports of their own" $port) }}
 {{- end }}
 {{- $fullname := include "gapura.fullname" . }}
 {{- /* One name base for every -control object: the helper truncates, a raw fullname minus
@@ -210,8 +219,18 @@ spec:
         app.kubernetes.io/name: {{ include "gapura.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: console
+      {{- if $usersFile }}
+      annotations:
+        # A changed users file rolls the console, which reads it only at startup. A Secret given
+        # by console.auth.local.existingSecret is outside the chart: restart the console by hand
+        # after changing it.
+        checksum/users: {{ sha256sum $usersFile }}
+      {{- end }}
     spec:
       serviceAccountName: {{ $controlName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if or $localFile $storeCa $configTls }}
       volumes:
       {{- if $localFile }}

@@ -139,6 +139,9 @@ updateStrategy:
   maxUnavailable: 0
   maxSurge: 1
 
+# Rendered only while replicaCount exceeds minAvailable (a percentage rounded up, as the
+# disruption controller does): a budget covering every replica allows no eviction and hangs
+# `kubectl drain` and node upgrades, so replicaCount 1 gets no PDB rather than a blocking one.
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
@@ -242,6 +245,9 @@ console:
     #   python3 -c "import bcrypt,sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(10)).decode())" 'password-anda'
     # ). Groups feed the same grants as OIDC groups do. Rendered into a Secret mounted as
     # the users file; give existingSecret to supply your own Secret with a `users.yaml` key.
+    # The console reads the file only at startup: a change to `users` rolls it (the pod carries
+    # the file's checksum), but a change to an existingSecret does not -- restart it by hand,
+    # `kubectl rollout restart deployment/<fullname>-control`, or removed users keep signing in.
     local:
       users: []
       existingSecret: ""

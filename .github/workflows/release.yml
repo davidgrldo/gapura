@@ -162,16 +162,23 @@ jobs:
           merge-multiple: true
           path: /tmp/digests
       - name: Join the per-arch digests into one manifest list
+        # The metadata JSON carries free text (the OCI description label comes from the repository
+        # description) and the version comes from the dispatch input, so both arrive through the
+        # environment: interpolated into the script, an apostrophe ended the quote around them and
+        # the shell ran whatever followed (#235).
+        env:
+          META: ${{ steps.meta.outputs.json }}
+          META_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          tags=$(jq -r '.tags | map("--tag " + .) | join(" ")' <<<'${{ steps.meta.outputs.json }}')
+          tags=$(jq -r '.tags | map("--tag " + .) | join(" ")' <<<"$META")
           # An unmatched glob would pass through literally and printf would still emit "$IMAGE@",
           # so check the directory itself before trusting the refs.
           test -n "$(ls -A /tmp/digests 2>/dev/null)"
           refs=$(for f in /tmp/digests/*; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
           # shellcheck disable=SC2086
           docker buildx imagetools create $tags $refs
-          docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+          docker buildx imagetools inspect "${IMAGE}:${META_VERSION}"
 
   chart:
     needs: image

@@ -94,6 +94,29 @@ means what it usually does, moving from one version below to a later one. Releas
   switched off, and a refusal lands on the input it is about. A broader requirement shows
   read-only, with where it comes from and its issuer. A "JWT" tag beside a service or route says it
   requires a token. Roles are as for the API key: a viewer reads, an editor switches it.
+- Changing `console.auth.local.users` now restarts the console (#230). The console reads its
+  users file only at startup, and `helm upgrade` replaced the Secret without touching the pod, so a
+  removed user or a rotated leaked hash kept signing in until some unrelated restart. The console
+  pod carries a `checksum/users` annotation of the rendered file. A Secret given by
+  `console.auth.local.existingSecret` is outside the chart: restart the console by hand after
+  changing it.
+- The top-level `imagePullSecrets` now reach the console's pod too (#231); from a private registry
+  the gateway pulled and the console sat in ImagePullBackOff.
+- The PodDisruptionBudget is no longer rendered when it would allow no eviction at all (#232):
+  with `replicaCount: 1` and the default `minAvailable: 1` it hung `kubectl drain`, cluster
+  autoscaler scale-down and node upgrades. It now renders only while `replicaCount` exceeds
+  `minAvailable` (a percentage rounded up, as the disruption controller counts it). Left out
+  rather than refused, so lowering `replicaCount` on a small cluster needs no second setting; an
+  existing single-replica release loses its PDB on upgrade.
+- In store mode, `console.service.port` equal to `console.store.config.port` fails at render time
+  (#233) instead of rendering a console whose second listener cannot bind and crash-loops.
+- The `helm test` pods pass the restricted Pod Security level (#234): non-root (agnhost as 65532,
+  curl as its image's own uid 100), RuntimeDefault seccomp, no privilege escalation, all
+  capabilities dropped. In a namespace enforcing restricted they were rejected and `helm test`
+  timed out as if the gateway were broken.
+- The release workflow passes the image metadata JSON to its script through the environment
+  (#235): interpolated inside a single-quoted string, an apostrophe in the repository description
+  ended the quote and the shell ran the rest.
 - Store mode can limit requests. `/api/workspaces/{workspace}/rate-limit` lists the workspace's
   limits as `{target, limit, per}`; PUT `{"target", "limit", "per"}` limits a route, a service or
   the whole workspace to `limit` requests (1 to 1 000 000) per `second`, `minute` or `hour`, and

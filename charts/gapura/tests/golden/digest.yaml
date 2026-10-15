@@ -356,9 +356,19 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
+  # curl_user, the image's own user (uid 100): the image names it, and runAsNonRoot cannot
+  # verify a user by name, so the uid is given.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile: { type: RuntimeDefault }
   containers:
   - name: curl
     image: curlimages/curl:8.11.1
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities: { drop: ["ALL"] }
     command: ["/bin/sh", "-c"]
     args:
     - |
@@ -410,12 +420,24 @@ spec:
         app.kubernetes.io/component: smoke-backend
         gapura.dev/smoke: "true"
     spec:
+      # Restricted Pod Security, like the rest of the chart: a namespace enforcing it rejected
+      # these fixtures and `helm test` timed out as if the gateway were broken (#234). agnhost's
+      # image declares no user and so runs as root unless told otherwise; netexec on 8080 needs
+      # nothing root has.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
       - name: echo
         # The same echo backend deploy/kind/fixture.yaml uses.
         image: registry.k8s.io/e2e-test-images/agnhost:2.53
         args: [netexec, --http-port=8080]
         ports: [{ containerPort: 8080, name: http }]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
 ---
 # Source: gapura/templates/smoke-test.yaml
 # `helm test` fixture: one throwaway Gateway, HTTPRoute and echo backend, plus a curl pod that

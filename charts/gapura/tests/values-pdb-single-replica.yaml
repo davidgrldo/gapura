@@ -1,0 +1,3 @@
+# One replica with the default PodDisruptionBudget: minAvailable 1 would allow no eviction and
+# hang every drain, so no PDB renders (#232).
+replicaCount: 1

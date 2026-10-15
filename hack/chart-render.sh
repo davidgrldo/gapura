@@ -105,4 +105,28 @@ for values in "$CHART"/tests/values-*.yaml; do
   fi
 done
 
+# Values the chart must refuse at render time: tests/fail-*.yaml, each opening with a
+# `# expect: <text>` line that the error has to contain. A refusal that silently stops firing
+# would otherwise surface only as a pod crash-looping on the user's cluster.
+for values in "$CHART"/tests/fail-*.yaml; do
+  [ -e "$values" ] || continue
+  case=$(basename "$values" .yaml)
+  expect=$(sed -n '1s/^# expect: //p' "$values")
+  if [ -z "$expect" ]; then
+    echo "FAIL $case: first line must be '# expect: <error text>'" >&2
+    status=1
+    continue
+  fi
+  if err=$(helm template gapura "$CHART" --namespace gapura-system --values "$values" --kube-version 1.34 2>&1 >/dev/null); then
+    echo "FAIL $case: rendered, expected a failure containing: $expect" >&2
+    status=1
+  elif ! grep -qF -- "$expect" <<<"$err"; then
+    echo "FAIL $case: failed with an unexpected error, expected: $expect" >&2
+    printf '%s\n' "$err" >&2
+    status=1
+  else
+    echo "ok $case (refused)"
+  fi
+done
+
 exit $status
