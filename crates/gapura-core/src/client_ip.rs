@@ -36,7 +36,20 @@ impl FromStr for Cidr {
 }
 
 impl Cidr {
+    /// Whether `ip` is in this network, in either of the forms an IPv4 address takes (#216): an
+    /// IPv4-mapped IPv6 address (`::ffff:10.0.0.5`, how a dual-stack `[::]` listener sees an
+    /// IPv4 peer) is in a v4 network that holds the address it stands for, and an IPv4 address
+    /// is in a v6 network that holds its mapped form. So trust does not depend on which socket
+    /// the proxy arrived on, or on whether the address was canonicalised first.
     pub fn contains(&self, ip: IpAddr) -> bool {
+        let other_form = match ip {
+            IpAddr::V4(v4) => Some(IpAddr::V6(v4.to_ipv6_mapped())),
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4),
+        };
+        self.contains_exactly(ip) || other_form.is_some_and(|ip| self.contains_exactly(ip))
+    }
+
+    fn contains_exactly(&self, ip: IpAddr) -> bool {
         match (self.addr, ip) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
                 same_prefix(u32::from(net).into(), u32::from(ip).into(), self.bits, 32)
@@ -69,6 +82,10 @@ fn same_prefix(a: u128, b: u128, bits: u32, width: u32) -> bool {
 /// can write these headers too. When a chain exists it keeps its precedence, including the
 /// all-trusted chain that resolves to its own first address. An unparseable value is ignored,
 /// the way an unparseable XFF hop is skipped.
+///
+/// Every address, the peer and each hop alike, is canonicalised first (#216): an IPv4 client
+/// seen through a dual-stack `[::]` socket, or written mapped by a proxy, is `::ffff:a.b.c.d`,
+/// and is both trusted and reported as the IPv4 address it is.
 pub fn client_ip(
     peer: IpAddr,
     forwarded_for: Option<&str>,
@@ -76,6 +93,7 @@ pub fn client_ip(
     named: Option<&str>,
 ) -> IpAddr {
     let trusts = |ip: IpAddr| trusted.iter().any(|net| net.contains(ip));
+    let peer = peer.to_canonical();
     if !trusts(peer) {
         return peer;
     }
@@ -85,7 +103,7 @@ pub fn client_ip(
     // Right to left, so `leftmost` ends up holding the far end of the chain.
     let mut leftmost = None;
     for hop in chain.rsplit(',') {
-        let Ok(ip) = hop.trim().parse::<IpAddr>() else {
+        let Ok(ip) = hop.trim().parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
             continue;
         };
         if !trusts(ip) {
@@ -98,7 +116,11 @@ pub fn client_ip(
 }
 
 fn named_header_ip(named: Option<&str>) -> Option<IpAddr> {
-    named?.trim().parse::<IpAddr>().ok()
+    named?
+        .trim()
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| ip.to_canonical())
 }
 
 #[cfg(test)]
@@ -238,6 +260,56 @@ mod tests {
         assert!(!v6.contains(ip("10.0.0.1")));
         let v4: Cidr = "10.0.0.0/8".parse().unwrap();
         assert!(!v4.contains(ip("2001:db8::1")));
+    }
+
+    #[test]
+    fn a_mapped_v4_peer_is_trusted_by_a_v4_network() {
+        // #216: on a dual-stack `[::]` listener an IPv4 load balancer at 10.0.0.5 arrives as
+        // `::ffff:10.0.0.5`. Untrusted, every client became the load balancer.
+        let got = client_ip(
+            ip("::ffff:10.0.0.5"),
+            Some("198.51.100.5"),
+            &nets(&["10.0.0.0/8"]),
+            None,
+        );
+        assert_eq!(got, ip("198.51.100.5"));
+        // Mapped hops are walked as the v4 addresses they are, and reported that way.
+        let got = client_ip(
+            ip("::ffff:10.0.0.5"),
+            Some("::ffff:198.51.100.5, ::ffff:10.0.0.110"),
+            &nets(&["10.0.0.0/8"]),
+            None,
+        );
+        assert_eq!(got, ip("198.51.100.5"));
+        // An untrusted mapped peer is still the client, reported as v4.
+        let got = client_ip(
+            ip("::ffff:203.0.113.9"),
+            Some("1.2.3.4"),
+            &nets(&["10.0.0.0/8"]),
+            None,
+        );
+        assert_eq!(got, ip("203.0.113.9"));
+        let got = client_ip(
+            ip("::ffff:10.0.0.5"),
+            None,
+            &nets(&["10.0.0.0/8"]),
+            Some("::ffff:198.51.100.7"),
+        );
+        assert_eq!(got, ip("198.51.100.7"));
+    }
+
+    #[test]
+    fn a_mapped_address_is_in_the_v4_network_it_stands_for() {
+        let v4: Cidr = "10.0.0.0/8".parse().unwrap();
+        assert!(v4.contains(ip("::ffff:10.1.2.3")));
+        assert!(!v4.contains(ip("::ffff:11.1.2.3")));
+        // A v6 network naming the mapped range keeps matching it, in either form, so
+        // canonicalising the peer first never takes trust away.
+        let mapped: Cidr = "::ffff:0:0/96".parse().unwrap();
+        assert!(mapped.contains(ip("::ffff:10.1.2.3")));
+        assert!(mapped.contains(ip("10.1.2.3")));
+        let got = client_ip(ip("::ffff:10.0.0.5"), Some("198.51.100.5"), &[mapped], None);
+        assert_eq!(got, ip("198.51.100.5"));
     }
 
     #[test]

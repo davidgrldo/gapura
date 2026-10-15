@@ -8,6 +8,26 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A JWT policy refuses any request with more than one Authorization line, whatever the lines
+  contain (#212). Only lines that parsed as UTF-8 and as `Bearer <token>` were counted, so
+  `Bearer<TAB><forged>` or a line carrying obs-text went upstream unverified beside a valid
+  token, and backends that split on any whitespace or keep the first duplicate read the forged
+  one. A single line that is not a bearer is refused as a missing token, as before.
+- Dot segments with path parameters are refused with 400 like plain ones (#213): Tomcat and
+  Jetty strip `;params` before resolving dot segments, so `/public/..;/admin` was matched as
+  `/public` and served as `/admin`. A path whose `;params` would move it to another rule
+  (`/admin;x/secret` falling past `/admin` to a catch-all) is refused too; parameters that route
+  the same either way, such as `;jsessionid=`, are forwarded as before.
+- The trusted-proxy check understands IPv4-mapped IPv6 addresses (#216): on a dual-stack `[::]`
+  listener an IPv4 load balancer arrives as `::ffff:10.0.0.5`, which a `10.0.0.0/8` trust did
+  not cover, so every client was logged and rate-limited as the load balancer. Mapped peers and
+  hops are matched in both forms and reported as IPv4.
+- `timeouts.request` is no longer ignored when `timeouts.backendRequest` is set (#217): each
+  socket read or write of an attempt is bounded by the smaller of the two, and `request` is
+  also a budget for the whole request, retries included — each attempt's connect and read
+  timeouts are capped to what is left of it, and an attempt that would start after it is spent
+  answers 504. Pingora bounds reads, not exchanges, so this is still an idle timeout within an
+  attempt: a backend that trickles bytes faster than the bound can outlast `request`.
 - The change-own-password audit entry names the account (#191): the username is read before
   the write and carried into the entry beside "password: changed". A password change by a
   user of the console can no longer be told apart from an admin's reset by its name — the

@@ -138,14 +138,37 @@ enum Decision {
 }
 
 /// Gateway API timeouts to Pingora's per-attempt read/write timeout.
-/// `Some(0)` disables the timeout (Gateway API: "0s" means no timeout); `None` uses the default.
-/// `backendRequest` is the per-attempt bound and wins over `request` when both are set.
+///
+/// Pingora 0.8 applies this to each socket read and write of an attempt, not to the attempt
+/// as a whole: it is an idle bound, and a backend that keeps trickling bytes is not cut off by
+/// it. Pingora has no hook that could end an exchange that is waiting on a read, so a true total
+/// deadline is not available here (#217). What is enforced instead:
+///
+/// - The per-read bound is the smaller of `backendRequest` and `request`; setting
+///   `backendRequest` no longer makes `request` ignored. `0` (Gateway API: "0s", no timeout)
+///   drops that field from the choice, and only when neither field bounds anything is the
+///   timeout disabled. With neither field set the default applies.
+/// - `request` is also a budget for the whole request, retries included, counted from when the
+///   request was read: see [`request_budget_left`], which caps each attempt's connect and read
+///   timeouts to what is left of it and refuses an attempt once it is spent.
 pub fn effective_timeout(t: &Timeouts) -> Option<Duration> {
-    match t.backend_request_ms.or(t.request_ms) {
-        Some(0) => None,
-        Some(ms) => Some(Duration::from_millis(ms)),
-        None => Some(DEFAULT_UPSTREAM_TIMEOUT),
+    if t.backend_request_ms.is_none() && t.request_ms.is_none() {
+        return Some(DEFAULT_UPSTREAM_TIMEOUT);
     }
+    [t.backend_request_ms, t.request_ms]
+        .into_iter()
+        .flatten()
+        .filter(|&ms| ms > 0)
+        .min()
+        .map(Duration::from_millis)
+}
+
+/// What is left of the rule's `request` timeout `elapsed` into the request, or `None` when it
+/// sets none (unset or "0s"). `Some(Duration::ZERO)` means it is spent.
+pub fn request_budget_left(t: &Timeouts, elapsed: Duration) -> Option<Duration> {
+    t.request_ms
+        .filter(|&ms| ms > 0)
+        .map(|ms| Duration::from_millis(ms).saturating_sub(elapsed))
 }
 
 /// The connect timeout for `t`'s rule: its own, where 0 or unset means the default.
@@ -274,6 +297,50 @@ fn refusal_response(challenge: &str, request_id: &str) -> Result<ResponseHeader>
     resp.insert_header("Cache-Control", "no-store")?;
     resp.insert_header("X-Request-Id", request_id)?;
     Ok(resp)
+}
+
+/// Whether `ex` would match a different rule once its `;params` are stripped, the way a servlet
+/// container reads the path (#213). `/admin;x/secret` misses an `/admin` prefix (the byte after
+/// it is `;`, not `/`) and falls through to a catch-all, while Tomcat serves it as
+/// `/admin/secret`: the `/admin` policy never ran. Refusing every `;` would break matrix
+/// parameters and `;jsessionid=` URLs that route the same either way, so only a request whose
+/// two readings disagree is refused. Paths without a `;` cost nothing.
+fn path_params_change_the_route(rt: &Runtime, port: u16, ex: &Extracted) -> bool {
+    let Some(stripped) = attrs::without_path_params(&ex.path) else {
+        return false;
+    };
+    let rule_for = |path: &str| {
+        let mut req = ex.attrs();
+        req.path = path;
+        rt.config
+            .match_port_with(port, &req, rt.regexes())
+            .map(|hit| (hit.listener_index, hit.entry.rule))
+    };
+    rule_for(&ex.path) != rule_for(&stripped)
+}
+
+/// Why a JWT policy refuses `req`, with the challenge to answer; `None` admits it.
+///
+/// Every Authorization line is forwarded upstream, so the check must cover every line, not just
+/// the first (#190). Lines are counted raw (#212): counting only those that parse as UTF-8 and as
+/// `Bearer <token>` let `Bearer\t<forged>`, or a line carrying obs-text, through unverified beside
+/// a valid one, and a backend that splits on any whitespace or keeps the first duplicate then read
+/// the forged token. So one Authorization line per request, whatever its shape; a single line that
+/// is not UTF-8 or not a bearer presents no token and is refused as a missing one.
+fn jwt_refusal(
+    req: &RequestHeader,
+    policy: &gapura_core::config::JwtPolicy,
+    keys: &jwt::Keys,
+) -> Option<(&'static str, &'static str)> {
+    let mut lines = req.headers.get_all(http::header::AUTHORIZATION).iter();
+    let first = lines.next();
+    if lines.next().is_some() {
+        return Some(("multiple_bearer", "one credential per request"));
+    }
+    let presented = jwt::bearer(first.and_then(|v| v.to_str().ok()));
+    jwt::verify(policy, keys, presented)
+        .err()
+        .map(|r| (r.as_str(), "Bearer"))
 }
 
 /// The client address after the trusted-proxy walk, the same answer the access log records:
@@ -469,6 +536,16 @@ impl ProxyHttp for GapuraProxy {
             }
         }
 
+        if path_params_change_the_route(&rt, ctx.port, ctx.extracted.as_ref().expect("set above")) {
+            tracing::debug!(
+                reason = "path parameters change the route",
+                "refusing a request target"
+            );
+            ctx.local_status = Some(400);
+            write_local(session, 400, &ctx.request_id).await?;
+            return Ok(true);
+        }
+
         let decision = {
             let ex = ctx.extracted.as_ref().expect("set above");
             match rt
@@ -540,44 +617,14 @@ impl ProxyHttp for GapuraProxy {
                 for plugin in &rt.config.listeners[listener].rules[rule].plugins {
                     let refusal: Option<(&'static str, &'static str, String)> = match plugin {
                         gapura_core::config::Plugin::Jwt(policy) => {
-                            // Every Authorization line, not just the first (#190): HTTP/2
-                            // permits the header across several lines, and a second unverified
-                            // line forwarded upstream is an authentication bypass.
-                            let lines: Vec<String> = session
-                                .req_header()
-                                .headers
-                                .get_all(http::header::AUTHORIZATION)
-                                .iter()
-                                .filter_map(|v| v.to_str().ok())
-                                .map(str::to_string)
-                                .collect();
-                            let presented: Option<String> = lines
-                                .iter()
-                                .filter_map(|l| jwt::bearer(Some(l)).map(str::to_string))
-                                .next();
-                            // If more than one line carries a bearer, refuse: forwarding
-                            // lines the check did not verify is the bypass.
-                            let bearer_count = lines
-                                .iter()
-                                .filter(|l| jwt::bearer(Some(l)).is_some())
-                                .count();
-                            if bearer_count > 1 {
-                                Some((
-                                    "jwt",
-                                    "multiple_bearer",
-                                    "one credential per request".into(),
-                                ))
-                            } else {
-                                // No keys for this document means it did not parse at swap time.
-                                // Refusing is the safe direction: the alternative is passing traffic
-                                // through unverified because a configuration error made verification
-                                // impossible.
-                                let empty = jwt::Keys::default();
-                                let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                                jwt::verify(policy, keys, presented.as_deref())
-                                    .err()
-                                    .map(|r| ("jwt", r.as_str(), "Bearer".to_string()))
-                            }
+                            // No keys for this document means it did not parse at swap time.
+                            // Refusing is the safe direction: the alternative is passing traffic
+                            // through unverified because a configuration error made verification
+                            // impossible.
+                            let empty = jwt::Keys::default();
+                            let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
+                            jwt_refusal(session.req_header(), policy, keys)
+                                .map(|(reason, challenge)| ("jwt", reason, challenge.to_string()))
                         }
                         gapura_core::config::Plugin::KeyAuth(policy) => {
                             let presented = session
@@ -728,14 +775,26 @@ impl ProxyHttp for GapuraProxy {
                 peer
             }
         };
+        // A retry starts with whatever is left of the request's budget, not a fresh one (#217).
+        let left = ctx
+            .rule()
+            .and_then(|r| request_budget_left(&r.timeouts, ctx.started.elapsed()));
+        if left == Some(Duration::ZERO) {
+            return Err(Error::explain(
+                ErrorType::HTTPStatus(504),
+                "the request timeout was spent before this attempt",
+            ));
+        }
+        let within_budget = |d: Duration| left.map_or(d, |left| d.min(left));
         let timeout = ctx
             .rule()
             .map(|r| effective_timeout(&r.timeouts))
-            .unwrap_or(Some(DEFAULT_UPSTREAM_TIMEOUT));
-        peer.options.connection_timeout = Some(
+            .unwrap_or(Some(DEFAULT_UPSTREAM_TIMEOUT))
+            .map(within_budget);
+        peer.options.connection_timeout = Some(within_budget(
             ctx.rule()
                 .map_or(DEFAULT_CONNECT_TIMEOUT, |r| connect_timeout(&r.timeouts)),
-        );
+        ));
         peer.options.read_timeout = timeout;
         peer.options.write_timeout = timeout;
         ctx.upstream_started = Some(Instant::now());
@@ -1105,14 +1164,74 @@ mod tests {
             }),
             None
         );
+        // #217: `request` is no longer ignored when `backendRequest` is set; the smaller wins,
+        // and "0s" on one of them leaves the other in force.
+        assert_eq!(
+            effective_timeout(&Timeouts {
+                request_ms: Some(300),
+                backend_request_ms: Some(500),
+                ..Timeouts::default()
+            }),
+            Some(Duration::from_millis(300))
+        );
         assert_eq!(
             effective_timeout(&Timeouts {
                 request_ms: Some(1500),
                 backend_request_ms: Some(0),
                 ..Timeouts::default()
             }),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            effective_timeout(&Timeouts {
+                request_ms: Some(0),
+                backend_request_ms: Some(500),
+                ..Timeouts::default()
+            }),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            effective_timeout(&Timeouts {
+                request_ms: None,
+                backend_request_ms: Some(0),
+                ..Timeouts::default()
+            }),
             None
         );
+        assert_eq!(
+            effective_timeout(&Timeouts {
+                request_ms: Some(0),
+                backend_request_ms: Some(0),
+                ..Timeouts::default()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn the_request_timeout_is_a_budget_retries_draw_from() {
+        let t = Timeouts {
+            request_ms: Some(5000),
+            backend_request_ms: Some(3000),
+            ..Timeouts::default()
+        };
+        assert_eq!(
+            request_budget_left(&t, Duration::from_millis(3200)),
+            Some(Duration::from_millis(1800))
+        );
+        assert_eq!(
+            request_budget_left(&t, Duration::from_secs(6)),
+            Some(Duration::ZERO)
+        );
+        // No `request` timeout, or "0s", is no budget at all.
+        for request_ms in [None, Some(0)] {
+            let t = Timeouts {
+                request_ms,
+                backend_request_ms: Some(3000),
+                ..Timeouts::default()
+            };
+            assert_eq!(request_budget_left(&t, Duration::from_secs(60)), None);
+        }
     }
 
     #[test]
@@ -1190,6 +1309,171 @@ mod tests {
         let none = RequestHeader::build("GET", b"/", None).unwrap();
         assert_eq!(forwarded_for(&none), None);
         assert_eq!(client_ip_of(&none, proxy, &trusted, &[]), proxy);
+    }
+
+    mod jwt_lines {
+        use super::super::*;
+        use base64::Engine;
+        use gapura_core::config::JwtPolicy;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        const SECRET: &[u8] = b"a test secret that is long enough";
+
+        fn policy() -> (JwtPolicy, jwt::Keys) {
+            let k = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(SECRET);
+            let jwks = serde_json::json!({"keys": [
+                {"kty": "oct", "k": k, "alg": "HS256", "kid": "k1"}
+            ]})
+            .to_string();
+            let keys = jwt::Keys::default();
+            let keys = gapura_core::jwt::keys(&jwks).unwrap_or(keys);
+            let policy = JwtPolicy {
+                issuer: None,
+                audience: None,
+                jwks,
+            };
+            (policy, keys)
+        }
+
+        fn token(secret: &[u8], sub: &str) -> String {
+            let mut header = Header::new(Algorithm::HS256);
+            header.kid = Some("k1".into());
+            let claims = serde_json::json!({"sub": sub, "exp": 4102444800u64});
+            encode(&header, &claims, &EncodingKey::from_secret(secret)).unwrap()
+        }
+
+        fn with_lines(lines: &[&[u8]]) -> RequestHeader {
+            let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+            for line in lines {
+                let value = http::HeaderValue::from_bytes(line).unwrap();
+                req.append_header(http::header::AUTHORIZATION, value)
+                    .unwrap();
+            }
+            req
+        }
+
+        #[test]
+        fn one_valid_bearer_is_admitted() {
+            let (policy, keys) = policy();
+            let good = format!("Bearer {}", token(SECRET, "me"));
+            assert_eq!(
+                jwt_refusal(&with_lines(&[good.as_bytes()]), &policy, &keys),
+                None
+            );
+        }
+
+        #[test]
+        fn a_tab_separated_line_beside_a_valid_one_is_refused() {
+            // #212: `bearer()` splits on a space, so the tab line was neither counted nor
+            // verified, yet it was forwarded, and a backend splitting on any whitespace read it.
+            let (policy, keys) = policy();
+            let forged = format!(
+                "Bearer\t{}",
+                token(b"not the secret at all, forged", "admin")
+            );
+            let good = format!("Bearer {}", token(SECRET, "me"));
+            for lines in [
+                [forged.as_bytes(), good.as_bytes()],
+                [good.as_bytes(), forged.as_bytes()],
+            ] {
+                assert_eq!(
+                    jwt_refusal(&with_lines(&lines), &policy, &keys).map(|r| r.0),
+                    Some("multiple_bearer")
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_utf8_line_beside_a_valid_one_is_refused() {
+            // #212: `to_str()` fails on obs-text, so the line was dropped from the count.
+            let (policy, keys) = policy();
+            let mut forged = format!("Bearer {}", token(b"forged", "admin")).into_bytes();
+            forged.push(0x80);
+            let good = format!("Bearer {}", token(SECRET, "me"));
+            assert_eq!(
+                jwt_refusal(&with_lines(&[&forged, good.as_bytes()]), &policy, &keys).map(|r| r.0),
+                Some("multiple_bearer")
+            );
+        }
+
+        #[test]
+        fn a_single_line_that_is_not_a_bearer_presents_no_token() {
+            let (policy, keys) = policy();
+            let tab = format!("Bearer\t{}", token(SECRET, "me"));
+            let mut non_utf8 = format!("Bearer {}", token(SECRET, "me")).into_bytes();
+            non_utf8.push(0x80);
+            for line in [tab.as_bytes(), &non_utf8, b"Basic dXNlcjpwYXNz"] {
+                assert_eq!(
+                    jwt_refusal(&with_lines(&[line]), &policy, &keys),
+                    Some(("missing", "Bearer"))
+                );
+            }
+            assert_eq!(
+                jwt_refusal(&with_lines(&[]), &policy, &keys),
+                Some(("missing", "Bearer"))
+            );
+        }
+    }
+
+    #[test]
+    fn path_parameters_that_change_the_route_are_caught() {
+        // #213: `/admin;x/secret` misses the `/admin` prefix and falls to the catch-all, while
+        // Tomcat serves it as `/admin/secret`.
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: { name: gapura }
+spec: { controllerName: gapura.dev/controller }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: main, namespace: infra, generation: 1 }
+spec:
+  gatewayClassName: gapura
+  listeners:
+  - { name: http, port: 80, protocol: HTTP, allowedRoutes: { namespaces: { from: All } } }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps, generation: 1, creationTimestamp: "2026-09-10T00:00:00Z" }
+spec:
+  parentRefs: [{ name: main, namespace: infra }]
+  rules:
+  - matches: [{ path: { type: PathPrefix, value: /admin } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: /shop } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: / } }]
+    backendRefs: [{ name: echo, port: 80 }]
+"#;
+        let snap = gapura_core::Snapshot::from_yaml_docs(yaml).unwrap();
+        let translation = gapura_core::translate(&snap, &gapura_core::Settings::default());
+        let rt = Runtime::new(translation.config, 1, Vec::new());
+        let changes = |path: &str| {
+            let r = RequestHeader::build("GET", path.as_bytes(), None).unwrap();
+            path_params_change_the_route(&rt, 80, &Extracted::from_request(&r).unwrap())
+        };
+        // The catch-all is what a miss falls to, so the test only means something if it is
+        // there and `/admin` really is a different rule.
+        let rule_of = |path: &str| {
+            let r = RequestHeader::build("GET", path.as_bytes(), None).unwrap();
+            let ex = Extracted::from_request(&r).unwrap();
+            rt.config
+                .match_port_with(80, &ex.attrs(), rt.regexes())
+                .map(|hit| hit.entry.rule)
+        };
+        assert!(rule_of("/admin/secret").is_some());
+        assert!(rule_of("/elsewhere").is_some());
+        assert_ne!(rule_of("/admin/secret"), rule_of("/elsewhere"));
+        assert!(!changes("/admin/secret"));
+        assert!(!changes("/elsewhere"));
+        assert!(changes("/admin;x/secret"));
+        assert!(changes("/admin;"));
+        assert!(changes("/;x/admin/secret"));
+        // Parameters that route the same either way are left alone.
+        assert!(!changes("/shop/cart;jsessionid=1"));
+        assert!(!changes("/admin/secret;v=2"));
+        assert!(!changes("/elsewhere;x/y"));
     }
 
     #[test]
