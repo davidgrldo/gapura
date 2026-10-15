@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Routes stored before #242 are served safely (#227, #228). An exact or prefix path stored with
+  a lowercase percent-escape (`/files/a%2fb`) is served with uppercase hex, the form the gateway
+  normalises a request's path to, so it matches again. A route with a header match on
+  `x-consumer-username` is no longer served at all, rather than letting a client claim to be a
+  consumer; the control plane logs a warning naming it whenever it sends a data plane a new
+  configuration, and serves it again once that match is removed. The console now also refuses
+  a regex path with a lowercase escape, which could never match.
 - A JWT policy refuses any request with more than one Authorization line, whatever the lines
   contain (#212). Only lines that parsed as UTF-8 and as `Bearer <token>` were counted, so
   `Bearer<TAB><forged>` or a line carrying obs-text went upstream unverified beside a valid
