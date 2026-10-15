@@ -2083,3 +2083,69 @@ async fn bad_headers_are_named_and_nothing_is_written() {
     )
     .await;
 }
+
+/// #227 and #228 for rows written before the console refused them: a lowercase escape in an
+/// exact or prefix path is served uppercase, as the data plane normalises a request's path, and
+/// a route that matches on the consumer header is not served at all while the others are.
+#[tokio::test]
+async fn rows_stored_before_the_path_and_header_checks_are_served_safely() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &header_route(Some(
+            serde_json::json!([{"name": "x-version", "value": "2"}]),
+        ))
+        .to_string(),
+    )
+    .await;
+    // What the console writes now refuses, written as an older release stored it.
+    let db = store.client().await.unwrap();
+    db.batch_execute(
+        r#"update routes set paths = '[{"type":"exact","value":"/files/a%2fb"},{"type":"prefix","value":"/caf%c3%a9"},{"type":"regex","value":"^/r%2fx$"}]'
+             where name = 'orders-api';
+           update routes set headers = '[{"name":"X-Consumer-Username","value":"admin"}]'
+             where name = 'beta';"#,
+    )
+    .await
+    .unwrap();
+
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let config = gapura_core::store::compile(&snapshot, &Default::default());
+    let rules: Vec<&str> = config.listeners[0]
+        .rules
+        .iter()
+        .map(|r| r.route.as_str())
+        .collect();
+    assert_eq!(rules, ["default/orders-api"]);
+    assert_eq!(
+        gapura_core::store::refused_routes(&snapshot),
+        ["default/beta"]
+    );
+    use gapura_core::config::PathMatch;
+    let paths: Vec<&PathMatch> = config.listeners[0].rules[0]
+        .matches
+        .iter()
+        .map(|m| &m.path)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            &PathMatch::Exact("/files/a%2Fb".into()),
+            &PathMatch::Prefix("/caf%C3%A9".into()),
+            &PathMatch::Regex("^/r%2fx$".into()),
+        ]
+    );
+    // Served to a data plane the same way.
+    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
+    assert_eq!(served, config);
+}

@@ -180,10 +180,14 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     // reference panics the compile and takes the control plane's endpoint down with it. A
     // foreign key should make it unreachable and the console should refuse it first; this is
     // what stands between those two being wrong and a crash.
+    //
+    // A route that matches on the consumer header is not served at all (#228); see
+    // [`refused_routes`].
     let mut routes: Vec<&StoreRoute> = snap
         .routes
         .iter()
         .filter(|r| services.contains_key(&(r.workspace.as_str(), r.service.as_str())))
+        .filter(|r| !matches_consumer_header(r))
         .collect();
     // Highest priority first, then by name, so the table is a function of the rows and not of
     // the order a query happened to return them.
@@ -313,6 +317,53 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .map(|c| (c.key_hash.clone(), c.workspace.clone()))
             .collect(),
     }
+}
+
+/// The routes [`compile`] leaves out because a header match names
+/// [`CONSUMER_HEADER`](crate::credentials::CONSUMER_HEADER), as `workspace/name` (#228).
+///
+/// Routes are matched before `key_auth` runs and before the data plane replaces the client's
+/// own consumer header, so such a match reads whatever the client claims to be. The control
+/// plane refuses one on write; this covers a row stored before it did. The whole route is left
+/// out rather than only its header match, which would widen it to every consumer.
+pub fn refused_routes(snap: &StoreSnapshot) -> Vec<String> {
+    snap.routes
+        .iter()
+        .filter(|r| matches_consumer_header(r))
+        .map(route_id)
+        .collect()
+}
+
+fn matches_consumer_header(route: &StoreRoute) -> bool {
+    route.headers.iter().any(|h| {
+        h.name
+            .eq_ignore_ascii_case(crate::credentials::CONSUMER_HEADER)
+    })
+}
+
+/// `path` with the hex digits of every `%XX` escape in uppercase: `/files/a%2fb` becomes
+/// `/files/a%2Fb`.
+///
+/// The data plane normalises a request's path this way before matching it, and compares bytes,
+/// so an exact or prefix path written with a lowercase escape could never match (#227). The
+/// control plane stores paths through this, and [`compile`] passes stored ones through it too,
+/// for rows written before it did. A `%` not followed by two hexadecimal digits is left alone.
+pub fn uppercase_escapes(path: &str) -> String {
+    let mut bytes = path.as_bytes().to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && bytes
+                .get(i + 1..i + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+        {
+            bytes[i + 1..i + 3].make_ascii_uppercase();
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(bytes).expect("only ASCII hex digits were uppercased")
 }
 
 /// The policies that apply to one route, most specific wins.
@@ -483,10 +534,20 @@ fn route_id(route: &StoreRoute) -> String {
 /// Kong's OR-of-each-list into Gateway API's list-of-AND-matches: one entry per combination.
 /// The header matches are already an AND, so every combination carries all of them.
 fn expand(route: &StoreRoute) -> Vec<RouteMatch> {
+    // Exact and prefix paths in the form the data plane normalises a request's path to (#227).
+    // A regex is the author's own pattern and is served as written.
     let paths = if route.paths.is_empty() {
         vec![PathMatch::Prefix("/".to_string())]
     } else {
-        route.paths.clone()
+        route
+            .paths
+            .iter()
+            .map(|p| match p {
+                PathMatch::Exact(v) => PathMatch::Exact(uppercase_escapes(v)),
+                PathMatch::Prefix(v) => PathMatch::Prefix(uppercase_escapes(v)),
+                PathMatch::Regex(v) => PathMatch::Regex(v.clone()),
+            })
+            .collect()
     };
     let methods: Vec<Option<String>> = if route.methods.is_empty() {
         vec![None]
@@ -1184,6 +1245,116 @@ mod tests {
     /// What the compiler made of that snapshot before routes had headers, computed at the time.
     const PRE_HEADERS_DIGEST: &str =
         "1081010dd85af1cc25660773d6f1f352c96ed5e32b59d29b43415a255b8cf4b2";
+
+    /// #227: a path stored before the control plane uppercased escapes is served in the form the
+    /// data plane normalises a request's path to, or it never matches.
+    #[test]
+    fn a_stored_lowercase_escape_is_served_uppercase_and_matches() {
+        let mut exact = route("exact", "orders", "/", 0);
+        exact.paths = vec![PathMatch::Exact("/files/a%2fb".into())];
+        let mut prefix = route("prefix", "orders", "/", 0);
+        prefix.paths = vec![PathMatch::Prefix("/caf%c3%a9".into())];
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![exact, prefix],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let paths: Vec<&PathMatch> = cfg.listeners[0]
+            .rules
+            .iter()
+            .map(|r| &r.matches[0].path)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                &PathMatch::Exact("/files/a%2Fb".into()),
+                &PathMatch::Prefix("/caf%C3%A9".into()),
+            ]
+        );
+        // What the data plane matches is the normalised path, escapes in uppercase.
+        assert_eq!(hit_with(&cfg, "/files/a%2Fb", &[]), Some("exact"));
+        assert_eq!(hit_with(&cfg, "/caf%C3%A9/menu", &[]), Some("prefix"));
+    }
+
+    /// A regex is the author's own pattern: the compiler serves it as written.
+    #[test]
+    fn a_stored_regex_path_keeps_its_escapes_as_written() {
+        let mut r = route("r", "orders", "/", 0);
+        r.paths = vec![PathMatch::Regex("^/a%2fb$".into())];
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![r],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(
+            cfg.listeners[0].rules[0].matches[0].path,
+            PathMatch::Regex("^/a%2fb$".into())
+        );
+    }
+
+    #[test]
+    fn uppercase_escapes_touches_only_the_hex_of_escapes() {
+        for (path, want) in [
+            ("/a%2fb", "/a%2Fb"),
+            ("/a%2F%3a%c3%a9", "/a%2F%3A%C3%A9"),
+            ("/%25ab", "/%25ab"),
+            ("/abc", "/abc"),
+            ("/a%zz", "/a%zz"),
+            ("/a%2", "/a%2"),
+            ("/a%", "/a%"),
+            ("/a%%2f", "/a%%2F"),
+        ] {
+            assert_eq!(uppercase_escapes(path), want, "{path:?}");
+        }
+    }
+
+    /// #228: a route stored before the control plane refused a match on the consumer header is
+    /// left out whole -- dropping only that match would widen it to every consumer -- and named,
+    /// while the other routes compile as before.
+    #[test]
+    fn a_route_matching_on_the_consumer_header_is_not_served() {
+        let mut spoof = ws_route("shop", "admin", "orders", "api.example");
+        spoof.priority = 10;
+        spoof.headers = vec![kv("X-Consumer-Username", "admin")];
+        let snap = StoreSnapshot {
+            services: vec![ws_svc("shop", "orders", "orders.internal")],
+            routes: vec![spoof, ws_route("shop", "public", "orders", "api.example")],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let ids: Vec<&str> = cfg.listeners[0]
+            .rules
+            .iter()
+            .map(|r| r.route.as_str())
+            .collect();
+        assert_eq!(ids, ["shop/public"]);
+        assert!(cfg.ports[&80].iter().all(|e| e.matcher.headers.is_empty()));
+        assert_eq!(refused_routes(&snap), ["shop/admin"]);
+        assert_eq!(
+            hit(&cfg, 80, "api.example", "/x", "GET"),
+            Some("shop/public")
+        );
+    }
+
+    #[test]
+    fn refused_routes_is_empty_without_a_consumer_header_match() {
+        let mut beta = route("beta", "orders", "/", 0);
+        beta.headers = vec![kv("x-consumer-id", "1")];
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![beta],
+            ..Default::default()
+        };
+        assert!(refused_routes(&snap).is_empty());
+        assert_eq!(
+            compile(&snap, &StoreSettings::default()).listeners[0]
+                .rules
+                .len(),
+            1
+        );
+    }
 
     fn jwt(issuer: &str) -> Plugin {
         Plugin::Jwt(crate::config::JwtPolicy {

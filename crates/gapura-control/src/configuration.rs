@@ -619,11 +619,7 @@ fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError>
     }
     // The data plane also writes the hex of an escape it keeps in uppercase, and compares bytes,
     // so `%2f` is stored as `%2F`, the form a request for either arrives in (#227).
-    let mut bytes = bytes.to_vec();
-    for (i, _) in value.match_indices('%') {
-        bytes[i + 1..i + 3].make_ascii_uppercase();
-    }
-    let mut value = String::from_utf8(bytes).expect("only ASCII hex digits were uppercased");
+    let mut value = gapura_core::store::uppercase_escapes(value);
     if kind == "prefix" {
         while value.len() > 1 && value.ends_with('/') {
             value.pop();
@@ -783,6 +779,15 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
                 return Err(field(
                     at,
                     format!("This regular expression does not compile: {reason}"),
+                ));
+            }
+            // The data plane matches a regex against the normalised path, whose kept escapes
+            // are uppercase, so `%2f` in a pattern could never match (#227). A regex is the
+            // author's own pattern, so it is refused rather than rewritten.
+            if gapura_core::store::uppercase_escapes(&path.value) != path.value {
+                return Err(field(
+                    at,
+                    "Write percent-escapes in uppercase (%2F): the gateway matches the path that way.",
                 ));
             }
             path.value
@@ -1455,11 +1460,37 @@ mod tests {
         }
         // A regex is the author's own pattern, and its escapes are left as written.
         let (r, _) = route(
-            route_with_paths(vec![path("regex", "/a%2fb")]),
+            route_with_paths(vec![path("regex", "^/a%2Fb%C3%A9$")]),
             Write::Replace,
         )
         .unwrap();
-        assert_eq!(r.paths[0].value, "/a%2fb");
+        assert_eq!(r.paths[0].value, "^/a%2Fb%C3%A9$");
+    }
+
+    /// #227: a regex is matched against the normalised path, whose escapes are uppercase, so one
+    /// written with a lowercase escape could never match; it is refused rather than rewritten.
+    #[test]
+    fn a_regex_with_a_lowercase_escape_is_refused() {
+        for value in ["/a%2fb", "^/caf%c3%A9$", "/x|/a%2F%3a"] {
+            let err = route(
+                route_with_paths(vec![path("prefix", "/ok"), path("regex", value)]),
+                Write::Replace,
+            )
+            .unwrap_err();
+            assert_eq!(err.field, "paths[1].value", "{value:?}");
+            assert_eq!(
+                err.sentence,
+                "Write percent-escapes in uppercase (%2F): the gateway matches the path that way.",
+                "{value:?}"
+            );
+        }
+        // Not an escape: a % that two hexadecimal digits do not follow.
+        for value in ["/a%[0-9a-f]{2}", "/100%$"] {
+            assert!(
+                route(route_with_paths(vec![path("regex", value)]), Write::Replace).is_ok(),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
