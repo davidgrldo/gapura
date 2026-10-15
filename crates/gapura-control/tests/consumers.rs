@@ -278,6 +278,39 @@ async fn row(app: &axum::Router, list: &str, name: &str, as_: Uuid) -> serde_jso
         .clone()
 }
 
+/// `value` with the `updated_at` of each row, or of the one object, taken out once it is checked
+/// to be a stamp in the API's format: what the rows say, compared without when it was said.
+fn unstamped(mut value: serde_json::Value) -> serde_json::Value {
+    fn take(row: &mut serde_json::Value) {
+        let shown = row.to_string();
+        let stamp = row.as_object_mut().and_then(|o| o.remove("updated_at"));
+        let stamp = stamp
+            .as_ref()
+            .and_then(|s| s.as_str())
+            .unwrap_or_else(|| panic!("no updated_at in {shown}"));
+        assert!(stamp.len() == 27 && stamp.ends_with('Z'), "{stamp}");
+    }
+    match &mut value {
+        serde_json::Value::Array(rows) => rows.iter_mut().for_each(take),
+        one => take(one),
+    }
+    value
+}
+
+/// The `updated_at` the key-auth list shows for `target`, which a PUT replacing it sends back.
+async fn stamp(app: &axum::Router, target: &str, as_: Uuid) -> String {
+    read(app, KEY_AUTH, as_)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["target"] == target)
+        .unwrap_or_else(|| panic!("{target} has no key requirement"))["updated_at"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 async fn count(store: &Store, sql: &str) -> i64 {
     store
         .client()
@@ -517,7 +550,7 @@ async fn key_auth_on_a_route_admits_its_workspaces_keys_only() {
     )
     .await;
     assert_eq!(
-        read(&app, KEY_AUTH, s.vi).await,
+        unstamped(read(&app, KEY_AUTH, s.vi).await),
         serde_json::json!([{"target": "route:orders-api", "header": "x-api-key"}])
     );
 
@@ -663,7 +696,7 @@ async fn the_most_specific_requirement_applies() {
     )
     .await;
     assert_eq!(
-        read(&app, KEY_AUTH, s.vi).await,
+        unstamped(read(&app, KEY_AUTH, s.vi).await),
         serde_json::json!([
             {"target": "workspace", "header": "x-ws"},
             {"target": "service:orders", "header": "x-svc"},
@@ -678,8 +711,12 @@ async fn the_most_specific_requirement_applies() {
     ] {
         let policy = key_auth_on(&compiled(&store).await, COMPILED_ROUTE).unwrap();
         assert_eq!(policy.header, header);
+        // The stamp is that of the requirement that applies, wherever it is set.
+        let shown = row(&app, ROUTES, "orders-api", s.vi).await["key_auth"].clone();
+        let applying = stamp(&app, from_target(from), s.vi).await;
+        assert_eq!(shown["updated_at"].as_str(), Some(applying.as_str()));
         assert_eq!(
-            row(&app, ROUTES, "orders-api", s.vi).await["key_auth"],
+            unstamped(shown),
             serde_json::json!({"header": header, "from": from})
         );
         if let Some(target) = then_delete {
@@ -695,7 +732,7 @@ async fn the_most_specific_requirement_applies() {
     }
     // The service shows its own requirement or the workspace's, never a route's.
     assert_eq!(
-        row(&app, SERVICES, "orders", s.vi).await["key_auth"],
+        unstamped(row(&app, SERVICES, "orders", s.vi).await["key_auth"].clone()),
         serde_json::json!({"header": "x-ws", "from": "workspace"})
     );
     ok(
@@ -932,9 +969,90 @@ async fn a_prefix_names_a_key_in_its_own_workspace_only() {
     );
 }
 
-/// Two editors switching key_auth on for one target at the same moment, with different headers:
-/// the unique index lets one insert, and the other, retried, finds that row and changes its
-/// header. Once per kind of target, each from nothing.
+/// The target a row's `from` names, in the seed's workspace.
+fn from_target(from: &str) -> &'static str {
+    match from {
+        "route" => "route:orders-api",
+        "service" => "service:orders",
+        _ => "workspace",
+    }
+}
+
+/// #223: a PUT replaces a requirement only when it sends the stamp it read. A missing one (the
+/// caller saw none), an old one, or one sent for a requirement removed since: 409, nothing
+/// written. The list's stamp is the one to send, and a write moves it.
+#[tokio::test]
+async fn a_key_requirement_is_replaced_only_from_a_fresh_read() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let target = "service:orders";
+    let old = "2026-01-01T00:00:00.000000Z";
+    let put = |header: &str, seen: Option<&str>| {
+        let mut body = serde_json::json!({"target": target, "header": header});
+        if let Some(seen) = seen {
+            body["seen_updated_at"] = seen.into();
+        }
+        body.to_string()
+    };
+    let stale = |body: String, as_: Uuid| {
+        let app = &app;
+        async move {
+            let (status, answer) =
+                send(app, "PUT", KEY_AUTH, Some(as_), FROM_THE_CONSOLE, &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}: {answer}");
+            assert_eq!(
+                sentence(&answer),
+                "Someone else changed this policy. Reload it and apply your change again."
+            );
+        }
+    };
+
+    // None set: a stamp is stale, and no stamp switches it on.
+    let before = everything(&store).await;
+    stale(put("x-a", Some(old)), s.ed).await;
+    assert_eq!(everything(&store).await, before);
+    ok(&app, "PUT", KEY_AUTH, s.ed, &put("x-a", None)).await;
+    let first = stamp(&app, target, s.vi).await;
+    // The service row shows the same stamp as the list.
+    assert_eq!(
+        row(&app, SERVICES, "orders", s.vi).await["key_auth"]["updated_at"],
+        first.as_str()
+    );
+
+    // Set: no stamp, or another one, is stale; the one read replaces it.
+    let before = everything(&store).await;
+    stale(put("x-b", None), s.ed).await;
+    stale(put("x-b", Some(old)), s.ed).await;
+    assert_eq!(everything(&store).await, before);
+    ok(&app, "PUT", KEY_AUTH, s.ed, &put("x-b", Some(&first))).await;
+    let second = stamp(&app, target, s.vi).await;
+    assert_ne!(first, second);
+    // Another editor's sheet, opened before that change, cannot undo it.
+    stale(put("x-a", Some(&first)), s.ada).await;
+    let header = key_auth_on(&compiled(&store).await, COMPILED_ROUTE).map(|p| p.header);
+    assert_eq!(header.as_deref(), Some("x-b"));
+
+    // Removed since it was read: its stamp is stale too.
+    ok(
+        &app,
+        "DELETE",
+        &format!("{KEY_AUTH}?target={target}"),
+        s.ed,
+        "",
+    )
+    .await;
+    let before = everything(&store).await;
+    stale(put("x-c", Some(&second)), s.ed).await;
+    assert_eq!(everything(&store).await, before);
+}
+
+/// Two editors switching key_auth on for one target at the same moment, with different headers,
+/// each having seen none: the unique index lets one insert, and the other, retried, finds that
+/// row and is refused as stale, since it never saw it (#223). Once per kind of target, each from
+/// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_policy_per_target_even_at_once() {
     let Some((store, _guard)) = fresh_store().await else {
@@ -953,9 +1071,11 @@ async fn one_policy_per_target_even_at_once() {
             send(&app, "PUT", KEY_AUTH, Some(s.ed), FROM_THE_CONSOLE, &one),
             send(&app, "PUT", KEY_AUTH, Some(s.ada), FROM_THE_CONSOLE, &two),
         );
+        let mut answers = [a.0, b.0];
+        answers.sort();
         assert_eq!(
-            (a.0, b.0),
-            (StatusCode::NO_CONTENT, StatusCode::NO_CONTENT),
+            answers,
+            [StatusCode::NO_CONTENT, StatusCode::CONFLICT],
             "{target}: {a:?} {b:?}"
         );
         let db = store.client().await.unwrap();
@@ -972,7 +1092,7 @@ async fn one_policy_per_target_even_at_once() {
         let header: String = rows[0].get(0);
         assert!(["x-one", "x-two"].contains(&header.as_str()), "{header}");
 
-        // One created it and the other changed it, and the change is what is stored.
+        // One created it, and that is what is stored.
         let audits = db
             .query(
                 "select action, after->>'header' from audit_log
@@ -982,16 +1102,16 @@ async fn one_policy_per_target_even_at_once() {
             .await
             .unwrap();
         let audits: Vec<(String, String)> = audits.iter().map(|r| (r.get(0), r.get(1))).collect();
-        assert_eq!(audits.len(), 2, "{target}: {audits:?}");
-        assert_eq!(
-            (audits[0].0.as_str(), audits[1].0.as_str()),
-            ("create", "update")
-        );
-        assert_eq!(audits[1].1, header, "{target}");
+        assert_eq!(audits.len(), 1, "{target}: {audits:?}");
+        assert_eq!(audits[0].0, "create");
+        assert_eq!(audits[0].1, header, "{target}");
 
         // The header it already reads, again: nothing to write.
+        let seen = stamp(&app, target, s.vi).await;
+        let again =
+            format!(r#"{{"target":"{target}","header":"{header}","seen_updated_at":"{seen}"}}"#);
         let before = everything(&store).await;
-        ok(&app, "PUT", KEY_AUTH, s.ed, &put(&header)).await;
+        ok(&app, "PUT", KEY_AUTH, s.ed, &again).await;
         assert_eq!(
             everything(&store).await,
             before,

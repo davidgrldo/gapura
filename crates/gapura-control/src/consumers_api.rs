@@ -219,14 +219,22 @@ pub async fn put_key_auth(
         Ok(t) => t,
         Err(e) => return field_error(e),
     };
-    match consumers::header(input.header.as_deref()) {
-        Ok(header) => written(
+    let header = match consumers::header(input.header.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return field_error(e),
+    };
+    written(match input.seen_updated_at.as_deref() {
+        None => {
             store
                 .put_key_auth(caller.me.id, workspace, &target, &header)
-                .await,
-        ),
-        Err(e) => field_error(e),
-    }
+                .await
+        }
+        Some(seen) => {
+            store
+                .replace_key_auth(caller.me.id, workspace, &target, &header, seen)
+                .await
+        }
+    })
 }
 
 /// `?target=`, as `delete_key_auth`, `delete_jwt` and `delete_rate_limit` read it.
@@ -425,7 +433,13 @@ pub async fn put_rate_limit(
     match consumers::rate_limit(&input) {
         Ok(limit) => written(
             store
-                .put_rate_limit(caller.me.id, workspace, &target, limit)
+                .put_rate_limit(
+                    caller.me.id,
+                    workspace,
+                    &target,
+                    limit,
+                    input.seen_updated_at.as_deref(),
+                )
                 .await,
         ),
         Err(e) => field_error(e),

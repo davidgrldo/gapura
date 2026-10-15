@@ -335,6 +335,22 @@ fn token(key: &EcKey, kid: &str, aud: &str) -> String {
 }
 
 /// A PUT body for `target`.
+/// The `updated_at` of `target`'s own requirement, as `?target=` reads it: what a PUT replacing it
+/// sends back.
+async fn stamp(app: &axum::Router, target: &str, as_: Uuid) -> String {
+    read(app, &format!("{JWT}?target={target}"), as_).await["updated_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{target} shows no updated_at"))
+        .to_string()
+}
+
+/// `body`, a PUT, sending `seen` as the stamp it read.
+fn seen(body: &str, seen: &str) -> String {
+    let mut body = parse(body);
+    body["seen_updated_at"] = json!(seen);
+    body.to_string()
+}
+
 fn put(target: &str, issuer: &str, audience: Option<&str>, jwks: &str) -> String {
     let mut body = json!({"target": target, "issuer": issuer, "jwks": jwks});
     if let Some(audience) = audience {
@@ -446,8 +462,13 @@ async fn each_target_kind_is_listed_and_one_is_read_with_its_jwks() {
             {"target": "route:orders-api", "issuer": "https://route.example", "audience": "api", "keys": 1},
         ])
     );
+    let mut document = read(&app, &format!("{JWT}?target=service:orders"), s.vi).await;
+    let stamp = document["updated_at"].take();
+    let stamp = stamp.as_str().expect("the document carries its updated_at");
+    assert!(stamp.len() == 27 && stamp.ends_with('Z'), "{stamp}");
+    document.as_object_mut().unwrap().remove("updated_at");
     assert_eq!(
-        read(&app, &format!("{JWT}?target=service:orders"), s.vi).await,
+        document,
         json!({"target": "service:orders", "issuer": "https://svc.example", "audience": "svc", "jwks": one})
     );
     assert_eq!(
@@ -531,8 +552,8 @@ async fn the_most_specific_requirement_applies() {
         let route = row(&app, ROUTES, "orders-api", s.vi).await;
         assert_eq!(route["jwt"], json!({"issuer": issuer, "from": from}));
         assert_eq!(
-            route["key_auth"],
-            json!({"header": "x-api-key", "from": "workspace"})
+            (&route["key_auth"]["header"], &route["key_auth"]["from"]),
+            (&json!("x-api-key"), &json!("workspace"))
         );
         if let Some(target) = then_delete {
             ok(&app, "DELETE", &format!("{JWT}?target={target}"), s.ed, "").await;
@@ -569,12 +590,13 @@ async fn the_audit_records_the_requirement_not_the_keys() {
     let first = put("service:orders", ISSUER, Some("orders"), &jwks(&[&a]));
     ok(&app, "PUT", JWT, s.ed, &first).await;
 
+    let read_at = stamp(&app, "service:orders", s.vi).await;
     let before = everything(&store).await;
-    ok(&app, "PUT", JWT, s.ada, &first).await;
+    ok(&app, "PUT", JWT, s.ada, &seen(&first, &read_at)).await;
     assert_eq!(everything(&store).await, before, "a save of nothing");
 
     let second = put("service:orders", ISSUER, None, &jwks(&[&a, &b]));
-    ok(&app, "PUT", JWT, s.ed, &second).await;
+    ok(&app, "PUT", JWT, s.ed, &seen(&second, &read_at)).await;
     ok(
         &app,
         "DELETE",
@@ -625,6 +647,73 @@ async fn the_audit_records_the_requirement_not_the_keys() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(sentence(&body), "service:orders has no JWT requirement.");
+    assert_eq!(everything(&store).await, before);
+}
+
+/// #197 and #223: editor A opens the JWT control (JWKS v1), editor B rotates to v2, and A, who
+/// changed only the audience, applies. A's save carries the stamp it read, which is stale: 409,
+/// and v2 stays. A save without a stamp, which says it saw none, is as stale, and so is a stamp
+/// sent after the requirement was removed.
+#[tokio::test]
+async fn a_stale_sheet_does_not_undo_a_rotation() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let (v1, v2) = (jwks(&[&ec_key("v1")]), jwks(&[&ec_key("v2")]));
+    let target = "route:orders-api";
+    ok(
+        &app,
+        "PUT",
+        JWT,
+        s.ed,
+        &put(target, ISSUER, Some("orders"), &v1),
+    )
+    .await;
+    let a_read = stamp(&app, target, s.ed).await;
+    let b_read = stamp(&app, target, s.ada).await;
+    ok(
+        &app,
+        "PUT",
+        JWT,
+        s.ada,
+        &seen(&put(target, ISSUER, Some("orders"), &v2), &b_read),
+    )
+    .await;
+    assert_ne!(stamp(&app, target, s.vi).await, a_read);
+
+    let before = everything(&store).await;
+    for body in [
+        seen(&put(target, ISSUER, Some("billing"), &v1), &a_read),
+        put(target, ISSUER, Some("billing"), &v1),
+    ] {
+        let (status, answer) = send(&app, "PUT", JWT, Some(s.ed), &body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}: {answer}");
+        assert_eq!(
+            sentence(&answer),
+            "Someone else changed this policy. Reload it and apply your change again."
+        );
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the stale saves wrote nothing"
+    );
+    assert_eq!(
+        jwt_on(&compiled(&store).await, COMPILED_ROUTE)
+            .unwrap()
+            .jwks,
+        v2
+    );
+
+    // Removed since: the stamp names a requirement that is gone.
+    let last = stamp(&app, target, s.vi).await;
+    ok(&app, "DELETE", &format!("{JWT}?target={target}"), s.ada, "").await;
+    let before = everything(&store).await;
+    let body = seen(&put(target, ISSUER, None, &v1), &last);
+    let (status, answer) = send(&app, "PUT", JWT, Some(s.ed), &body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(everything(&store).await, before);
 }
 
@@ -752,12 +841,13 @@ async fn bad_input_is_named_and_writes_nothing() {
     // A JWKS at the limit is not too large, though its JSON-escaped body is more than any other
     // write may send.
     let at_limit = format!("{good}{}", " ".repeat(64 * 1024 - good.len()));
+    let read_at = stamp(&app, "workspace", s.ed).await;
     ok(
         &app,
         "PUT",
         JWT,
         s.ed,
-        &put("workspace", ISSUER, None, &at_limit),
+        &seen(&put("workspace", ISSUER, None, &at_limit), &read_at),
     )
     .await;
 }

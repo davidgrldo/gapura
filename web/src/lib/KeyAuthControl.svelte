@@ -2,7 +2,7 @@
   import { tick } from 'svelte'
   import { Button } from '$lib/components/ui/button/index.js'
   import { Input } from '$lib/components/ui/input/index.js'
-  import { write } from './api.js'
+  import { get, write } from './api.js'
   import { base } from './configuration.js'
   import { can } from './workspace.js'
 
@@ -11,9 +11,10 @@
   // the sheet's. It is its own form for the same reason, so Enter in the header applies it rather
   // than saving the sheet.
   // - `target` is `workspace`, `service:{name}` or `route:{name}`;
-  // - `applies` is the requirement the list says applies to it, `{ header, from }` or null, where
-  //   `from` may be a broader target: a route without its own takes its service's, then the
-  //   workspace's, and that one is changed where it is set, not here;
+  // - `applies` is the requirement the list says applies to it, `{ header, from, updated_at }` or
+  //   null, where `from` may be a broader target: a route without its own takes its service's,
+  //   then the workspace's, and that one is changed where it is set, not here. `updated_at` is
+  //   the policy row's stamp, which an apply sends back; when it is left out, it is read here;
   // - `onchanged` fetches the list again, which brings the new `applies`, and settles once it is
   //   drawn or has failed without rejecting. It must not close the sheet this sits in.
   let { workspace, target, applies = null, role, onchanged } = $props()
@@ -35,6 +36,12 @@
   let input = $state(null)
   let button = $state(null)
   let group = $state(null)
+  // The stamp of the requirement set here as it was read, which an apply sends back so that one
+  // changed since is refused rather than overwritten (#223); undefined while it is being read.
+  let seen = $state(undefined)
+  let reading = $state(false)
+  // The newest read's number, so a slow answer for a row the sheet has left cannot be used.
+  let latest = 0
 
   // Starts again from what the list says whenever it says something new: after an apply, after
   // the sheet's own save, or for another row. `applies` and `target` are read, not only `own`, so
@@ -47,26 +54,68 @@
     error = undefined
   })
 
+  // A list that leaves the stamp out has it read from the requirements list. One that no longer
+  // says what `applies` does is not this read's, so an empty stamp is kept, which the server
+  // refuses as stale.
+  $effect(() => {
+    applies
+    const mine = ++latest
+    seen = applies?.updated_at
+    reading = own !== null && seen === undefined
+    if (!reading) return
+    get(base(workspace, 'key-auth')).then(
+      (list) => {
+        if (mine !== latest) return
+        const row = list.find((r) => r.target === target)
+        seen = row && row.header === own ? row.updated_at : ''
+        reading = false
+      },
+      () => {
+        if (mine !== latest) return
+        seen = ''
+        reading = false
+      },
+    )
+  })
+
   const changed = $derived(on !== (own !== null) || (on && header.trim().toLowerCase() !== own))
   const misnamed = $derived(error?.field === 'header')
 
   async function apply(event) {
     event.preventDefault()
-    if (saving || !changed) return
+    if (saving || reading || !changed) return
     saving = true
     error = undefined
     try {
-      if (on) await write('PUT', base(workspace, 'key-auth'), { target, header: header.trim() })
-      else await write('DELETE', `${base(workspace, 'key-auth')}?target=${encodeURIComponent(target)}`)
+      if (on) {
+        await write('PUT', base(workspace, 'key-auth'), {
+          target,
+          header: header.trim(),
+          // None when nothing is set here: the server then refuses to replace one set since.
+          seen_updated_at: own === null ? undefined : seen,
+        })
+      } else await write('DELETE', `${base(workspace, 'key-auth')}?target=${encodeURIComponent(target)}`)
     } catch (failure) {
       // `Refused` names the field it is about; `Forbidden` and a connection that failed do not,
       // and their sentence goes in the box below.
       saving = false
-      error = { sentence: failure.message, field: failure.field }
+      error = {
+        sentence: failure.message,
+        field: failure.field,
+        // Someone changed or removed the requirement since it was read: the list is what to
+        // look at, and Reload fetches it.
+        stale: failure.status === 409 && failure.message.includes('Reload'),
+      }
       await tick()
       ;(misnamed ? input : button)?.focus()
       return
     }
+    await settle()
+  }
+
+  // Fetches the list again, which starts the form again from it, after an apply or for Reload.
+  async function settle() {
+    saving = true
     await onchanged()
     saving = false
     // The list now says what applies, and the form has started again from it. The checkbox is
@@ -111,7 +160,10 @@
           {error.sentence}
         </p>
       {/if}
-      <Button bind:ref={button} type="submit" variant="outline" size="sm" class="justify-self-start" disabled={saving || !changed}>
+      {#if error?.stale}
+        <Button variant="outline" size="sm" class="justify-self-start" onclick={settle}>Reload</Button>
+      {/if}
+      <Button bind:ref={button} type="submit" variant="outline" size="sm" class="justify-self-start" disabled={saving || reading || !changed}>
         {saving ? 'Applying…' : 'Apply'}
       </Button>
     {:else if own !== null}

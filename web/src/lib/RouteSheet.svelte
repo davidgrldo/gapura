@@ -65,8 +65,14 @@
   // A refusal leaves the list possibly out of date; it is fetched when the sheet closes, not
   // while the reader is reading why.
   let staleOnClose = false
+  // The route's and its service's stamps as the form was filled, which a save sends back. Not
+  // the live prop: the policy controls in this sheet reload the list, which hands the sheet a
+  // fresher row, and saving these fields with its stamps would overwrite a change the form never
+  // showed (#229).
+  let seen = undefined
 
   function reset() {
+    seen = route && { updated_at: route.updated_at, service_updated_at: route.service_updated_at }
     name = route?.name ?? ''
     service = route?.service ?? services[0] ?? ''
     priority = route?.priority ?? 0
@@ -218,8 +224,8 @@
     if (mode === 'edit')
       send('PUT', here(), {
         ...body,
-        updated_at: route.updated_at,
-        service_updated_at: route.service_updated_at,
+        updated_at: seen.updated_at,
+        service_updated_at: seen.service_updated_at,
       })
     else send('POST', base(workspace, 'routes'), body)
   }

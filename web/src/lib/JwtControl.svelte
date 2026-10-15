@@ -30,9 +30,10 @@
   let issuer = $state('')
   let audience = $state('')
   let jwks = $state('')
-  // This target's own requirement as `?target=` answered it, `{ issuer, audience, jwks }`: what
-  // the form starts from and is compared with. Undefined while it is being read, and null when
-  // there is none or it could not be read.
+  // This target's own requirement as `?target=` answered it, `{ issuer, audience, jwks,
+  // updated_at }`: what the form starts from and is compared with, and the stamp an apply sends
+  // back so that a requirement changed since is refused rather than overwritten (#223).
+  // Undefined while it is being read, and null when there is none or it could not be read.
   let stored = $state(undefined)
   // Why the stored requirement could not be read, when it could not.
   let unread = $state(undefined)
@@ -70,7 +71,12 @@
     get(`${base(workspace, 'jwt')}?target=${encodeURIComponent(target)}`).then(
       (document) => {
         if (mine !== latest) return
-        stored = { issuer: document.issuer ?? '', audience: document.audience ?? '', jwks: document.jwks }
+        stored = {
+          issuer: document.issuer ?? '',
+          audience: document.audience ?? '',
+          jwks: document.jwks,
+          updated_at: document.updated_at,
+        }
         issuer = stored.issuer
         audience = stored.audience
         jwks = stored.jwks
@@ -108,6 +114,9 @@
           issuer: issuer.trim(),
           audience: audience.trim() || null,
           jwks,
+          // None when nothing is set here, or when what is set could not be read: the server then
+          // replaces only a requirement no read could show, such as one SQL by hand broke.
+          seen_updated_at: stored?.updated_at,
         })
       } else {
         await write('DELETE', `${base(workspace, 'jwt')}?target=${encodeURIComponent(target)}`)
@@ -116,11 +125,23 @@
       // `Refused` names the field it is about; `Forbidden` and a connection that failed do not,
       // and their sentence goes in the box below.
       saving = false
-      error = { sentence: failure.message, field: failure.field }
+      error = {
+        sentence: failure.message,
+        field: failure.field,
+        // Someone changed or removed the requirement since it was read: the list is what to
+        // look at, and Reload fetches it.
+        stale: failure.status === 409 && failure.message.includes('Reload'),
+      }
       await tick()
       ;(placed ? inputs[placed] : button)?.focus()
       return
     }
+    await settle()
+  }
+
+  // Fetches the list again, which starts the form again from it, after an apply or for Reload.
+  async function settle() {
+    saving = true
     await onchanged()
     saving = false
     // The list now says what applies, and the form has started again from it. The checkbox is
@@ -219,6 +240,9 @@
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
           {error.sentence}
         </p>
+      {/if}
+      {#if error?.stale}
+        <Button variant="outline" size="sm" class="justify-self-start" onclick={settle}>Reload</Button>
       {/if}
       <Button bind:ref={button} type="submit" variant="outline" size="sm" class="justify-self-start" disabled={saving || reading || !changed}>
         {saving ? 'Applying…' : 'Apply'}

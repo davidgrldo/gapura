@@ -109,6 +109,11 @@ pub struct KeyAuthInput {
     pub target: String,
     #[serde(default)]
     pub header: Option<String>,
+    /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
+    /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
+    /// does one sent when there is no requirement to replace.
+    #[serde(default)]
+    pub seen_updated_at: Option<String>,
 }
 
 /// Names a key cannot be read from: the connection's own, which a proxy owns, and the one the
@@ -161,8 +166,9 @@ pub struct JwtInput {
     pub audience: Option<String>,
     #[serde(default)]
     pub jwks: Option<String>,
-    /// The policy row's updated_at as this caller last read it; a mismatch answers 409
-    /// (#197), so a second editor's rotation cannot be silently undone by a stale sheet.
+    /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
+    /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
+    /// does one sent when there is no requirement to replace.
     #[serde(default)]
     pub seen_updated_at: Option<String>,
 }
@@ -269,6 +275,8 @@ pub struct JwtDocument {
     pub issuer: Option<String>,
     pub audience: Option<String>,
     pub jwks: String,
+    /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
+    pub updated_at: String,
 }
 
 /// The most requests a limit may allow per window.
@@ -308,7 +316,9 @@ pub struct RateLimitInput {
     pub limit: Option<serde_json::Value>,
     #[serde(default)]
     pub per: Option<serde_json::Value>,
-    /// The policy row's updated_at as this caller last read it; a mismatch answers 409 (#197).
+    /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
+    /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
+    /// does one sent when there is no requirement to replace.
     #[serde(default)]
     pub seen_updated_at: Option<String>,
 }
@@ -393,6 +403,8 @@ pub struct RateLimitView {
     pub target: String,
     pub limit: u32,
     pub per: Per,
+    /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
+    pub updated_at: String,
 }
 
 /// A key as a list shows it: never the key, never its hash.
@@ -433,6 +445,8 @@ impl std::fmt::Debug for IssuedKey {
 pub struct PolicyView {
     pub target: String,
     pub header: String,
+    /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
+    pub updated_at: String,
 }
 
 #[cfg(test)]

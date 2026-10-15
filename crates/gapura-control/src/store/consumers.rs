@@ -54,7 +54,7 @@ async fn target_row(
 }
 
 /// The `name` policy row on a target `target_row` resolved, read `FOR UPDATE`: its id, its
-/// configuration and whether it is enabled.
+/// configuration, whether it is enabled, and its `updated_at` as the API shows it.
 async fn plugin_row(
     tx: &Transaction<'_>,
     workspace: Uuid,
@@ -64,10 +64,13 @@ async fn plugin_row(
     let row = match resolved {
         None => {
             tx.query_opt(
-                "select id, config, enabled, updated_at::text from plugins
-                  where workspace_id = $1 and name = $2 and service_id is null
-                    and route_id is null and consumer_id is null
-                    for update",
+                &format!(
+                    "select id, config, enabled, {} as updated_at from plugins
+                      where workspace_id = $1 and name = $2 and service_id is null
+                        and route_id is null and consumer_id is null
+                        for update",
+                    updated_at("updated_at")
+                ),
                 &[&workspace, &name],
             )
             .await?
@@ -75,8 +78,9 @@ async fn plugin_row(
         Some((column, id)) => {
             tx.query_opt(
                 &format!(
-                    "select id, config, enabled, updated_at::text from plugins
-                      where {column} = $1 and name = $2 for update"
+                    "select id, config, enabled, {} as updated_at from plugins
+                      where {column} = $1 and name = $2 for update",
+                    updated_at("updated_at")
                 ),
                 &[&id, &name],
             )
@@ -91,6 +95,24 @@ async fn plugin_row(
             r.get("updated_at"),
         )
     }))
+}
+
+/// Whether a policy write was made from a fresh read (#197, #223): `shown` is the `updated_at` a
+/// read shows of the requirement set on the target, and `seen` the one the caller sent. A `PUT`
+/// creates or replaces, so a caller that sends no stamp says it saw no requirement there:
+/// replacing one it never saw is as stale as replacing one it saw older, and so is sending a
+/// stamp for one that has gone since.
+///
+/// `shown` is `None` where no read shows a stamp: no row, a disabled one, which reads as none, or
+/// one whose configuration does not fit, which fails every read. Such a row can only be replaced
+/// with no stamp, so a write can still put right what SQL by hand broke, and nothing a reader saw
+/// is lost by it.
+fn fresh(shown: Option<&str>, seen: Option<&str>) -> Result<(), WriteError> {
+    if shown == seen {
+        Ok(())
+    } else {
+        Err(WriteError::Stale)
+    }
 }
 
 /// The `key_auth` row on a target `target_row` resolved, read `FOR UPDATE`: its id, its header
@@ -446,16 +468,20 @@ impl Store {
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "select p.config->>'header' as header, s.name as service, r.name as route
-                   from plugins p
-                   left join services s on s.id = p.service_id
-                   left join routes r on r.id = p.route_id
-                  where p.workspace_id = $1 and p.name = 'key_auth' and p.consumer_id is null
-                    and p.enabled
-                  order by case when p.service_id is not null then 1
-                                when p.route_id is not null then 2
-                                else 0 end,
-                           coalesce(s.name, r.name)",
+                &format!(
+                    "select p.config->>'header' as header, s.name as service, r.name as route,
+                            {} as updated_at
+                       from plugins p
+                       left join services s on s.id = p.service_id
+                       left join routes r on r.id = p.route_id
+                      where p.workspace_id = $1 and p.name = 'key_auth' and p.consumer_id is null
+                        and p.enabled
+                      order by case when p.service_id is not null then 1
+                                    when p.route_id is not null then 2
+                                    else 0 end,
+                               coalesce(s.name, r.name)",
+                    updated_at("p.updated_at")
+                ),
                 &[&workspace],
             )
             .await?;
@@ -471,13 +497,15 @@ impl Store {
                 Ok(PolicyView {
                     target: target.as_text(),
                     header,
+                    updated_at: row.get("updated_at"),
                 })
             })
             .collect()
     }
 
-    /// Requires a key on `target`, read from `header`, which needs the editor role. Switching
-    /// a requirement on again with the header it already reads writes nothing.
+    /// Requires a key on `target`, read from `header`, which needs the editor role, when the
+    /// caller saw no requirement set there: one set meanwhile is not replaced, but answered as
+    /// `replace_key_auth` answers a stale stamp.
     pub async fn put_key_auth(
         &self,
         caller: Uuid,
@@ -485,7 +513,24 @@ impl Store {
         target: &Target,
         header: &str,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_put_key_auth(caller, workspace, target, header)).await
+        retrying(move || self.try_put_key_auth(caller, workspace, target, header, None)).await
+    }
+
+    /// Requires a key on `target`, read from `header`, in place of the requirement set there,
+    /// when `seen_updated_at` is its stamp as last read. Switching a requirement on again with
+    /// the header it already reads writes nothing.
+    pub async fn replace_key_auth(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        target: &Target,
+        header: &str,
+        seen_updated_at: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || {
+            self.try_put_key_auth(caller, workspace, target, header, Some(seen_updated_at))
+        })
+        .await
     }
 
     async fn try_put_key_auth(
@@ -494,16 +539,17 @@ impl Store {
         workspace: Uuid,
         target: &Target,
         header: &str,
+        seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
-        let after = PolicyView {
-            target: target.as_text(),
-            header: header.to_string(),
-        };
-        let (action, id, before) = match policy_row(&tx, workspace, resolved).await? {
+        let after = serde_json::json!({ "target": target.as_text(), "header": header });
+        let row = policy_row(&tx, workspace, resolved).await?;
+        let shown = row.as_ref().filter(|r| r.2 && r.1.is_some());
+        fresh(shown.map(|r| r.3.as_str()), seen_updated_at)?;
+        let (action, id, before) = match row {
             // Nothing to write, so nothing to audit and nothing for the data planes to reload.
             Some((_, Some(current), true, _)) if current == header => return Ok(()),
             // Another header, or a disabled row: that is no requirement, so taking it over is
@@ -548,7 +594,7 @@ impl Store {
                 object_id: Some(id),
                 workspace: Some(workspace),
                 before,
-                after: Some(json(&after)),
+                after: Some(after),
             },
         )
         .await?;
@@ -660,9 +706,10 @@ impl Store {
         let row = client
             .query_opt(
                 &format!(
-                    "select p.config from plugins p {join}
+                    "select p.config, {} as updated_at from plugins p {join}
                       where p.workspace_id = $1 and p.name = 'jwt' and p.consumer_id is null
-                        and p.enabled and {filter}"
+                        and p.enabled and {filter}",
+                    updated_at("p.updated_at")
                 ),
                 &[&workspace, &name],
             )
@@ -674,13 +721,15 @@ impl Store {
                 issuer: policy.issuer,
                 audience: policy.audience,
                 jwks: policy.jwks,
+                updated_at: row.get("updated_at"),
             })
         })
         .transpose()
     }
 
-    /// Requires a JWT on `target` that `policy` accepts, which needs the editor role. The same
-    /// requirement again writes nothing.
+    /// Requires a JWT on `target` that `policy` accepts, which needs the editor role, when
+    /// `seen_updated_at` is the stamp of the requirement set there as last read, or `None` when
+    /// none was. The same requirement again writes nothing.
     pub async fn put_jwt(
         &self,
         caller: Uuid,
@@ -716,14 +765,14 @@ impl Store {
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
         let config = json(policy);
-        let (action, id, before) = match plugin_row(&tx, workspace, resolved, "jwt").await? {
-            Some((id, current, enabled, stored_at)) => {
-                // #197: a second editor's rotation is undone silently by a stale sheet.
-                if let Some(seen) = &seen_updated_at {
-                    if *seen != stored_at {
-                        return Err(WriteError::Stale);
-                    }
-                }
+        let row = plugin_row(&tx, workspace, resolved, "jwt").await?;
+        // #197: otherwise a second editor's rotation is undone silently by a stale sheet.
+        let shown = row
+            .as_ref()
+            .filter(|r| r.2 && stored_jwt(r.1.clone()).is_ok());
+        fresh(shown.map(|r| r.3.as_str()), seen_updated_at)?;
+        let (action, id, before) = match row {
+            Some((id, current, enabled, _)) => {
                 let current = stored_jwt(current).ok();
                 // Nothing to write, so nothing to audit and nothing for the data planes to reload.
                 if enabled && current.as_ref() == Some(policy) {
@@ -832,16 +881,19 @@ impl Store {
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "select p.config, s.name as service, r.name as route
-                   from plugins p
-                   left join services s on s.id = p.service_id
-                   left join routes r on r.id = p.route_id
-                  where p.workspace_id = $1 and p.name = $2 and p.consumer_id is null
-                    and p.enabled
-                  order by case when p.service_id is not null then 1
-                                when p.route_id is not null then 2
-                                else 0 end,
-                           coalesce(s.name, r.name)",
+                &format!(
+                    "select p.config, s.name as service, r.name as route, {} as updated_at
+                       from plugins p
+                       left join services s on s.id = p.service_id
+                       left join routes r on r.id = p.route_id
+                      where p.workspace_id = $1 and p.name = $2 and p.consumer_id is null
+                        and p.enabled
+                      order by case when p.service_id is not null then 1
+                                    when p.route_id is not null then 2
+                                    else 0 end,
+                               coalesce(s.name, r.name)",
+                    updated_at("p.updated_at")
+                ),
                 &[&workspace, &RATE_LIMIT],
             )
             .await?;
@@ -853,21 +905,25 @@ impl Store {
                     target: target.as_text(),
                     limit: limit.limit,
                     per: limit.per,
+                    updated_at: row.get("updated_at"),
                 })
             })
             .collect()
     }
 
-    /// Limits requests on `target` to `limit`, which needs the editor role. The same limit again
-    /// writes nothing.
+    /// Limits requests on `target` to `limit`, which needs the editor role, when
+    /// `seen_updated_at` is the stamp of the limit set there as last read, or `None` when none
+    /// was. The same limit again writes nothing.
     pub async fn put_rate_limit(
         &self,
         caller: Uuid,
         workspace: Uuid,
         target: &Target,
         limit: Limit,
+        seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_put_rate_limit(caller, workspace, target, limit)).await
+        retrying(move || self.try_put_rate_limit(caller, workspace, target, limit, seen_updated_at))
+            .await
     }
 
     async fn try_put_rate_limit(
@@ -876,13 +932,19 @@ impl Store {
         workspace: Uuid,
         target: &Target,
         limit: Limit,
+        seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
         let config = limit.config();
-        let (action, id, before) = match plugin_row(&tx, workspace, resolved, RATE_LIMIT).await? {
+        let row = plugin_row(&tx, workspace, resolved, RATE_LIMIT).await?;
+        let shown = row
+            .as_ref()
+            .filter(|r| r.2 && Limit::from_config(r.1.clone()).is_some());
+        fresh(shown.map(|r| r.3.as_str()), seen_updated_at)?;
+        let (action, id, before) = match row {
             Some((id, current, enabled, _)) => {
                 let current = Limit::from_config(current);
                 // Nothing to write, so nothing to audit and nothing for the data planes to reload.
