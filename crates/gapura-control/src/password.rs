@@ -65,8 +65,10 @@ const _: () = assert!(MAX_CONCURRENT_CHECKS * 19 <= 128 / 2);
 /// again", which a person can act on and a queue of minutes is not.
 const MAX_WAITING_CHECKS: usize = 16;
 
-/// Every password check, and every hash, goes through these.
-static CHECKING: LazyLock<Checks> =
+/// Every password check, and every hash, goes through these. Visible to the crate so a caller
+/// can hand its `*_in` seam this queue in production and a private one in a test: filling this
+/// one in a test would answer `Busy` to every other test checking a password at the same time.
+pub(crate) static CHECKING: LazyLock<Checks> =
     LazyLock::new(|| Checks::new(MAX_CONCURRENT_CHECKS, MAX_WAITING_CHECKS));
 
 /// A check refused because `MAX_WAITING_CHECKS` were already waiting. It says nothing about the
@@ -76,14 +78,14 @@ static CHECKING: LazyLock<Checks> =
 pub struct Busy;
 
 /// The places to run a check in, and a bound on how many may wait for one.
-struct Checks {
+pub(crate) struct Checks {
     permits: tokio::sync::Semaphore,
     waiting: std::sync::atomic::AtomicUsize,
     max_waiting: usize,
 }
 
 impl Checks {
-    fn new(concurrent: usize, max_waiting: usize) -> Self {
+    pub(crate) fn new(concurrent: usize, max_waiting: usize) -> Self {
         Self {
             permits: tokio::sync::Semaphore::new(concurrent),
             waiting: std::sync::atomic::AtomicUsize::new(0),
@@ -92,7 +94,7 @@ impl Checks {
     }
 
     /// A place to run one check in: now, after a short wait, or `Busy` when the queue is full.
-    async fn enter(&self) -> Result<tokio::sync::SemaphorePermit<'_>, Busy> {
+    pub(crate) async fn enter(&self) -> Result<tokio::sync::SemaphorePermit<'_>, Busy> {
         use std::sync::atomic::Ordering;
         if let Ok(permit) = self.permits.try_acquire() {
             return Ok(permit);
@@ -120,10 +122,19 @@ impl Checks {
 /// exists, which is what makes an unknown name and a wrong password cost alike; choosing the
 /// dummy inside the blocking task keeps even its first use off the async workers.
 pub async fn verify_or_dummy(password: String, stored: Option<String>) -> Result<bool, Busy> {
+    verify_or_dummy_in(&CHECKING, password, stored).await
+}
+
+/// `verify_or_dummy`, behind `checks` rather than the shared queue.
+pub(crate) async fn verify_or_dummy_in(
+    checks: &'static Checks,
+    password: String,
+    stored: Option<String>,
+) -> Result<bool, Busy> {
     if password.len() > MAX_PASSWORD_BYTES {
         return Ok(false);
     }
-    let permit = CHECKING.enter().await?;
+    let permit = checks.enter().await?;
     Ok(tokio::task::spawn_blocking(move || {
         // The permit travels with the work. Held by the request instead, it would be returned
         // the moment a client hung up mid-check, while the hashing it was counting carried on.
@@ -171,7 +182,8 @@ pub async fn check_or_busy<T: Send + 'static>(
     check_in(&CHECKING, check).await
 }
 
-async fn check_in<T: Send + 'static>(
+/// `check_or_busy`, behind `checks` rather than the shared queue.
+pub(crate) async fn check_in<T: Send + 'static>(
     checks: &'static Checks,
     check: impl FnOnce() -> T + Send + 'static,
 ) -> Result<Option<T>, Busy> {
