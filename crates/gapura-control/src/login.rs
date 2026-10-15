@@ -226,9 +226,10 @@ pub struct LocalUser {
     pub groups: Vec<String>,
 }
 
-/// The users local mode authenticates against. Verification is bcrypt -- inherently
-/// rate-limited by its own cost -- and a wrong password and an unknown email answer the same
-/// way and at the same cost, so the form cannot be used to enumerate users.
+/// The users local mode authenticates against. Verification is bcrypt, run off the async workers
+/// behind store mode's bounded queue (`password::check_or_busy`), and a wrong password and an
+/// unknown email answer the same way and at the same cost, so the form cannot be used to
+/// enumerate users.
 #[derive(Debug, Clone, Default)]
 pub struct LocalUsers {
     users: Vec<LocalUser>,
@@ -266,22 +267,26 @@ impl LocalUsers {
         self.users.is_empty()
     }
 
-    /// The user's groups when the password matches; None when anything is wrong.
-    pub fn verify(&self, email: &str, password: &str) -> Option<Vec<String>> {
-        let hash = match self.users.iter().find(|u| u.email == email) {
-            Some(u) => u.bcrypt.as_str(),
-            // Verify against a dummy so an unknown email costs the same bcrypt second as a
-            // wrong password, and timing cannot enumerate the user list.
-            None => DUMMY_BCRYPT,
-        };
-        if bcrypt::verify(password, hash).unwrap_or(false) {
-            self.users
-                .iter()
-                .find(|u| u.email == email)
-                .map(|u| u.groups.clone())
-        } else {
-            None
-        }
+    /// The user's groups when the password matches; None when anything is wrong; `Busy` when
+    /// too many password checks are already waiting, decided before any hash is looked at.
+    ///
+    /// The hashing is the expensive part, and anyone can ask for it, so it runs as store mode's
+    /// does: on the blocking pool, a bounded number at a time (#226).
+    pub async fn verify(
+        &self,
+        email: &str,
+        password: String,
+    ) -> Result<Option<Vec<String>>, crate::password::Busy> {
+        let user = self.users.iter().find(|u| u.email == email);
+        // Verify against a dummy so an unknown email costs the same bcrypt second as a wrong
+        // password, and timing cannot enumerate the user list.
+        let hash = user.map_or(DUMMY_BCRYPT, |u| u.bcrypt.as_str()).to_string();
+        let matches = crate::password::check_or_busy(move || {
+            bcrypt::verify(password, &hash).unwrap_or(false)
+        })
+        .await?
+        .unwrap_or(false);
+        Ok(user.filter(|_| matches).map(|u| u.groups.clone()))
     }
 }
 
@@ -806,18 +811,24 @@ pub async fn login_local(
     } else {
         // Only the password's verdict is logged, never the email: the users file is small, but
         // the habit is the same one the OIDC path keeps.
-        match state.local_users.verify(&form.username, &form.password) {
-            Some(groups) => {
+        match state
+            .local_users
+            .verify(&form.username, form.password)
+            .await
+        {
+            Ok(Some(groups)) => {
                 tracing::info!(subject = %form.username, groups = groups.len(), "signed in");
                 session_response(
                     &state,
                     form.username,
-                    groups,
+                    mapped_groups(groups, &state.mapping),
                     pending.return_to.as_deref(),
                     now_millis(),
                 )
             }
-            None => refused_local("That email and password do not match."),
+            Ok(None) => refused_local("That email and password do not match."),
+            // 503, as in store mode: not counted against the name or the address.
+            Err(crate::password::Busy) => busy_page(),
         }
     };
     // Past the checks above, both modes answer a refused password with 401 and a session with
@@ -955,6 +966,52 @@ pub(crate) fn session_cookie(
     )
 }
 
+/// The longest `Set-Cookie` value a session may be sent in. Browsers keep a cookie of up to about
+/// 4096 bytes, name and value together, and silently drop a larger one; the margin covers the
+/// attributes, which some count too. A dropped session is worse than none: the next request is
+/// unauthenticated, the console sends the reader back to the identity provider, which signs them
+/// straight back in, and round it goes (#225).
+pub(crate) const MAX_SESSION_COOKIE: usize = 4000;
+
+/// The groups of `groups` the role mapping names, once each. In Kubernetes mode a session's
+/// groups are read for nothing but `scope::visible`, which looks each one up in that mapping, so
+/// the rest only make the cookie larger: an identity provider can send hundreds (#225).
+pub(crate) fn mapped_groups(groups: Vec<String>, mapping: &crate::scope::Mapping) -> Vec<String> {
+    let mut kept: Vec<String> = groups
+        .into_iter()
+        .filter(|group| mapping.contains_key(group))
+        .collect();
+    kept.sort();
+    kept.dedup();
+    kept
+}
+
+/// Whether a browser will keep `cookie`; logged when it will not, with how many groups it carried.
+fn cookie_fits(cookie: &str, groups: usize) -> bool {
+    let fits = cookie.len() <= MAX_SESSION_COOKIE;
+    if !fits {
+        tracing::warn!(
+            bytes = cookie.len(),
+            groups,
+            "sign-in completed but its session would not fit in a cookie; refusing to issue one"
+        );
+    }
+    fits
+}
+
+/// What sign-in answers when the session it would issue is larger than a browser keeps: a page
+/// saying why, rather than a cookie that is dropped and a sign-in that starts over (#225).
+fn oversized_session_page() -> Response {
+    notice_page(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Sign-in failed",
+        "Your session is too large",
+        "You signed in, but you belong to more of the groups this console grants access to than \
+         fit in a browser cookie, so the console cannot keep you signed in. Ask an administrator \
+         to map fewer groups, or to remove you from some.",
+    )
+}
+
 /// A redirect to where the reader was going, carrying a fresh session for `subject`, issued
 /// at `issued_at` (see `session_cookie`).
 fn session_response(
@@ -964,7 +1021,11 @@ fn session_response(
     return_to: Option<&str>,
     issued_at: u64,
 ) -> Response {
+    let groups_kept = groups.len();
     let cookie = session_cookie(state, subject, groups, issued_at);
+    if !cookie_fits(&cookie, groups_kept) {
+        return oversized_session_page();
+    }
     let destination = return_to
         .filter(|p| safe_return_path(p))
         .unwrap_or(AFTER_LOGIN);
@@ -1221,7 +1282,7 @@ pub async fn callback(
     let (subject, groups, issued_at) = match &state.store {
         None => {
             tracing::info!(subject = %subject, groups = groups.len(), "signed in");
-            (subject, groups, now_millis())
+            (subject, mapped_groups(groups, &state.mapping), now_millis())
         }
         Some(store) => {
             let name = display_name(&as_json, &subject);
@@ -1249,7 +1310,11 @@ pub async fn callback(
         }
     };
 
+    let groups_kept = groups.len();
     let cookie = session_cookie(&state, subject, groups, issued_at);
+    if !cookie_fits(&cookie, groups_kept) {
+        return Ok(oversized_session_page());
+    }
     let destination = pending
         .return_to
         .as_deref()
@@ -1837,7 +1902,14 @@ mod against_a_stub_provider {
     async fn a_person_who_signs_in_comes_back_with_a_session_naming_their_groups() {
         let provider = Arc::new(Provider::default());
         *provider.groups.lock().unwrap() = serde_json::json!(["team-a", "team-b"]);
-        let state = state(&stub(provider.clone()).await);
+        let mut state = state(&stub(provider.clone()).await);
+        state.mapping = Arc::new(
+            [
+                ("team-a".to_string(), vec!["apps".to_string()]),
+                ("team-b".to_string(), vec!["shop".to_string()]),
+            ]
+            .into(),
+        );
 
         let (csrf, nonce, cookie) = begin_a_login(&state).await;
         *provider.nonce.lock().unwrap() = Some(nonce);
@@ -2017,6 +2089,64 @@ mod against_a_stub_provider {
             StatusCode::SEE_OTHER,
             "no groups is an empty console, not a failed login"
         );
+    }
+
+    /// `n` groups as Entra ID names them: GUIDs, 36 characters each.
+    fn guids(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("{i:08x}-0000-4000-8000-{i:012x}"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_session_carries_only_the_groups_the_mapping_names_however_many_arrive() {
+        // #225: two hundred groups would have made a cookie of well over 4 KiB, which the
+        // browser drops, and the sign-in loops through the provider for ever.
+        let provider = Arc::new(Provider::default());
+        let mut sent = guids(200);
+        sent.insert(100, "team-a".to_string());
+        *provider.groups.lock().unwrap() = serde_json::json!(sent);
+        let state = state(&stub(provider.clone()).await);
+
+        let response = sign_in_through(&state, &provider).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let set_cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(
+            set_cookie.len() <= MAX_SESSION_COOKIE,
+            "{}",
+            set_cookie.len()
+        );
+        assert_eq!(session_of(&response).groups, ["team-a"]);
+    }
+
+    #[tokio::test]
+    async fn a_session_too_large_for_a_cookie_is_refused_with_a_page_saying_why() {
+        let provider = Arc::new(Provider::default());
+        let sent = guids(200);
+        *provider.groups.lock().unwrap() = serde_json::json!(sent);
+        let mut state = state(&stub(provider.clone()).await);
+        // Every one of them mapped, so none can be left out.
+        state.mapping = Arc::new(
+            sent.iter()
+                .map(|g| (g.clone(), vec!["apps".to_string()]))
+                .collect(),
+        );
+
+        let response = sign_in_through(&state, &provider).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .any(|c| c.to_str().unwrap().starts_with("__Host-gapura_session=")),
+            "no session a browser would drop"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("too large"), "{body}");
     }
 
     #[tokio::test]
@@ -2251,27 +2381,48 @@ mod local_users_tests {
         bcrypt::hash(pw, 4).unwrap()
     }
 
-    #[test]
-    fn a_correct_password_yields_the_users_groups() {
+    #[tokio::test]
+    async fn a_correct_password_yields_the_users_groups() {
         let users = file(&format!(
             "  - email: a@x\n    bcrypt: {}\n    groups: [team-a, team-b]\n",
             hash("s3cret")
         ));
         assert_eq!(
-            users.verify("a@x", "s3cret"),
-            Some(vec!["team-a".into(), "team-b".into()])
+            users.verify("a@x", "s3cret".into()).await,
+            Ok(Some(vec!["team-a".into(), "team-b".into()]))
         );
     }
 
-    #[test]
-    fn a_wrong_password_and_an_unknown_email_agree() {
+    #[tokio::test]
+    async fn a_wrong_password_and_an_unknown_email_agree() {
         let users = file(&format!(
             "  - email: a@x\n    bcrypt: {}\n    groups: [g]\n",
             hash("s3cret")
         ));
-        assert_eq!(users.verify("a@x", "wrong"), None);
-        assert_eq!(users.verify("nobody@x", "s3cret"), None);
-        assert_eq!(users.verify("nobody@x", "wrong"), None);
+        assert_eq!(users.verify("a@x", "wrong".into()).await, Ok(None));
+        assert_eq!(users.verify("nobody@x", "s3cret".into()).await, Ok(None));
+        assert_eq!(users.verify("nobody@x", "wrong".into()).await, Ok(None));
+    }
+
+    #[test]
+    fn a_session_keeps_only_the_groups_the_mapping_names() {
+        let mapping: crate::scope::Mapping = [
+            ("team-a".to_string(), vec!["apps".to_string()]),
+            ("team-b".to_string(), vec!["*".to_string()]),
+        ]
+        .into();
+        let groups = ["unmapped", "team-b", "team-a", "team-b", "other"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            mapped_groups(groups.clone(), &mapping),
+            ["team-a", "team-b"]
+        );
+        // What it leaves out grants nothing, so the scope it reads to is the same.
+        assert_eq!(
+            crate::scope::visible(&mapped_groups(groups.clone(), &mapping), &mapping),
+            crate::scope::visible(&groups, &mapping)
+        );
     }
 }
 
@@ -2565,6 +2716,68 @@ mod local_login_flow_tests {
             post(&state, "/auth/login", body).await.status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Signs `email` in through the form with `password`, as far as the form's answer.
+    async fn sign_in_with(
+        state: &AppState,
+        email: &str,
+        password: &str,
+    ) -> axum::response::Response {
+        let page = get(state, "/auth/login").await;
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let login_state = form_value(&html, "state");
+        post(
+            state,
+            "/auth/login",
+            format!("state={login_state}&email={email}&password={password}"),
+        )
+        .await
+    }
+
+    fn session_groups(response: &axum::response::Response) -> Vec<String> {
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.len() <= MAX_SESSION_COOKIE, "{}", cookie.len());
+        let value = cookie
+            .strip_prefix("__Host-gapura_session=")
+            .and_then(|rest| rest.split(';').next())
+            .expect("a session cookie");
+        crate::session::decode(value, b"0123456789abcdef0123456789abcdef", now_seconds())
+            .expect("a valid session")
+            .groups
+    }
+
+    #[tokio::test]
+    async fn a_local_users_session_keeps_only_mapped_groups_or_is_refused_when_still_too_large() {
+        // #225, through the users file: the same cookie, the same limit.
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let many: Vec<String> = (0..200).map(|i| format!("/org/unit-{i:04}/team")).collect();
+        let mut state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [{}, team-a]\n",
+            many.join(", ")
+        ));
+        let signed_in = sign_in_with(&state, "a%40x", "s3cret").await;
+        assert_eq!(signed_in.status(), StatusCode::SEE_OTHER);
+        assert_eq!(session_groups(&signed_in), ["team-a"]);
+
+        state.mapping = Arc::new(
+            many.iter()
+                .map(|g| (g.clone(), vec!["apps".to_string()]))
+                .collect(),
+        );
+        let refused = sign_in_with(&state, "a%40x", "s3cret").await;
+        assert_eq!(refused.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(refused.headers().get(header::SET_COOKIE).is_none());
+        let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("too large"));
     }
 
     #[tokio::test]

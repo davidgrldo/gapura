@@ -159,6 +159,32 @@ async fn hash_in(
     .and_then(|hashed| hashed))
 }
 
+/// Runs `check`, a password check this module does not make itself, as `verify_or_dummy` runs
+/// one: off the async workers, under the same bound, and `Busy` at once when too many are
+/// already waiting. `None` when the check panicked. Kubernetes mode's users file is bcrypt, and
+/// its sign-in form answers anyone just as store mode's does, so its checks queue behind the same
+/// places rather than hashing on the workers every other request, `/healthz` included, needs
+/// (#226).
+pub async fn check_or_busy<T: Send + 'static>(
+    check: impl FnOnce() -> T + Send + 'static,
+) -> Result<Option<T>, Busy> {
+    check_in(&CHECKING, check).await
+}
+
+async fn check_in<T: Send + 'static>(
+    checks: &'static Checks,
+    check: impl FnOnce() -> T + Send + 'static,
+) -> Result<Option<T>, Busy> {
+    let permit = checks.enter().await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        // Held by the work, as in `verify_or_dummy`.
+        let _permit = permit;
+        check()
+    })
+    .await
+    .ok())
+}
+
 /// Long enough for any name a person or a team uses, and well inside what a unique index on
 /// the column can hold.
 pub const MAX_USERNAME_CHARS: usize = 64;
@@ -248,9 +274,39 @@ mod tests {
         assert!(verify("correct horse battery", &stored));
     }
 
-    #[test]
-    fn the_check_semaphore_has_the_fixed_size() {
-        assert_eq!(CHECKING.permits.available_permits(), MAX_CONCURRENT_CHECKS);
+    #[tokio::test(flavor = "current_thread")]
+    async fn another_check_runs_off_the_workers_and_behind_the_same_queue() {
+        let checks: &'static Checks = Box::leak(Box::new(Checks::new(1, 0)));
+        let running = checks.enter().await.unwrap();
+        assert_eq!(
+            check_in(checks, || true).await,
+            Err(Busy),
+            "no place and no room to wait: refused at once"
+        );
+        drop(running);
+        // On a single-threaded runtime, a check run inline would be on this very thread.
+        let here = std::thread::current().id();
+        let there = check_in(checks, || std::thread::current().id()).await;
+        assert!(matches!(there, Ok(Some(id)) if id != here), "{there:?}");
+        // A check that panics is no answer, and gives its place back.
+        assert_eq!(
+            check_in(checks, || -> bool { panic!("a bad hash") }).await,
+            Ok(None)
+        );
+        assert!(checks.enter().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_check_semaphore_has_the_fixed_size() {
+        // Other tests check passwords through the same queue at the same time, so count the
+        // places by taking them all, not by reading how many happen to be free right now.
+        let all = CHECKING
+            .permits
+            .acquire_many(MAX_CONCURRENT_CHECKS as u32)
+            .await
+            .unwrap();
+        assert!(CHECKING.permits.try_acquire().is_err());
+        drop(all);
     }
 
     use super::*;

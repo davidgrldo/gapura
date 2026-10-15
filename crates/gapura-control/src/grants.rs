@@ -129,9 +129,21 @@ pub fn direct_changes(held: &BTreeMap<Uuid, Role>, wanted: &RoleChanges) -> Vec<
 }
 
 /// A direct grant as an audit entry records it. Always an object, with `role` null on the side
-/// where the account held, or will hold, nothing in that workspace.
-pub fn direct_audit(workspace: &str, role: Option<Role>) -> serde_json::Value {
-    serde_json::json!({ "workspace": workspace, "role": role })
+/// where the account held, or will hold, nothing in that workspace. It names the account whose
+/// grant it is, by name as account entries do and by id, since the entry's `object_id` is not
+/// what the trail shows (#224).
+pub fn direct_audit(
+    account: &str,
+    account_id: Uuid,
+    workspace: &str,
+    role: Option<Role>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "account": account,
+        "account_id": account_id,
+        "workspace": workspace,
+        "role": role,
+    })
 }
 
 /// A group mapping as an audit entry records it, or nothing on the side where it does not
@@ -605,13 +617,18 @@ mod tests {
 
     #[test]
     fn audit_entries_have_the_shapes_the_trail_promises() {
+        let wes = id(7);
         assert_eq!(
-            direct_audit("payments", None),
-            serde_json::json!({"workspace": "payments", "role": null})
+            direct_audit("wes", wes, "payments", None),
+            serde_json::json!({
+                "account": "wes", "account_id": wes, "workspace": "payments", "role": null,
+            })
         );
         assert_eq!(
-            direct_audit("payments", Some(Role::Viewer)),
-            serde_json::json!({"workspace": "payments", "role": "viewer"})
+            direct_audit("wes", wes, "payments", Some(Role::Viewer)),
+            serde_json::json!({
+                "account": "wes", "account_id": wes, "workspace": "payments", "role": "viewer",
+            })
         );
         assert_eq!(
             mapping_audit("/platform", "payments", Some(Role::Editor)),
