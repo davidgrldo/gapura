@@ -519,6 +519,28 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_route_patch_withdraws_only_our_parents() {
+        // #214: translation sends no parents for a route that stopped naming our Gateways but
+        // still carries our entries; the write must drop ours and keep everyone else's.
+        let live = json!({ "parents": [
+            { "parentRef": { "group": GATEWAY_GROUP, "kind": "Gateway", "name": "other", "namespace": "infra" }, "controllerName": "example.com/other", "conditions": [] },
+            { "parentRef": { "group": GATEWAY_GROUP, "kind": "Gateway", "name": "main", "namespace": "infra" }, "controllerName": "gapura.dev/controller", "conditions": [] },
+        ] });
+        let p = StatusPatch::HttpRoute {
+            namespace: "apps".into(),
+            name: "echo".into(),
+            uid: None,
+            parents: vec![],
+        };
+        let b = body(&p, &live, "gapura.dev/controller", "now");
+        assert_eq!(
+            b["status"]["parents"],
+            json!([{ "parentRef": { "group": GATEWAY_GROUP, "kind": "Gateway", "name": "other", "namespace": "infra" }, "controllerName": "example.com/other", "conditions": [] }]),
+            "a merge patch replaces the list, so the other controller's entry must be in it"
+        );
+    }
+
+    #[test]
     fn hash_changes_with_content() {
         let a = StatusPatch::GatewayClass {
             name: "g".into(),

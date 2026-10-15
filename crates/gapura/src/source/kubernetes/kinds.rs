@@ -147,10 +147,31 @@ pub fn project(kind: &Kind, obj: &DynamicObject) -> Option<Value> {
             annotations.remove(LAST_APPLIED_ANNOTATION);
         }
     }
-    // Only the publish Service's status is read (LoadBalancer addresses); the rest is dead weight.
-    if kind.name != "Service" {
-        if let Some(root) = doc.as_object_mut() {
-            root.remove("status");
+    // Only the publish Service's status is read (LoadBalancer addresses), plus which controllers
+    // hold an HTTPRoute's `status.parents` entries: translation withdraws ours from a route that
+    // stopped naming our Gateways (#214), after a restart too. The rest is dead weight.
+    match kind.name {
+        "Service" => {}
+        "HTTPRoute" => {
+            let mut controllers: Vec<&str> = doc
+                .pointer("/status/parents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.get("controllerName").and_then(Value::as_str))
+                .collect();
+            controllers.sort_unstable();
+            controllers.dedup();
+            let parents: Vec<Value> = controllers
+                .iter()
+                .map(|c| json!({ "controllerName": c }))
+                .collect();
+            doc["status"] = json!({ "parents": parents });
+        }
+        _ => {
+            if let Some(root) = doc.as_object_mut() {
+                root.remove("status");
+            }
         }
     }
     match kind.name {
@@ -226,6 +247,32 @@ mod tests {
             project(kind_named("Service"), &svc).unwrap()["status"]["loadBalancer"]["ingress"][0]
                 ["ip"],
             "203.0.113.7"
+        );
+    }
+
+    #[test]
+    fn route_status_keeps_only_the_controllers_holding_parents() {
+        let route = obj(
+            json!({ "metadata": { "name": "echo", "namespace": "apps" }, "spec": {},
+            "status": { "parents": [
+                { "controllerName": "gapura.dev/controller", "parentRef": { "name": "a" },
+                  "conditions": [{ "type": "Accepted", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z" }] },
+                { "controllerName": "example.com/other", "parentRef": { "name": "b" } },
+                { "controllerName": "gapura.dev/controller", "parentRef": { "name": "c" } },
+            ] } }),
+        );
+        assert_eq!(
+            project(kind_named("HTTPRoute"), &route).unwrap()["status"],
+            json!({ "parents": [
+                { "controllerName": "example.com/other" },
+                { "controllerName": "gapura.dev/controller" },
+            ] }),
+            "conditions and times are dropped, so a condition change does not change the snapshot"
+        );
+        let bare = obj(json!({ "metadata": { "name": "echo", "namespace": "apps" }, "spec": {} }));
+        assert_eq!(
+            project(kind_named("HTTPRoute"), &bare).unwrap()["status"],
+            json!({ "parents": [] })
         );
     }
 

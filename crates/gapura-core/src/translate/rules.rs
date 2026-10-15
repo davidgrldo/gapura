@@ -96,6 +96,18 @@ pub(crate) fn compile(
         let filters = compile_filters(&r.filters, prefix_only, mirror_cluster)?;
         let mut backends = Vec::new();
         for b in &r.backend_refs {
+            // Per-backend filters are not implemented. Forwarding as though they were absent
+            // would skip a header removal or a redirect the operator asked for on this backend,
+            // so the whole route is refused, as an unsupported rule filter is (#219).
+            if !b.filters.is_empty() {
+                let types: Vec<&str> = b.filters.iter().map(|f| f.type_.as_str()).collect();
+                return Err(Unsupported(format!(
+                    "backendRefs[].filters are not supported (backend {} has {}); move the \
+                     filters to the rule's filters",
+                    b.name,
+                    types.join(", ")
+                )));
+            }
             // Negative weights are rejected by the CRD schema; clamping is defense in depth, not a real path.
             let weight = b.weight.unwrap_or(1).max(0) as u32;
             match backends::resolve(b, rref, snap, clusters) {
@@ -771,6 +783,48 @@ spec: { ports: [{ name: http, port: 80 }] }
         assert!(
             matches!(compile_first(yaml).0, Err(Unsupported(m)) if m.contains("weight")),
             "a weighted mirror is meaningless: all traffic is mirrored"
+        );
+    }
+
+    #[test]
+    fn backend_ref_filters_reject_the_route() {
+        // #219: a per-backend RequestHeaderModifier used to be dropped by deserialization, and
+        // the route reported Accepted=True while Authorization went to the backend anyway.
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps }
+spec:
+  rules:
+  - backendRefs:
+    - name: canary
+      port: 80
+      filters:
+      - type: RequestHeaderModifier
+        requestHeaderModifier: { remove: [Authorization] }
+      - type: ExtensionRef
+        extensionRef: { group: example.com, kind: Thing, name: x }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: canary, namespace: apps }
+spec: { ports: [{ name: http, port: 80 }] }
+"#;
+        let (result, _) = compile_first(yaml);
+        assert!(
+            matches!(&result, Err(Unsupported(m))
+                if m.contains("backendRefs[].filters")
+                    && m.contains("canary")
+                    && m.contains("RequestHeaderModifier, ExtensionRef")),
+            "{:?}",
+            result.err()
+        );
+        let start = yaml.find("      filters:").unwrap();
+        let end = yaml.find("---").unwrap();
+        let empty = format!("{}      filters: []\n{}", &yaml[..start], &yaml[end..]);
+        assert!(
+            compile_first(&empty).0.is_ok(),
+            "an empty filters list is the same as none: {empty}"
         );
     }
 

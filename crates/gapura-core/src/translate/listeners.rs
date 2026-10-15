@@ -13,6 +13,10 @@ use crate::translate::grants;
 
 pub(crate) const GATEWAY_GROUP: &str = "gateway.networking.k8s.io";
 
+/// Gateway condition reasons for `spec.addresses`.
+pub(crate) const UNSUPPORTED_ADDRESS: &str = "UnsupportedAddress";
+pub(crate) const ADDRESS_NOT_ASSIGNED: &str = "AddressNotAssigned";
+
 /// `(reason, message)` for a False/True condition.
 pub(crate) type Rejection = (&'static str, String);
 
@@ -23,6 +27,9 @@ pub(crate) struct GatewayBuild {
     pub listeners: Vec<ListenerBuild>,
     /// Set when the Gateway itself is refused, whatever its listeners say.
     pub rejected: Option<Rejection>,
+    /// `spec.addresses` values (all of a type we understand). Gapura cannot assign an address,
+    /// so any value that is not already published makes the Gateway `Programmed=False`.
+    pub requested_addresses: Vec<String>,
 }
 
 pub(crate) struct ListenerBuild {
@@ -189,6 +196,22 @@ pub(crate) fn build(
                         r.name
                     ),
                 )
+            })
+            .or_else(|| {
+                // `IPAddress` is the CRD default; any other type is implementation-specific.
+                gw.spec
+                    .addresses
+                    .iter()
+                    .map(|a| a.type_.as_deref().unwrap_or("IPAddress"))
+                    .find(|t| !matches!(*t, "IPAddress" | "Hostname"))
+                    .map(|t| {
+                        (
+                            UNSUPPORTED_ADDRESS,
+                            format!(
+                                "spec.addresses type {t} is not supported, use IPAddress or Hostname"
+                            ),
+                        )
+                    })
             });
         out.push(GatewayBuild {
             r#ref: r.clone(),
@@ -196,6 +219,7 @@ pub(crate) fn build(
             generation: gw.metadata.generation,
             listeners,
             rejected,
+            requested_addresses: gw.spec.addresses.iter().map(|a| a.value.clone()).collect(),
         });
     }
     out
