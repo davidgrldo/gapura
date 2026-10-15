@@ -277,11 +277,22 @@ impl LocalUsers {
         email: &str,
         password: String,
     ) -> Result<Option<Vec<String>>, crate::password::Busy> {
+        self.verify_in(&crate::password::CHECKING, email, password)
+            .await
+    }
+
+    /// `verify`, behind `checks` rather than the shared queue.
+    pub(crate) async fn verify_in(
+        &self,
+        checks: &'static crate::password::Checks,
+        email: &str,
+        password: String,
+    ) -> Result<Option<Vec<String>>, crate::password::Busy> {
         let user = self.users.iter().find(|u| u.email == email);
         // Verify against a dummy so an unknown email costs the same bcrypt second as a wrong
         // password, and timing cannot enumerate the user list.
         let hash = user.map_or(DUMMY_BCRYPT, |u| u.bcrypt.as_str()).to_string();
-        let matches = crate::password::check_or_busy(move || {
+        let matches = crate::password::check_in(checks, move || {
             bcrypt::verify(password, &hash).unwrap_or(false)
         })
         .await?
@@ -793,6 +804,17 @@ pub async fn login_local(
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     axum::Form(form): axum::Form<LocalLogin>,
 ) -> Response {
+    login_local_in(state, headers, peer, form, &crate::password::CHECKING).await
+}
+
+/// `login_local`, with its password checks behind `checks` rather than the shared queue.
+async fn login_local_in(
+    state: AppState,
+    headers: header::HeaderMap,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    form: LocalLogin,
+    checks: &'static crate::password::Checks,
+) -> Response {
     // A form this console never issued, or issued too long ago, is refused before any password
     // work happens.
     let Ok(pending) = Pending::resume(&state.session_key, &form.state) else {
@@ -807,13 +829,13 @@ pub async fn login_local(
         Err(wait) => return throttled(wait),
     };
     let response = if let Some(store) = state.store.clone() {
-        store_login(&state, &store, form, pending.return_to).await
+        store_login(&state, &store, form, pending.return_to, checks).await
     } else {
         // Only the password's verdict is logged, never the email: the users file is small, but
         // the habit is the same one the OIDC path keeps.
         match state
             .local_users
-            .verify(&form.username, form.password)
+            .verify_in(checks, &form.username, form.password)
             .await
         {
             Ok(Some(groups)) => {
@@ -885,6 +907,7 @@ async fn store_login(
     store: &Store,
     form: LocalLogin,
     return_to: Option<String>,
+    checks: &'static crate::password::Checks,
 ) -> Response {
     // A name no account can have -- Postgres refuses a NUL in text, and the rules cap the
     // length -- is an unknown name: verified against the dummy like any other, so it costs and
@@ -904,7 +927,8 @@ async fn store_login(
     };
     // Off the async workers, a bounded number at a time, and against the dummy when there is
     // no account: see `verify_or_dummy`.
-    let Ok(matches) = crate::password::verify_or_dummy(
+    let Ok(matches) = crate::password::verify_or_dummy_in(
+        checks,
         form.password,
         account.as_ref().map(|a| a.password_hash.clone()),
     )
@@ -1768,9 +1792,14 @@ mod against_a_stub_provider {
     }
 
     /// A store with nothing in it, when there is one to test against: the variable and the rule
-    /// tests/identity.rs uses. Cargo runs one test binary at a time and no other test in this
-    /// one touches a database, so resetting the schema here is safe.
-    async fn empty_store() -> Option<Arc<crate::store::Store>> {
+    /// tests/identity.rs uses. Cargo runs one test binary at a time, and the tests in this one
+    /// that touch a database hold the guard that comes with it until they end, so resetting the
+    /// schema here never pulls it from under another.
+    async fn empty_store() -> Option<(
+        Arc<crate::store::Store>,
+        tokio::sync::MutexGuard<'static, ()>,
+    )> {
+        static DATABASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let Ok(url) = std::env::var("GAPURA_TEST_DATABASE_URL") else {
             assert!(
                 std::env::var_os("CI").is_none(),
@@ -1778,6 +1807,7 @@ mod against_a_stub_provider {
             );
             return None;
         };
+        let guard = DATABASE.lock().await;
         let store = Arc::new(crate::store::Store::connect(&url).await.unwrap());
         store
             .client()
@@ -1790,7 +1820,7 @@ mod against_a_stub_provider {
             .await
             .unwrap();
         store.migrate().await.unwrap();
-        Some(store)
+        Some((store, guard))
     }
 
     /// One OIDC sign-in through the stub, as far as the callback's answer. `sso=1` because in
@@ -1812,7 +1842,7 @@ mod against_a_stub_provider {
 
     #[tokio::test]
     async fn in_store_mode_a_sign_in_names_the_row_and_a_disabled_account_gets_no_session() {
-        let Some(store) = empty_store().await else {
+        let Some((store, _database)) = empty_store().await else {
             return;
         };
         let provider = Arc::new(Provider::default());
@@ -1852,6 +1882,38 @@ mod against_a_stub_provider {
         let refused = sign_in_through(&state, &provider).await;
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
         assert!(refused.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn in_store_mode_a_busy_queue_answers_503_and_counts_nothing_against_the_name() {
+        use super::local_login_flow_tests::{assert_busy, sign_in_behind};
+        let Some((store, _database)) = empty_store().await else {
+            return;
+        };
+        let password = "correct horse battery";
+        store
+            .bootstrap_superuser("root", &crate::password::hash(password).unwrap())
+            .await
+            .unwrap();
+        let mut state = state("http://127.0.0.1:1");
+        state.store = Some(store);
+        let checks: &'static crate::password::Checks =
+            Box::leak(Box::new(crate::password::Checks::new(1, 0)));
+        let running = checks.enter().await.unwrap();
+        // An account and no account read alike, and more wrong passwords than lock the pair,
+        // had they been counted.
+        assert_busy(sign_in_behind(&state, "nobody", password, checks).await).await;
+        for _ in 0..6 {
+            assert_busy(sign_in_behind(&state, "root", "wrong", checks).await).await;
+        }
+        drop(running);
+        assert_eq!(
+            sign_in_behind(&state, "root", password, checks)
+                .await
+                .status(),
+            StatusCode::SEE_OTHER,
+            "a busy answer was counted as a failure"
+        );
     }
 
     #[tokio::test]
@@ -2404,6 +2466,45 @@ mod local_users_tests {
         assert_eq!(users.verify("nobody@x", "wrong".into()).await, Ok(None));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_local_check_runs_off_the_workers_and_behind_the_queue() {
+        use crate::password::{Busy, Checks};
+        // #226: these checks were bcrypt on the async workers, unbounded. A private queue, so the
+        // shared one the other tests use is never held here.
+        let users = file(&format!(
+            "  - email: a@x\n    bcrypt: {}\n    groups: [g]\n",
+            bcrypt::hash("s3cret", 6).unwrap()
+        ));
+        let checks: &'static Checks = Box::leak(Box::new(Checks::new(1, 0)));
+        let running = checks.enter().await.unwrap();
+        // Refused at once, and before any hash is looked at: an unknown email reads the same.
+        assert_eq!(
+            users.verify_in(checks, "a@x", "s3cret".into()).await,
+            Err(Busy)
+        );
+        assert_eq!(
+            users.verify_in(checks, "nobody@x", "s3cret".into()).await,
+            Err(Busy)
+        );
+        drop(running);
+
+        // With the place free, the check takes it and is not done by the first poll: bcrypt run
+        // inline would have finished on this, the runtime's only thread, before returning.
+        let mut verifying = Box::pin(users.verify_in(checks, "a@x", "s3cret".into()));
+        let first = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(verifying.as_mut(), cx).is_pending())
+        })
+        .await;
+        assert!(first, "the check finished on the async worker");
+        assert_eq!(
+            checks.enter().await.err(),
+            Some(Busy),
+            "the running check holds the queue's place"
+        );
+        assert_eq!(verifying.await, Ok(Some(vec!["g".into()])));
+        assert!(checks.enter().await.is_ok(), "and gives it back");
+    }
+
     #[test]
     fn a_session_keeps_only_the_groups_the_mapping_names() {
         let mapping: crate::scope::Mapping = [
@@ -2643,6 +2744,60 @@ mod local_login_flow_tests {
         )
         .await;
         assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// The answer `login_local` gives, with its checks behind `checks`. Called directly rather
+    /// than through the router so the queue can be a private one: filling the shared queue
+    /// would answer `Busy` to every other test checking a password at the same time.
+    pub(super) async fn sign_in_behind(
+        state: &AppState,
+        username: &str,
+        password: &str,
+        checks: &'static crate::password::Checks,
+    ) -> axum::response::Response {
+        let form = LocalLogin {
+            state: Pending::begin(&state.session_key, None).state,
+            username: username.into(),
+            password: password.into(),
+        };
+        login_local_in(state.clone(), header::HeaderMap::new(), None, form, checks).await
+    }
+
+    /// What `busy_page` says, and that it is neither a refusal nor a session.
+    pub(super) async fn assert_busy(response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Sign-in is busy right now"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_busy_queue_answers_503_and_counts_nothing_against_the_name() {
+        // #226: Kubernetes mode's checks queue behind the same bound as store mode's, and a full
+        // queue is the console's state, not this client's, so it costs the client nothing.
+        let hash = bcrypt::hash("s3cret", 4).unwrap();
+        let state = local_state(&format!(
+            "users:\n  - email: a@x\n    bcrypt: {hash}\n    groups: [team-a]\n"
+        ));
+        let checks: &'static crate::password::Checks =
+            Box::leak(Box::new(crate::password::Checks::new(1, 0)));
+        let running = checks.enter().await.unwrap();
+        // More wrong passwords than lock the pair, had they been counted.
+        for _ in 0..6 {
+            assert_busy(sign_in_behind(&state, "a@x", "wrong", checks).await).await;
+        }
+        drop(running);
+        assert_eq!(
+            sign_in_behind(&state, "a@x", "s3cret", checks)
+                .await
+                .status(),
+            StatusCode::SEE_OTHER,
+            "a busy answer was counted as a failure"
+        );
     }
 
     #[tokio::test]
