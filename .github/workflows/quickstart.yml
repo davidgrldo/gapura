@@ -17,7 +17,10 @@ on:
         required: false
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
-  workflow_run:
+  # zizmor's dangerous-triggers: workflow_run is dangerous when a pull request's run triggers a
+  # job that then holds secrets or write access. Here it is only release, which pull requests
+  # never start, and this job holds contents: read and no secret at all.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [release]
     types: [completed]
 permissions:
@@ -36,6 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 0 # enough history to resolve the newest tag
       - uses: azure/setup-helm@v5
         with:
@@ -49,12 +53,16 @@ jobs:
       # named "release <version>" for exactly this. Otherwise the input, else the newest tag.
       # Ordering maps "-" to "~", which GNU sort -V puts before anything, so 0.1.0 sorts after
       # 0.1.0-rc.3 rather than before it.
+      # zizmor's github-env: a value written to GITHUB_ENV that carries a newline can set any
+      # variable for the steps after it. Neither written here can: the version is checked against
+      # the semver pattern before it is written, and RUN_SHA is the commit the release run built,
+      # forty hex digits set by GitHub rather than text anyone types.
       - name: Resolve the version under test
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
           RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
+        run: | # zizmor: ignore[github-env]
           set -euo pipefail
           version="${INPUT_VERSION#v}"
           if [ -z "$version" ] && [ -n "$RUN_TITLE" ]; then
@@ -180,7 +188,7 @@ jobs:
           GW=$(kubectl -n gapura-demo get gateway main -o jsonpath='{.status.addresses[0].value}')
           # A NodePort address carries no port; the host port 80 mapped above is the one that
           # reaches it, which is exactly what the README's kind setup guarantees.
-          for attempt in $(seq 10); do
+          for _ in $(seq 10); do
             if body=$(curl -sS --fail-with-body -H 'Host: echo.example' "http://${GW}/echo?msg=it-works" 2>&1); then
               echo "answer through the gateway: $body"
               exit 0

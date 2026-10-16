@@ -25,6 +25,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -42,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.89
       - uses: Swatinem/rust-cache@v2
         with:
@@ -59,6 +63,8 @@ jobs:
     # because the check reads the route states from the Rust enum in crates/.
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           # The version Dockerfile.control builds the console with.
@@ -72,14 +78,68 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check all
+
+  workflows:
+    runs-on: ubuntu-latest
+    # The workflows themselves, linted twice over. zizmor is the one that matters for #235: it
+    # flags a template expanded inside a `run:` script, step outputs included -- release.yml
+    # expanded steps.meta.outputs.json inside single quotes, and an apostrophe in the data
+    # ended the quote. actionlint passes that very line, since it only distrusts the
+    # github.event fields it knows; it stays for what it is good at, typos in expressions and
+    # keys, and shellcheck over every script.
+    #
+    # Both are release binaries at a pinned version, checked against a pinned sha256 before they
+    # run: no Docker image (Docker Hub rate limits), no install script fetched from a branch.
+    # Each hash is of the linux tarball at that tag, and matches the release's GitHub build
+    # attestation (`gh attestation verify <file> -R <repo>`); actionlint's also matches its
+    # published checksums file. Bumping a version means bumping its hash beside it.
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      ZIZMOR_VERSION: 1.30.1
+      ZIZMOR_SHA256: e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install actionlint and zizmor
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          curl -sSfL -o zizmor.tar.gz \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  zizmor.tar.gz" | sha256sum -c -
+          tar -xzf zizmor.tar.gz -C bin zizmor
+      # actionlint runs shellcheck only if it finds one, and says nothing when it does not, so
+      # ask for the runner's copy first: a runner image without it fails here, not silently.
+      - run: |
+          shellcheck --version
+          "$RUNNER_TEMP/bin/actionlint" -version
+          "$RUNNER_TEMP/bin/actionlint"
+      # Offline: the online audits look actions up in GitHub's advisory database, so a new
+      # advisory would turn unrelated pull requests red. .github/zizmor.yml says what is
+      # configured and why; findings that do not apply are ignored where they occur, with the
+      # reason beside them.
+      - run: |
+          "$RUNNER_TEMP/bin/zizmor" --version
+          "$RUNNER_TEMP/bin/zizmor" --offline .
 
   chart:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: azure/setup-helm@v5
         with:
           # Pinned: the golden renders were produced by this version, and a helm release that
@@ -92,6 +152,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
@@ -107,6 +169,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:

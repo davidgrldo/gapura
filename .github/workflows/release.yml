@@ -12,9 +12,10 @@ on:
           Prerelease version to publish from the dispatched branch, e.g. v0.2.0-rc.9. Only a
           prerelease: a release is published by pushing its tag, so it is built from that tag.
         required: true
+# Write access to the registry only in the jobs that push to it (build, image, chart): the guard
+# runs before anything is built and has no business holding it.
 permissions:
   contents: read
-  packages: write
 env:
   IMAGE: ghcr.io/${{ github.repository }}
   # The dispatch input reaches shell through the environment, never by template interpolation
@@ -47,6 +48,9 @@ jobs:
           fi
   build:
     needs: guard
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +86,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -108,9 +114,14 @@ jobs:
       # Job-level `outputs` are not merged across matrix legs: each leg records the whole map from
       # its own context, so one arch's digest always comes back empty. Hand the digests over as
       # per-leg artifacts instead, the way Docker's own multi-platform guide does.
-      - run: |
+      # Through env like every other value a script reads: the workflows job in ci.yml fails a
+      # template expanded inside a script, whatever its source, since that is how #235 happened.
+      - env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
           mkdir -p /tmp/digests
-          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+          echo "$DIGEST" > "/tmp/digests/${ARCH}"
       - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.component }}-${{ matrix.arch }}
@@ -120,6 +131,9 @@ jobs:
 
   image:
     needs: build
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +143,8 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}${{ matrix.component == 'control' && '-control' || '' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -182,22 +198,31 @@ jobs:
 
   chart:
     needs: image
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: azure/setup-helm@v5
         with:
           version: v4.1.4
       - run: ./hack/chart-render.sh
       - name: Package and push the chart
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           if [ -n "$DISPATCHED_TAG" ]; then version="${DISPATCHED_TAG#v}"; fi
           helm package charts/gapura --version "$version" --app-version "$version"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
           # helm push appends the chart name, so the remote is the parent path.
-          helm push "gapura-${version}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          helm push "gapura-${version}.tgz" "oci://ghcr.io/${OWNER}/charts"
 
   # The GitHub release object: the tag exists and the packages are pushed by the jobs above, but
   # without this the Releases page stays empty, and adopters judge maturity from that page. Notes
@@ -214,6 +239,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Build the release notes from CHANGELOG.md
         run: |
           set -euo pipefail
