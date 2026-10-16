@@ -137,10 +137,11 @@ curl -s http://127.0.0.1:19090/metrics | grep -E '^gapura_(requests_total|leader
 echo "==> helm test, in the namespace enforcing restricted"
 # The chart's own smoke test: a throwaway Gateway, route and echo backend, and a curl pod that
 # needs a request routed through this release. Those are the pods #234 was about -- refused by
-# restricted, and helm test timed out as if the gateway were broken. --logs prints the curl
-# pod's output, pass or fail; a refused pod has no output, so on failure the namespace's events
-# are printed too, which is where the refusal is spelled out.
-if ! helm test gapura --namespace "$NS" --timeout 5m --logs; then
+# restricted, and helm test timed out as if the gateway were broken. No --logs: the test pods'
+# hook-delete-policy removes them once they succeed, so helm cannot fetch their logs and would
+# fail a passing run. A refused pod has no output anyway; on failure the namespace's events are
+# printed, which is where the refusal is spelled out.
+if ! helm test gapura --namespace "$NS" --timeout 5m; then
   echo "helm test failed; recent events in $NS:" >&2
   kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2
   exit 1
