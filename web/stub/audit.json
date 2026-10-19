@@ -1,6 +1,28 @@
 {
   "entries": [
     {
+      "id": 216,
+      "at": "2026-10-10T08:15:30.481209Z",
+      "actor": "nadia.putri",
+      "actor_method": "local",
+      "action": "update",
+      "object_kind": "policy",
+      "workspace": "payments",
+      "before": { "target": "route:ledger-read", "kind": "rate_limit", "limit": 100, "per": "minute" },
+      "after": { "target": "route:ledger-read", "kind": "rate_limit", "limit": 300, "per": "minute" }
+    },
+    {
+      "id": 215,
+      "at": "2026-10-10T08:02:11.093745Z",
+      "actor": "fikri.ramadhan",
+      "actor_method": "oidc",
+      "action": "create",
+      "object_kind": "policy",
+      "workspace": "payments",
+      "before": null,
+      "after": { "target": "service:ledger", "kind": "jwt", "issuer": "https://id.example.com", "audience": "ledger", "keys": 2 }
+    },
+    {
       "id": 214,
       "at": "2026-10-09T15:42:07.318402Z",
       "actor": "fikri.ramadhan",

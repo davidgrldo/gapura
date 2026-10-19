@@ -6,7 +6,7 @@
   import * as Table from '$lib/components/ui/table/index.js'
   import CaretRight from 'phosphor-svelte/lib/CaretRight'
   import { when } from '../lib/configuration.js'
-  import { ACTION_LABEL, KINDS, KIND_LABEL, NO_WORKSPACE, changedKeys, nameOf } from '../lib/audit.js'
+  import { ACTION_LABEL, KINDS, KIND_LABEL, NO_WORKSPACE, changedKeys, nameOf, rowLabel } from '../lib/audit.js'
 
   let { me } = $props()
   const id = $props.id()
@@ -163,7 +163,7 @@
               </Table.Cell>
               <Table.Cell>{ACTION_LABEL[e.action] ?? e.action}</Table.Cell>
               <Table.Cell>
-                {KIND_LABEL[e.object_kind] ?? e.object_kind}{#if name}<span class="ml-1.5 font-mono">{name}</span>{/if}
+                {rowLabel(e)}{#if name}<span class="ml-1.5 font-mono">{name}</span>{/if}
               </Table.Cell>
               <Table.Cell>
                 {#if e.workspace}{e.workspace}{:else}<span class="text-muted-foreground">—</span>{/if}
