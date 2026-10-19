@@ -8,6 +8,17 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- OIDC sign-in no longer lets anonymous requests run up the identity provider's rate limits
+  (#253). Discovery (the discovery document and the signing keys) ran on every `GET /auth/login`
+  and every callback; the client it builds is now kept for five minutes and shared, concurrent
+  misses wait for one discovery, and a failed discovery is the answer for five seconds rather
+  than asked again per request. An ID token signed with a key the kept set lacks reads the keys
+  again at once, at most every 30 seconds, so a provider's key rotation is still followed. At
+  most eight authorization codes are exchanged at once; past that the callback answers the
+  existing 503 "busy" page. A code the provider refuses, or a token that does not verify, now
+  counts against the address's sign-in limit (ten a minute) instead of being given back, even
+  when the client hangs up mid-exchange, and its place among the eight is held until the provider
+  has answered.
 - A route on one Gateway can no longer take over a more specific listener's host on another
   Gateway sharing the port (#248, completing #218). Every Gateway's listeners on a port share
   one match table, so a route on `shared`'s `*.example.com` naming `admin.example.com` could
