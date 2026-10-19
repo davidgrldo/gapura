@@ -8,6 +8,33 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A route on one Gateway can no longer take over a more specific listener's host on another
+  Gateway sharing the port (#248, completing #218). Every Gateway's listeners on a port share
+  one match table, so a route on `shared`'s `*.example.com` naming `admin.example.com` could
+  still capture `admin.example.com/login` from `admin-gw`'s own listener, whatever that
+  listener's allowedRoutes said. Hostnames are now yielded to a more specific listener on the
+  same serving port and protocol in any Gateway. A Gateway with its own `--gateway-address`
+  that was moved to a port of its own shares no table, and so claims nothing on the shared
+  port; one left on the shared port for want of a free bound port still does.
+- Hostnames are yielded only to a listener that is programmed (#249, a regression in rc.13).
+  A more specific sibling that serves nothing -- `allowedRoutes.kinds` without HTTPRoute, an
+  HTTPS listener whose certificate Secret is missing, TLS passthrough, a conflicted listener,
+  or any listener of a refused Gateway -- took the host away from the wildcard listener's
+  routes, so `admin.example.com` answered 404 although nothing else served it.
+- Kubernetes-mode Exact and PathPrefix values are written the way the gateway normalises a
+  request's path (#250; #227 fixed only store mode): `/%7Ejohn` is served as `/~john`,
+  `/files/a%2fb` as `/files/a%2Fb` (still an encoded slash), and `//api//v1` as `/api/v1`. They
+  were Accepted but never matched, and their requests fell through to any catch-all rule,
+  skipping the intended rule's filters. A value no request can carry -- a malformed escape, a
+  `.` or `..` segment, or a path that is not absolute -- makes the route `Accepted=False`,
+  `UnsupportedValue`. The data plane and the translator now share one path normaliser,
+  `gapura_core::path::normalize_path`.
+- A Kubernetes-mode Exact or PathPrefix value containing `;` (`/api;v=2`, `/items;type=book`)
+  makes the route `Accepted=False`, `UnsupportedValue` (#247). Servlet backends read `;` as path
+  parameters, so since #213 the gateway answers 400 to every request whose `;params` would move
+  it to another rule, which is every request for such a rule: the route said Accepted and no
+  client could reach it. An escaped `%3B` is still allowed; RegularExpression values are left
+  to the data plane's own check.
 - An exact or prefix path containing `;` (`/api;v=2`, `/items;type=book`) is refused rather
   than reported as working (#247). Since #213 the gateway answered every request for such a
   route with 400, and no request-time check can serve it safely: a servlet backend reads
