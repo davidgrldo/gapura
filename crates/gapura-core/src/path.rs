@@ -39,6 +39,10 @@ pub fn normalize_path(raw: &str) -> Result<String, &'static str> {
     while i < bytes.len() {
         if bytes[i] == b'%' {
             let hex = raw.get(i + 1..i + 3).ok_or("a truncated percent escape")?;
+            // from_str_radix alone accepts a sign, so `%+1` would pass as an escape.
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("an invalid percent escape");
+            }
             let v = u8::from_str_radix(hex, 16).map_err(|_| "an invalid percent escape")?;
             if v.is_ascii_alphanumeric() || matches!(v, b'-' | b'.' | b'_' | b'~') {
                 decoded.push(v);
@@ -196,7 +200,15 @@ mod path_tests {
 
     #[test]
     fn non_origin_targets_and_bad_escapes_are_refused() {
-        for p in ["http://x/admin", "*", "admin", "/a%2", "/a%zz"] {
+        for p in [
+            "http://x/admin",
+            "*",
+            "admin",
+            "/a%2",
+            "/a%zz",
+            "/a%+1",
+            "/a%-1",
+        ] {
             assert!(normalize_path(p).is_err(), "{p}");
         }
     }
