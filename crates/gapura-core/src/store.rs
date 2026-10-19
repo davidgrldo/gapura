@@ -181,13 +181,13 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     // foreign key should make it unreachable and the console should refuse it first; this is
     // what stands between those two being wrong and a crash.
     //
-    // A route that matches on the consumer header is not served at all (#228); see
-    // [`refused_routes`].
+    // A route that matches on the consumer header (#228), or whose exact or prefix path names
+    // `;params` (#247), is not served at all; see [`refused_routes`].
     let mut routes: Vec<&StoreRoute> = snap
         .routes
         .iter()
         .filter(|r| services.contains_key(&(r.workspace.as_str(), r.service.as_str())))
-        .filter(|r| !matches_consumer_header(r))
+        .filter(|r| refusal(r).is_none())
         .collect();
     // Highest priority first, then by name, so the table is a function of the rows and not of
     // the order a query happened to return them.
@@ -319,19 +319,46 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     }
 }
 
-/// The routes [`compile`] leaves out because a header match names
-/// [`CONSUMER_HEADER`](crate::credentials::CONSUMER_HEADER), as `workspace/name` (#228).
+/// The routes [`compile`] leaves out, as `workspace/name`, each with why, in a sentence that
+/// ends saying what to change to serve it again. The control plane refuses each of these on
+/// write; this covers rows stored before it did, and the whole route is left out rather than
+/// only the offending match, which would widen it.
 ///
-/// Routes are matched before `key_auth` runs and before the data plane replaces the client's
-/// own consumer header, so such a match reads whatever the client claims to be. The control
-/// plane refuses one on write; this covers a row stored before it did. The whole route is left
-/// out rather than only its header match, which would widen it to every consumer.
-pub fn refused_routes(snap: &StoreSnapshot) -> Vec<String> {
+/// - A header match naming [`CONSUMER_HEADER`](crate::credentials::CONSUMER_HEADER) (#228).
+///   Routes are matched before `key_auth` runs and before the data plane replaces the client's
+///   own consumer header, so such a match reads whatever the client claims to be. Dropping only
+///   that match would widen the route to every consumer.
+/// - An exact or prefix path containing `;` (#247). A servlet backend strips `;params` before
+///   resolving a path, so `GET /api;v=2` would run this route's policies while the backend
+///   serves `/api`, whose route may carry others. Dropping only that path could leave the route
+///   with none, which means every path.
+pub fn refused_routes(snap: &StoreSnapshot) -> Vec<(String, &'static str)> {
     snap.routes
         .iter()
-        .filter(|r| matches_consumer_header(r))
-        .map(route_id)
+        .filter_map(|r| refusal(r).map(|why| (route_id(r), why)))
         .collect()
+}
+
+/// Why [`compile`] leaves `route` out, or `None` to serve it; see [`refused_routes`].
+fn refusal(route: &StoreRoute) -> Option<&'static str> {
+    if matches_consumer_header(route) {
+        return Some(
+            "it matches on a header the gateway sets itself; remove that header match to serve it",
+        );
+    }
+    if names_path_parameters(route) {
+        return Some(
+            "an exact or prefix path contains ;, which servlet backends read as path parameters; remove the ; to serve it",
+        );
+    }
+    None
+}
+
+fn names_path_parameters(route: &StoreRoute) -> bool {
+    route.paths.iter().any(|p| match p {
+        PathMatch::Exact(v) | PathMatch::Prefix(v) => v.contains(';'),
+        PathMatch::Regex(_) => false,
+    })
 }
 
 fn matches_consumer_header(route: &StoreRoute) -> bool {
@@ -1331,9 +1358,65 @@ mod tests {
             .collect();
         assert_eq!(ids, ["shop/public"]);
         assert!(cfg.ports[&80].iter().all(|e| e.matcher.headers.is_empty()));
-        assert_eq!(refused_routes(&snap), ["shop/admin"]);
+        assert_eq!(
+            refused_routes(&snap),
+            [(
+                "shop/admin".to_string(),
+                "it matches on a header the gateway sets itself; remove that header match to serve it"
+            )]
+        );
         assert_eq!(
             hit(&cfg, 80, "api.example", "/x", "GET"),
+            Some("shop/public")
+        );
+    }
+
+    /// #247: a route stored before the control plane refused `;` in an exact or prefix path is
+    /// left out whole -- dropping only that path could leave it with none, which is every path
+    /// -- and named, while a regex naming `;` and the other routes compile as before.
+    #[test]
+    fn a_route_whose_path_names_path_parameters_is_not_served() {
+        let mut exact = ws_route("shop", "versioned", "orders", "api.example");
+        exact.paths = vec![PathMatch::Exact("/api;v=2".into())];
+        let mut prefix = ws_route("shop", "books", "orders", "api.example");
+        prefix.paths = vec![
+            PathMatch::Prefix("/items".into()),
+            PathMatch::Prefix("/items;type=book".into()),
+        ];
+        let mut regex = ws_route("shop", "matrix", "orders", "api.example");
+        regex.paths = vec![PathMatch::Regex("/m;v=[0-9]+".into())];
+        let snap = StoreSnapshot {
+            services: vec![ws_svc("shop", "orders", "orders.internal")],
+            routes: vec![
+                exact,
+                prefix,
+                regex,
+                ws_route("shop", "public", "orders", "api.example"),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let mut ids: Vec<&str> = cfg.listeners[0]
+            .rules
+            .iter()
+            .map(|r| r.route.as_str())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["shop/matrix", "shop/public"]);
+        assert!(cfg.ports[&80].iter().all(|e| match &e.matcher.path {
+            PathMatch::Exact(v) | PathMatch::Prefix(v) => !v.contains(';'),
+            PathMatch::Regex(_) => true,
+        }));
+        let why = "an exact or prefix path contains ;, which servlet backends read as path parameters; remove the ; to serve it";
+        assert_eq!(
+            refused_routes(&snap),
+            [
+                ("shop/versioned".to_string(), why),
+                ("shop/books".to_string(), why)
+            ]
+        );
+        assert_eq!(
+            hit(&cfg, 80, "api.example", "/items/1", "GET"),
             Some("shop/public")
         );
     }

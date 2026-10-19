@@ -2126,10 +2126,11 @@ async fn rows_stored_before_the_path_and_header_checks_are_served_safely() {
         .map(|r| r.route.as_str())
         .collect();
     assert_eq!(rules, ["default/orders-api"]);
-    assert_eq!(
-        gapura_core::store::refused_routes(&snapshot),
-        ["default/beta"]
-    );
+    let refused: Vec<String> = gapura_core::store::refused_routes(&snapshot)
+        .into_iter()
+        .map(|(route, _)| route)
+        .collect();
+    assert_eq!(refused, ["default/beta"]);
     use gapura_core::config::PathMatch;
     let paths: Vec<&PathMatch> = config.listeners[0].rules[0]
         .matches
@@ -2144,6 +2145,58 @@ async fn rows_stored_before_the_path_and_header_checks_are_served_safely() {
             &PathMatch::Regex("^/r%2fx$".into()),
         ]
     );
+    // Served to a data plane the same way.
+    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
+    assert_eq!(served, config);
+}
+
+/// #247 for rows written before the console refused them: a route whose exact or prefix path
+/// contains `;` is not served at all -- not served without that path, which could leave it
+/// matching every path -- and is named, while the other routes are served as before.
+#[tokio::test]
+async fn a_stored_route_whose_path_names_path_parameters_is_not_served() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    ok(&app, "POST", ROUTES, s.ed, &header_route(None).to_string()).await;
+    // The console refuses the value now, on the path's own field.
+    let (status, body) = send(
+        &app,
+        "POST",
+        ROUTES,
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        r#"{"name":"v2","service":"orders","hosts":["api.example.com"],"paths":[{"type":"exact","value":"/api;v=2"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json(&body)["field"], "paths[0].value");
+    // Written as an older release stored it.
+    let db = store.client().await.unwrap();
+    db.batch_execute(
+        r#"update routes set paths = '[{"type":"prefix","value":"/orders"},{"type":"prefix","value":"/orders;type=book"}]'
+             where name = 'beta';"#,
+    )
+    .await
+    .unwrap();
+
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let config = gapura_core::store::compile(&snapshot, &Default::default());
+    let rules: Vec<&str> = config.listeners[0]
+        .rules
+        .iter()
+        .map(|r| r.route.as_str())
+        .collect();
+    assert_eq!(rules, ["default/orders-api"]);
+    let refused = gapura_core::store::refused_routes(&snapshot);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, "default/beta");
+    assert!(refused[0].1.contains("path parameters"), "{}", refused[0].1);
     // Served to a data plane the same way.
     let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
     let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();

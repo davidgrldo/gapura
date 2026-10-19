@@ -211,14 +211,11 @@ async fn serve(
         return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
     }
     // Said when a data plane is sent a configuration, not on every poll, so it is logged once
-    // per change and data plane rather than every few seconds: a route stored before #242 that
-    // matches on the consumer header is left out of it (#228).
-    for route in refused_routes(&snapshot) {
-        tracing::warn!(
-            %route,
-            header = gapura_core::credentials::CONSUMER_HEADER,
-            "not serving a route that matches on a header the gateway sets itself; remove that header match to serve it"
-        );
+    // per change and data plane rather than every few seconds: a route stored before the console
+    // refused it -- one matching on the consumer header (#228), or one whose exact or prefix path
+    // contains `;` (#247) -- is left out of it.
+    for (route, reason) in refused_routes(&snapshot) {
+        tracing::warn!(%route, reason, "not serving a route");
     }
     (
         StatusCode::OK,
