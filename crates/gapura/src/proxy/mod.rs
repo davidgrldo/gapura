@@ -395,6 +395,19 @@ fn forwarded_for(req: &RequestHeader) -> Option<String> {
     Some(joined)
 }
 
+/// The `X-Forwarded-For` value to send upstream: every inbound line, joined, then the peer.
+/// Rebuilding from the first line alone dropped the hops on the others, the real one included,
+/// from what upstreams see. The peer is canonical (#252): on a dual-stack `[::]` listener an
+/// IPv4 client arrives as `::ffff:203.0.113.9`, and a backend that allowlists or geolocates the
+/// last hop must see `203.0.113.9`, as the access log and the rate limiter already do.
+fn forwarded_for_with_hop(req: &RequestHeader, peer: std::net::IpAddr) -> String {
+    let hop = peer.to_canonical();
+    match forwarded_for(req) {
+        Some(existing) => format!("{existing}, {hop}"),
+        None => hop.to_string(),
+    }
+}
+
 fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
     req.headers.get(name).and_then(|v| v.to_str().ok())
 }
@@ -872,17 +885,8 @@ impl ProxyHttp for GapuraProxy {
             }
         }
         upstream.insert_header("X-Forwarded-Proto", ctx.scheme)?;
-        if let Some(ip) = session
-            .client_addr()
-            .and_then(|a| a.as_inet())
-            .map(|a| a.ip().to_string())
-        {
-            // Appended to every inbound line, joined: rebuilding from the first line alone
-            // dropped the hops on the others, the real one included, from what upstreams see.
-            let value = match forwarded_for(upstream) {
-                Some(existing) => format!("{existing}, {ip}"),
-                None => ip,
-            };
+        if let Some(peer) = session.client_addr().and_then(|a| a.as_inet()) {
+            let value = forwarded_for_with_hop(upstream, peer.ip());
             upstream.insert_header("X-Forwarded-For", value)?;
         }
         upstream.insert_header("X-Request-Id", ctx.request_id.clone())?;
@@ -1311,6 +1315,25 @@ mod tests {
         assert_eq!(client_ip_of(&none, proxy, &trusted, &[]), proxy);
     }
 
+    #[test]
+    fn the_forwarded_for_hop_is_the_canonical_peer() {
+        // #252: an IPv4 client on a dual-stack `[::]` listener is `::ffff:203.0.113.9` to the
+        // socket; the backend must see the IPv4 address the access log records.
+        let mapped: std::net::IpAddr = "::ffff:203.0.113.9".parse().unwrap();
+        let none = RequestHeader::build("GET", b"/", None).unwrap();
+        assert_eq!(forwarded_for_with_hop(&none, mapped), "203.0.113.9");
+        let mut two = RequestHeader::build("GET", b"/", None).unwrap();
+        two.append_header("X-Forwarded-For", "6.6.6.6").unwrap();
+        two.append_header("X-Forwarded-For", "10.0.0.2").unwrap();
+        assert_eq!(
+            forwarded_for_with_hop(&two, mapped),
+            "6.6.6.6, 10.0.0.2, 203.0.113.9"
+        );
+        // Real IPv6 peers are left as they are.
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(forwarded_for_with_hop(&none, v6), "2001:db8::1");
+    }
+
     mod jwt_lines {
         use super::super::*;
         use base64::Engine;
@@ -1474,6 +1497,82 @@ spec:
         assert!(!changes("/shop/cart;jsessionid=1"));
         assert!(!changes("/admin/secret;v=2"));
         assert!(!changes("/elsewhere;x/y"));
+    }
+
+    #[test]
+    fn a_rule_naming_path_parameters_is_still_refused_at_the_data_plane() {
+        // #247: no check here can make such a rule safe. With `Exact /api;v=2` beside `Exact
+        // /api`, `GET /api;v=2` would run the first rule's policies while a servlet backend
+        // serves `/api`, whose rule may carry others. So the console, the store compiler and the
+        // translator refuse a `;` in an Exact or PathPrefix value, and a row that slipped past
+        // them is still refused here: the stripped reading never matches the rule as sent.
+        let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: { name: gapura }
+spec: { controllerName: gapura.dev/controller }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: main, namespace: infra, generation: 1 }
+spec:
+  gatewayClassName: gapura
+  listeners:
+  - { name: http, port: 80, protocol: HTTP, allowedRoutes: { namespaces: { from: All } } }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: r, namespace: apps, generation: 1, creationTimestamp: "2026-09-10T00:00:00Z" }
+spec:
+  parentRefs: [{ name: main, namespace: infra }]
+  rules:
+  - matches: [{ path: { type: Exact, value: /api-v-2 } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: /items-type-book } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: Exact, value: /api } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: / } }]
+    backendRefs: [{ name: echo, port: 80 }]
+"#;
+        let snap = gapura_core::Snapshot::from_yaml_docs(yaml).unwrap();
+        let mut config = gapura_core::translate(&snap, &gapura_core::Settings::default()).config;
+        // The translator refuses these values, so they are written into the served
+        // configuration directly, the way a row that slipped through would arrive.
+        for entry in config.ports.get_mut(&80).unwrap() {
+            entry.matcher.path = match &entry.matcher.path {
+                PathMatch::Exact(p) if p == "/api-v-2" => PathMatch::Exact("/api;v=2".into()),
+                PathMatch::Prefix(p) if p == "/items-type-book" => {
+                    PathMatch::Prefix("/items;type=book".into())
+                }
+                other => other.clone(),
+            };
+        }
+        let rt = Runtime::new(config, 1, Vec::new());
+        let with = |path: &str| {
+            let r = RequestHeader::build("GET", path.as_bytes(), None).unwrap();
+            Extracted::from_request(&r).unwrap()
+        };
+        // The test only means something if these requests do match the `;` rules as sent.
+        let path_of = |path: &str| {
+            rt.config
+                .match_port_with(80, &with(path).attrs(), rt.regexes())
+                .map(|hit| hit.entry.matcher.path.clone())
+        };
+        assert_eq!(
+            path_of("/api;v=2"),
+            Some(PathMatch::Exact("/api;v=2".into()))
+        );
+        assert_eq!(
+            path_of("/items;type=book/42"),
+            Some(PathMatch::Prefix("/items;type=book".into()))
+        );
+        for path in ["/api;v=2", "/items;type=book", "/items;type=book/42"] {
+            assert!(
+                path_params_change_the_route(&rt, 80, &with(path)),
+                "{path} must be refused"
+            );
+        }
     }
 
     #[test]

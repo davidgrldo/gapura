@@ -35,6 +35,27 @@ means what it usually does, moving from one version below to a later one. Releas
   it to another rule, which is every request for such a rule: the route said Accepted and no
   client could reach it. An escaped `%3B` is still allowed; RegularExpression values are left
   to the data plane's own check.
+- An exact or prefix path containing `;` (`/api;v=2`, `/items;type=book`) is refused rather
+  than reported as working (#247). Since #213 the gateway answered every request for such a
+  route with 400, and no request-time check can serve it safely: a servlet backend reads
+  `/api;v=2` as `/api`, so the request would run this route's policies while the backend serves
+  another route's path. The console refuses the value on the path's field; a stored route from
+  before this change is left out of the configuration whole, and the control plane logs a
+  warning naming it whenever it sends a data plane a new configuration. Remove the `;` to
+  serve it. A regex path may still contain `;`; the gateway refuses any
+  request whose `;params` would move it to another rule, as before.
+- The `X-Forwarded-For` hop the gateway appends upstream is the IPv4 address of an IPv4 client
+  on a dual-stack `[::]` listener, not `::ffff:203.0.113.9` (#252), matching the access log and
+  the rate limiter since #216.
+- A backend name whose lookup outlives the 3 s timeout is not looked up again until that lookup
+  ends (#251). A timeout drops the future but not `getaddrinfo`, so with DNS black-holed every
+  tick started one more blocking call per name, each living tens of seconds, until tokio's
+  blocking pool was full and its queue grew for as long as the outage lasted. The answer that
+  finally comes is used by the next tick, and clusters naming the same host share one lookup.
+- The audit log names a JWT requirement and a request limit as such (#254). Every policy entry
+  was labelled "Key requirement", so a rate-limit change read as a key one; the row now says "JWT
+  requirement" or "Request limit" from what the entry recorded, and the kind filter's `policy`
+  choice is "Policy", since it returns all three.
 - CI hardening (#234, #235 follow-ups): a new `workflows` job lints the workflows with zizmor and
   actionlint, so a template expanded inside a `run:` script fails CI, and the k3s leg installs
   into a namespace enforcing the restricted Pod Security level and runs `helm test` there.

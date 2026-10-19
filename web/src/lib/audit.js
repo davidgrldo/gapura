@@ -1,5 +1,6 @@
 // The audit log's words. The kinds are audit.rs's KINDS, written once here in the same order;
-// web/check.mjs fails the build when they drift.
+// web/check.mjs fails the build when they drift. These label the kind filter. A row is worded by
+// rowLabel() below, because `policy` is three things: the filter for it returns all of them.
 export const KIND_LABEL = {
   user: 'Account',
   group_mapping: 'Group mapping',
@@ -8,12 +9,26 @@ export const KIND_LABEL = {
   route: 'Route',
   consumer: 'Consumer',
   consumer_key: 'API key',
-  policy: 'Key requirement',
+  policy: 'Policy',
   data_plane: 'Data plane',
   data_plane_token: 'Data plane token',
   setting: 'Setting',
 }
 export const KINDS = Object.keys(KIND_LABEL)
+
+// What a policy entry is, by the `kind` its before and after bodies record: a JWT requirement and
+// a request limit say so, and a key requirement records none.
+const POLICY_LABEL = { jwt: 'JWT requirement', rate_limit: 'Request limit' }
+const KEY_REQUIREMENT = 'Key requirement'
+
+// What a row says it is: the kind's own word, except for a policy, which is worded by what it
+// holds. `after` is read first, and `before` for a delete, which records no `after`.
+export function rowLabel(entry) {
+  if (entry.object_kind === 'policy') {
+    return POLICY_LABEL[entry.after?.kind ?? entry.before?.kind] ?? KEY_REQUIREMENT
+  }
+  return KIND_LABEL[entry.object_kind] ?? entry.object_kind
+}
 
 export const ACTION_LABEL = { create: 'Created', update: 'Changed', delete: 'Deleted' }
 

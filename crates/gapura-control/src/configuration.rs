@@ -581,6 +581,18 @@ fn plain_path(kind: &str, value: &str, at: String) -> Result<String, FieldError>
     if value.contains(['?', '#']) {
         return Err(field(at, "A path has no query string or fragment."));
     }
+    // #247: a servlet backend strips `;params` before resolving a path, so `GET /api;v=2` would
+    // run this rule's policies while the backend serves `/api`, whose rule may carry others. No
+    // check at request time can make that safe, so the value is refused (the gateway also
+    // refuses such rows from before this check). A regex path is left alone: a `;` hides in it
+    // too many ways (`[;]`, `\x3b`, `.`), and the data plane already refuses any request whose
+    // stripped path routes elsewhere.
+    if value.contains(';') {
+        return Err(field(
+            at,
+            "A path may not contain ; — servlet backends read it as path parameters, so the gateway cannot match it safely.",
+        ));
+    }
     // The data plane normalises a request's path before matching it (`normalize_path` in the
     // gateway's proxy): it collapses `//`, refuses `.` and `..` segments, and decodes an escaped
     // letter, digit or `- . _ ~`. A route path written any of those ways could never match.
@@ -1438,6 +1450,36 @@ mod tests {
         // A regex is the author's own pattern and may use any of these.
         assert!(route(
             route_with_paths(vec![path("regex", "/a b|/c#")]),
+            Write::Replace
+        )
+        .is_ok());
+    }
+
+    /// #247: `GET /api;v=2` would run this rule's policies while a servlet backend serves
+    /// `/api`, so an exact or prefix path naming `;params` cannot be matched safely.
+    #[test]
+    fn a_path_naming_path_parameters_is_refused() {
+        for kind in ["prefix", "exact"] {
+            for value in ["/api;v=2", "/items;type=book", "/admin;", "/;x/admin"] {
+                let err =
+                    route(route_with_paths(vec![path(kind, value)]), Write::Replace).unwrap_err();
+                assert_eq!(err.field, "paths[0].value", "{kind} {value:?}");
+                assert_eq!(
+                    err.sentence,
+                    "A path may not contain ; — servlet backends read it as path parameters, so the gateway cannot match it safely.",
+                    "{kind} {value:?}"
+                );
+            }
+        }
+        // An escaped `;` is not a parameter to a servlet container, and a regex is left to the
+        // data plane, which refuses any request whose stripped path routes elsewhere.
+        assert!(route(
+            route_with_paths(vec![path("exact", "/api%3Bv=2")]),
+            Write::Replace
+        )
+        .is_ok());
+        assert!(route(
+            route_with_paths(vec![path("regex", "/api;v=[0-9]+")]),
             Write::Replace
         )
         .is_ok());

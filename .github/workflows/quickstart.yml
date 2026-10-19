@@ -90,18 +90,21 @@ jobs:
       # never installs (the console is disabled by default and needs an IdP), so nothing else
       # here would notice its visibility flip being forgotten. The honest check is the same
       # anonymous manifest fetch RELEASING 5.3 documents, against the tag the release actually
-      # publishes for the version under test. It exists only from 0.1.0-rc.3 -- the first
-      # release after the console image joined the pipeline -- so older tags are skipped with
-      # a line saying so, not failed.
+      # publishes for the version under test. A tag whose own release workflow never built the
+      # console image (v0.1.0 among them) is skipped with a line saying so, not failed; a
+      # version number cannot tell, since 0.1.0 came before the 0.1.0 RCs that do have one.
       - name: Anonymous console image fetch (RELEASING 5.3)
         run: |
           set -euo pipefail
-          if [ "$(printf '%s\n0.1.0~rc.3\n' "$(printf '%s' "$version" | sed 's/-/~/')" | sort -V | head -1)" != "0.1.0~rc.3" ]; then
-            echo "skipping: $version predates the console image (first published 0.1.0-rc.3)"
-            exit 0
-          fi
           # A dispatched prerelease has no tag to resolve; its commit came with the release run.
-          sha="${sha:-sha-$(git rev-parse "v${version}")}"
+          if [ -z "${sha:-}" ]; then
+            if ! git show "v${version}:.github/workflows/release.yml" | grep -q gapura-control; then
+              echo "skipping: v$version's release did not publish a console image"
+              exit 0
+            fi
+            # ^{commit}: an annotated tag's own object id is not the commit the image is tagged with.
+            sha="sha-$(git rev-parse "v${version}^{commit}")"
+          fi
           tok=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:davidgrldo/gapura-control:pull" | jq -r .token)
           code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
             -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
