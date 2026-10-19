@@ -15,6 +15,7 @@ pub mod hostname;
 pub mod input;
 pub mod jwt;
 pub mod matcher;
+pub mod path;
 pub mod snapshot;
 pub mod status;
 pub mod store;

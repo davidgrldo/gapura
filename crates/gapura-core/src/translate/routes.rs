@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::Cluster;
+use crate::config::{Cluster, Protocol};
 use crate::hostname;
 use crate::input::{HttpRoute, ParentReference};
 use crate::snapshot::{ObjectRef, Settings, Snapshot};
@@ -17,6 +17,7 @@ pub(crate) fn attach(
     clusters: &mut BTreeMap<String, Cluster>,
     status: &mut Vec<StatusPatch>,
 ) {
+    let siblings = siblings(gateways, settings);
     for (rref, route) in &snap.http_routes {
         // Compile only a route that names one of our Gateways. Any namespace may hold
         // HTTPRoutes, and compiling one costs its regex paths; a route for another controller
@@ -79,9 +80,10 @@ pub(crate) fn attach(
             let Some(i) = our_gateway(gateways, pref, rref) else {
                 continue; // not ours (or absent): the spec says stay silent
             };
-            let gw = &mut gateways[i];
             let outcome = attach_to_gateway(
-                gw,
+                i,
+                &mut gateways[i],
+                &siblings,
                 pref,
                 route,
                 rref,
@@ -138,8 +140,11 @@ struct Outcome {
     claimed: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_to_gateway(
+    gateway: usize,
     gw: &mut GatewayBuild,
+    siblings: &[Sibling],
     pref: &ParentReference,
     route: &HttpRoute,
     rref: &ObjectRef,
@@ -155,17 +160,7 @@ fn attach_to_gateway(
     };
     let gw_ns = gw.r#ref.namespace.clone();
     let gw_id = gw.r#ref.to_string();
-    let siblings: Vec<Sibling> = gw
-        .listeners
-        .iter()
-        .map(|l| Sibling {
-            name: l.name.clone(),
-            port: l.port,
-            protocol: l.protocol,
-            hostname: l.hostname.clone(),
-        })
-        .collect();
-    for l in gw.listeners.iter_mut() {
+    for (listener, l) in gw.listeners.iter_mut().enumerate() {
         if pref.section_name.as_deref().is_some_and(|s| s != l.name)
             || pref.port.is_some_and(|p| p != l.port)
         {
@@ -181,7 +176,7 @@ fn attach_to_gateway(
         let Some(hosts) = hostname::intersect(l.hostname.as_deref(), &route.spec.hostnames) else {
             continue; // no hostname intersection
         };
-        let Some(hosts) = yield_to_siblings(hosts, l, &siblings) else {
+        let Some(hosts) = yield_to_siblings(hosts, (gateway, listener), l, siblings) else {
             outcome.claimed += 1;
             continue;
         };
@@ -200,21 +195,50 @@ fn attach_to_gateway(
     outcome
 }
 
-/// What `yield_to_siblings` needs of every listener of the Gateway, copied out so the attach
-/// loop can hold one listener mutably while looking at the others.
+/// A programmed listener as `yield_to_siblings` sees it, copied out before the attach loop so
+/// it can hold one listener mutably while looking at every other one.
 struct Sibling {
-    name: String,
+    /// `(gateway, listener)` indices into the attach step's `gateways`.
+    at: (usize, usize),
+    /// The port it serves on, after any address-override remap.
     port: u16,
-    protocol: Option<crate::config::Protocol>,
+    protocol: Protocol,
     hostname: Option<String>,
 }
 
-/// Drop the effective hostnames a more specific sibling listener (same Gateway, port and
-/// protocol) also matches. Gateway API hands a request to the most specific matching listener,
-/// but the port's match table ranks entries by their own hostname: without this, a route on
-/// `*.example.com` naming `admin.example.com` competed with the `admin.example.com` listener's
-/// routes on path alone and could take over paths there, whatever that listener's allowedRoutes
-/// said (#218).
+/// Every programmed listener of every Gateway, with the port it serves on. A listener that is
+/// not programmed serves nothing, so it claims no hostname either (#249): yielding to one would
+/// leave the host unserved. The same goes for every listener of a refused Gateway.
+fn siblings(gateways: &[GatewayBuild], settings: &Settings) -> Vec<Sibling> {
+    let ports = crate::translate::serving_ports(gateways, settings);
+    let mut out = Vec::new();
+    for (gi, gw) in gateways.iter().enumerate() {
+        for (li, l) in gw.listeners.iter().enumerate() {
+            let (Some(port), Some(protocol)) = (ports[gi][li], l.protocol) else {
+                continue;
+            };
+            out.push(Sibling {
+                at: (gi, li),
+                port,
+                protocol,
+                hostname: l.hostname.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Drop the effective hostnames a more specific programmed listener on the same serving port
+/// and protocol also matches. Gateway API hands a request to the most specific matching
+/// listener, but the port's match table ranks entries by their own hostname: without this, a
+/// route on `*.example.com` naming `admin.example.com` competed with the `admin.example.com`
+/// listener's routes on path alone and could take over paths there, whatever that listener's
+/// allowedRoutes said (#218).
+///
+/// The sibling may belong to another Gateway (#248): the data plane builds one match table per
+/// serving port from every Gateway's listeners, so two Gateways on one port compete exactly as
+/// two listeners of one Gateway do. A Gateway with its own address that was moved to a port of
+/// its own shares no table with the others and so yields to none of them.
 ///
 /// A hostname is dropped when the sibling's hostname covers all of it: the same exact host, a
 /// wildcard containing it, or a wildcard containing (or equal to) a wildcard effective hostname.
@@ -223,19 +247,25 @@ struct Sibling {
 /// hostnames remained and all of them were dropped, so the route does not attach here.
 fn yield_to_siblings(
     hosts: Vec<String>,
+    at: (usize, usize),
     own: &ListenerBuild,
     siblings: &[Sibling],
 ) -> Option<Vec<String>> {
     if hosts.is_empty() {
         return Some(hosts);
     }
+    // A listener that is not programmed adds no entries, so which port it would have served on
+    // only shapes its route's status; its declared port is as good as any.
+    let own_port = siblings
+        .iter()
+        .find(|s| s.at == at)
+        .map_or(own.port, |s| s.port);
     let own_specificity = hostname::specificity(own.hostname.as_deref());
     let claims = |h: &str| {
         siblings.iter().any(|s| {
-            s.name != own.name
-                && s.port == own.port
-                && s.protocol.is_some()
-                && s.protocol == own.protocol
+            s.at != at
+                && s.port == own_port
+                && Some(s.protocol) == own.protocol
                 && hostname::specificity(s.hostname.as_deref()) > own_specificity
                 && s.hostname
                     .as_deref()
@@ -279,8 +309,9 @@ fn accepted_condition(
         (
             ConditionStatus::False,
             reasons::NO_MATCHING_LISTENER_HOSTNAME,
-            "Every route hostname belongs to a more specific listener on the same port; a \
-             request is served by the most specific matching listener only"
+            "Every route hostname belongs to a more specific listener on the same port, of this \
+             Gateway or another one sharing the port; a request is served by the most specific \
+             matching listener only"
                 .to_string(),
         )
     } else {

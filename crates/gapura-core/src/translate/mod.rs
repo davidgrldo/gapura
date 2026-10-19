@@ -72,37 +72,114 @@ fn remap_overridden_listeners(
     settings: &Settings,
     overridden: &[bool],
 ) {
-    let mut taken: BTreeSet<u16> = listeners.iter().map(|l| l.port).collect();
+    let slots: Vec<RemapSlot<'_>> = listeners
+        .iter()
+        .zip(overridden)
+        .map(|(l, &overridden)| RemapSlot {
+            gateway: gateway_of(&l.id),
+            https: l.protocol == crate::config::Protocol::Https,
+            port: l.port,
+            overridden,
+        })
+        .collect();
+    let targets = remap_targets(&slots, settings);
+    for (l, target) in listeners.iter_mut().zip(targets) {
+        if let Some(p) = target {
+            l.client_port = Some(l.port);
+            l.port = p;
+        }
+    }
+}
+
+/// One programmed listener as the remap sees it, in the order `assemble` emits listeners.
+struct RemapSlot<'a> {
+    /// "namespace/name" of its Gateway.
+    gateway: &'a str,
+    https: bool,
+    /// The declared port.
+    port: u16,
+    /// Its Gateway carries a `--gateway-address` override.
+    overridden: bool,
+}
+
+/// The port each slot moves to, or `None` where it keeps its declared port. The allocation
+/// behind [`remap_overridden_listeners`], shared with [`serving_ports`] so the attach step sees
+/// exactly the ports `assemble` later serves on.
+fn remap_targets(slots: &[RemapSlot<'_>], settings: &Settings) -> Vec<Option<u16>> {
+    let mut taken: BTreeSet<u16> = slots.iter().map(|s| s.port).collect();
     // One allocation per (Gateway, protocol, declared port), not per listener: Gateway API
     // allows several listeners on one port, told apart by hostname, and a Service for the
     // Gateway's own address can target one port per protocol -- so the whole group must land
     // on the same target, or every listener but one is unreachable at that address. With no
     // free port the group stays whole on the shared port.
-    let mut groups: BTreeMap<(String, bool, u16), Option<u16>> = BTreeMap::new();
-    for i in 0..listeners.len() {
-        if !overridden[i] {
+    let mut groups: BTreeMap<(&str, bool, u16), Option<u16>> = BTreeMap::new();
+    let mut targets = Vec::with_capacity(slots.len());
+    for s in slots {
+        if !s.overridden {
+            targets.push(None);
             continue;
         }
-        let https = listeners[i].protocol == crate::config::Protocol::Https;
-        let key = (
-            gateway_of(&listeners[i].id).to_string(),
-            https,
-            listeners[i].port,
-        );
-        let target = *groups.entry(key).or_insert_with(|| {
-            let pool = if https {
-                &settings.https_ports
-            } else {
-                &settings.http_ports
-            };
-            pool.iter().copied().find(|p| !taken.contains(p))
-        });
+        let target = *groups
+            .entry((s.gateway, s.https, s.port))
+            .or_insert_with(|| {
+                let pool = if s.https {
+                    &settings.https_ports
+                } else {
+                    &settings.http_ports
+                };
+                pool.iter().copied().find(|p| !taken.contains(p))
+            });
         if let Some(p) = target {
-            listeners[i].client_port = Some(listeners[i].port);
-            listeners[i].port = p;
             taken.insert(p);
         }
+        targets.push(target);
     }
+    targets
+}
+
+/// The port every programmed listener will serve on, indexed `[gateway][listener]` like
+/// `gateways`: its declared port, or the one an address override moves it to. `None` for a
+/// listener that is not programmed (or whose Gateway is refused), which `assemble` leaves out.
+///
+/// Listeners on one serving port share one match table in the data plane, whichever Gateway
+/// they belong to, so this is what decides which listeners compete for a request (#248). It
+/// walks the programmed listeners in the order `assemble` does and runs the same allocation.
+pub(crate) fn serving_ports(
+    gateways: &[GatewayBuild],
+    settings: &Settings,
+) -> Vec<Vec<Option<u16>>> {
+    let keys: Vec<String> = gateways
+        .iter()
+        .map(|g| format!("{}/{}", g.r#ref.namespace, g.r#ref.name))
+        .collect();
+    let mut slots = Vec::new();
+    let mut at = Vec::new();
+    for (gi, gw) in gateways.iter().enumerate() {
+        if gw.rejected.is_some() {
+            continue;
+        }
+        let overridden = settings.gateway_address_overrides.contains_key(&keys[gi]);
+        for (li, l) in gw.listeners.iter().enumerate() {
+            if !l.programmed() {
+                continue;
+            }
+            slots.push(RemapSlot {
+                gateway: &keys[gi],
+                https: l.protocol == Some(crate::config::Protocol::Https),
+                port: l.port,
+                overridden,
+            });
+            at.push((gi, li));
+        }
+    }
+    let mut ports: Vec<Vec<Option<u16>>> = gateways
+        .iter()
+        .map(|g| vec![None; g.listeners.len()])
+        .collect();
+    for ((gi, li), target) in at.into_iter().zip(remap_targets(&slots, settings)) {
+        ports[gi][li] = Some(target.unwrap_or(gateways[gi].listeners[li].port));
+    }
+    ports
 }
 
 /// Whether a requested address is a published one. IP addresses compare parsed, so

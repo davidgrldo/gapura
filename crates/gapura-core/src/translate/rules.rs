@@ -224,8 +224,10 @@ fn compile_match(m: &HttpRouteMatch) -> Result<RouteMatch, Unsupported> {
         Some(p) => {
             let value = p.value.clone().unwrap_or_else(|| "/".to_string());
             match p.type_.as_deref().unwrap_or("PathPrefix") {
-                "Exact" => PathMatch::Exact(value),
-                "PathPrefix" => PathMatch::Prefix(normalize_prefix(value)),
+                "Exact" => PathMatch::Exact(normalized_path("Exact", &value)?),
+                "PathPrefix" => {
+                    PathMatch::Prefix(normalize_prefix(normalized_path("PathPrefix", &value)?))
+                }
                 "RegularExpression" => {
                     // Validate here so an invalid pattern keeps the Unsupported path; the data
                     // plane compiles the pattern again into its per-generation side map.
@@ -280,6 +282,37 @@ fn compile_match(m: &HttpRouteMatch) -> Result<RouteMatch, Unsupported> {
         headers,
         query,
         method: m.method.as_ref().map(|s| s.to_ascii_uppercase()),
+    })
+}
+
+/// An Exact or PathPrefix value in the form the data plane normalises a request's path to
+/// before comparing bytes ([`crate::path::normalize_path`]): an escaped letter, digit or
+/// `- . _ ~` decoded, the hex of every other escape in uppercase (`%2f` is `%2F`, still an
+/// encoded slash, which the data plane never decodes), and `//` merged. Written any other way
+/// the value is Accepted but can never match, and a request meant for it falls through to
+/// whatever catch-all rule is left, skipping this rule's filters (#250).
+///
+/// A value the data plane would refuse as a request path -- a malformed escape, a `.` or `..`
+/// segment, or one that is not absolute -- has no normal form: no request reaches a rule with
+/// it, so the route is refused rather than served a rule that is dead on arrival.
+///
+/// So is a value with a `;` (#247). Servlet backends read `;` as the start of path parameters,
+/// so the data plane also matches every request with its `;params` stripped and answers 400
+/// when the two matches disagree: `GET /api;v=2` matches `Exact /api;v=2` as sent and the
+/// catch-all (or nothing) as `/api`, so a rule written with one is never reached. An escaped
+/// `%3B` is data, not a parameter, and stays allowed. A RegularExpression is left alone.
+fn normalized_path(kind: &str, value: &str) -> Result<String, Unsupported> {
+    if value.contains(';') {
+        return Err(Unsupported(format!(
+            "path match {kind} value {value:?} contains ;, which servlet backends read as path \
+             parameters, so it cannot be matched safely"
+        )));
+    }
+    crate::path::normalize_path(value).map_err(|why| {
+        Unsupported(format!(
+            "path match {kind} {value:?} can never match: the gateway refuses such a request \
+             path ({why})"
+        ))
     })
 }
 
@@ -1150,5 +1183,118 @@ mod rate_limit_tests {
         assert_eq!(parse_rate_limit("20"), None);
         assert_eq!(parse_rate_limit("soon"), None);
         assert_eq!(parse_rate_limit("20/fortnight"), None);
+    }
+
+    fn path_of(type_: &str, value: &str) -> Result<PathMatch, Unsupported> {
+        let m = HttpRouteMatch {
+            path: Some(crate::input::HttpPathMatch {
+                type_: Some(type_.to_string()),
+                value: Some(value.to_string()),
+            }),
+            ..Default::default()
+        };
+        compile_match(&m).map(|m| m.path)
+    }
+
+    /// #250: Exact and PathPrefix values are written the way the data plane normalises a
+    /// request's path, which it then compares byte for byte.
+    #[test]
+    fn exact_and_prefix_values_take_the_data_planes_normal_form() {
+        for (value, exact, prefix) in [
+            // An escaped unreserved character is decoded.
+            ("/%7Ejohn", "/~john", "/~john"),
+            ("/%61dmin/%2D", "/admin/-", "/admin/-"),
+            // Any other escape keeps its meaning, an encoded slash included, in uppercase hex.
+            ("/files/a%2fb", "/files/a%2Fb", "/files/a%2Fb"),
+            ("/q%3f%c3%a9", "/q%3F%C3%A9", "/q%3F%C3%A9"),
+            // Repeated slashes merge; the prefix still loses its trailing slash afterwards.
+            ("//api//v1//", "/api/v1/", "/api/v1"),
+            ("/x%2f/", "/x%2F/", "/x%2F"),
+            // Already normal values, raw UTF-8 and dots inside a segment are left alone.
+            ("/api/v1", "/api/v1", "/api/v1"),
+            ("/café", "/café", "/café"),
+            ("/v1.2/..x", "/v1.2/..x", "/v1.2/..x"),
+            ("/", "/", "/"),
+        ] {
+            assert_eq!(
+                path_of("Exact", value).unwrap(),
+                PathMatch::Exact(exact.into()),
+                "Exact {value:?}"
+            );
+            assert_eq!(
+                path_of("PathPrefix", value).unwrap(),
+                PathMatch::Prefix(prefix.into()),
+                "PathPrefix {value:?}"
+            );
+            assert_eq!(
+                crate::path::normalize_path(value).unwrap(),
+                exact,
+                "the value is exactly what a request for it is matched as"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_and_prefix_values_no_request_can_carry_are_refused() {
+        // The data plane answers 400 to each of these as a request path, so a rule written with
+        // one could never be reached.
+        for value in [
+            "/a/../b",
+            "/a/./b",
+            "/public/%2e%2e/admin",
+            "/a%zz",
+            "/a%2",
+            "/a%",
+            "relative",
+        ] {
+            for type_ in ["Exact", "PathPrefix"] {
+                let Err(Unsupported(msg)) = path_of(type_, value) else {
+                    panic!("{type_} {value:?} was accepted");
+                };
+                assert!(
+                    msg.contains(type_) && msg.contains("can never match"),
+                    "{msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_and_prefix_values_with_path_parameters_are_refused() {
+        // #247: the data plane refuses a request whose `;params` move it to another rule, which
+        // is every request for a rule written with one.
+        for value in [
+            "/api;v=2",
+            "/items;type=book",
+            "/a;",
+            "/public/..;/admin",
+            "/;x/a",
+        ] {
+            for type_ in ["Exact", "PathPrefix"] {
+                let Err(Unsupported(msg)) = path_of(type_, value) else {
+                    panic!("{type_} {value:?} was accepted");
+                };
+                assert!(msg.contains(type_) && msg.contains("contains ;"), "{msg}");
+            }
+        }
+        // An escaped semicolon is data, which no servlet container reads as a parameter.
+        assert_eq!(
+            path_of("Exact", "/api%3bv=2").unwrap(),
+            PathMatch::Exact("/api%3Bv=2".into())
+        );
+        // A pattern is the author's own; the data plane's check covers what it matches.
+        assert_eq!(
+            path_of("RegularExpression", "/api;v=.*").unwrap(),
+            PathMatch::Regex("/api;v=.*".into())
+        );
+    }
+
+    #[test]
+    fn a_regex_path_is_served_as_written() {
+        // A pattern is the author's own and is matched against the normalised path as is.
+        assert_eq!(
+            path_of("RegularExpression", "/a%2f.*").unwrap(),
+            PathMatch::Regex("/a%2f.*".into())
+        );
     }
 }
