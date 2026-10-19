@@ -13,7 +13,7 @@
 //!   so a flood of unique, long names costs the counters no more than one of short ones.
 //! - **An address.** Ten failures from one address in a minute refuse its sign-ins until the
 //!   minute is out, whatever names they try. A provider's refusal on the callback counts here,
-//!   naming no account.
+//!   naming no account, and so does a code the provider will not exchange for tokens.
 //!
 //! An attempt is counted from the moment it is let through, not from when its password has been
 //! verified: `begin` reserves it against both counters as a failure in waiting, and its outcome

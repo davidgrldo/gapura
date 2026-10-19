@@ -26,13 +26,14 @@ use openidconnect::core::{
     CoreTokenIntrospectionResponse, CoreTokenType,
 };
 use openidconnect::{
-    AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
-    StandardTokenResponse, TokenResponse,
+    AdditionalClaims, AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret,
+    CsrfToken, EmptyExtraTokenFields, EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenClaims,
+    IdTokenFields, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+    SignatureVerificationError, StandardErrorResponse, StandardTokenResponse, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The cookie a session travels in. `api` reads it back out under the same name.
 ///
@@ -123,6 +124,26 @@ type Client = openidconnect::Client<
     EndpointMaybeSet,
 >;
 
+/// How long a discovered client, the provider's metadata and its signing keys, is used before
+/// discovery runs again. Long enough that anonymous sign-ins cost the provider nothing between
+/// refreshes (#253); short enough that a changed endpoint or a newly published key is followed
+/// within minutes without a restart.
+const DISCOVERY_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// How long a failed discovery is the answer for, rather than asked again. A provider that is
+/// down, or refusing this client for its rate, is not asked once per sign-in meanwhile.
+const DISCOVERY_RETRY: Duration = Duration::from_secs(5);
+
+/// How often an ID token signed with a key the cached set does not hold may force discovery to
+/// run early. Keys rotate rarely; tokens naming an unknown key could arrive on every callback.
+const REDISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many authorization codes may be exchanged with the provider at once. Each is held for up to
+/// `REQUEST_TIMEOUT`, and the callback answers anyone holding a state `begin` handed out, so
+/// without a bound a burst of junk codes becomes as many requests at the provider. A person
+/// signing in holds one for a fraction of a second.
+const MAX_EXCHANGES: usize = 8;
+
 /// What this console was registered as with the identity provider, and what it asks for.
 pub struct Oidc {
     issuer: IssuerUrl,
@@ -134,6 +155,29 @@ pub struct Oidc {
     pub groups_claim: String,
     scopes: Vec<Scope>,
     http: reqwest::Client,
+    /// The client discovery last built, shared by every request. Its lock is held across a
+    /// discovery, so requests that find it stale together wait for one discovery between them.
+    discovery: tokio::sync::Mutex<Discovery>,
+    /// Places for a code exchange; see `MAX_EXCHANGES`.
+    exchanges: tokio::sync::Semaphore,
+}
+
+/// A client built from the provider's discovery document and signing keys, and until when it is
+/// used: `DISCOVERY_TTL` after it was built, so a later discovery is always the later `until`.
+#[derive(Clone)]
+struct Discovered {
+    client: Arc<Client>,
+    until: Instant,
+}
+
+/// What `Oidc::client` remembers between requests.
+#[derive(Default)]
+struct Discovery {
+    current: Option<Discovered>,
+    /// When discovery last failed, and why: the answer until `DISCOVERY_RETRY` has passed.
+    failed: Option<(Instant, String)>,
+    /// When an unknown signing key last forced a discovery; see `REDISCOVERY_INTERVAL`.
+    forced: Option<Instant>,
 }
 
 impl Oidc {
@@ -164,6 +208,8 @@ impl Oidc {
                 .timeout(REQUEST_TIMEOUT)
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()?,
+            discovery: Default::default(),
+            exchanges: tokio::sync::Semaphore::new(MAX_EXCHANGES),
         })
     }
 
@@ -187,24 +233,77 @@ impl Oidc {
         &self.issuer_name
     }
 
-    /// A client built from the provider's discovery document.
+    /// A client built from the provider's discovery document and signing keys.
     ///
-    /// Discovery runs per sign-in rather than once at startup. It costs two requests on a
-    /// path a person only takes when their session has run out, and in exchange a provider
-    /// that rotates its signing keys is followed without a restart, rather than through a
-    /// cache whose staleness nobody would notice until every login began failing. It also
-    /// keeps an identity-provider outage from being something that stops this process from
-    /// starting, which would take the console's already signed-in readers down with it.
-    async fn client(&self) -> anyhow::Result<Client> {
-        let metadata = CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http)
+    /// Discovery runs when a sign-in needs it, not once at startup, so an identity-provider
+    /// outage never stops this process from starting, which would take the console's already
+    /// signed-in readers down with it. What it finds is kept for `DISCOVERY_TTL` and shared:
+    /// `begin` answers anyone, and running discovery for each of them cost the provider two
+    /// requests per anonymous `GET /auth/login` (#253). A provider that rotates its signing keys
+    /// is still followed without a restart: by the next discovery, or at once when a token
+    /// names a key the kept set lacks (`rediscover`).
+    async fn client(&self) -> anyhow::Result<Discovered> {
+        let mut discovery = self.discovery.lock().await;
+        let now = Instant::now();
+        if let Some(current) = discovery.current.as_ref().filter(|d| now < d.until) {
+            return Ok(current.clone());
+        }
+        // Requests that waited on the lock behind a discovery that failed get its answer too,
+        // rather than each asking again in turn.
+        if let Some((_, error)) = discovery
+            .failed
+            .as_ref()
+            .filter(|(at, _)| now.duration_since(*at) < DISCOVERY_RETRY)
+        {
+            anyhow::bail!("{error}");
+        }
+        self.discover_into(&mut discovery).await
+    }
+
+    /// A client from a discovery run now, because an ID token named a signing key `used` does not
+    /// hold: the provider may have rotated its keys since. `None` when one was forced less than
+    /// `REDISCOVERY_INTERVAL` ago, so tokens naming unknown keys cannot make every callback a
+    /// discovery. A client discovered since `used` was is returned as it is.
+    async fn rediscover(&self, used: &Discovered) -> Option<anyhow::Result<Discovered>> {
+        let mut discovery = self.discovery.lock().await;
+        if let Some(newer) = discovery.current.as_ref().filter(|d| d.until > used.until) {
+            return Some(Ok(newer.clone()));
+        }
+        let now = Instant::now();
+        if discovery
+            .forced
+            .is_some_and(|at| now.duration_since(at) < REDISCOVERY_INTERVAL)
+        {
+            return None;
+        }
+        discovery.forced = Some(now);
+        Some(self.discover_into(&mut discovery).await)
+    }
+
+    /// Runs discovery and remembers what came of it, under the lock `discovery` was taken from.
+    async fn discover_into(&self, discovery: &mut Discovery) -> anyhow::Result<Discovered> {
+        let discovered = CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http)
             .await
-            .map_err(|e| anyhow::anyhow!("reading the provider's discovery document: {e}"))?;
-        Ok(Client::from_provider_metadata(
-            metadata,
-            self.client_id.clone(),
-            Some(self.client_secret.clone()),
-        )
-        .set_redirect_uri(self.redirect.clone()))
+            .map(|metadata| Discovered {
+                client: Arc::new(
+                    Client::from_provider_metadata(
+                        metadata,
+                        self.client_id.clone(),
+                        Some(self.client_secret.clone()),
+                    )
+                    .set_redirect_uri(self.redirect.clone()),
+                ),
+                until: Instant::now() + DISCOVERY_TTL,
+            })
+            .map_err(|e| anyhow::anyhow!("reading the provider's discovery document: {e}"));
+        match &discovered {
+            Ok(discovered) => {
+                discovery.current = Some(discovered.clone());
+                discovery.failed = None;
+            }
+            Err(error) => discovery.failed = Some((Instant::now(), format!("{error:#}"))),
+        }
+        discovered
     }
 }
 
@@ -644,7 +743,7 @@ pub async fn begin(
             sign_up,
         ));
     }
-    let client = state.oidc.client().await.map_err(|error| {
+    let Discovered { client, .. } = state.oidc.client().await.map_err(|error| {
         tracing::warn!(%error, "cannot reach the identity provider to begin a sign-in");
         StatusCode::BAD_GATEWAY
     })?;
@@ -1125,7 +1224,8 @@ fn unavailable_page() -> Response {
     )
 }
 
-/// What sign-in answers when too many password checks are already waiting (#157).
+/// What sign-in answers when too many password checks are already waiting (#157), or too many
+/// authorization codes are being exchanged with the identity provider (#253).
 ///
 /// 503, not 429: the queue is the whole console's, so it says nothing about this client's own
 /// rate, and the attempt is not counted against it. It is decided before any hash is checked,
@@ -1221,10 +1321,10 @@ pub async fn callback(
         attempt.failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
-    // Only a provider's refusal is counted here. Nothing after it is a guess this address could
-    // repeat to learn something, so the reservation is given back now rather than held across
-    // the exchange with the provider.
-    drop(attempt);
+    // The reservation is held across the exchange with the provider: a code it refuses counts
+    // against the address, so a loop of junk codes is held to the limit a loop of wrong passwords
+    // is (#253). Every answer before the exchange, or that says nothing about the code, such as
+    // the provider being unreachable or the exchanges busy, drops it, which gives it back.
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -1248,36 +1348,18 @@ pub async fn callback(
         return Ok(stale_sign_in_page());
     }
 
-    let client = state.oidc.client().await.map_err(|error| {
-        tracing::warn!(%error, "cannot reach the identity provider to finish a sign-in");
-        StatusCode::BAD_GATEWAY
-    })?;
-    let tokens = client
-        .exchange_code(AuthorizationCode::new(code))
-        .map_err(|error| {
-            tracing::error!(%error, "the provider's metadata has no token endpoint");
-            StatusCode::BAD_GATEWAY
-        })?
-        .set_pkce_verifier(PkceCodeVerifier::new(pending.verifier))
-        .request_async(&state.oidc.http)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "exchanging an authorization code failed");
-            StatusCode::UNAUTHORIZED
-        })?;
-
-    // Verifying the ID token is what makes any of this worth anything: signature, issuer,
-    // audience, and the nonce that ties this token to the redirect we sent this browser on.
-    let id_token = tokens.id_token().ok_or_else(|| {
-        tracing::warn!("the provider returned no ID token");
-        StatusCode::UNAUTHORIZED
-    })?;
-    let claims = id_token
-        .claims(&client.id_token_verifier(), &Nonce::new(pending.nonce))
-        .map_err(|error| {
-            tracing::warn!(%error, "an ID token did not verify");
-            StatusCode::UNAUTHORIZED
-        })?;
+    let claims = match exchange(&state.oidc, code, pending.verifier, pending.nonce).await {
+        Ok(claims) => {
+            attempt.succeeded();
+            claims
+        }
+        Err(Exchange::Refused) => {
+            attempt.failed();
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(Exchange::Busy) => return Ok(busy_page()),
+        Err(Exchange::Unavailable) => return Err(StatusCode::BAD_GATEWAY),
+    };
 
     let subject = claims.subject().to_string();
     // The origin decides whether the sign-in can end in a session at all: a Secure cookie
@@ -1361,6 +1443,87 @@ pub async fn callback(
         header::HeaderValue::from_static(RETIRED_COOKIE),
     );
     Ok(response)
+}
+
+/// Why `exchange` produced no verified claims.
+enum Exchange {
+    /// The provider refused the code, or what it answered with did not verify: counted against
+    /// the address, like a wrong password.
+    Refused,
+    /// `MAX_EXCHANGES` were already in flight. Says nothing about the code, so it is not counted.
+    Busy,
+    /// The provider could not be discovered, or its metadata names no token endpoint: not counted.
+    Unavailable,
+}
+
+/// The ID token's verified claims, for `code` redeemed with `verifier`, and carrying `nonce`.
+async fn exchange(
+    oidc: &Oidc,
+    code: String,
+    verifier: String,
+    nonce: String,
+) -> Result<IdTokenClaims<ExtraClaims, CoreGenderClaim>, Exchange> {
+    let discovered = oidc.client().await.map_err(|error| {
+        tracing::warn!(%error, "cannot reach the identity provider to finish a sign-in");
+        Exchange::Unavailable
+    })?;
+    let request = discovered
+        .client
+        .exchange_code(AuthorizationCode::new(code))
+        .map_err(|error| {
+            tracing::error!(%error, "the provider's metadata has no token endpoint");
+            Exchange::Unavailable
+        })?
+        .set_pkce_verifier(PkceCodeVerifier::new(verifier));
+    let tokens = {
+        // Held only for the request to the provider, not for what follows it.
+        let Ok(_exchanging) = oidc.exchanges.try_acquire() else {
+            tracing::warn!("too many authorization codes are being exchanged at once");
+            return Err(Exchange::Busy);
+        };
+        request.request_async(&oidc.http).await.map_err(|error| {
+            tracing::warn!(%error, "exchanging an authorization code failed");
+            Exchange::Refused
+        })?
+    };
+
+    // Verifying the ID token is what makes any of this worth anything: signature, issuer,
+    // audience, and the nonce that ties this token to the redirect we sent this browser on.
+    let id_token = tokens.id_token().ok_or_else(|| {
+        tracing::warn!("the provider returned no ID token");
+        Exchange::Refused
+    })?;
+    let nonce = Nonce::new(nonce);
+    let refused = |error: ClaimsVerificationError| {
+        tracing::warn!(%error, "an ID token did not verify");
+        Exchange::Refused
+    };
+    let verified = id_token
+        .claims(&discovered.client.id_token_verifier(), &nonce)
+        .cloned();
+    match verified {
+        Ok(claims) => Ok(claims),
+        // Signed with a key the kept set does not hold: the provider may have rotated its keys
+        // since they were read, so they are read again, at most once per interval, and the
+        // token checked against those. The code is spent; the token already in hand is what is
+        // checked again.
+        Err(ClaimsVerificationError::SignatureVerification(
+            SignatureVerificationError::NoMatchingKey,
+        )) => match oidc.rediscover(&discovered).await {
+            Some(Ok(fresh)) => id_token
+                .claims(&fresh.client.id_token_verifier(), &nonce)
+                .cloned()
+                .map_err(refused),
+            Some(Err(error)) => {
+                tracing::warn!(%error, "an ID token names an unknown key and rediscovery failed");
+                Err(Exchange::Refused)
+            }
+            None => Err(refused(ClaimsVerificationError::SignatureVerification(
+                SignatureVerificationError::NoMatchingKey,
+            ))),
+        },
+        Err(error) => Err(refused(error)),
+    }
 }
 
 /// A callback that cannot finish this browser's sign-in: its state is spent, expired, never
@@ -1527,6 +1690,7 @@ mod against_a_stub_provider {
     use openidconnect::core::CoreHmacKey;
     use openidconnect::{Audience, IdToken, IdTokenClaims, StandardClaims, SubjectIdentifier};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
@@ -1546,10 +1710,46 @@ mod against_a_stub_provider {
         /// The verifier it carried, to check against the challenge the sign-in began with.
         verifier: Mutex<Option<String>>,
         groups: Mutex<serde_json::Value>,
+        /// How many times the discovery document, the key set and the token endpoint were asked.
+        discoveries: AtomicUsize,
+        key_sets: AtomicUsize,
+        exchanges: AtomicUsize,
+        /// Set to refuse every code, as a provider refuses one it never issued.
+        refuse_codes: AtomicBool,
+        /// Set to take the nonce from the code rather than from `nonce`, so sign-ins in flight
+        /// together each get their own: `sign_in_with_own_code` sends its nonce as its code.
+        code_is_nonce: AtomicBool,
+        /// Set to hold every code exchange until it has a permit.
+        gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+        /// Set to sign ID tokens with this Ed25519 key, by PEM and key ID, rather than with the
+        /// client secret.
+        signer: Mutex<Option<(String, String)>>,
+        /// The key set served, `[]` until set.
+        keys: Mutex<Vec<serde_json::Value>>,
     }
 
-    fn id_token(issuer: &str, provider: &Provider) -> String {
-        let nonce = provider.nonce.lock().unwrap().clone().unwrap_or_default();
+    /// A fresh Ed25519 key's PEM, and the public half as the key set serves it under `kid`.
+    fn ed25519(kid: &str) -> (String, serde_json::Value) {
+        use openidconnect::core::CoreEdDsaPrivateSigningKey;
+        use openidconnect::{JsonWebKeyId, PrivateSigningKey};
+        let pem = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+            .unwrap()
+            .serialize_pem();
+        let key = CoreEdDsaPrivateSigningKey::from_ed25519_pem(
+            &pem,
+            Some(JsonWebKeyId::new(kid.to_string())),
+        )
+        .unwrap();
+        (
+            pem,
+            serde_json::to_value(key.as_verification_key()).unwrap(),
+        )
+    }
+
+    fn id_token(issuer: &str, provider: &Provider, code_nonce: Option<String>) -> String {
+        let nonce = code_nonce
+            .or_else(|| provider.nonce.lock().unwrap().clone())
+            .unwrap_or_default();
         let mut other = serde_json::Map::new();
         other.insert(
             "groups".to_string(),
@@ -1564,18 +1764,32 @@ mod against_a_stub_provider {
             ExtraClaims { other },
         )
         .set_nonce(Some(Nonce::new(nonce)));
-        IdToken::<
+        type Token = IdToken<
             ExtraClaims,
             CoreGenderClaim,
             CoreJweContentEncryptionAlgorithm,
             CoreJwsSigningAlgorithm,
-        >::new(
-            claims,
-            &CoreHmacKey::new(CLIENT_SECRET.as_bytes().to_vec()),
-            CoreJwsSigningAlgorithm::HmacSha256,
-            None,
-            None,
-        )
+        >;
+        match provider.signer.lock().unwrap().as_ref() {
+            Some((pem, kid)) => Token::new(
+                claims,
+                &openidconnect::core::CoreEdDsaPrivateSigningKey::from_ed25519_pem(
+                    pem,
+                    Some(openidconnect::JsonWebKeyId::new(kid.clone())),
+                )
+                .unwrap(),
+                CoreJwsSigningAlgorithm::EdDsa,
+                None,
+                None,
+            ),
+            None => Token::new(
+                claims,
+                &CoreHmacKey::new(CLIENT_SECRET.as_bytes().to_vec()),
+                CoreJwsSigningAlgorithm::HmacSha256,
+                None,
+                None,
+            ),
+        }
         .unwrap()
         .to_string()
     }
@@ -1591,20 +1805,26 @@ mod against_a_stub_provider {
             "jwks_uri": format!("{issuer}/jwks"),
             "response_types_supported": ["code"],
             "subject_types_supported": ["public"],
-            "id_token_signing_alg_values_supported": ["HS256"],
+            "id_token_signing_alg_values_supported": ["HS256", "EdDSA"],
         });
         let token_issuer = issuer.clone();
+        let (discovering, keying) = (provider.clone(), provider.clone());
         let app = Router::new()
             .route(
                 "/.well-known/openid-configuration",
                 get(move || {
+                    discovering.discoveries.fetch_add(1, Ordering::SeqCst);
                     let document = document.clone();
                     async move { Json(document) }
                 }),
             )
             .route(
                 "/jwks",
-                get(|| async { Json(serde_json::json!({"keys": []})) }),
+                get(move || {
+                    keying.key_sets.fetch_add(1, Ordering::SeqCst);
+                    let keys = keying.keys.lock().unwrap().clone();
+                    async move { Json(serde_json::json!({ "keys": keys })) }
+                }),
             )
             .route(
                 "/token",
@@ -1612,16 +1832,36 @@ mod against_a_stub_provider {
                     let provider = provider.clone();
                     let issuer = token_issuer.clone();
                     async move {
-                        *provider.saw_verifier.lock().unwrap() = body.contains("code_verifier=");
-                        *provider.verifier.lock().unwrap() = body
-                            .split('&')
-                            .find_map(|pair| pair.strip_prefix("code_verifier="))
-                            .map(str::to_string);
-                        Json(serde_json::json!({
-                            "access_token": "an access token",
-                            "token_type": "Bearer",
-                            "id_token": id_token(&issuer, &provider),
-                        }))
+                        provider.exchanges.fetch_add(1, Ordering::SeqCst);
+                        let gate = provider.gate.lock().unwrap().clone();
+                        if let Some(gate) = gate {
+                            let _passed = gate.acquire().await.unwrap();
+                        }
+                        let form: HashMap<String, String> =
+                            openidconnect::url::form_urlencoded::parse(body.as_bytes())
+                                .into_owned()
+                                .collect();
+                        if provider.refuse_codes.load(Ordering::SeqCst) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({ "error": "invalid_grant" })),
+                            );
+                        }
+                        *provider.saw_verifier.lock().unwrap() = form.contains_key("code_verifier");
+                        *provider.verifier.lock().unwrap() = form.get("code_verifier").cloned();
+                        let code_nonce = provider
+                            .code_is_nonce
+                            .load(Ordering::SeqCst)
+                            .then(|| form.get("code").cloned())
+                            .flatten();
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "access_token": "an access token",
+                                "token_type": "Bearer",
+                                "id_token": id_token(&issuer, &provider, code_nonce),
+                            })),
+                        )
                     }
                 }),
             );
@@ -2329,6 +2569,208 @@ mod against_a_stub_provider {
             body.contains("HTTPS"),
             "and what would work instead: {body}"
         );
+    }
+
+    /// One sign-in, begun and finished with its own nonce as its code, so several can be in
+    /// flight together and each be answered with its own (`Provider::code_is_nonce`).
+    async fn sign_in_with_own_code(state: &AppState) -> axum::response::Response {
+        let (csrf, nonce, cookie) = begin_a_login(state).await;
+        get_from_with(
+            state,
+            &format!("/auth/callback?code={}&state={csrf}", query_escape(&nonce)),
+            &[("x-forwarded-proto", "https"), ("cookie", &cookie)],
+        )
+        .await
+    }
+
+    /// Waits, a few seconds at most, for `done`.
+    async fn until(done: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("in time");
+    }
+
+    #[tokio::test]
+    async fn sign_ins_within_the_ttl_share_one_discovery() {
+        // #253: discovery ran for every begin and every callback, two requests at the provider
+        // each, for anyone who asked for /auth/login.
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        for _ in 0..3 {
+            let response = sign_in_through(&state, &provider).await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        }
+        begin_a_login(&state).await;
+        assert_eq!(provider.discoveries.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.key_sets.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.exchanges.load(Ordering::SeqCst), 3);
+
+        // Past its TTL, the next sign-in reads it again, and the ones after use that.
+        state
+            .oidc
+            .discovery
+            .lock()
+            .await
+            .current
+            .as_mut()
+            .unwrap()
+            .until = Instant::now();
+        begin_a_login(&state).await;
+        let response = sign_in_through(&state, &provider).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(provider.discoveries.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.key_sets.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sign_ins_that_find_no_client_together_wait_for_one_discovery() {
+        let provider = Arc::new(Provider::default());
+        let state = state(&stub(provider.clone()).await);
+        let mut begun = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let state = state.clone();
+            begun.spawn(async move { get_from(&state, "/auth/login").await.status() });
+        }
+        while let Some(status) = begun.join_next().await {
+            assert_eq!(status.unwrap(), StatusCode::SEE_OTHER);
+        }
+        assert_eq!(provider.discoveries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_is_down_is_not_asked_again_on_every_sign_in() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counting = asked.clone();
+        let app = Router::new().route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                counting.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::TOO_MANY_REQUESTS }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = state(&issuer);
+        for _ in 0..5 {
+            assert_eq!(
+                get_from(&state, "/auth/login").await.status(),
+                StatusCode::BAD_GATEWAY
+            );
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_code_the_provider_refuses_counts_against_the_address() {
+        // #253: the reservation was given back before the exchange, so a loop of begin and a
+        // junk code cost the provider a token request each, without limit.
+        let provider = Arc::new(Provider::default());
+        provider.refuse_codes.store(true, Ordering::SeqCst);
+        let state = state(&stub(provider.clone()).await);
+        for _ in 0..10 {
+            let (csrf, _, cookie) = begin_a_login(&state).await;
+            let response = come_back(&state, &csrf, &cookie).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(response.headers().get(header::SET_COOKIE).is_none());
+        }
+        assert_eq!(provider.exchanges.load(Ordering::SeqCst), 10);
+
+        let (csrf, _, cookie) = begin_a_login(&state).await;
+        let response = come_back(&state, &csrf, &cookie).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            provider.exchanges.load(Ordering::SeqCst),
+            10,
+            "a locked address does not reach the token endpoint"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exchanges_past_the_bound_are_answered_busy_and_counted_against_nothing() {
+        use super::local_login_flow_tests::assert_busy;
+        let provider = Arc::new(Provider::default());
+        provider.code_is_nonce.store(true, Ordering::SeqCst);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *provider.gate.lock().unwrap() = Some(gate.clone());
+        let mut state = state(&stub(provider.clone()).await);
+        Arc::get_mut(&mut state.oidc).unwrap().exchanges = tokio::sync::Semaphore::new(2);
+
+        let mut held = tokio::task::JoinSet::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            held.spawn(async move { sign_in_with_own_code(&state).await.status() });
+        }
+        until(|| provider.exchanges.load(Ordering::SeqCst) == 2).await;
+
+        // More than the address limit's worth, had a busy answer been counted.
+        for _ in 0..12 {
+            // Answered at once: one that joined the exchanges would wait at the gate.
+            let answered =
+                tokio::time::timeout(Duration::from_secs(5), sign_in_with_own_code(&state))
+                    .await
+                    .expect("answered without waiting for a place");
+            assert_busy(answered).await;
+        }
+        assert_eq!(
+            provider.exchanges.load(Ordering::SeqCst),
+            2,
+            "a busy answer does not reach the token endpoint"
+        );
+
+        *provider.gate.lock().unwrap() = None;
+        gate.add_permits(2);
+        while let Some(status) = held.join_next().await {
+            assert_eq!(status.unwrap(), StatusCode::SEE_OTHER);
+        }
+        assert_eq!(
+            sign_in_with_own_code(&state).await.status(),
+            StatusCode::SEE_OTHER,
+            "places are given back"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_key_is_read_again_but_not_for_every_token_naming_one() {
+        let provider = Arc::new(Provider::default());
+        let (first_pem, first) = ed25519("first");
+        *provider.signer.lock().unwrap() = Some((first_pem, "first".to_string()));
+        *provider.keys.lock().unwrap() = vec![first.clone()];
+        let state = state(&stub(provider.clone()).await);
+        assert_eq!(
+            sign_in_through(&state, &provider).await.status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(provider.key_sets.load(Ordering::SeqCst), 1);
+
+        // The provider publishes a second key and signs with it at once: the kept set does not
+        // hold it, so it is read again, and the same token verifies.
+        let (second_pem, second) = ed25519("second");
+        *provider.signer.lock().unwrap() = Some((second_pem, "second".to_string()));
+        *provider.keys.lock().unwrap() = vec![first, second];
+        assert_eq!(
+            sign_in_through(&state, &provider).await.status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(provider.discoveries.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.key_sets.load(Ordering::SeqCst), 2);
+
+        // A token naming a key nobody published is refused, and soon after the last forced
+        // discovery it forces none.
+        let (unpublished, _) = ed25519("unpublished");
+        *provider.signer.lock().unwrap() = Some((unpublished, "unpublished".to_string()));
+        for _ in 0..3 {
+            assert_eq!(
+                sign_in_through(&state, &provider).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(provider.discoveries.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.key_sets.load(Ordering::SeqCst), 2);
     }
 }
 

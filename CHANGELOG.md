@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- OIDC sign-in no longer lets anonymous requests run up the identity provider's rate limits
+  (#253). Discovery (the discovery document and the signing keys) ran on every `GET /auth/login`
+  and every callback; the client it builds is now kept for five minutes and shared, concurrent
+  misses wait for one discovery, and a failed discovery is the answer for five seconds rather
+  than asked again per request. An ID token signed with a key the kept set lacks reads the keys
+  again at once, at most every 30 seconds, so a provider's key rotation is still followed. At
+  most eight authorization codes are exchanged at once; past that the callback answers the
+  existing 503 "busy" page. A code the provider refuses, or a token that does not verify, now
+  counts against the address's sign-in limit (ten a minute) instead of being given back.
 - CI hardening (#234, #235 follow-ups): a new `workflows` job lints the workflows with zizmor and
   actionlint, so a template expanded inside a `run:` script fails CI, and the k3s leg installs
   into a namespace enforcing the restricted Pod Security level and runs `helm test` there.
