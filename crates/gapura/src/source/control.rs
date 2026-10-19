@@ -4,6 +4,8 @@
 //! the configuration that replaces it. The call is also the liveness signal: there is no second
 //! heartbeat reporting a fact this one already carries.
 
+use std::collections::{BTreeSet, HashMap};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,7 +53,10 @@ impl ControlSource {
     /// matters as much as the version: `run` re-resolves backends from it on every tick, and a
     /// start whose first poll is a 304 receives no configuration to resolve from otherwise --
     /// that start used to keep whatever one resolution at boot produced, forever.
-    pub async fn prime(&self) -> Option<(String, Config)> {
+    ///
+    /// `in_flight` is the set `run` carries across its ticks, so a lookup that outlives this
+    /// first resolution is waited for by the next one rather than started a second time.
+    pub async fn prime(&self, in_flight: &mut InFlight) -> Option<(String, Config)> {
         let path = self.cache_path.as_ref()?;
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -64,7 +69,14 @@ impl ControlSource {
         match serde_json::from_slice::<Cached>(&bytes) {
             Ok(cached) => {
                 let served = self.store.load().config.clone();
-                let config = resolve(cached.config.clone(), &served, lookup, LOOKUP_TIMEOUT).await;
+                let config = resolve(
+                    cached.config.clone(),
+                    &served,
+                    lookup,
+                    LOOKUP_TIMEOUT,
+                    in_flight,
+                )
+                .await;
                 self.store.swap_from_cache(config);
                 tracing::info!(
                     version = %cached.version,
@@ -139,7 +151,8 @@ impl ControlSource {
             }
         }
         let client = builder.build().expect("a reqwest client");
-        let (mut held, mut latest) = match self.prime().await {
+        let mut in_flight = InFlight::new();
+        let (mut held, mut latest) = match self.prime(&mut in_flight).await {
             Some((version, config)) => (Some(version), Some(config)),
             None => (None, None),
         };
@@ -172,7 +185,14 @@ impl ControlSource {
             // result differs, so a quiet cluster does not churn the runtime.
             if let Some(config) = &latest {
                 let served = self.store.load().config.clone();
-                let resolved = resolve(config.clone(), &served, lookup, LOOKUP_TIMEOUT).await;
+                let resolved = resolve(
+                    config.clone(),
+                    &served,
+                    lookup,
+                    LOOKUP_TIMEOUT,
+                    &mut in_flight,
+                )
+                .await;
                 if served != resolved {
                     self.store.swap(resolved, Vec::new());
                 }
@@ -195,6 +215,21 @@ impl ControlSource {
 /// upstream lookup needs, and short beside the default poll interval.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Lookups that outlived their tick's timeout and are still running, by `host:port`.
+///
+/// A timeout drops the future, not the lookup (#251): `tokio::net::lookup_host` runs
+/// `getaddrinfo` on the blocking pool, and that call runs on to glibc's own limit -- tens of
+/// seconds with `ndots:5` and a search list -- whatever happens to the future. With every name
+/// looked up on every tick, a black-holed DNS server then started one more blocking call per
+/// name per tick, each outliving several ticks, until the pool reached its thread cap and its
+/// queue grew for as long as the outage lasted. So each lookup runs as its own task, a tick that
+/// gives up on one keeps its handle here, and the next tick waits on that handle instead of
+/// starting another. That bounds the blocking calls at one per distinct name, whatever the
+/// outage costs, which is what the configuration already asks for on a healthy tick. A semaphore
+/// would bound them too, but it would still let names queue behind the ones that hang, and it
+/// adds a number to choose; this needs none.
+pub type InFlight = HashMap<String, tokio::task::JoinHandle<std::io::Result<Vec<SocketAddr>>>>;
+
 /// Fill in `Cluster::endpoints` for every cluster that names a host instead.
 ///
 /// Only the data plane can do this. Data planes in another network are deliberately supported,
@@ -207,44 +242,64 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 /// `config` cannot supply them: it is the control plane's configuration, whose resolve clusters
 /// are always empty by construction, so leaving them alone on error -- what this used to do --
 /// swapped in an empty cluster and turned a CoreDNS restart into a 503 for every such backend.
-/// A lookup that outlasts `timeout` is a resolver error too.
+/// A lookup that outlasts `timeout` is a resolver error too; it is left running in `in_flight`
+/// and its answer, when it comes, is the one a later tick uses.
 ///
-/// Every cluster is looked up at once, so one name that hangs costs a tick at most `timeout`,
-/// not `timeout` for each name behind it.
+/// Every name is looked up at once, so one name that hangs costs a tick at most `timeout`,
+/// not `timeout` for each name behind it. Clusters naming the same `host:port` share a lookup.
 async fn resolve<F, Fut>(
     mut config: Config,
     served: &Config,
     lookup: F,
     timeout: Duration,
+    in_flight: &mut InFlight,
 ) -> Config
 where
     F: Fn(String) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
+    Fut: std::future::Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'static,
 {
-    let lookups = config.clusters.iter().filter_map(|(key, cluster)| {
-        let target = cluster.resolve.clone()?;
-        let pending =
-            tokio::time::timeout(timeout, lookup(format!("{}:{}", target.host, target.port)));
-        Some(async move {
-            let result = pending.await.unwrap_or_else(|_| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("no answer within {timeout:?}"),
-                ))
-            });
-            (key.clone(), target, result)
-        })
+    let targets: BTreeSet<String> = config
+        .clusters
+        .values()
+        .filter_map(|c| c.resolve.as_ref())
+        .map(|t| format!("{}:{}", t.host, t.port))
+        .collect();
+    // What is left in `previous` afterwards is for names no longer configured. Dropping those
+    // handles detaches their tasks, which end with their blocking calls.
+    let mut previous = std::mem::take(in_flight);
+    let lookups = targets.into_iter().map(|target| {
+        let mut handle = previous
+            .remove(&target)
+            .unwrap_or_else(|| tokio::spawn(lookup(target.clone())));
+        async move {
+            let outcome = tokio::time::timeout(timeout, &mut handle).await;
+            (target, handle, outcome)
+        }
     });
-    let results = futures::future::join_all(lookups).await;
+    let mut answers = HashMap::new();
+    for (target, handle, outcome) in futures::future::join_all(lookups).await {
+        let answer = match outcome {
+            Ok(Ok(result)) => result.map_err(|e| e.to_string()),
+            Ok(Err(e)) => Err(format!("the lookup task failed: {e}")),
+            Err(_) => {
+                in_flight.insert(target.clone(), handle);
+                Err(format!("no answer within {timeout:?}"))
+            }
+        };
+        answers.insert(target, answer);
+    }
 
-    for (key, target, result) in results {
-        let Some(cluster) = config.clusters.get_mut(&key) else {
+    for (key, cluster) in config.clusters.iter_mut() {
+        let Some(target) = &cluster.resolve else {
             continue;
         };
-        match result {
+        let Some(answer) = answers.get(&format!("{}:{}", target.host, target.port)) else {
+            continue;
+        };
+        match answer {
             Ok(addrs) => {
                 let mut endpoints: Vec<Endpoint> = addrs
-                    .into_iter()
+                    .iter()
                     .map(|a| Endpoint {
                         address: a.ip().to_string(),
                         port: a.port(),
@@ -260,7 +315,7 @@ where
             Err(e) => {
                 let kept = served
                     .clusters
-                    .get(&key)
+                    .get(key)
                     .filter(|c| c.resolve == cluster.resolve)
                     .map(|c| c.endpoints.clone())
                     .unwrap_or_default();
@@ -280,7 +335,7 @@ where
 
 /// The system resolver, for `resolve`. A function rather than a closure at each call site so
 /// the tests can hand `resolve` a resolver that fails on demand.
-async fn lookup(target: String) -> std::io::Result<Vec<std::net::SocketAddr>> {
+async fn lookup(target: String) -> std::io::Result<Vec<SocketAddr>> {
     Ok(tokio::net::lookup_host(target).await?.collect())
 }
 
@@ -342,7 +397,13 @@ mod tests {
         assert!(!s.store.is_ready(), "nothing to serve yet");
 
         s.write_cache("\"7\"", &Config::default());
-        assert_eq!(s.prime().await.map(|(v, _)| v).as_deref(), Some("\"7\""));
+        assert_eq!(
+            s.prime(&mut InFlight::new())
+                .await
+                .map(|(v, _)| v)
+                .as_deref(),
+            Some("\"7\"")
+        );
         assert!(
             s.store.is_ready(),
             "priming from cache must make the gateway ready, or the pod never joins its Service"
@@ -359,7 +420,7 @@ mod tests {
         let half = std::fs::read(&path).unwrap();
         std::fs::write(&path, &half[..half.len() / 2]).unwrap();
 
-        assert_eq!(s.prime().await, None);
+        assert_eq!(s.prime(&mut InFlight::new()).await, None);
         assert!(
             !s.store.is_ready(),
             "and it starts unready, not serving nothing as if it were something"
@@ -369,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_cache_is_not_an_error() {
         let dir = tempdir();
-        assert_eq!(source(&dir).prime().await, None);
+        assert_eq!(source(&dir).prime(&mut InFlight::new()).await, None);
     }
 
     /// The file holds a private key for every certificate the gateway serves.
@@ -399,7 +460,13 @@ mod tests {
         let s = source(&dir);
         s.write_cache("\"7\"", &Config::default());
         std::fs::write(dir.join("cache.tmp"), b"{ half a docum").unwrap();
-        assert_eq!(s.prime().await.map(|(v, _)| v).as_deref(), Some("\"7\""));
+        assert_eq!(
+            s.prime(&mut InFlight::new())
+                .await
+                .map(|(v, _)| v)
+                .as_deref(),
+            Some("\"7\"")
+        );
     }
 
     fn resolve_config(host: &str, endpoints: Vec<Endpoint>) -> Config {
@@ -449,6 +516,7 @@ mod tests {
             &served,
             |t| resolves_to(t, &["10.0.0.9"]),
             LOOKUP_TIMEOUT,
+            &mut InFlight::new(),
         )
         .await;
         assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.9")]);
@@ -461,7 +529,14 @@ mod tests {
         // a resolver hiccup into a 503 for every request to this backend.
         let from_control_plane = resolve_config("orders.apps", vec![]);
         let served = resolve_config("orders.apps", vec![ep("10.0.0.5")]);
-        let got = resolve(from_control_plane, &served, resolver_down, LOOKUP_TIMEOUT).await;
+        let got = resolve(
+            from_control_plane,
+            &served,
+            resolver_down,
+            LOOKUP_TIMEOUT,
+            &mut InFlight::new(),
+        )
+        .await;
         assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.5")]);
     }
 
@@ -471,7 +546,14 @@ mod tests {
         // belong to the old host and must not be sent the new host's traffic.
         let from_control_plane = resolve_config("orders-v2.apps", vec![]);
         let served = resolve_config("orders.apps", vec![ep("10.0.0.5")]);
-        let got = resolve(from_control_plane, &served, resolver_down, LOOKUP_TIMEOUT).await;
+        let got = resolve(
+            from_control_plane,
+            &served,
+            resolver_down,
+            LOOKUP_TIMEOUT,
+            &mut InFlight::new(),
+        )
+        .await;
         assert!(got.clusters["store/orders"].endpoints.is_empty());
     }
 
@@ -492,6 +574,7 @@ mod tests {
                 &served,
                 resolver_hangs,
                 Duration::from_millis(50),
+                &mut InFlight::new(),
             ),
         )
         .await
@@ -530,6 +613,7 @@ mod tests {
                 }
             },
             Duration::from_secs(5),
+            &mut InFlight::new(),
         )
         .await;
         for name in ["a", "b", "c"] {
@@ -549,11 +633,96 @@ mod tests {
         let s = source(&dir);
         let cached = resolve_config("orders.apps", vec![]);
         s.write_cache("\"3\"", &cached);
-        let (version, config) = s.prime().await.expect("primed");
+        let (version, config) = s.prime(&mut InFlight::new()).await.expect("primed");
         assert_eq!(version, "\"3\"");
         assert_eq!(
             config, cached,
             "unresolved, exactly as the control plane sent it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lookup_still_running_is_waited_for_not_started_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // #251: a timeout drops the future, but `getaddrinfo` keeps its blocking thread. Started
+        // afresh on every tick, a black-holed resolver piled up one more per name per tick.
+        let started = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let slow = |t: String| {
+            started.fetch_add(1, Ordering::SeqCst);
+            let gate = gate.clone();
+            async move {
+                // Each answer takes a permit for good, so every lookup waits for its own.
+                gate.acquire().await.unwrap().forget();
+                resolves_to(t, &["10.0.0.9"]).await
+            }
+        };
+        // Two clusters naming one host share a lookup.
+        let mut from_control_plane = resolve_config("orders.apps", vec![]);
+        let twin = from_control_plane.clusters["store/orders"].clone();
+        from_control_plane
+            .clusters
+            .insert("store/orders-twin".into(), twin);
+        let mut served = resolve_config("orders.apps", vec![ep("10.0.0.5")]);
+        let twin = served.clusters["store/orders"].clone();
+        served.clusters.insert("store/orders-twin".into(), twin);
+        let tick = Duration::from_millis(50);
+        let mut in_flight = InFlight::new();
+
+        for _ in 0..3 {
+            let got = resolve(
+                from_control_plane.clone(),
+                &served,
+                &slow,
+                tick,
+                &mut in_flight,
+            )
+            .await;
+            assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.5")]);
+            assert_eq!(
+                got.clusters["store/orders-twin"].endpoints,
+                vec![ep("10.0.0.5")]
+            );
+        }
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "one lookup, however many ticks it outlives"
+        );
+        assert_eq!(in_flight.len(), 1);
+
+        // The answer that finally comes is the one the next tick uses.
+        gate.add_permits(1);
+        let got = resolve(
+            from_control_plane.clone(),
+            &served,
+            &slow,
+            tick,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(got.clusters["store/orders"].endpoints, vec![ep("10.0.0.9")]);
+        assert_eq!(
+            got.clusters["store/orders-twin"].endpoints,
+            vec![ep("10.0.0.9")]
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert!(in_flight.is_empty());
+
+        // Once it has answered, the next tick asks again.
+        resolve(
+            from_control_plane.clone(),
+            &served,
+            &slow,
+            tick,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert_eq!(in_flight.len(), 1);
+
+        // A name no longer configured is not held on to.
+        resolve(Config::default(), &served, &slow, tick, &mut in_flight).await;
+        assert!(in_flight.is_empty());
     }
 }

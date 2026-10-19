@@ -8,6 +8,20 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A route whose Exact or PathPrefix path contains `;` (`Exact /api;v=2`, `PathPrefix
+  /items;type=book`) is served again (#247). Since #213 every request it was written for was
+  refused with 400, because the same path with its `;params` stripped never matches it. Such a
+  rule is now checked against where its own value lands once stripped, so a prefix still cannot
+  reach another rule through what follows it: `/items;type=book/admin/x` is refused when
+  `/items/admin` has a rule of its own. A RegularExpression path keeps the plain check.
+- The `X-Forwarded-For` hop the gateway appends upstream is the IPv4 address of an IPv4 client
+  on a dual-stack `[::]` listener, not `::ffff:203.0.113.9` (#252), matching the access log and
+  the rate limiter since #216.
+- A backend name whose lookup outlives the 3 s timeout is not looked up again until that lookup
+  ends (#251). A timeout drops the future but not `getaddrinfo`, so with DNS black-holed every
+  tick started one more blocking call per name, each living tens of seconds, until tokio's
+  blocking pool was full and its queue grew for as long as the outage lasted. The answer that
+  finally comes is used by the next tick, and clusters naming the same host share one lookup.
 - CI hardening (#234, #235 follow-ups): a new `workflows` job lints the workflows with zizmor and
   actionlint, so a template expanded inside a `run:` script fails CI, and the k3s leg installs
   into a namespace enforcing the restricted Pod Security level and runs `helm test` there.

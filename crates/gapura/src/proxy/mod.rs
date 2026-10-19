@@ -305,18 +305,40 @@ fn refusal_response(challenge: &str, request_id: &str) -> Result<ResponseHeader>
 /// `/admin/secret`: the `/admin` policy never ran. Refusing every `;` would break matrix
 /// parameters and `;jsessionid=` URLs that route the same either way, so only a request whose
 /// two readings disagree is refused. Paths without a `;` cost nothing.
+///
+/// A rule whose own Exact or PathPrefix value carries a `;` (`Exact /api;v=2`, `PathPrefix
+/// /items;type=book`) can never agree with the stripped reading, which has no `;` left to match
+/// it, so comparing against it refused every request the rule was written for (#247). For such a
+/// rule the stripped request is compared instead with where the rule's own value lands once
+/// stripped: `/items;type=book` is `/items` to a servlet container, and the operator who wrote
+/// the rule has accepted that. Exact then always agrees -- the request is the value. A prefix
+/// still cannot be used to escape: `/items;type=book/admin/x` is `/items/admin/x` to the
+/// backend, and when that lands on an `/items/admin` rule while `/items` does not, it is
+/// refused, as is `/;x/admin/secret` under a `PathPrefix /;x` rule. Extra `;params` past the
+/// rule's value reach nothing a request without them would not. A RegularExpression keeps the
+/// plain comparison: it has no single value to anchor on, and a pattern such as
+/// `.*;jsessionid=.*` would otherwise wave `/admin;jsessionid=1/secret` past `/admin`.
 fn path_params_change_the_route(rt: &Runtime, port: u16, ex: &Extracted) -> bool {
     let Some(stripped) = attrs::without_path_params(&ex.path) else {
         return false;
     };
-    let rule_for = |path: &str| {
+    let matched = |path: &str| {
         let mut req = ex.attrs();
         req.path = path;
-        rt.config
-            .match_port_with(port, &req, rt.regexes())
-            .map(|hit| (hit.listener_index, hit.entry.rule))
+        rt.config.match_port_with(port, &req, rt.regexes())
     };
-    rule_for(&ex.path) != rule_for(&stripped)
+    let rule_for = |path: &str| matched(path).map(|hit| (hit.listener_index, hit.entry.rule));
+    let servlet_view = rule_for(&stripped);
+    let Some(sent) = matched(&ex.path) else {
+        return servlet_view.is_some();
+    };
+    match &sent.entry.matcher.path {
+        PathMatch::Exact(value) | PathMatch::Prefix(value) if value.contains(';') => {
+            let root = attrs::without_path_params(value).expect("the value contains a `;`");
+            servlet_view != rule_for(&root)
+        }
+        _ => servlet_view != Some((sent.listener_index, sent.entry.rule)),
+    }
 }
 
 /// Why a JWT policy refuses `req`, with the challenge to answer; `None` admits it.
@@ -393,6 +415,19 @@ fn forwarded_for(req: &RequestHeader) -> Option<String> {
         joined.push_str(&String::from_utf8_lossy(line.as_bytes()));
     }
     Some(joined)
+}
+
+/// The `X-Forwarded-For` value to send upstream: every inbound line, joined, then the peer.
+/// Rebuilding from the first line alone dropped the hops on the others, the real one included,
+/// from what upstreams see. The peer is canonical (#252): on a dual-stack `[::]` listener an
+/// IPv4 client arrives as `::ffff:203.0.113.9`, and a backend that allowlists or geolocates the
+/// last hop must see `203.0.113.9`, as the access log and the rate limiter already do.
+fn forwarded_for_with_hop(req: &RequestHeader, peer: std::net::IpAddr) -> String {
+    let hop = peer.to_canonical();
+    match forwarded_for(req) {
+        Some(existing) => format!("{existing}, {hop}"),
+        None => hop.to_string(),
+    }
 }
 
 fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
@@ -872,17 +907,8 @@ impl ProxyHttp for GapuraProxy {
             }
         }
         upstream.insert_header("X-Forwarded-Proto", ctx.scheme)?;
-        if let Some(ip) = session
-            .client_addr()
-            .and_then(|a| a.as_inet())
-            .map(|a| a.ip().to_string())
-        {
-            // Appended to every inbound line, joined: rebuilding from the first line alone
-            // dropped the hops on the others, the real one included, from what upstreams see.
-            let value = match forwarded_for(upstream) {
-                Some(existing) => format!("{existing}, {ip}"),
-                None => ip,
-            };
+        if let Some(peer) = session.client_addr().and_then(|a| a.as_inet()) {
+            let value = forwarded_for_with_hop(upstream, peer.ip());
             upstream.insert_header("X-Forwarded-For", value)?;
         }
         upstream.insert_header("X-Request-Id", ctx.request_id.clone())?;
@@ -1311,6 +1337,25 @@ mod tests {
         assert_eq!(client_ip_of(&none, proxy, &trusted, &[]), proxy);
     }
 
+    #[test]
+    fn the_forwarded_for_hop_is_the_canonical_peer() {
+        // #252: an IPv4 client on a dual-stack `[::]` listener is `::ffff:203.0.113.9` to the
+        // socket; the backend must see the IPv4 address the access log records.
+        let mapped: std::net::IpAddr = "::ffff:203.0.113.9".parse().unwrap();
+        let none = RequestHeader::build("GET", b"/", None).unwrap();
+        assert_eq!(forwarded_for_with_hop(&none, mapped), "203.0.113.9");
+        let mut two = RequestHeader::build("GET", b"/", None).unwrap();
+        two.append_header("X-Forwarded-For", "6.6.6.6").unwrap();
+        two.append_header("X-Forwarded-For", "10.0.0.2").unwrap();
+        assert_eq!(
+            forwarded_for_with_hop(&two, mapped),
+            "6.6.6.6, 10.0.0.2, 203.0.113.9"
+        );
+        // Real IPv6 peers are left as they are.
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(forwarded_for_with_hop(&none, v6), "2001:db8::1");
+    }
+
     mod jwt_lines {
         use super::super::*;
         use base64::Engine;
@@ -1474,6 +1519,116 @@ spec:
         assert!(!changes("/shop/cart;jsessionid=1"));
         assert!(!changes("/admin/secret;v=2"));
         assert!(!changes("/elsewhere;x/y"));
+    }
+
+    /// A runtime for one HTTPRoute on port 80 whose `rules` are given as YAML list items.
+    fn runtime_with_rules(rules: &str) -> Runtime {
+        let yaml = format!(
+            r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {{ name: gapura }}
+spec: {{ controllerName: gapura.dev/controller }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {{ name: main, namespace: infra, generation: 1 }}
+spec:
+  gatewayClassName: gapura
+  listeners:
+  - {{ name: http, port: 80, protocol: HTTP, allowedRoutes: {{ namespaces: {{ from: All }} }} }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {{ name: r, namespace: apps, generation: 1, creationTimestamp: "2026-09-10T00:00:00Z" }}
+spec:
+  parentRefs: [{{ name: main, namespace: infra }}]
+  rules:
+{rules}"#
+        );
+        let snap = gapura_core::Snapshot::from_yaml_docs(&yaml).unwrap();
+        let translation = gapura_core::translate(&snap, &gapura_core::Settings::default());
+        Runtime::new(translation.config, 1, Vec::new())
+    }
+
+    fn params_change(rt: &Runtime, path: &str) -> bool {
+        let r = RequestHeader::build("GET", path.as_bytes(), None).unwrap();
+        path_params_change_the_route(rt, 80, &Extracted::from_request(&r).unwrap())
+    }
+
+    fn path_value_of(rt: &Runtime, path: &str) -> Option<PathMatch> {
+        let r = RequestHeader::build("GET", path.as_bytes(), None).unwrap();
+        let ex = Extracted::from_request(&r).unwrap();
+        rt.config
+            .match_port_with(80, &ex.attrs(), rt.regexes())
+            .map(|hit| hit.entry.matcher.path.clone())
+    }
+
+    #[test]
+    fn a_rule_that_names_path_parameters_itself_is_served() {
+        // #247: the stripped reading has no `;` left, so it never matched such a rule, and
+        // every request the rule was written for was refused.
+        let rt = runtime_with_rules(
+            r#"
+  - matches: [{ path: { type: Exact, value: "/api;v=2" } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: "/items;type=book" } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: "/items/admin" } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: "/;x" } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: /admin } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: PathPrefix, value: / } }]
+    backendRefs: [{ name: echo, port: 80 }]
+"#,
+        );
+        // The rules really are the ones these requests match as sent.
+        assert_eq!(
+            path_value_of(&rt, "/api;v=2"),
+            Some(PathMatch::Exact("/api;v=2".into()))
+        );
+        assert_eq!(
+            path_value_of(&rt, "/items;type=book/42"),
+            Some(PathMatch::Prefix("/items;type=book".into()))
+        );
+        assert_eq!(
+            path_value_of(&rt, "/;x/admin/secret"),
+            Some(PathMatch::Prefix("/;x".into()))
+        );
+        assert!(!params_change(&rt, "/api;v=2"));
+        assert!(!params_change(&rt, "/items;type=book"));
+        assert!(!params_change(&rt, "/items;type=book/42"));
+        assert!(!params_change(&rt, "/items;type=book/42;jsessionid=1"));
+        // A prefix cannot be used to reach a rule its own value does not land on: these are
+        // `/items/admin/x` and `/admin/secret` to a servlet container.
+        assert!(params_change(&rt, "/items;type=book/admin/x"));
+        assert!(params_change(&rt, "/items;type=book/admin;y/x"));
+        assert!(params_change(&rt, "/;x/admin/secret"));
+        // #213 itself is unchanged.
+        assert!(params_change(&rt, "/admin;x/secret"));
+        assert!(!params_change(&rt, "/admin/secret;v=2"));
+    }
+
+    #[test]
+    fn a_regular_expression_naming_path_parameters_keeps_the_plain_check() {
+        // A pattern has no single value to anchor on: `.*;jsessionid=.*` would otherwise wave
+        // `/admin;jsessionid=1/secret` past the `/admin` rule a servlet container resolves it to.
+        let rt = runtime_with_rules(
+            r#"
+  - matches: [{ path: { type: PathPrefix, value: /admin } }]
+    backendRefs: [{ name: echo, port: 80 }]
+  - matches: [{ path: { type: RegularExpression, value: ".*;jsessionid=.*" } }]
+    backendRefs: [{ name: echo, port: 80 }]
+"#,
+        );
+        assert_eq!(
+            path_value_of(&rt, "/admin;jsessionid=1/secret"),
+            Some(PathMatch::Regex(".*;jsessionid=.*".into()))
+        );
+        assert!(params_change(&rt, "/admin;jsessionid=1/secret"));
+        assert!(!params_change(&rt, "/admin/secret;jsessionid=1"));
     }
 
     #[test]
