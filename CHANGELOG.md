@@ -16,7 +16,9 @@ means what it usually does, moving from one version below to a later one. Releas
   again at once, at most every 30 seconds, so a provider's key rotation is still followed. At
   most eight authorization codes are exchanged at once; past that the callback answers the
   existing 503 "busy" page. A code the provider refuses, or a token that does not verify, now
-  counts against the address's sign-in limit (ten a minute) instead of being given back.
+  counts against the address's sign-in limit (ten a minute) instead of being given back, even
+  when the client hangs up mid-exchange, and its place among the eight is held until the provider
+  has answered.
 - CI hardening (#234, #235 follow-ups): a new `workflows` job lints the workflows with zizmor and
   actionlint, so a template expanded inside a `run:` script fails CI, and the k3s leg installs
   into a namespace enforcing the restricted Pod Security level and runs `helm test` there.

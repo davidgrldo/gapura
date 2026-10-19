@@ -158,8 +158,9 @@ pub struct Oidc {
     /// The client discovery last built, shared by every request. Its lock is held across a
     /// discovery, so requests that find it stale together wait for one discovery between them.
     discovery: tokio::sync::Mutex<Discovery>,
-    /// Places for a code exchange; see `MAX_EXCHANGES`.
-    exchanges: tokio::sync::Semaphore,
+    /// Places for a code exchange; see `MAX_EXCHANGES`. Shared with the task each exchange runs
+    /// in, so a place is held until the provider has answered, whatever became of the request.
+    exchanges: Arc<tokio::sync::Semaphore>,
 }
 
 /// A client built from the provider's discovery document and signing keys, and until when it is
@@ -209,7 +210,7 @@ impl Oidc {
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()?,
             discovery: Default::default(),
-            exchanges: tokio::sync::Semaphore::new(MAX_EXCHANGES),
+            exchanges: Arc::new(tokio::sync::Semaphore::new(MAX_EXCHANGES)),
         })
     }
 
@@ -1324,7 +1325,8 @@ pub async fn callback(
     // The reservation is held across the exchange with the provider: a code it refuses counts
     // against the address, so a loop of junk codes is held to the limit a loop of wrong passwords
     // is (#253). Every answer before the exchange, or that says nothing about the code, such as
-    // the provider being unreachable or the exchanges busy, drops it, which gives it back.
+    // the provider being unreachable or the exchanges busy, drops it, which gives it back. Once
+    // the code is sent it is settled whatever the client does, hanging up included (`Sent`).
     let (Some(code), Some(returned_state)) = (query.code, query.state) else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -1348,15 +1350,9 @@ pub async fn callback(
         return Ok(stale_sign_in_page());
     }
 
-    let claims = match exchange(&state.oidc, code, pending.verifier, pending.nonce).await {
-        Ok(claims) => {
-            attempt.succeeded();
-            claims
-        }
-        Err(Exchange::Refused) => {
-            attempt.failed();
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+    let claims = match exchange(&state.oidc, attempt, code, pending.verifier, pending.nonce).await {
+        Ok(claims) => claims,
+        Err(Exchange::Refused) => return Err(StatusCode::UNAUTHORIZED),
         Err(Exchange::Busy) => return Ok(busy_page()),
         Err(Exchange::Unavailable) => return Err(StatusCode::BAD_GATEWAY),
     };
@@ -1456,9 +1452,43 @@ enum Exchange {
     Unavailable,
 }
 
-/// The ID token's verified claims, for `code` redeemed with `verifier`, and carrying `nonce`.
+/// A sign-in attempt whose code has gone to the provider, settled by `settle`.
+///
+/// Dropped unsettled, it counts as a failure. That is what happens when the client hangs up
+/// mid-exchange and axum drops the callback: the provider has been asked all the same, and giving
+/// the attempt back then let a client that sends a junk code and closes the socket go uncounted,
+/// however many it sent (#253).
+struct Sent<'a>(Option<crate::throttle::Attempt<'a>>);
+
+impl Sent<'_> {
+    fn settle(mut self, succeeded: bool) {
+        if let Some(attempt) = self.0.take() {
+            if succeeded {
+                attempt.succeeded();
+            } else {
+                attempt.failed();
+            }
+        }
+    }
+}
+
+impl Drop for Sent<'_> {
+    fn drop(&mut self) {
+        if let Some(attempt) = self.0.take() {
+            attempt.failed();
+        }
+    }
+}
+
+/// The ID token's verified claims, for `code` redeemed with `verifier`, and carrying `nonce`;
+/// `attempt` is settled by the outcome.
+///
+/// Until the code is sent, an answer drops `attempt`, which gives it back: an unreachable
+/// provider and full exchanges say nothing about the code. From then on it is settled by what
+/// the provider says, and counts as failed if this future is dropped first (`Sent`).
 async fn exchange(
     oidc: &Oidc,
+    attempt: crate::throttle::Attempt<'_>,
     code: String,
     verifier: String,
     nonce: String,
@@ -1467,26 +1497,56 @@ async fn exchange(
         tracing::warn!(%error, "cannot reach the identity provider to finish a sign-in");
         Exchange::Unavailable
     })?;
-    let request = discovered
-        .client
-        .exchange_code(AuthorizationCode::new(code))
-        .map_err(|error| {
-            tracing::error!(%error, "the provider's metadata has no token endpoint");
-            Exchange::Unavailable
-        })?
-        .set_pkce_verifier(PkceCodeVerifier::new(verifier));
-    let tokens = {
-        // Held only for the request to the provider, not for what follows it.
-        let Ok(_exchanging) = oidc.exchanges.try_acquire() else {
-            tracing::warn!("too many authorization codes are being exchanged at once");
-            return Err(Exchange::Busy);
-        };
-        request.request_async(&oidc.http).await.map_err(|error| {
-            tracing::warn!(%error, "exchanging an authorization code failed");
-            Exchange::Refused
-        })?
+    if discovered.client.token_uri().is_none() {
+        tracing::error!("the provider's metadata has no token endpoint");
+        return Err(Exchange::Unavailable);
+    }
+    let Ok(exchanging) = oidc.exchanges.clone().try_acquire_owned() else {
+        tracing::warn!("too many authorization codes are being exchanged at once");
+        return Err(Exchange::Busy);
     };
+    let sent = Sent(Some(attempt));
+    // The request runs in a task of its own, which holds the place until the provider has
+    // answered: dropped with the callback, the request would be abandoned and its place freed
+    // while the provider was still working on it, and the bound would cap nothing.
+    let (client, http) = (discovered.client.clone(), oidc.http.clone());
+    let answered = tokio::spawn(async move {
+        let _exchanging = exchanging;
+        client
+            .exchange_code(AuthorizationCode::new(code))
+            .map_err(|error| error.to_string())?
+            .set_pkce_verifier(PkceCodeVerifier::new(verifier))
+            .request_async(&http)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await;
+    let tokens = match answered {
+        Ok(Ok(tokens)) => tokens,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "exchanging an authorization code failed");
+            sent.settle(false);
+            return Err(Exchange::Refused);
+        }
+        Err(error) => {
+            tracing::error!(%error, "exchanging an authorization code did not finish");
+            sent.settle(false);
+            return Err(Exchange::Refused);
+        }
+    };
+    let verified = verify(oidc, &discovered, &tokens, nonce).await;
+    sent.settle(verified.is_ok());
+    verified
+}
 
+/// The claims of the ID token in `tokens`, verified against `discovered`'s keys, or against keys
+/// read again when it names one those lack.
+async fn verify(
+    oidc: &Oidc,
+    discovered: &Discovered,
+    tokens: &ExtraTokenResponse,
+    nonce: String,
+) -> Result<IdTokenClaims<ExtraClaims, CoreGenderClaim>, Exchange> {
     // Verifying the ID token is what makes any of this worth anything: signature, issuer,
     // audience, and the nonce that ties this token to the redirect we sent this browser on.
     let id_token = tokens.id_token().ok_or_else(|| {
@@ -1509,7 +1569,7 @@ async fn exchange(
         // checked again.
         Err(ClaimsVerificationError::SignatureVerification(
             SignatureVerificationError::NoMatchingKey,
-        )) => match oidc.rediscover(&discovered).await {
+        )) => match oidc.rediscover(discovered).await {
             Some(Ok(fresh)) => id_token
                 .claims(&fresh.client.id_token_verifier(), &nonce)
                 .cloned()
@@ -1719,7 +1779,7 @@ mod against_a_stub_provider {
         /// Set to take the nonce from the code rather than from `nonce`, so sign-ins in flight
         /// together each get their own: `sign_in_with_own_code` sends its nonce as its code.
         code_is_nonce: AtomicBool,
-        /// Set to hold every code exchange until it has a permit.
+        /// Set to hold every code exchange until it has a permit, one spent per exchange.
         gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
         /// Set to sign ID tokens with this Ed25519 key, by PEM and key ID, rather than with the
         /// client secret.
@@ -1835,7 +1895,7 @@ mod against_a_stub_provider {
                         provider.exchanges.fetch_add(1, Ordering::SeqCst);
                         let gate = provider.gate.lock().unwrap().clone();
                         if let Some(gate) = gate {
-                            let _passed = gate.acquire().await.unwrap();
+                            gate.acquire().await.unwrap().forget();
                         }
                         let form: HashMap<String, String> =
                             openidconnect::url::form_urlencoded::parse(body.as_bytes())
@@ -2698,7 +2758,7 @@ mod against_a_stub_provider {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         *provider.gate.lock().unwrap() = Some(gate.clone());
         let mut state = state(&stub(provider.clone()).await);
-        Arc::get_mut(&mut state.oidc).unwrap().exchanges = tokio::sync::Semaphore::new(2);
+        Arc::get_mut(&mut state.oidc).unwrap().exchanges = Arc::new(tokio::sync::Semaphore::new(2));
 
         let mut held = tokio::task::JoinSet::new();
         for _ in 0..2 {
@@ -2732,6 +2792,48 @@ mod against_a_stub_provider {
             StatusCode::SEE_OTHER,
             "places are given back"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_callback_dropped_mid_exchange_is_counted_and_keeps_its_place_until_answered() {
+        // A client that sends a junk code and hangs up while it is being exchanged: axum drops
+        // the callback, and dropping its attempt gave it back, so none was ever counted, and the
+        // place it held was freed while the provider was still working on it.
+        let provider = Arc::new(Provider::default());
+        provider.refuse_codes.store(true, Ordering::SeqCst);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *provider.gate.lock().unwrap() = Some(gate.clone());
+        let state = state(&stub(provider.clone()).await);
+        for sent in 1..=10 {
+            let (csrf, _, cookie) = begin_a_login(&state).await;
+            let calling = {
+                let state = state.clone();
+                tokio::spawn(async move { come_back(&state, &csrf, &cookie).await })
+            };
+            until(|| provider.exchanges.load(Ordering::SeqCst) == sent).await;
+            calling.abort();
+            assert!(calling.await.unwrap_err().is_cancelled());
+            assert_eq!(
+                state.oidc.exchanges.available_permits(),
+                MAX_EXCHANGES - 1,
+                "the place is held while the provider is still answering"
+            );
+            gate.add_permits(1);
+            until(|| state.oidc.exchanges.available_permits() == MAX_EXCHANGES).await;
+        }
+
+        let (csrf, _, cookie) = begin_a_login(&state).await;
+        // Bounded: one let through would wait at the gate for ever.
+        let refused =
+            tokio::time::timeout(Duration::from_secs(5), come_back(&state, &csrf, &cookie))
+                .await
+                .expect("refused before reaching the provider");
+        assert_eq!(
+            refused.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "every abandoned exchange was counted against the address"
+        );
+        assert_eq!(provider.exchanges.load(Ordering::SeqCst), 10);
     }
 
     #[tokio::test]
