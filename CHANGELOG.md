@@ -8,12 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- A route whose Exact or PathPrefix path contains `;` (`Exact /api;v=2`, `PathPrefix
-  /items;type=book`) is served again (#247). Since #213 every request it was written for was
-  refused with 400, because the same path with its `;params` stripped never matches it. Such a
-  rule is now checked against where its own value lands once stripped, so a prefix still cannot
-  reach another rule through what follows it: `/items;type=book/admin/x` is refused when
-  `/items/admin` has a rule of its own. A RegularExpression path keeps the plain check.
+- An exact or prefix path containing `;` (`/api;v=2`, `/items;type=book`) is refused rather
+  than reported as working (#247). Since #213 the gateway answered every request for such a
+  route with 400, and no request-time check can serve it safely: a servlet backend reads
+  `/api;v=2` as `/api`, so the request would run this route's policies while the backend serves
+  another route's path. The console refuses the value on the path's field; a stored route from
+  before this change is left out of the configuration whole, and the control plane logs a
+  warning naming it whenever it sends a data plane a new configuration. Remove the `;` to
+  serve it. A regex path may still contain `;`; the gateway refuses any
+  request whose `;params` would move it to another rule, as before.
 - The `X-Forwarded-For` hop the gateway appends upstream is the IPv4 address of an IPv4 client
   on a dual-stack `[::]` listener, not `::ffff:203.0.113.9` (#252), matching the access log and
   the rate limiter since #216.
