@@ -8,6 +8,10 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The audit log names a JWT requirement and a request limit as such (#254). Every policy entry
+  was labelled "Key requirement", so a rate-limit change read as a key one; the row now says "JWT
+  requirement" or "Request limit" from what the entry recorded, and the kind filter's `policy`
+  choice is "Policy", since it returns all three.
 - CI hardening (#234, #235 follow-ups): a new `workflows` job lints the workflows with zizmor and
   actionlint, so a template expanded inside a `run:` script fails CI, and the k3s leg installs
   into a namespace enforcing the restricted Pod Security level and runs `helm test` there.
