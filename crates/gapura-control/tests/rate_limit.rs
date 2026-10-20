@@ -131,6 +131,7 @@ const SERVICE: &str = r#"{"name":"orders","protocol":"http","host":"orders.inter
 const ROUTE: &str = r#"{"name":"orders-api","service":"orders","hosts":["api.example.com"],"paths":[{"type":"prefix","value":"/orders"}]}"#;
 const SERVICES: &str = "/api/workspaces/default/services";
 const ROUTES: &str = "/api/workspaces/default/routes";
+const CONSUMERS: &str = "/api/workspaces/default/consumers";
 const LIMITS: &str = "/api/workspaces/default/rate-limit";
 /// The compiled name of the seeded route.
 const COMPILED_ROUTE: &str = "default/orders-api";
@@ -926,4 +927,44 @@ async fn kubernetes_mode_has_none_of_it() {
     let (status, body) = send(&app, "GET", LIMITS, None, "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(sentence(&body).contains("keeps no configuration"), "{body}");
+}
+
+/// One policy of a name per target and consumer: a limit on everyone and a consumer's own on
+/// the same route are two rows, and a second of either is refused by the database itself.
+#[tokio::test]
+async fn a_route_holds_one_limit_on_everyone_and_one_per_consumer() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    let db = store.client().await.unwrap();
+    let insert = |consumer: bool| {
+        let db = &db;
+        async move {
+            db.execute(
+                "insert into plugins (workspace_id, name, config, route_id, consumer_id)
+                 select r.workspace_id, 'rate_limit', '{\"limit\": 5, \"window_ms\": 1000}',
+                        r.id, case when $1 then c.id end
+                   from routes r, consumers c where r.name = 'orders-api' and c.username = 'mobile'",
+                &[&consumer],
+            )
+            .await
+        }
+    };
+    insert(false).await.expect("the limit on everyone");
+    insert(true).await.expect("the consumer's own, beside it");
+    assert!(insert(false).await.is_err(), "a second on everyone");
+    assert!(insert(true).await.is_err(), "a second for the consumer");
+    // A route and a service still exclude each other, consumer or not.
+    let both = db
+        .execute(
+            "insert into plugins (workspace_id, name, route_id, service_id, consumer_id)
+             select r.workspace_id, 'rate_limit', r.id, r.service_id, c.id
+               from routes r, consumers c where r.name = 'orders-api' and c.username = 'mobile'",
+            &[],
+        )
+        .await;
+    assert!(both.is_err(), "a route and a service at once");
 }
