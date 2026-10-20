@@ -1450,3 +1450,155 @@ async fn an_untrusted_caller_cannot_name_itself_in_the_access_log() {
         "no trusted network is configured, so the header is not believed"
     );
 }
+
+/// The store-mode snapshot: one route for echo.test to the echo upstream behind key_auth,
+/// limited for everyone to 3 an hour per address and for `tight` to 2 an hour of its own, counted
+/// per consumer. Hour windows, so no run of the test crosses a boundary (#57).
+fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{KeyAuthPolicy, LimitBy, PathMatch, Plugin, Protocol, RateLimit};
+    use gapura_core::store::{
+        StoreCredential, StorePlugin, StoreRateLimit, StoreRoute, StoreService, StoreSnapshot,
+    };
+    use sha2::{Digest, Sha256};
+    let hash = |key: &str| -> String {
+        Sha256::digest(key.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let hour = |limit, by| RateLimit {
+        limit,
+        window_ms: 3_600_000,
+        by,
+    };
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: "shop".into(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: "shop".into(),
+            name: "api".into(),
+            service: "echo".into(),
+            hosts: vec!["echo.test".into()],
+            paths: vec![PathMatch::Prefix("/".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        plugins: vec![StorePlugin {
+            workspace: "shop".into(),
+            route: None,
+            service: None,
+            plugin: Plugin::KeyAuth(KeyAuthPolicy::default()),
+        }],
+        credentials: ["tight", "roomy"]
+            .map(|c| StoreCredential {
+                key_hash: hash(&format!("{c}-key")),
+                consumer: c.into(),
+                workspace: "shop".into(),
+            })
+            .into(),
+        rate_limits: vec![
+            StoreRateLimit {
+                workspace: "shop".into(),
+                route: None,
+                service: None,
+                consumer: None,
+                limit: hour(3, LimitBy::Ip),
+            },
+            StoreRateLimit {
+                workspace: "shop".into(),
+                route: Some("api".into()),
+                service: None,
+                consumer: Some("tight".into()),
+                limit: hour(2, LimitBy::Consumer),
+            },
+        ],
+    }
+}
+
+/// A consumer's own limit, end to end: once key_auth has named the caller, `tight` is held to
+/// its own 2 an hour while `roomy`, from the same address, still has the 3 an hour everyone has
+/// -- untouched by `tight`'s requests, which count in a window of their own.
+///
+/// Two things the limit must not leak. The upstream is told the bare username, not the
+/// `workspace/username` the data plane counts under. And the metric is labelled with the rule,
+/// never the consumer, because a label per consumer grows without bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_consumer_s_own_limit_holds_it_and_no_one_else() {
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_store_gateway(consumer_limited(upstream)).await;
+    let c = client(&gw);
+    let status = |key: Option<&'static str>| {
+        let mut req = c.get(url(&gw, "echo.test", "/"));
+        if let Some(key) = key {
+            req = req.header("x-api-key", key);
+        }
+        async move { req.send().await.unwrap().status() }
+    };
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "tight-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "tight 0");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        body["headers"][gapura_core::credentials::CONSUMER_HEADER],
+        "tight",
+        "the upstream is told the bare username, not the workspace-qualified id"
+    );
+    assert_eq!(status(Some("tight-key")).await, 200, "tight 1");
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "tight-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429, "past tight's own allowance");
+    assert_eq!(r.headers()["x-ratelimit-limit"], "2");
+    for i in 0..3 {
+        assert_eq!(status(Some("roomy-key")).await, 200, "roomy {i}");
+    }
+    assert_eq!(
+        status(Some("roomy-key")).await,
+        429,
+        "past everyone's allowance"
+    );
+    // Without a key key_auth refuses first: there is no consumer, and no limit is spent.
+    assert_eq!(status(None).await, 401);
+
+    // Both refusals above were counted, under the rule's name: `tight`'s own limit does not
+    // get a label of its own, and no consumer's name reaches the metrics at all.
+    let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metrics
+            .lines()
+            .any(|l| l == r#"gapura_rate_limited_total{route="shop/api#0"} 2"#),
+        "both 429s count under the rule's label:\n{metrics}"
+    );
+    let named: Vec<&str> = metrics
+        .lines()
+        .filter(|l| l.contains("tight") || l.contains("roomy"))
+        .collect();
+    assert!(
+        named.is_empty(),
+        "a consumer's name is a metric label: {named:?}"
+    );
+}
