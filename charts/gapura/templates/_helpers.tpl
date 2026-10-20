@@ -94,3 +94,82 @@ app.kubernetes.io/component: gateway
 {{- printf "%s:%s" (.Values.image).repository (default .Chart.AppVersion (.Values.image).tag) -}}
 {{- end -}}
 {{- end -}}
+
+{{- /* The configuration endpoint's Service name. It carries the longest suffix (-control-config),
+       so it truncates its own base; deriving it from gapura.controlName could itself overrun 63.
+       The console's Service and the data plane's default --control-plane both build it here. */}}
+{{- define "gapura.configName" -}}
+{{- printf "%s-control-config" (include "gapura.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- /* The data plane's objects (Deployment, Service, ServiceAccount), truncated for the same
+       63-character limit. */}}
+{{- define "gapura.dataPlaneName" -}}
+{{- printf "%s-data-plane" (include "gapura.fullname" . | trunc 52 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- /* The pod and container security contexts and the probes, shared by the Kubernetes-mode
+       gateway and the data plane: the same binary, bound the same way, healthy by the same
+       endpoints. */}}
+{{- define "gapura.podSecurityContext" -}}
+runAsNonRoot: true
+runAsUser: 65532
+runAsGroup: 65532
+seccompProfile:
+  type: RuntimeDefault
+{{- if eq .Values.privilegedPorts "sysctl" }}
+sysctls:
+- name: net.ipv4.ip_unprivileged_port_start
+  value: "0"
+{{- end }}
+{{- end -}}
+
+{{- define "gapura.containerSecurityContext" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities:
+  drop: ["ALL"]
+  {{- if eq .Values.privilegedPorts "capability" }}
+  add: ["NET_BIND_SERVICE"]
+  {{- end }}
+{{- end -}}
+
+{{- define "gapura.probes" -}}
+{{- /* The pre-stop delay comes out of the grace period's budget, so it is cut to what the grace
+       period leaves after the drain rather than refused: a values file carrying 0.1.0's 75 s
+       must keep rendering on upgrade, with the 14 s it has room for. deployment.yaml refuses a
+       grace period below 61, so this never goes negative. */ -}}
+{{- $grace := int (.Values.terminationGracePeriodSeconds | default 0) -}}
+{{- $preStop := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) -}}
+readinessProbe:
+  httpGet: { path: /readyz, port: admin }
+  periodSeconds: 5
+  failureThreshold: 3
+{{- if eq .Values.livenessPort "http" }}
+livenessProbe:
+  tcpSocket: { port: http }
+  periodSeconds: 10
+  failureThreshold: 3
+{{- else }}
+livenessProbe:
+  httpGet: { path: /healthz, port: admin }
+  periodSeconds: 10
+  failureThreshold: 3
+{{- end }}
+# On /healthz, not /readyz: readiness waits for the first config, which never arrives when
+# the Gateway API CRDs or the RBAC are missing, and a startupProbe on it would turn that
+# into CrashLoopBackOff instead of a pod that stays NotReady with readable logs.
+startupProbe:
+  httpGet: { path: /healthz, port: admin }
+  periodSeconds: 2
+  failureThreshold: 30
+{{- if and (gt $preStop 0) (semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version) }}
+# Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
+# Service's endpoints asynchronously and an external load balancer keeps sending to the
+# node until its own health checks fail. Holding SIGTERM back keeps serving those. The
+# sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
+lifecycle:
+  preStop:
+    sleep: { seconds: {{ $preStop }} }
+{{- end }}
+{{- end -}}

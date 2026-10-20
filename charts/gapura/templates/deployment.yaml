@@ -11,10 +11,6 @@
 {{- if lt $grace 61 }}
 {{- fail (printf "terminationGracePeriodSeconds (%d) must be at least 61: Pingora takes up to 60 s to drain in-flight requests after SIGTERM, and a pod still draining at the deadline is SIGKILLed" $grace) }}
 {{- end }}
-{{- /* The pre-stop delay comes out of the same budget, so it is cut to what the grace period
-     leaves after the drain rather than refused: a values file carrying 0.1.0's 75 s must keep
-     rendering on upgrade, with the 14 s it has room for. */ -}}
-{{- $preStop := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) }}
 {{- if not (has .Values.livenessPort (list "http" "admin")) }}
 {{- fail (printf "livenessPort must be http or admin, got %q" .Values.livenessPort) }}
 {{- end }}
@@ -56,17 +52,7 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-        {{- if eq .Values.privilegedPorts "sysctl" }}
-        sysctls:
-        - name: net.ipv4.ip_unprivileged_port_start
-          value: "0"
-        {{- end }}
+      securityContext: {{- include "gapura.podSecurityContext" . | nindent 8 }}
       containers:
       - name: gapura
         image: {{ include "gapura.image" . }}
@@ -126,45 +112,8 @@ spec:
         - { name: http, containerPort: {{ (.Values.ports).http }}, protocol: TCP }
         - { name: https, containerPort: {{ (.Values.ports).https }}, protocol: TCP }
         - { name: admin, containerPort: {{ (.Values.ports).admin }}, protocol: TCP }
-        readinessProbe:
-          httpGet: { path: /readyz, port: admin }
-          periodSeconds: 5
-          failureThreshold: 3
-        {{- if eq .Values.livenessPort "http" }}
-        livenessProbe:
-          tcpSocket: { port: http }
-          periodSeconds: 10
-          failureThreshold: 3
-        {{- else }}
-        livenessProbe:
-          httpGet: { path: /healthz, port: admin }
-          periodSeconds: 10
-          failureThreshold: 3
-        {{- end }}
-        # On /healthz, not /readyz: readiness waits for the first config, which never arrives when
-        # the Gateway API CRDs or the RBAC are missing, and a startupProbe on it would turn that
-        # into CrashLoopBackOff instead of a pod that stays NotReady with readable logs.
-        startupProbe:
-          httpGet: { path: /healthz, port: admin }
-          periodSeconds: 2
-          failureThreshold: 30
-        {{- if and (gt $preStop 0) (semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version) }}
-        # Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
-        # Service's endpoints asynchronously and an external load balancer keeps sending to the
-        # node until its own health checks fail. Holding SIGTERM back keeps serving those. The
-        # sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
-        lifecycle:
-          preStop:
-            sleep: { seconds: {{ $preStop }} }
-        {{- end }}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop: ["ALL"]
-            {{- if eq .Values.privilegedPorts "capability" }}
-            add: ["NET_BIND_SERVICE"]
-            {{- end }}
+        {{- include "gapura.probes" . | nindent 8 }}
+        securityContext: {{- include "gapura.containerSecurityContext" . | nindent 10 }}
         {{- with .Values.resources }}
         resources: {{- toYaml . | nindent 10 }}
         {{- end }}

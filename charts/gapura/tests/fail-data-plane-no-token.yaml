@@ -1,0 +1,7 @@
+# expect: dataPlane.controlPlane.token.existingSecret must name a Secret
+# A data plane with no token cannot authenticate to any control plane: the gateway exits at
+# startup without --control-plane-token-file, so the render fails instead.
+dataPlane:
+  enabled: true
+  controlPlane:
+    url: https://control.example.test:8081

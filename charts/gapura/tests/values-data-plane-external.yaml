@@ -1,0 +1,20 @@
+# A data plane polling a control plane outside this release, through a TLS-terminating sidecar
+# on loopback: no console here, an http:// URL allowed by insecureHttp, no CA, a NodePort
+# Service, and the shared gateway values (threads, trusted proxies) carried over.
+threads: 2
+trustedProxies: ["10.0.0.0/8"]
+dataPlane:
+  enabled: true
+  replicaCount: 1
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30081
+  controlPlane:
+    url: http://127.0.0.1:18081
+    insecureHttp: true
+    token:
+      existingSecret: edge-token
+      key: plane-token
+  extraArgs:
+    - --control-plane-interval=10

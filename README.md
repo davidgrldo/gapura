@@ -247,6 +247,77 @@ The conformance report is in [conformance/](conformance/). To reproduce everythi
 `hack/kind-deploy.sh`: the suite brings its own Gateways on port 80 and the fixture would compete
 for that address. Pass `FIXTURE=1 ./hack/conformance.sh` to keep the fixture as well.
 
+### Serving console routes
+
+The gateway above serves HTTPRoutes. Routes created in the console (store mode) are served by a
+second Deployment, `<fullname>-data-plane`, which polls the console's configuration endpoint
+instead of reading the cluster. For a release `gapura` in `gapura-system`:
+
+1. Run the console in store mode (`console.store.existingSecret`) and publish its configuration
+   endpoint: `console.store.config.service.create: true` creates the ClusterIP Service
+   `gapura-control-config`.
+2. Give the endpoint TLS: a data plane refuses an `http://` control plane. With cert-manager, a
+   self-signed CA and a certificate from it for the Service's name:
+
+   ```yaml
+   apiVersion: cert-manager.io/v1
+   kind: Issuer
+   metadata: { name: selfsigned, namespace: gapura-system }
+   spec: { selfSigned: {} }
+   ---
+   apiVersion: cert-manager.io/v1
+   kind: Certificate
+   metadata: { name: gapura-config-ca, namespace: gapura-system }
+   spec:
+     isCA: true
+     commonName: gapura-config-ca
+     secretName: gapura-config-ca
+     privateKey: { algorithm: ECDSA, size: 256 }
+     issuerRef: { name: selfsigned, kind: Issuer }
+   ---
+   apiVersion: cert-manager.io/v1
+   kind: Issuer
+   metadata: { name: gapura-config-ca, namespace: gapura-system }
+   spec: { ca: { secretName: gapura-config-ca } }
+   ---
+   apiVersion: cert-manager.io/v1
+   kind: Certificate
+   metadata: { name: gapura-control-config, namespace: gapura-system }
+   spec:
+     secretName: gapura-control-config-tls
+     dnsNames: [gapura-control-config.gapura-system.svc]
+     issuerRef: { name: gapura-config-ca, kind: Issuer }
+   ```
+
+   Set `console.store.config.tls.existingSecret: gapura-control-config-tls`. The same Secret's
+   `ca.crt` is the CA the data plane trusts. The console reads the certificate at startup, so
+   restart it after a renewal.
+3. Sign in as a superuser, open Data planes and register one. Its token is shown once; store it:
+
+   ```bash
+   kubectl -n gapura-system create secret generic gapura-data-plane-token --from-file=token=/dev/stdin
+   ```
+
+   (paste the token, then Ctrl-D).
+4. Enable the data plane:
+
+   ```yaml
+   dataPlane:
+     enabled: true
+     controlPlane:
+       token: { existingSecret: gapura-data-plane-token }
+       ca: { existingSecret: gapura-control-config-tls }
+   ```
+
+   With `dataPlane.controlPlane.url` empty it polls `https://gapura-control-config.gapura-system.svc:8081`,
+   and the chart tells the console which port it binds for plain HTTP (`dataPlane.ports.http`).
+   Its Service, `gapura-data-plane`, is ClusterIP by default (`dataPlane.service.type`):
+
+   ```bash
+   kubectl -n gapura-system port-forward svc/gapura-data-plane 8080:80
+   curl -sS localhost:8080/your-route
+   ```
+
 ## Development
 
 ```bash
@@ -282,7 +353,8 @@ LoadBalancer addresses of `--publish-service namespace/name` into Gateway status
 
 A third config source exists besides files (`--config-dir`, above) and the cluster: `--control-plane`
 polls the configuration endpoint `gapura-control` serves and keeps a disk cache, so a control-plane
-outage costs new configuration, not traffic. The chart does not expose it yet. The URL must be
+outage costs new configuration, not traffic. The chart runs one with `dataPlane.enabled` (see
+[Serving console routes](#serving-console-routes)). The URL must be
 `https://`: every configuration carries the private key of each certificate the gateway serves.
 Start `gapura-control` with `--config-tls-cert` and `--config-tls-key` to serve that endpoint over
 TLS, and pass the CA that signed the certificate to the gateway with `--control-plane-ca`.

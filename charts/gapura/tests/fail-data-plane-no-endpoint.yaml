@@ -1,0 +1,18 @@
+# expect: dataPlane.controlPlane.url is empty, so the data plane polls this release's own configuration endpoint
+# The default URL names the console's configuration Service, which this release does not create
+# (console.store.config.service.create is off): the data plane would poll a name that resolves
+# to nothing.
+console:
+  enabled: true
+  store:
+    existingSecret: gapura-console-db
+    config:
+      tls:
+        existingSecret: gapura-console-config-tls
+  sessionKey:
+    existingSecret: gapura-console-session
+dataPlane:
+  enabled: true
+  controlPlane:
+    token:
+      existingSecret: gapura-data-plane-token

@@ -67,6 +67,18 @@ Data planes fetch their configuration from the second listener on port
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if ((.Values.dataPlane).enabled) }}
+{{- $dpPorts := ((.Values.dataPlane).ports) | default dict }}
+
+The data plane is enabled: {{ include "gapura.dataPlaneName" . }} serves the routes created in the
+console, not HTTPRoutes, polling {{ if (((.Values.dataPlane).controlPlane).url) }}{{ (((.Values.dataPlane).controlPlane).url) }}{{ else }}this release's configuration endpoint ({{ include "gapura.configName" . }}){{ end }}.
+It is reached through the {{ (((.Values.dataPlane).service).type) | default "ClusterIP" }} Service {{ include "gapura.dataPlaneName" . }} on ports {{ int ($dpPorts.http | default 80) }} and {{ int ($dpPorts.https | default 443) }}:
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "gapura.dataPlaneName" . }}
+   A pod stays NotReady until its first configuration arrives; its log names why one has not.
+{{- if not ((((.Values.dataPlane).controlPlane).ca).existingSecret) }}
+   No dataPlane.controlPlane.ca: the endpoint's certificate has to chain to a public root.
+{{- end }}
+{{- end }}
 
 The GatewayClass {{ (.Values.gatewayClass).name }} is cluster-scoped. A second release of this chart
 in the same cluster needs its own gatewayClass.name and controllerName.
