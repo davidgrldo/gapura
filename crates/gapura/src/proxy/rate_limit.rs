@@ -95,10 +95,10 @@ const SWEEP_FLOOR: usize = 65_536;
 /// by a header, times this. A rule's name comes from configuration. A consumer's own limit
 /// counts under a name of its own, which a request reaches only by presenting that consumer's
 /// valid key, and one valid key opens one such name for every rule its consumer's own limit
-/// reaches. The bound is therefore (rules + rule x consumer pairs whose own limit counts by a
-/// header) x this, which is finite, and rare in practice: it takes consumers that each have a
-/// header-counted limit of their own. The documented figure on [`LimitBy::Header`] is this one
-/// per window name.
+/// reaches. The bound is therefore (rules that count by a header + rule x consumer pairs whose
+/// own limit counts by a header) x this, which is finite, and rare in practice: it takes
+/// consumers that each have a header-counted limit of their own. The documented figure on
+/// [`LimitBy::Header`] is this one per window name.
 const HEADER_WINDOWS: usize = 65_536;
 
 /// How often a request that meets `HEADER_WINDOWS` may sweep, in milliseconds. Without it,

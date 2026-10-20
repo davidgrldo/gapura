@@ -1,4 +1,5 @@
-//! End-to-end: the real `gapura` binary against a generated config dir and a mock upstream.
+//! End-to-end: the real `gapura` binary, configured from a generated config dir or a stub control
+//! plane, against a mock upstream.
 
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener};
@@ -411,18 +412,8 @@ async fn answers_on_http(gw: &Gateway) -> bool {
     gw.logged(PROBE_ID).is_some()
 }
 
-/// Start the binary on ports chosen here, rendering the config once the http port is known.
-///
-/// `free_port` drops its listener before the child binds, so another listener in this binary -- a
-/// parallel test's gateway or upstream -- can take the same ephemeral port in between. If it does
-/// before the child starts, the gateway refuses to start on an address it cannot bind, and the
-/// race shows up as an immediate clean exit; retrying with fresh ports is the fix. If it does
-/// between that check and Pingora's own bind, Pingora logs "is in use, will try again" and retries
-/// once a second while the process stays up, and every request to the port reaches the other
-/// listener. Readiness therefore demands answers from this child on both ports, which holds off
-/// until the other listener's test ends and the retry wins. A child that starts but never becomes
-/// ready is a real failure, and fails the test with whatever it managed to log; a holder that
-/// outlived the whole wait would fail the same way, and would need a retry on fresh ports.
+/// Start the binary on ports chosen here, rendering the config once the http port is known. The
+/// port race and what readiness waits for are described on [`start_gateway_from`].
 async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
     start_gateway_with(render, &[]).await
 }
@@ -445,6 +436,17 @@ async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> G
 /// The gateway reading its configuration from wherever `source` says. It is handed each
 /// attempt's temporary directory and HTTP port, writes there what it needs, and returns the
 /// arguments that name it.
+///
+/// `free_port` drops its listener before the child binds, so another listener in this binary -- a
+/// parallel test's gateway or upstream -- can take the same ephemeral port in between. If it does
+/// before the child starts, the gateway refuses to start on an address it cannot bind, and the
+/// race shows up as an immediate clean exit; retrying with fresh ports is the fix. If it does
+/// between that check and Pingora's own bind, Pingora logs "is in use, will try again" and retries
+/// once a second while the process stays up, and every request to the port reaches the other
+/// listener. Readiness therefore demands answers from this child on both ports, which holds off
+/// until the other listener's test ends and the retry wins. A child that starts but never becomes
+/// ready is a real failure, and fails the test with whatever it managed to log; a holder that
+/// outlived the whole wait would fail the same way, and would need a retry on fresh ports.
 async fn start_gateway_from(
     source: impl Fn(&std::path::Path, u16) -> Vec<String>,
     extra: &[&str],
@@ -1451,9 +1453,17 @@ async fn an_untrusted_caller_cannot_name_itself_in_the_access_log() {
     );
 }
 
-/// The store-mode snapshot: one route for echo.test to the echo upstream behind key_auth,
-/// limited for everyone to 3 an hour per address and for `tight` to 2 an hour of its own, counted
-/// per consumer. Hour windows, so no run of the test crosses a boundary (#57).
+/// The store-mode snapshot: one route for echo.test to the echo upstream behind
+/// key_auth, limited for everyone to 3 an hour per address and for `tight` to 2 an hour of its
+/// own, which counts by address as well.
+///
+/// Both limits count by address on purpose. Every request in the test comes from one address, so
+/// `tight`'s requests and everyone else's have the same client, `127.0.0.1`, and the only thing
+/// that keeps `tight`'s count out of everyone's is the window's name. Counting `tight`'s limit by
+/// consumer would separate the two by the kind of client instead, whatever the window were
+/// called, and the test could not tell a window shared in name from one kept apart.
+///
+/// Hour windows, so a run is very unlikely to cross a boundary (#57).
 fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
     use gapura_core::config::{KeyAuthPolicy, LimitBy, PathMatch, Plugin, Protocol, RateLimit};
     use gapura_core::store::{
@@ -1521,7 +1531,7 @@ fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
                 route: Some("api".into()),
                 service: None,
                 consumer: Some("tight".into()),
-                limit: hour(2, LimitBy::Consumer),
+                limit: hour(2, LimitBy::Ip),
             },
         ],
     }
@@ -1530,6 +1540,12 @@ fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
 /// A consumer's own limit, end to end: once key_auth has named the caller, `tight` is held to
 /// its own 2 an hour while `roomy`, from the same address, still has the 3 an hour everyone has
 /// -- untouched by `tight`'s requests, which count in a window of their own.
+///
+/// Both limits count by address (see `consumer_limited`), so the two windows have the same
+/// client and differ only in their name. A data plane that counted `tight` under the rule's
+/// window would let `tight` spend two of `roomy`'s three, and `roomy` would be refused at its
+/// second request. That is what this test proves; counting by consumer is covered by the unit
+/// tests in `rate_limit.rs`.
 ///
 /// Two things the limit must not leak. The upstream is told the bare username, not the
 /// `workspace/username` the data plane counts under. And the metric is labelled with the rule,
@@ -1568,16 +1584,25 @@ async fn a_consumer_s_own_limit_holds_it_and_no_one_else() {
         .unwrap();
     assert_eq!(r.status(), 429, "past tight's own allowance");
     assert_eq!(r.headers()["x-ratelimit-limit"], "2");
-    for i in 0..3 {
+    for i in 0..2 {
         assert_eq!(status(Some("roomy-key")).await, 200, "roomy {i}");
     }
-    assert_eq!(
-        status(Some("roomy-key")).await,
-        429,
-        "past everyone's allowance"
-    );
-    // Without a key key_auth refuses first: there is no consumer, and no limit is spent.
+    // Without a key key_auth refuses first: there is no consumer, and the limit is not reached.
+    // Were it spent, this address would have used up all 3 and roomy's next request would fail.
     assert_eq!(status(None).await, 401);
+    assert_eq!(status(Some("roomy-key")).await, 200, "roomy 2");
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "roomy-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429, "past everyone's allowance");
+    assert_eq!(
+        r.headers()["x-ratelimit-limit"],
+        "3",
+        "everyone's limit, not tight's"
+    );
 
     // Both refusals above were counted, under the rule's name: `tight`'s own limit does not
     // get a label of its own, and no consumer's name reaches the metrics at all.
