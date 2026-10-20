@@ -11,6 +11,7 @@ use gapura_core::Config;
 use pingora::tls::pkey::{PKey, Private};
 use pingora::tls::x509::X509;
 
+use crate::proxy::outlier;
 use crate::telemetry::{now_secs, METRICS};
 
 /// A parsed TLS bundle: leaf certificate, optional chain, private key.
@@ -38,10 +39,25 @@ pub struct Runtime {
     /// Decoding keys per JWKS document, for the same reason: a policy's keys cannot change
     /// between swaps, so parsing them per request would be work nothing asked for.
     jwt_keys: HashMap<String, crate::proxy::jwt::Keys>,
+    /// Outlier records for each cluster's endpoints, shared with every other generation built
+    /// from the same `Registry`.
+    health: outlier::ClusterHealth,
 }
 
 impl Runtime {
+    /// A generation with records of its own, for callers with no `Store` (tests).
     pub fn new(config: Config, generation: u64, status: Vec<StatusPatch>) -> Self {
+        Self::build(config, generation, status, &outlier::Registry::default())
+    }
+
+    /// As `new`, sharing endpoint outlier records with every generation built from `outliers`.
+    pub fn build(
+        config: Config,
+        generation: u64,
+        status: Vec<StatusPatch>,
+        outliers: &outlier::Registry,
+    ) -> Self {
+        let health = outliers.sync(&config);
         let rr = config
             .clusters
             .keys()
@@ -110,6 +126,7 @@ impl Runtime {
             upstream_cas,
             regexes,
             jwt_keys,
+            health,
         }
     }
 
@@ -138,6 +155,11 @@ impl Runtime {
     pub fn upstream_ca(&self, cluster: &str) -> Option<Arc<Box<[X509]>>> {
         self.upstream_cas.get(cluster).cloned()
     }
+
+    /// The outlier records of `cluster`'s endpoints, in endpoint order; empty for an unknown one.
+    pub fn health(&self, cluster: &str) -> &[Option<Arc<outlier::Health>>] {
+        self.health.get(cluster).map_or(&[], Vec::as_slice)
+    }
 }
 
 fn parse_bundle(cert_pem: &str, key_pem: &str) -> Result<ParsedCert, String> {
@@ -162,6 +184,8 @@ pub struct Store {
     current: ArcSwap<Runtime>,
     ready: AtomicBool,
     generation: AtomicU64,
+    /// Endpoint outlier records, kept across swaps; each generation holds handles into it.
+    outliers: outlier::Registry,
 }
 
 impl Store {
@@ -170,6 +194,7 @@ impl Store {
             current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0, Vec::new())),
             ready: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            outliers: outlier::Registry::default(),
         }
     }
 
@@ -186,8 +211,12 @@ impl Store {
     /// Call from a single writer (the config source); concurrent swaps could publish generations out of order.
     pub fn swap(&self, config: Config, status: Vec<StatusPatch>) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.current
-            .store(Arc::new(Runtime::new(config, generation, status)));
+        self.current.store(Arc::new(Runtime::build(
+            config,
+            generation,
+            status,
+            &self.outliers,
+        )));
         self.ready.store(true, Ordering::Release);
         METRICS.config_last_reload_timestamp_seconds.set(now_secs());
         METRICS.config_from_cache.set(0);
@@ -202,8 +231,12 @@ impl Store {
     /// `gapura_config_from_cache`, so the state is visible rather than disguised.
     pub fn swap_from_cache(&self, config: Config) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.current
-            .store(Arc::new(Runtime::new(config, generation, Vec::new())));
+        self.current.store(Arc::new(Runtime::build(
+            config,
+            generation,
+            Vec::new(),
+            &self.outliers,
+        )));
         self.ready.store(true, Ordering::Release);
         METRICS.config_from_cache.set(1);
     }
@@ -274,6 +307,38 @@ mod tests {
         assert_eq!(store.load().generation, 1);
         store.swap(Config::default(), Vec::new());
         assert_eq!(store.load_full().generation, 2);
+    }
+
+    /// The point of keeping outlier records in the `Store`: a swap builds a new `Runtime`, and an
+    /// endpoint ejected under the old one is still ejected under the new one.
+    #[test]
+    fn outlier_records_survive_a_swap() {
+        use crate::proxy::outlier::Outcome;
+        use gapura_core::config::OutlierDetection;
+
+        let mut config = Config::default();
+        config.clusters.insert(
+            "apps/echo:80".into(),
+            Cluster {
+                endpoints: vec![Endpoint {
+                    address: "10.0.0.1".into(),
+                    port: 8080,
+                }],
+                ..Cluster::default()
+            },
+        );
+        let store = Store::empty();
+        store.swap(config.clone(), Vec::new());
+        let h = store.load().health("apps/echo:80")[0].clone().unwrap();
+        for _ in 0..5 {
+            h.record(Outcome::Failure, 0, &OutlierDetection::default());
+        }
+        store.swap(config, Vec::new());
+        assert!(store.load().health("apps/echo:80")[0]
+            .as_ref()
+            .unwrap()
+            .is_ejected(0));
+        assert!(store.load().health("apps/none:80").is_empty());
     }
 
     #[test]

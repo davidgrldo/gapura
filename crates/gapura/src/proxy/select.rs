@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use gapura_core::config::{Cluster, PathMatch, PathRewrite, Redirect, WeightedBackend};
+use gapura_core::config::{Cluster, Endpoint, PathMatch, PathRewrite, Redirect, WeightedBackend};
 use rand::Rng;
 
 /// Answer locally instead of proxying.
@@ -45,6 +45,12 @@ pub fn pick_backend(
 
 pub fn random_roll(total: u64) -> u64 {
     rand::rng().random_range(0..total)
+}
+
+/// The address of a configured endpoint; `None` for one that does not parse.
+pub fn endpoint_addr(e: &Endpoint) -> Option<SocketAddr> {
+    let ip = e.address.parse::<IpAddr>().ok()?;
+    Some(SocketAddr::new(ip, e.port))
 }
 
 /// Endpoint at the round-robin cursor, skipping addresses already tried by this request.

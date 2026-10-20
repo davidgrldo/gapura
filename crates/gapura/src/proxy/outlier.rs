@@ -4,12 +4,20 @@
 //! failures eject it for `base × n` (n = times ejected, capped); after that it is back on
 //! probation, where one failure ejects it again and enough successes clear its history.
 //! Selection only asks [`Health::is_ejected`], which takes no lock.
+//!
+//! Records are keyed by address and held by the [`Registry`] the `Store` owns, outside any one
+//! configuration generation: a swap neither resets them nor keeps them for addresses it dropped.
 
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use gapura_core::config::OutlierDetection;
+use gapura_core::Config;
+
+use crate::proxy::select::endpoint_addr;
 
 /// What one attempt against an endpoint came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +101,49 @@ static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// Milliseconds on a process-local monotonic clock, the one ejections are measured on.
 pub fn now_ms() -> u64 {
     EPOCH.elapsed().as_millis() as u64
+}
+
+/// Per cluster key, one record per entry of `Cluster::endpoints`, in order; `None` where the
+/// address does not parse (selection never picks those).
+pub type ClusterHealth = HashMap<String, Vec<Option<Arc<Health>>>>;
+
+/// Every configured endpoint's record, by address.
+#[derive(Default)]
+pub struct Registry(Mutex<HashMap<SocketAddr, Arc<Health>>>);
+
+impl Registry {
+    /// Records for `config`'s endpoints, sharing those of addresses seen before. An address
+    /// `config` does not name is forgotten, so one that comes back starts over, as a new endpoint
+    /// would.
+    pub fn sync(&self, config: &Config) -> ClusterHealth {
+        let mut known = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let named: HashSet<SocketAddr> = config
+            .clusters
+            .values()
+            .flat_map(|c| c.endpoints.iter().filter_map(endpoint_addr))
+            .collect();
+        known.retain(|addr, _| named.contains(addr));
+        let mut out = ClusterHealth::new();
+        for (key, cluster) in &config.clusters {
+            let records = cluster
+                .endpoints
+                .iter()
+                .map(|e| endpoint_addr(e).map(|a| Arc::clone(known.entry(a).or_default())))
+                .collect();
+            out.insert(key.clone(), records);
+        }
+        out
+    }
+}
+
+/// `pick_endpoint`'s question about the endpoint at an index, answered from `records`.
+pub fn ejected_at(records: &[Option<Arc<Health>>], now_ms: u64) -> impl Fn(usize) -> bool + '_ {
+    move |i| {
+        records
+            .get(i)
+            .and_then(Option::as_ref)
+            .is_some_and(|h| h.is_ejected(now_ms))
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +243,57 @@ mod tests {
             h.record(S, 30_000, &p);
         }
         assert_eq!(h.record(F, 30_000, &p), Some(Duration::from_secs(60)));
+    }
+
+    fn config(clusters: &[(&str, &[&str])]) -> Config {
+        let mut c = Config::default();
+        for (key, addrs) in clusters {
+            c.clusters.insert(
+                key.to_string(),
+                gapura_core::config::Cluster {
+                    endpoints: addrs
+                        .iter()
+                        .map(|a| gapura_core::config::Endpoint {
+                            address: a.to_string(),
+                            port: 80,
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+        }
+        c
+    }
+
+    #[test]
+    fn the_registry_keeps_records_across_syncs_and_forgets_dropped_addresses() {
+        let reg = Registry::default();
+        let both = config(&[
+            ("a", &["10.0.0.1", "10.0.0.2"]),
+            ("b", &["10.0.0.1", "nope"]),
+        ]);
+        let h = reg.sync(&both);
+        let first = h["a"][0].clone().unwrap();
+        assert!(
+            Arc::ptr_eq(&first, h["b"][0].as_ref().unwrap()),
+            "one record per address, whichever clusters name it"
+        );
+        assert!(
+            h["b"][1].is_none(),
+            "an address that does not parse has no record"
+        );
+        eject(&first, 0, &OutlierDetection::default());
+
+        let again = reg.sync(&both);
+        assert!(Arc::ptr_eq(&first, again["a"][0].as_ref().unwrap()));
+        assert!(again["a"][0].as_ref().unwrap().is_ejected(0));
+
+        reg.sync(&config(&[("a", &["10.0.0.2"])]));
+        let back = reg.sync(&both);
+        assert!(
+            !back["a"][0].as_ref().unwrap().is_ejected(0),
+            "an address that left the configuration starts over when it returns"
+        );
     }
 
     #[test]
