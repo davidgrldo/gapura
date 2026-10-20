@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store route's rate limit no longer resets when another route is added, removed or
+  re-prioritised. Its window was named after the route's place in the whole route table, so a
+  change ahead of it renamed the window of every route sorted after: a route at its limit got a
+  fresh allowance, and its `gapura_rate_limited_total` series moved to a new `route` label. The
+  label is now `<route>#0` for every store route and stays put, so after upgrading every store
+  route but the first in the table moves to a new series once. The Kubernetes path is
+  unchanged: its index was already the rule's place in its own HTTPRoute.
 - Every answer the gateway gives on its own now names its cause: a stable key such as
   `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
   `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an
