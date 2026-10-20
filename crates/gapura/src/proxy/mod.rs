@@ -2,8 +2,9 @@
 //!
 //! One request, top to bottom: `request_filter` (match, answer locally or pick a cluster),
 //! `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite, headers),
-//! `response_filter` (response headers), `fail_to_connect` (retry once), `fail_to_proxy`
-//! (502/504 mapping), `logging` (access log + metrics).
+//! `upstream_response_filter` (the endpoint's outcome), `response_filter` (response headers),
+//! `fail_to_connect` (retry once), `fail_to_proxy` (502/504 mapping), `logging` (access log +
+//! metrics). Outcomes feed passive outlier detection (`outlier`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -28,6 +29,7 @@ use pingora::{Error, ErrorSource, ErrorType, Result};
 use tokio::sync::Semaphore;
 
 use crate::proxy::attrs::Extracted;
+use crate::proxy::outlier::Outcome;
 use crate::proxy::select::{
     pick_backend, pick_endpoint, random_roll, redirect_location, rewrite_path, Local,
 };
@@ -105,6 +107,32 @@ impl Ctx {
             .get(self.listener?)?
             .rules
             .get(self.rule?)
+    }
+
+    /// Count this attempt's outcome against the endpoint it went to.
+    fn record(&self, outcome: Outcome) {
+        let (Some(health), Some(rt), Some(key)) = (&self.health, &self.runtime, &self.cluster)
+        else {
+            return;
+        };
+        let p = rt
+            .config
+            .clusters
+            .get(key)
+            .and_then(|c| c.outlier)
+            .unwrap_or_default();
+        if let Some(out_for) = health.record(outcome, outlier::now_ms(), &p) {
+            METRICS
+                .upstream_ejections_total
+                .with_label_values(&[key])
+                .inc();
+            tracing::warn!(
+                cluster = %key,
+                endpoint = ?self.upstream,
+                seconds = out_for.as_secs(),
+                "ejecting an endpoint after consecutive failures"
+            );
+        }
     }
 
     fn route_label(&self) -> &str {
@@ -923,6 +951,21 @@ impl ProxyHttp for GapuraProxy {
         Ok(())
     }
 
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
+        // The gateway failures, as Envoy counts them: the endpoint answered, but the way a broken
+        // proxy or an overloaded instance does. A 500 is the application's, usually the request's.
+        ctx.record(match upstream_response.status.as_u16() {
+            502..=504 => Outcome::Failure,
+            _ => Outcome::Success,
+        });
+        Ok(())
+    }
+
     async fn response_filter(
         &self,
         _session: &mut Session,
@@ -976,6 +1019,7 @@ impl ProxyHttp for GapuraProxy {
             .upstream_errors_total
             .with_label_values(&[&cluster, "connect"])
             .inc();
+        ctx.record(Outcome::Failure);
         if let Some(addr) = ctx.upstream {
             ctx.tried.push(addr);
         }
@@ -1028,7 +1072,12 @@ impl ProxyHttp for GapuraProxy {
                 }
                 _ => "other",
             };
-            // connect failures were already counted in fail_to_connect
+            // A connect failure was counted, and recorded against its endpoint, in fail_to_connect.
+            // A read error is most often a pooled connection the backend had already closed,
+            // which says nothing about the endpoint; a timeout does.
+            if kind == "timeout" {
+                ctx.record(Outcome::Failure);
+            }
             if kind != "connect" {
                 METRICS
                     .upstream_errors_total

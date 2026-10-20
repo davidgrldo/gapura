@@ -160,6 +160,24 @@ impl Runtime {
     pub fn health(&self, cluster: &str) -> &[Option<Arc<outlier::Health>>] {
         self.health.get(cluster).map_or(&[], Vec::as_slice)
     }
+
+    /// Set `gapura_upstream_ejected_endpoints` from this generation's clusters. An ejection ends
+    /// by the clock, not by an event, so the gauge is worked out when it is read; clusters that
+    /// left the configuration drop out of it.
+    pub fn publish_ejected(&self, now_ms: u64) {
+        METRICS.upstream_ejected_endpoints.reset();
+        for (cluster, records) in &self.health {
+            let out = records
+                .iter()
+                .flatten()
+                .filter(|h| h.is_ejected(now_ms))
+                .count();
+            METRICS
+                .upstream_ejected_endpoints
+                .with_label_values(&[cluster])
+                .set(out as i64);
+        }
+    }
 }
 
 fn parse_bundle(cert_pem: &str, key_pem: &str) -> Result<ParsedCert, String> {

@@ -47,6 +47,9 @@ impl AdminApp {
                 }
             }
             "/metrics" => {
+                self.store
+                    .load()
+                    .publish_ejected(crate::proxy::outlier::now_ms());
                 let encoder = TextEncoder::new();
                 let mut buf = Vec::new();
                 match encoder.encode(&prometheus::gather(), &mut buf) {
