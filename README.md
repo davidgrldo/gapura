@@ -47,6 +47,36 @@ a separate control plane is optional rather than required:
   turns on TLS to it, always verified; `console.store.ca` takes the CA bundle of a service that
   signs with its own, such as RDS or Cloud SQL.
 
+### Error keys
+
+Every answer the gateway gives on its own -- not an upstream's response, not a redirect -- names
+its cause with a stable key, in an `X-Gapura-Error` header and in the access log's `error_key`
+(`null` on every other line). The body is plain text, `404 no route`, unless the request's
+`Accept` prefers `application/json` (names it at a quality no lower than plain text gets); then
+it is `{"error":{"key":"NO_ROUTE","message":"no route","request_id":"..."}}`. The set is closed
+and a key never changes meaning, so a client can match on it:
+
+| Key | Status | Cause |
+|---|---|---|
+| `INVALID_REQUEST_TARGET` | 400 | the path cannot be normalised, the host is ambiguous, or `;` parameters would route it elsewhere |
+| `NO_ROUTE` | 404 | no rule matches |
+| `NO_BACKEND` | 500 | the rule has no valid backend |
+| `NO_ENDPOINTS` | 503 | the backend has no ready endpoint, or none left to try |
+| `AUTH_KEY_MISSING` | 401 | an API key policy found no key |
+| `AUTH_KEY_INVALID` | 401 | an API key policy found a key it does not accept |
+| `AUTH_JWT_MISSING` | 401 | a JWT policy found no bearer token |
+| `AUTH_JWT_INVALID` | 401 | a JWT policy found a token it does not accept |
+| `RATE_LIMITED` | 429 | the rule's rate limit is spent for this client |
+| `UPSTREAM_CONNECT_TIMEOUT` | 504 | connecting to the upstream timed out |
+| `UPSTREAM_TIMEOUT` | 504 | the upstream went quiet past the rule's timeout, or the request's budget ran out |
+| `UPSTREAM_CONNECT_ERROR` | 502 | the upstream refused the connection or could not be reached |
+| `UPSTREAM_TLS_ERROR` | 502 | the TLS handshake with the upstream failed |
+| `UPSTREAM_ERROR` | 502 | the exchange with the upstream failed after it connected |
+| `INTERNAL_ERROR` | 500 | the gateway failed on its own account |
+
+The 401 keys say whether a credential was presented, never why it was refused: that stays with
+the operator, in the `reason` label of `gapura_policy_refused_total`.
+
 ## The name
 
 A *gapura* is the gate of a Javanese or Balinese temple. The one the mark is

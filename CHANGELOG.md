@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Every answer the gateway gives on its own now names its cause: a stable key such as
+  `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
+  `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an
+  upstream's answer, a redirect, or a client that went away). A request whose `Accept` prefers
+  `application/json` gets the body as `{"error":{"key","message","request_id"}}`; every other
+  request keeps the plain text it got before, with two exceptions: a 401 now says
+  `401 unauthorized` where its body was empty, and a 500 for a fault of the gateway's own says
+  `internal error` rather than `no valid backend`, which only a missing backend means. No status
+  changes. The README's "Error keys" lists the set; a key is never renamed or reused.
 - The chart can run a data plane that serves the routes created in the console. Until now every
   gateway it started read the cluster (`--kubernetes`), so a store route was compiled and served
   to nobody. `dataPlane.enabled` adds a second Deployment and Service, `<fullname>-data-plane`,
