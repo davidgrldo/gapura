@@ -734,9 +734,11 @@ impl ProxyHttp for GapuraProxy {
 
                 // The limit is enforced here: after the match (the route is known) and the
                 // policies (the consumer is known, and its own limit replaces the rule's), before
-                // any upstream work (the limit must not cost the backend anything). Same client
-                // answer the access log records, so a limited request names the same client a
-                // served one would.
+                // any upstream work (the limit must not cost the backend anything). When the limit
+                // counts by address, the address is the same answer the access log records, so a
+                // limited request names the same client a served one would; a limit that counts
+                // by consumer or by a header's value counts that instead, which the log does not
+                // name.
                 let r = &rt.config.listeners[listener].rules[rule];
                 if let Some((rl, own)) = rt.config.rate_limit_for(r, ctx.consumer_id.as_deref()) {
                     // Keyed per rule, not per route (#185): one HTTPRoute can carry rules with

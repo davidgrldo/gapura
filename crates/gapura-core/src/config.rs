@@ -67,11 +67,12 @@ pub struct Config {
 /// consumer: Kong's order, a consumer's limit before any limit on everyone.
 ///
 /// How these limits count is part of what they mean, and the data plane has to count them the
-/// same way. Each limit, whether it sits in `routes` or is `any`, counts on each route apart,
-/// exactly as a limit on a whole workspace does: a limit that is the consumer's on no route in
-/// particular is "N on every route", never one counter shared across the routes it covers. A
-/// consumer-wide limit that spent itself on one route would make that route's traffic starve the
-/// others, which is not what attaching a limit to a consumer says.
+/// same way. Each limit, whether it sits in `routes` or is `any`, counts on each rule apart --
+/// per route in store mode, where a route has one rule -- exactly as a limit on a whole
+/// workspace does: a limit that is the consumer's on no route in particular is "N on every
+/// route", never one counter shared across the routes it covers. A consumer-wide limit that
+/// spent itself on one route would make that route's traffic starve the others, which is not
+/// what attaching a limit to a consumer says.
 ///
 /// The data plane counts a consumer's own limit in a window apart from the rule's, keyed with the
 /// consumer, so a consumer that has one is not also counted against the limit everyone else
@@ -210,9 +211,10 @@ pub enum LimitBy {
     /// without the header, with it repeated or with it empty counts by address instead, because
     /// a front proxy that appends a line rather than replacing it leaves the client's own line
     /// first, and honouring either would let the client pick its window. Past 65,536 windows
-    /// held by one limit -- ended ones not yet swept count too, and the cap applies separately
-    /// to each limit and on each replica -- a new value counts by address too, so a client
-    /// choosing values cannot grow the data plane's table at its request rate. Only as
+    /// held per window name -- a rule has one, and a consumer's own limit has one for each rule
+    /// it reaches; ended windows not yet swept count too, and the cap applies separately to each
+    /// name and on each replica -- a new value counts by address too, so a client choosing
+    /// values cannot grow the data plane's table at its request rate. Only as
     /// honest as whoever sets the header: a client that sets it itself picks a fresh window per
     /// value, so this belongs behind a proxy that overwrites it.
     Header(String),

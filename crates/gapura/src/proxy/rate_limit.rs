@@ -1,6 +1,8 @@
-//! Per-replica request limits. One fixed window per (rule, client), aligned to the epoch so
-//! every replica and every restart slices time identically; the client is what the limit counts
-//! by -- an address, a consumer or a header's value, see [`Client`]. The project has no database,
+//! Per-replica request limits. One fixed window per (window name, client), aligned to the epoch
+//! so every replica and every restart slices time identically. The window name is the rule's, or
+//! the rule's and the consumer's for a consumer's own limit, which counts apart from the rule
+//! everyone else shares; the client is what the limit counts by -- an address, a consumer or a
+//! header's value, see [`Client`]. The project has no database,
 //! so counts are per replica: with N replicas the effective allowance is N x limit, which is the
 //! documented semantics, not a bug to fix with state.
 
@@ -87,13 +89,16 @@ const SWEEP_FLOOR: usize = 65_536;
 /// so without a cap one limit could grow the table at its request rate; past this a new value
 /// counts by the request's address instead, as a request without the header does. Windows
 /// still held are what count, ended ones not yet swept included, which is why a request that
-/// meets the cap sweeps (see `CAPPED_SWEEP_MS`). The cap is per name -- the `route` a window is
-/// counted under -- so a limit whose clients choose the value fills only its own allowance,
+/// meets the cap sweeps (see `CAPPED_SWEEP_MS`). The cap is per name -- the window name a window
+/// is counted under -- so a limit whose clients choose the value fills only its own allowance,
 /// never another limit's. Memory is therefore bounded by the number of window names that count
-/// by a header, times this: a rule's name comes from configuration, and a consumer's own limit
+/// by a header, times this. A rule's name comes from configuration. A consumer's own limit
 /// counts under a name of its own, which a request reaches only by presenting that consumer's
-/// valid key, so a client needs a key for every name it would add to the bound. The documented
-/// figure on [`LimitBy::Header`] is this one.
+/// valid key, and one valid key opens one such name for every rule its consumer's own limit
+/// reaches. The bound is therefore (rules + rule x consumer pairs whose own limit counts by a
+/// header) x this, which is finite, and rare in practice: it takes consumers that each have a
+/// header-counted limit of their own. The documented figure on [`LimitBy::Header`] is this one
+/// per window name.
 const HEADER_WINDOWS: usize = 65_536;
 
 /// How often a request that meets `HEADER_WINDOWS` may sweep, in milliseconds. Without it,
@@ -104,8 +109,8 @@ const CAPPED_SWEEP_MS: u64 = 1_000;
 struct Window {
     /// When this window ends, in epoch milliseconds: `(bucket + 1) * window_ms` for the rule
     /// that created it. Kept per window rather than recomputed from the rule at hand, because
-    /// routes have different window lengths and so bucket numbers on different scales: only a
-    /// window's own end says whether it is still live.
+    /// window names have different window lengths and so bucket numbers on different scales:
+    /// only a window's own end says whether it is still live.
     ends_ms: u64,
     count: u32,
 }
@@ -123,9 +128,9 @@ struct Table {
 }
 
 impl Table {
-    /// How many header windows `route` holds, ended ones not yet swept included.
-    fn held(&self, route: &str) -> usize {
-        self.header_windows.get(route).copied().unwrap_or(0)
+    /// How many header windows `window` holds, ended ones not yet swept included.
+    fn held(&self, window: &str) -> usize {
+        self.header_windows.get(window).copied().unwrap_or(0)
     }
 
     /// Drops every window that has ended -- a live one holds a count that a reset would hand
@@ -133,9 +138,9 @@ impl Table {
     fn sweep(&mut self, now_ms: u64) {
         self.windows.retain(|_, w| w.ends_ms > now_ms);
         self.header_windows.clear();
-        for (route, client) in self.windows.keys() {
+        for (window, client) in self.windows.keys() {
             if matches!(client, Client::Header(_)) {
-                add_header_window(&mut self.header_windows, route);
+                add_header_window(&mut self.header_windows, window);
             }
         }
         self.sweep_at = (self.windows.len() * 2).max(SWEEP_FLOOR);
@@ -143,13 +148,13 @@ impl Table {
     }
 }
 
-/// Counts one more header window under `route`. The name is copied only the first time it is
+/// Counts one more header window under `window`. The name is copied only the first time it is
 /// seen, so a flood of new values does not allocate a name per window.
-fn add_header_window(counts: &mut HashMap<String, usize>, route: &str) {
-    match counts.get_mut(route) {
+fn add_header_window(counts: &mut HashMap<String, usize>, window: &str) {
+    match counts.get_mut(window) {
         Some(n) => *n += 1,
         None => {
-            counts.insert(route.to_string(), 1);
+            counts.insert(window.to_string(), 1);
         }
     }
 }
@@ -187,12 +192,12 @@ impl Default for RateLimiter {
 }
 
 impl RateLimiter {
-    /// Counts one request of `client` against `rl` under the window name `route`. `ip` is the
+    /// Counts one request of `client` against `rl` under the window name `window`. `ip` is the
     /// request's own address, which only the header cap needs: past `HEADER_WINDOWS` a new
     /// header value counts by it instead of opening one more window.
     pub fn check(
         &self,
-        route: &str,
+        window: &str,
         client: impl Into<Client>,
         ip: Option<IpAddr>,
         rl: &RateLimit,
@@ -201,12 +206,12 @@ impl RateLimiter {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        self.check_at(route, client, ip, rl, now_ms)
+        self.check_at(window, client, ip, rl, now_ms)
     }
 
     fn check_at(
         &self,
-        route: &str,
+        window: &str,
         client: impl Into<Client>,
         ip: Option<IpAddr>,
         rl: &RateLimit,
@@ -219,19 +224,19 @@ impl RateLimiter {
             Client::Ip(addr) => Client::Ip(grouped(addr)),
             named => named,
         };
-        let mut key = (route.to_string(), client);
-        // Set when this call swept because `route`'s header windows were full and found them
+        let mut key = (window.to_string(), client);
+        // Set when this call swept because `window`'s header windows were full and found them
         // still full. Logged after the lock is released: a subscriber that blocks on its
         // output must not hold up every worker's limit check.
         let mut cap_still_full = false;
         let outcome = 'counted: {
             let mut table = self.table.lock().unwrap();
-            // Unique keys are bounded by the unique (rule, client) pairs seen within a window,
-            // and header clients further by `HEADER_WINDOWS` for each window name. The sweep is
-            // a full scan under the one lock every worker shares, so it runs only once the table
-            // has doubled since the last one (and never below the floor): each sweep is paid
-            // for by as many inserts as it scans, and the table never holds more than twice its
-            // live windows. The one other sweep is a full header cap's, below, at most once a
+            // Unique keys are bounded by the unique (window name, client) pairs seen within a
+            // window, and header clients further by `HEADER_WINDOWS` for each window name. The
+            // sweep is a full scan under the one lock every worker shares, so it runs only once
+            // the table has doubled since the last one (and never below the floor): each sweep is
+            // paid for by as many inserts as it scans, and the table never holds more than twice
+            // its live windows. The one other sweep is a full header cap's, below, at most once a
             // second.
             if table.windows.len() > table.sweep_at {
                 table.sweep(now_ms);
@@ -241,11 +246,11 @@ impl RateLimiter {
                 // wait for it to catch up with the one that ran before the step.
                 let due = now_ms < table.swept_ms
                     || now_ms >= table.swept_ms.saturating_add(CAPPED_SWEEP_MS);
-                if table.held(route) >= HEADER_WINDOWS && due {
+                if table.held(window) >= HEADER_WINDOWS && due {
                     table.sweep(now_ms);
-                    cap_still_full = table.held(route) >= HEADER_WINDOWS;
+                    cap_still_full = table.held(window) >= HEADER_WINDOWS;
                 }
-                if table.held(route) >= HEADER_WINDOWS {
+                if table.held(window) >= HEADER_WINDOWS {
                     // Counted by address, as a request without the header is; with no address
                     // there is nothing to count by, and an unaddressed request never was.
                     match ip {
@@ -253,7 +258,7 @@ impl RateLimiter {
                         None => break 'counted Outcome::Allowed,
                     }
                 } else {
-                    add_header_window(&mut table.header_windows, route);
+                    add_header_window(&mut table.header_windows, window);
                 }
             }
             let w = table
@@ -277,7 +282,7 @@ impl RateLimiter {
         };
         if cap_still_full {
             tracing::warn!(
-                route,
+                window,
                 "this limit's header windows are full: a new header value now counts by address, or not at all without an address"
             );
         }
