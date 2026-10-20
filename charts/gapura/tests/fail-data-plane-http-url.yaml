@@ -1,0 +1,9 @@
+# expect: dataPlane.controlPlane.url http://control.example.test:8081 is plain http
+# The gateway refuses an http:// --control-plane without --control-plane-insecure-http and
+# exits at startup; the render fails first.
+dataPlane:
+  enabled: true
+  controlPlane:
+    url: http://control.example.test:8081
+    token:
+      existingSecret: gapura-data-plane-token

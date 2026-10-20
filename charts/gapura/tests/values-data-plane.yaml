@@ -1,0 +1,29 @@
+# The data plane serving the console's routes: the console in store mode with its configuration
+# endpoint published and served over TLS, and a data plane polling it by the default URL with its
+# token and the endpoint's CA from Secrets. The data plane binds 8080 for plain HTTP, so the
+# console is told to compile its routes onto that port. With the network policy on, the data
+# plane's admin port is closed the way the gateway's is.
+console:
+  enabled: true
+  store:
+    existingSecret: gapura-console-db
+    bootstrap:
+      existingSecret: gapura-console-bootstrap
+    config:
+      service:
+        create: true
+      tls:
+        existingSecret: gapura-console-config-tls
+  sessionKey:
+    existingSecret: gapura-console-session
+dataPlane:
+  enabled: true
+  ports:
+    http: 8080
+  controlPlane:
+    token:
+      existingSecret: gapura-data-plane-token
+    ca:
+      existingSecret: gapura-console-config-tls
+networkPolicy:
+  enabled: true

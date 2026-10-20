@@ -39,4 +39,40 @@ spec:
           {{- range (.Values.networkPolicy).adminFromNamespaces }}
           - {{ . | quote }}
           {{- end }}
+{{- if ((.Values.dataPlane).enabled) }}
+{{- $ports := ((.Values.dataPlane).ports) | default dict }}
+---
+# The same for the data plane, whose admin port tells as much. Ingress only, like the gateway's:
+# its polls to the console's configuration endpoint are egress and stay open, and the console's
+# pods are selected by no policy here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gapura.dataPlaneName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "data-plane") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gapura.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: data-plane
+  policyTypes: [Ingress]
+  ingress:
+  - ports:
+    - { port: {{ int ($ports.http | default 80) }}, protocol: TCP }
+    - { port: {{ int ($ports.https | default 443) }}, protocol: TCP }
+  - ports:
+    - { port: {{ int ($ports.admin | default 9090) }}, protocol: TCP }
+    from:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+          - {{ .Release.Namespace | quote }}
+          {{- range (.Values.networkPolicy).adminFromNamespaces }}
+          - {{ . | quote }}
+          {{- end }}
+{{- end }}
 {{- end }}

@@ -194,7 +194,9 @@ metrics:
 # Service and an EndpointSlice can route an internet hostname to it. Off by default only because
 # turning it on silently stops a Prometheus in another namespace from scraping; name that
 # namespace in adminFromNamespaces and turn it on. Kubelet probes are not affected on the common
-# CNIs (Calico, Cilium, the cloud CNIs), which exempt traffic from the node.
+# CNIs (Calico, Cilium, the cloud CNIs), which exempt traffic from the node. With dataPlane
+# enabled its pods get the same policy; both restrict ingress only, so the data plane's polls to
+# the console are not affected.
 networkPolicy:
   enabled: false
   adminFromNamespaces: []
@@ -328,3 +330,68 @@ console:
       memory: 32Mi
     limits:
       memory: 128Mi
+
+# A second gateway Deployment, <fullname>-data-plane, that serves the routes created in the
+# console (store mode) instead of the cluster's HTTPRoutes: the same image started with
+# --control-plane rather than --kubernetes, polling the configuration endpoint every 5 s. Off by
+# default. It reads no Kubernetes API, so it gets a ServiceAccount of its own with no token
+# mounted and no RBAC. Its own pods, labels and Service: the Kubernetes-mode gateway above keeps
+# serving Gateway API routes beside it. image, imagePullSecrets, privilegedPorts, logLevel,
+# threads, trustedProxies, trustedClientHeaders, accessLog, livenessPort, updateStrategy,
+# minReadySeconds, preStopDelaySeconds and terminationGracePeriodSeconds are the gateway's
+# values above and apply to both. No PodDisruptionBudget is rendered for it.
+dataPlane:
+  enabled: false
+  replicaCount: 2
+  # Container ports, as `ports` above. The console compiles its routes onto the plain-HTTP port
+  # it is told data planes bind; when this polls the chart's own console (controlPlane.url
+  # empty), the chart tells it this one.
+  ports:
+    http: 80
+    https: 443
+    admin: 9090
+  # ClusterIP by default: put an ingress or a LoadBalancer of your own in front, or set the type.
+  service:
+    type: ClusterIP
+    annotations: {}
+    # Only used when type is NodePort.
+    nodePorts:
+      http: null
+      https: null
+  controlPlane:
+    # Base URL of the configuration endpoint. Empty means this release's own console:
+    # https://<fullname>-control-config.<namespace>.svc:<console.store.config.port>, which needs
+    # console.store.config.service.create and console.store.config.tls.existingSecret.
+    url: ""
+    # Required. A data plane is registered by a superuser on the console's Data planes page,
+    # which shows its token once: store it in a Secret under `key`. Mounted as a file
+    # (--control-plane-token-file), never put in an argument or the environment, and read at
+    # startup: after rotating it, `kubectl rollout restart deployment/<fullname>-data-plane`.
+    token:
+      existingSecret: ""
+      key: token
+    # PEM bundle of the CA that signed the endpoint's certificate (--control-plane-ca), trusted
+    # on top of the public roots. An in-cluster endpoint almost always needs it: with a
+    # cert-manager CA Issuer, the `ca.crt` of the endpoint's certificate Secret.
+    ca:
+      existingSecret: ""
+      key: ca.crt
+    # Poll over plain http:// (--control-plane-insecure-http). Every configuration the endpoint
+    # serves carries the private key of each certificate this gateway serves, and every request
+    # carries its token: only for an endpoint behind a mesh or sidecar that encrypts the hop,
+    # where nothing crosses a network in clear. With an empty url it switches the default to
+    # http:// when the console's endpoint has no TLS.
+    insecureHttp: false
+  # The last configuration received is kept in an emptyDir (--config-cache), so a container that
+  # restarts while the control plane is down serves what it had instead of starting empty. A
+  # new pod starts with an empty cache, and stays unready until the control plane answers.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  extraArgs: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

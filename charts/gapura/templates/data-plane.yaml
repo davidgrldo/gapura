@@ -1,0 +1,197 @@
+{{- if ((.Values.dataPlane).enabled) }}
+{{- /* The data plane: the gateway image in control-plane mode, serving what the console keeps
+       in its store rather than the cluster's Gateway API objects. Everything it needs comes
+       from the configuration endpoint, so it reads no Kubernetes API and carries no credential
+       for one. deployment.yaml has already refused the shared values it would refuse here
+       (privilegedPorts, terminationGracePeriodSeconds, livenessPort): it always renders. */}}
+{{- $dp := .Values.dataPlane }}
+{{- $name := include "gapura.dataPlaneName" . }}
+{{- $ports := $dp.ports | default dict }}
+{{- $http := int ($ports.http | default 80) }}
+{{- $https := int ($ports.https | default 443) }}
+{{- $admin := int ($ports.admin | default 9090) }}
+{{- if and (eq .Values.privilegedPorts "none") (or (lt $http 1024) (lt $https 1024)) }}
+{{- fail "privilegedPorts: none cannot bind a port below 1024: raise dataPlane.ports.http/dataPlane.ports.https or pick capability or sysctl" }}
+{{- end }}
+{{- if ne 3 (len (uniq (list $http $https $admin))) }}
+{{- fail (printf "dataPlane.ports.http, dataPlane.ports.https and dataPlane.ports.admin must all differ, got http=%d https=%d admin=%d: two services sharing a port both bind it (SO_REUSEPORT) and the kernel splits traffic between them" $http $https $admin) }}
+{{- end }}
+{{- $cp := $dp.controlPlane | default dict }}
+{{- $token := $cp.token | default dict }}
+{{- $ca := $cp.ca | default dict }}
+{{- $insecure := $cp.insecureHttp | default false }}
+{{- if not $token.existingSecret }}
+{{- fail "dataPlane.controlPlane.token.existingSecret must name a Secret holding this data plane's token: register a data plane on the console's Data planes page (a superuser can; the token is shown once), store the token in a Secret under dataPlane.controlPlane.token.key, and name that Secret here" }}
+{{- end }}
+{{- /* The gateway refuses at startup what is refused here; saying it at render time beats a pod
+       in CrashLoopBackOff. */}}
+{{- $url := $cp.url | default "" }}
+{{- if not $url }}
+{{- $console := .Values.console | default dict }}
+{{- $store := $console.store | default dict }}
+{{- $config := $store.config | default dict }}
+{{- if not (and $console.enabled $store.existingSecret ($config.service | default dict).create) }}
+{{- fail "dataPlane.controlPlane.url is empty, so the data plane polls this release's own configuration endpoint, and the release publishes none: set console.enabled, console.store.existingSecret and console.store.config.service.create, or point dataPlane.controlPlane.url at a control plane" }}
+{{- end }}
+{{- $scheme := "https" }}
+{{- if not ($config.tls | default dict).existingSecret }}
+{{- if not $insecure }}
+{{- fail "the console's configuration endpoint serves plain text without console.store.config.tls.existingSecret, and a data plane refuses an http:// control plane: give the endpoint TLS, or set dataPlane.controlPlane.insecureHttp if a mesh or sidecar encrypts the hop" }}
+{{- end }}
+{{- $scheme = "http" }}
+{{- end }}
+{{- $url = printf "%s://%s.%s.svc:%d" $scheme (include "gapura.configName" .) .Release.Namespace (int ($config.port | default 8081)) }}
+{{- else if hasPrefix "http://" (lower $url) }}
+{{- if not $insecure }}
+{{- fail (printf "dataPlane.controlPlane.url %s is plain http: the configuration it serves carries TLS private keys and every request carries the token, so the gateway refuses it unless dataPlane.controlPlane.insecureHttp says nothing crosses a network in clear" $url) }}
+{{- end }}
+{{- else if not (hasPrefix "https://" (lower $url)) }}
+{{- fail (printf "dataPlane.controlPlane.url %s is not an http:// or https:// URL" $url) }}
+{{- end }}
+{{- $service := $dp.service | default dict }}
+{{- $serviceType := $service.type | default "ClusterIP" }}
+{{- $nodePorts := $service.nodePorts | default dict }}
+{{- $replicas := 2 }}
+{{- if not (kindIs "invalid" $dp.replicaCount) }}{{ $replicas = $dp.replicaCount }}{{ end }}
+---
+# No Kubernetes API access at all: no RBAC, and no token mounted to find one with.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "data-plane") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "data-plane") | nindent 4 }}
+  {{- with $service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $serviceType }}
+  selector:
+    app.kubernetes.io/name: {{ include "gapura.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: data-plane
+  ports:
+  - name: http
+    port: {{ $http }}
+    targetPort: http
+    protocol: TCP
+    {{- if and (eq $serviceType "NodePort") $nodePorts.http }}
+    nodePort: {{ $nodePorts.http }}
+    {{- end }}
+  - name: https
+    port: {{ $https }}
+    targetPort: https
+    protocol: TCP
+    {{- if and (eq $serviceType "NodePort") $nodePorts.https }}
+    nodePort: {{ $nodePorts.https }}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "gapura.componentLabels" (dict "root" . "component" "data-plane") | nindent 4 }}
+spec:
+  replicas: {{ $replicas }}
+  minReadySeconds: {{ .Values.minReadySeconds | default 0 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ (.Values.updateStrategy).maxUnavailable }}
+      maxSurge: {{ (.Values.updateStrategy).maxSurge }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gapura.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: data-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gapura.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: data-plane
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- include "gapura.podSecurityContext" . | nindent 8 }}
+      volumes:
+      - name: control-plane-token
+        secret: { secretName: {{ $token.existingSecret }} }
+      {{- if $ca.existingSecret }}
+      - name: control-plane-ca
+        secret: { secretName: {{ $ca.existingSecret }} }
+      {{- end }}
+      # The root filesystem is read-only; the configuration cache is the one thing written.
+      - name: config-cache
+        emptyDir: {}
+      containers:
+      - name: gapura
+        image: {{ include "gapura.image" . }}
+        imagePullPolicy: {{ (.Values.image).pullPolicy }}
+        args:
+        - --control-plane={{ $url }}
+        - --control-plane-token-file=/etc/gapura-control-plane-token/{{ $token.key | default "token" }}
+        {{- if $ca.existingSecret }}
+        - --control-plane-ca=/etc/gapura-control-plane-ca/{{ $ca.key | default "ca.crt" }}
+        {{- end }}
+        {{- if $insecure }}
+        - --control-plane-insecure-http
+        {{- end }}
+        - --config-cache=/var/cache/gapura/config.json
+        - --listen-http=0.0.0.0:{{ $http }}
+        - --listen-https=0.0.0.0:{{ $https }}
+        - --admin=0.0.0.0:{{ $admin }}
+        - --log-level={{ .Values.logLevel }}
+        {{- if gt (int .Values.threads) 0 }}
+        - --threads={{ .Values.threads }}
+        {{- end }}
+        {{- range .Values.trustedProxies }}
+        - --trusted-proxy={{ . }}
+        {{- end }}
+        {{- range .Values.trustedClientHeaders }}
+        - --trusted-client-header={{ . }}
+        {{- end }}
+        {{- if ((.Values.accessLog).query) }}
+        - --access-log-query
+        {{- end }}
+        {{- with $dp.extraArgs }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        volumeMounts:
+        - { name: control-plane-token, mountPath: /etc/gapura-control-plane-token, readOnly: true }
+        {{- if $ca.existingSecret }}
+        - { name: control-plane-ca, mountPath: /etc/gapura-control-plane-ca, readOnly: true }
+        {{- end }}
+        - { name: config-cache, mountPath: /var/cache/gapura }
+        ports:
+        - { name: http, containerPort: {{ $http }}, protocol: TCP }
+        - { name: https, containerPort: {{ $https }}, protocol: TCP }
+        - { name: admin, containerPort: {{ $admin }}, protocol: TCP }
+        {{- include "gapura.probes" . | nindent 8 }}
+        securityContext: {{- include "gapura.containerSecurityContext" . | nindent 10 }}
+        {{- with $dp.resources }}
+        resources: {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- with $dp.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $dp.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $dp.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

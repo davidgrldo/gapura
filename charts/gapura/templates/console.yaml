@@ -100,9 +100,7 @@ stringData:
 {{- /* One name base for every -control object: the helper truncates, a raw fullname minus
        suffix makes a 67-character Service on a long release. */}}
 {{- $controlName := include "gapura.controlName" . }}
-{{- /* The config endpoint's Service carries the longest suffix (-control-config), so it
-       truncates its own base; deriving it from $controlName could itself overrun 63. */}}
-{{- $configName := printf "%s-control-config" (include "gapura.fullname" . | trunc 48 | trimSuffix "-") }}
+{{- $configName := include "gapura.configName" . }}
 ---
 # The console: gapura-control, its own workload. Deliberately a separate Deployment,
 # ServiceAccount and RBAC from the data plane (#63): it holds cluster read credentials and
@@ -265,6 +263,11 @@ spec:
         - --auth-mode={{ $mode }}
         {{- if $store }}
         - --listen-config=0.0.0.0:{{ $configPort }}
+        {{- /* The console compiles its routes onto the plain-HTTP ports it is told data planes
+               bind (80 unless told otherwise); this release's own data plane says which. */}}
+        {{- if and ((.Values.dataPlane).enabled) (not (((.Values.dataPlane).controlPlane).url)) }}
+        - --data-plane-http-ports={{ int ((((.Values.dataPlane).ports).http) | default 80) }}
+        {{- end }}
         {{- if $configTls }}
         - --config-tls-cert=/etc/gapura-config-tls/{{ (((((.Values.console).store).config).tls).certKey) | default "tls.crt" }}
         - --config-tls-key=/etc/gapura-config-tls/{{ (((((.Values.console).store).config).tls).keyKey) | default "tls.key" }}

@@ -1,0 +1,17 @@
+# expect: the console's configuration endpoint serves plain text without console.store.config.tls.existingSecret
+# The configuration endpoint is published but has no TLS: an https:// URL would fail every
+# handshake, and the gateway refuses an http:// one without insecureHttp.
+console:
+  enabled: true
+  store:
+    existingSecret: gapura-console-db
+    config:
+      service:
+        create: true
+  sessionKey:
+    existingSecret: gapura-console-session
+dataPlane:
+  enabled: true
+  controlPlane:
+    token:
+      existingSecret: gapura-data-plane-token

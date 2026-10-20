@@ -8,6 +8,17 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The chart can run a data plane that serves the routes created in the console. Until now every
+  gateway it started read the cluster (`--kubernetes`), so a store route was compiled and served
+  to nobody. `dataPlane.enabled` adds a second Deployment and Service, `<fullname>-data-plane`,
+  running the gateway with `--control-plane` against this release's configuration endpoint (or
+  `dataPlane.controlPlane.url`), its token and CA mounted from Secrets, and its last
+  configuration cached in an emptyDir. It has its own ServiceAccount with no token mounted and no
+  RBAC, its own NetworkPolicy when `networkPolicy.enabled`, and the console is told the port it
+  binds for plain HTTP. The chart refuses to render one with no token Secret, with no published
+  endpoint to poll, or with a plain-text endpoint unless `dataPlane.controlPlane.insecureHttp`.
+  Off by default; nothing changes for existing installs. The README's "Serving console routes"
+  walks through it.
 - Store routes can strip the matched path, as Kong's `strip_path` does: with "Strip the matched
   path" ticked in the route sheet (`strip_path: true` in the API), a request for `/test/ping` on
   a `/test` route reaches the upstream as `/ping`, and an exact path reaches it as `/`. Off by
