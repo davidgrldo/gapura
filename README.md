@@ -28,6 +28,11 @@ a separate control plane is optional rather than required:
   `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.
 - **Traffic**: per-rule request and backend timeouts, one retry against a second endpoint when a
   connection fails, and per-route rate limits from a Service annotation, counted per replica.
+  Passive outlier detection takes an endpoint out of rotation after five consecutive connect
+  errors, timeouts or 502/503/504 answers, for 30 s and longer each time it happens again (up to
+  5 min); it is ignored while more than half of a backend's endpoints are out, so it never leaves
+  a request with nowhere to go. Counted in `gapura_upstream_ejections_total{cluster}` and
+  `gapura_upstream_ejected_endpoints{cluster}`.
 - **Consumer credentials**: a rule can require an API key or a JWT. The key travels through the
   configuration only as its SHA-256 hash, so a stolen config cache yields nothing to replay, and
   the presented key maps straight to the consumer it was issued to; a token that does not verify
