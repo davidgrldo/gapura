@@ -48,14 +48,36 @@ pub struct Config {
     /// held once: a limit attached to a consumer alone covers every route of its workspace, and
     /// copied into every rule it would multiply by consumers, routes and listeners.
     ///
+    /// A limit a consumer has on a service resolves into one [`ConsumerRateLimits::routes`]
+    /// entry per route of that service, so the table grows with rows and routes and never with
+    /// listeners: a route served on three listeners is still one key.
+    ///
     /// Absent on the wire while empty, like the two maps above, so a configuration that gives no
     /// consumer a limit of its own serialises byte-for-byte as before and its ETag does not move.
+    ///
+    /// A data plane that predates this table ignores it and enforces only the rules' own limits.
+    /// That is loose, not loud: nothing fails, and a consumer with a limit of its own is held to
+    /// the rule's instead, which may be none. So data planes are upgraded before the control
+    /// plane starts sending the table, not after.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub consumer_rate_limits: BTreeMap<String, ConsumerRateLimits>,
 }
 
 /// One consumer's own request limits, which replace a rule's [`RouteRule::rate_limit`] for that
 /// consumer: Kong's order, a consumer's limit before any limit on everyone.
+///
+/// How these limits count is part of what they mean, and the data plane has to count them the
+/// same way. Each limit, whether it sits in `routes` or is `any`, counts on each route apart,
+/// exactly as a limit on a whole workspace does: a limit that is the consumer's on no route in
+/// particular is "N on every route", never one counter shared across the routes it covers. A
+/// consumer-wide limit that spent itself on one route would make that route's traffic starve the
+/// others, which is not what attaching a limit to a consumer says.
+///
+/// The data plane counts a consumer's own limit in a window apart from the rule's, keyed with the
+/// consumer, so a consumer that has one is not also counted against the limit everyone else
+/// shares, and the two never draw on one another. Within that window [`RateLimit::by`] still
+/// applies: `ip` counts the consumer's requests per client address, `consumer` counts all of
+/// them together.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsumerRateLimits {
     /// By [`RouteRule::route`]: the consumer's limit on that route, else on that route's
@@ -64,8 +86,11 @@ pub struct ConsumerRateLimits {
     pub routes: BTreeMap<String, RateLimit>,
     /// The consumer's limit on no route or service: every route of its workspace not in
     /// `routes`. No workspace check is needed when it is read, because a consumer is only ever
-    /// identified on a route of its own workspace -- a `key_auth` policy accepts that
-    /// workspace's keys only.
+    /// identified on a route of its own workspace. Two things guarantee that: the store's
+    /// `plugins_for` sets the `key_auth` policy's workspace on every route that has one, and
+    /// [`credentials::identify`](crate::credentials::identify) then accepts only that
+    /// workspace's keys. A configuration without workspaces has a single one anyway, so there is
+    /// no other for a consumer to be identified in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub any: Option<RateLimit>,
 }
@@ -572,6 +597,65 @@ mod tests {
             wire.get("connect_ms").is_none(),
             "an unset connect_ms must not be serialised: {wire}"
         );
+    }
+
+    /// The consumer table is invisible on the wire while empty, and so is whichever half of an
+    /// entry is unused: a configuration that gives no consumer a limit of its own has to
+    /// serialise byte-for-byte as before, or its ETag changes for no reason, and an entry with
+    /// only a consumer-wide limit should not carry an empty `routes` any more than the reverse.
+    #[test]
+    fn an_empty_consumer_table_is_absent_on_the_wire_and_so_is_an_unused_half_of_an_entry() {
+        let wire = serde_json::to_value(Config::default()).unwrap();
+        assert!(
+            wire.get("consumer_rate_limits").is_none(),
+            "an empty table must not be serialised: {wire}"
+        );
+
+        let cfg = Config {
+            consumer_rate_limits: BTreeMap::from([
+                (
+                    "shop/mobile".to_string(),
+                    ConsumerRateLimits {
+                        routes: BTreeMap::new(),
+                        any: Some(RateLimit {
+                            by: LimitBy::Consumer,
+                            ..per_ip(8)
+                        }),
+                    },
+                ),
+                (
+                    "shop/batch".to_string(),
+                    ConsumerRateLimits {
+                        routes: BTreeMap::from([("shop/api".to_string(), per_ip(9))]),
+                        any: None,
+                    },
+                ),
+            ]),
+            ..Config::default()
+        };
+        let wire = serde_json::to_value(&cfg).unwrap();
+        let table = &wire["consumer_rate_limits"];
+        assert!(
+            table["shop/mobile"].get("routes").is_none(),
+            "an entry with no routes must not carry `routes`: {table}"
+        );
+        assert_eq!(table["shop/mobile"]["any"]["by"], "consumer");
+        assert!(
+            table["shop/batch"].get("any").is_none(),
+            "an entry with no `any` must not carry it: {table}"
+        );
+        assert_eq!(table["shop/batch"]["routes"]["shop/api"]["limit"], 9);
+        let back: Config = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, cfg, "the table must round-trip unchanged");
+
+        let any_only: ConsumerRateLimits =
+            serde_json::from_str(r#"{"any": {"limit": 5, "window_ms": 60000}}"#)
+                .expect("an entry written with only `any` must read");
+        assert!(
+            any_only.routes.is_empty(),
+            "a missing `routes` must mean none"
+        );
+        assert_eq!(any_only.any, Some(per_ip(5)));
     }
 
     /// The other direction, which is easy to miss: the data plane keeps a disk cache, so
