@@ -245,6 +245,7 @@ mod tests {
                 }],
                 tls: None,
                 resolve: None,
+                outlier: None,
             },
         );
         let rt = Runtime::new(
@@ -455,6 +456,7 @@ mod tests {
                 endpoints: vec![],
                 tls: tls(&ca.pem()),
                 resolve: None,
+                outlier: None,
             },
         );
         config.clusters.insert(
@@ -463,6 +465,7 @@ mod tests {
                 endpoints: vec![],
                 tls: tls("not a certificate"),
                 resolve: None,
+                outlier: None,
             },
         );
         config.clusters.insert(
@@ -475,6 +478,7 @@ mod tests {
                     insecure: false,
                 }),
                 resolve: None,
+                outlier: None,
             },
         );
         let rt = Runtime::new(config, 1, Vec::new());

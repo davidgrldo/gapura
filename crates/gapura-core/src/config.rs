@@ -306,6 +306,10 @@ pub struct Cluster {
     /// no ready addresses, and correctly so: in both cases there is nowhere to send the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve: Option<ResolveTarget>,
+    /// Passive outlier detection; `None` is `OutlierDetection::default()`. Nothing sets it yet:
+    /// it is where a per-service setting will go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outlier: Option<OutlierDetection>,
 }
 
 /// A name for the data plane to resolve into `Cluster::endpoints`.
@@ -313,6 +317,38 @@ pub struct Cluster {
 pub struct ResolveTarget {
     pub host: String,
     pub port: u16,
+}
+
+/// Passive outlier detection for one cluster's endpoints: how many consecutive failures take one
+/// out of rotation, for how long, and how much of the cluster may be out before that is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutlierDetection {
+    /// Consecutive failures (connect error, timeout, 502/503/504) that eject an endpoint. `0`
+    /// turns detection off for the cluster.
+    pub consecutive_failures: u32,
+    /// Consecutive successes after an ejection that clear its history. Until then one failure
+    /// ejects it again, for longer.
+    pub successes_to_recover: u32,
+    /// The nth ejection lasts n times this, up to `max_ejection_ms`.
+    pub base_ejection_ms: u64,
+    pub max_ejection_ms: u64,
+    /// With more than this share of the cluster ejected, ejection is ignored and every endpoint
+    /// takes traffic (Envoy's healthy panic): detection that has taken out most of a cluster is
+    /// more likely wrong than right, and what is left would take the whole load.
+    pub max_ejected_percent: u8,
+}
+
+impl Default for OutlierDetection {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 5,
+            successes_to_recover: 5,
+            base_ejection_ms: 30_000,
+            max_ejection_ms: 300_000,
+            max_ejected_percent: 50,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -378,6 +414,10 @@ mod tests {
                     }],
                     tls: None,
                     resolve: None,
+                    outlier: Some(OutlierDetection {
+                        consecutive_failures: 3,
+                        ..OutlierDetection::default()
+                    }),
                 },
             )]),
             credentials: BTreeMap::from([("abc123".to_string(), "team-orders".to_string())]),
@@ -412,6 +452,23 @@ mod tests {
         let old = serde_json::json!({"endpoints": [], "tls": null});
         let c: Cluster = serde_json::from_value(old).expect("a missing `resolve` must mean None");
         assert_eq!(c.resolve, None);
+    }
+
+    /// The same for `outlier`, and the ETag point below: a cluster that leaves it unset must
+    /// serialise as before, and one that sets some of it gets the defaults for the rest.
+    #[test]
+    fn an_unset_outlier_is_absent_on_the_wire_and_a_partial_one_fills_in() {
+        let wire = serde_json::to_value(Cluster::default()).unwrap();
+        assert!(wire.get("outlier").is_none(), "{wire}");
+        let partial = serde_json::json!({"endpoints": [], "tls": null, "outlier": {"consecutive_failures": 3}});
+        let c: Cluster = serde_json::from_value(partial).unwrap();
+        assert_eq!(
+            c.outlier,
+            Some(OutlierDetection {
+                consecutive_failures: 3,
+                ..OutlierDetection::default()
+            })
+        );
     }
 
     /// `connect_ms` must stay invisible on the wire while unset: a configuration that does not use
