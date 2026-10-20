@@ -624,49 +624,48 @@ impl ProxyHttp for GapuraProxy {
                 let rt = Arc::clone(ctx.runtime.as_ref().expect("set above"));
                 let route = rt.config.listeners[listener].rules[rule].route.clone();
                 for plugin in &rt.config.listeners[listener].rules[rule].plugins {
-                    let refusal: Option<(ErrorKey, &'static str, &'static str, String)> =
-                        match plugin {
-                            gapura_core::config::Plugin::Jwt(policy) => {
-                                // No keys for this document means it did not parse at swap time.
-                                // Refusing is the safe direction: the alternative is passing traffic
-                                // through unverified because a configuration error made verification
-                                // impossible.
-                                let empty = jwt::Keys::default();
-                                let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                                jwt_refusal(session.req_header(), policy, keys).map(
-                                    |(key, reason, challenge)| {
-                                        (key, "jwt", reason, challenge.to_string())
-                                    },
-                                )
-                            }
-                            gapura_core::config::Plugin::KeyAuth(policy) => {
-                                let presented = session
-                                    .req_header()
-                                    .headers
-                                    .get(&policy.header)
-                                    .and_then(|v| v.to_str().ok());
-                                match gapura_core::credentials::identify(
-                                    &rt.config,
-                                    presented,
-                                    policy.workspace.as_deref(),
-                                ) {
-                                    // Carried on the context rather than written here: the upstream
-                                    // header is set in upstream_request_filter, after the inbound one
-                                    // has been removed.
-                                    Ok(consumer) => {
-                                        ctx.consumer = Some(consumer.to_string());
-                                        ctx.key_headers.push(policy.header.clone());
-                                        None
-                                    }
-                                    Err(r) => Some((
-                                        ErrorKey::from(&r),
-                                        "key_auth",
-                                        r.as_str(),
-                                        format!("Key realm=\"{}\"", policy.header),
-                                    )),
+                    let refusal = match plugin {
+                        gapura_core::config::Plugin::Jwt(policy) => {
+                            // No keys for this document means it did not parse at swap time.
+                            // Refusing is the safe direction: the alternative is passing traffic
+                            // through unverified because a configuration error made verification
+                            // impossible.
+                            let empty = jwt::Keys::default();
+                            let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
+                            jwt_refusal(session.req_header(), policy, keys).map(
+                                |(key, reason, challenge)| {
+                                    (key, "jwt", reason, challenge.to_string())
+                                },
+                            )
+                        }
+                        gapura_core::config::Plugin::KeyAuth(policy) => {
+                            let presented = session
+                                .req_header()
+                                .headers
+                                .get(&policy.header)
+                                .and_then(|v| v.to_str().ok());
+                            match gapura_core::credentials::identify(
+                                &rt.config,
+                                presented,
+                                policy.workspace.as_deref(),
+                            ) {
+                                // Carried on the context rather than written here: the upstream
+                                // header is set in upstream_request_filter, after the inbound one
+                                // has been removed.
+                                Ok(consumer) => {
+                                    ctx.consumer = Some(consumer.to_string());
+                                    ctx.key_headers.push(policy.header.clone());
+                                    None
                                 }
+                                Err(r) => Some((
+                                    ErrorKey::from(&r),
+                                    "key_auth",
+                                    r.as_str(),
+                                    format!("Key realm=\"{}\"", policy.header),
+                                )),
                             }
-                        };
+                        }
+                    };
                     if let Some((key, kind, reason, challenge)) = refusal {
                         METRICS
                             .policy_refused_total
