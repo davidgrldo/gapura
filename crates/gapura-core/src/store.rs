@@ -328,6 +328,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .filter(|c| !c.workspace.is_empty())
             .map(|c| (c.key_hash.clone(), c.workspace.clone()))
             .collect(),
+        consumer_rate_limits: Default::default(),
     }
 }
 

@@ -441,6 +441,7 @@ fn assemble(
         // Consumers live in the store; the Kubernetes path has none.
         credentials: BTreeMap::new(),
         credential_workspaces: Default::default(),
+        consumer_rate_limits: Default::default(),
     }
 }
 

@@ -64,6 +64,19 @@ pub fn identify<'a>(
         .ok_or(Refusal::Unknown)
 }
 
+/// What [`Config::consumer_rate_limits`](crate::config::Config::consumer_rate_limits) is keyed
+/// by: `workspace/username`, as a store route is named `workspace/name`, so two workspaces'
+/// `mobile` consumers are told apart. An empty workspace -- a configuration without
+/// workspaces -- leaves the bare username. The store builds it from rows and the data plane from
+/// the policy that accepted a key, so it is written once, here.
+pub fn consumer_id(workspace: &str, username: &str) -> String {
+    if workspace.is_empty() {
+        username.to_string()
+    } else {
+        format!("{workspace}/{username}")
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -119,6 +132,12 @@ mod tests {
     #[test]
     fn the_default_header_is_the_one_callers_usually_send() {
         assert_eq!(KeyAuthPolicy::default().header, "x-api-key");
+    }
+
+    #[test]
+    fn a_consumer_is_named_as_a_route_is() {
+        assert_eq!(consumer_id("shop", "mobile"), "shop/mobile");
+        assert_eq!(consumer_id("", "mobile"), "mobile");
     }
 }
 
