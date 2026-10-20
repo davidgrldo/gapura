@@ -69,7 +69,8 @@
     get(base(workspace, 'rate-limit')).then(
       (list) => {
         if (mine !== latest) return
-        const row = list.find((r) => r.target === target)
+        // Consumers' own limits share this list, and a stamp of theirs is not this limit's.
+        const row = list.find((r) => r.target === target && !r.consumer)
         seen = row && row.limit === own.limit && row.per === own.per ? row.updated_at : ''
         reading = false
       },

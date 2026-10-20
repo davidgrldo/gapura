@@ -40,7 +40,8 @@
         if (mine !== latest) return
         const own = keyAuths.find((r) => r.target === 'workspace')
         const token = jwts.find((r) => r.target === 'workspace')
-        const limited = limits.find((r) => r.target === 'workspace')
+        // Consumers' own limits share this list, so the workspace's is the row that names none.
+        const limited = limits.find((r) => r.target === 'workspace' && !r.consumer)
         answer = {
           consumers,
           keyAuth: own ? { header: own.header, from: 'workspace', updated_at: own.updated_at } : null,
