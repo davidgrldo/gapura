@@ -429,17 +429,36 @@ async fn start_gateway(render: impl Fn(u16) -> String) -> Gateway {
 
 /// `start_gateway`, plus arguments the scenario needs on the command line.
 async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> Gateway {
+    start_gateway_from(
+        |dir, http| {
+            std::fs::write(dir.join("config.yaml"), render(http)).unwrap();
+            vec![
+                "--config-dir".to_string(),
+                dir.to_str().unwrap().to_string(),
+            ]
+        },
+        extra,
+    )
+    .await
+}
+
+/// The gateway reading its configuration from wherever `source` says. It is handed each
+/// attempt's temporary directory and HTTP port, writes there what it needs, and returns the
+/// arguments that name it.
+async fn start_gateway_from(
+    source: impl Fn(&std::path::Path, u16) -> Vec<String>,
+    extra: &[&str],
+) -> Gateway {
     const ATTEMPTS: u32 = 5;
     // What the last child to exit managed to say, so the final panic can show it.
     let mut last_logs = String::new();
     for attempt in 1..=ATTEMPTS {
         let (http, admin, https) = (free_port(), free_port(), free_port());
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.yaml"), render(http)).unwrap();
+        let source_args = source(dir.path(), http);
         let mut child = Command::new(env!("CARGO_BIN_EXE_gapura"))
+            .args(&source_args)
             .args([
-                "--config-dir",
-                dir.path().to_str().unwrap(),
                 "--listen-http",
                 &format!("127.0.0.1:{http}"),
                 "--listen-https",
@@ -516,6 +535,51 @@ async fn start_gateway_with(render: impl Fn(u16) -> String, extra: &[&str]) -> G
          port race every time, or it cannot start at all -- the second is a real regression and \
          looks identical from here. Its stdout on the last attempt was:\n{last_logs}"
     );
+}
+
+/// A data plane in `--control-plane` mode, polling a stand-in that serves one configuration:
+/// whatever `snapshot` compiles to once the gateway's HTTP port is known. Policies exist only in
+/// store mode, so this is the way to a refused credential.
+async fn start_store_gateway(snapshot: gapura_core::store::StoreSnapshot) -> Gateway {
+    let served = Arc::new(Mutex::new(String::new()));
+    let body = Arc::clone(&served);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    let app = Router::new().route(
+        "/v1/config",
+        axum::routing::get(move || {
+            let config = body.lock().unwrap().clone();
+            async move {
+                (
+                    [("content-type", "application/json"), ("etag", "\"v1\"")],
+                    config,
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    start_gateway_from(
+        move |dir, http| {
+            let settings = gapura_core::store::StoreSettings {
+                http_ports: vec![http],
+            };
+            let config = gapura_core::store::compile(&snapshot, &settings);
+            *served.lock().unwrap() = serde_json::to_string(&config).unwrap();
+            let token = dir.join("token");
+            std::fs::write(&token, "e2e").unwrap();
+            vec![
+                "--control-plane".to_string(),
+                format!("http://{control}"),
+                "--control-plane-insecure-http".to_string(),
+                "--control-plane-token-file".to_string(),
+                token.to_str().unwrap().to_string(),
+            ]
+        },
+        &[],
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -758,7 +822,25 @@ async fn not_found_for_unknown_host_and_unmatched_path() {
         .await
         .unwrap();
     assert_eq!(r.status(), 404);
+    assert_eq!(r.headers()["x-gapura-error"], "NO_ROUTE");
     assert_eq!(r.text().await.unwrap(), "404 no route\n");
+    // The same answer for a caller that asked for JSON, and the key in its access log line.
+    let r = c
+        .get(url(&gw, "unknown.test", "/api"))
+        .header("accept", "application/json")
+        .header("x-request-id", "no-route-json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.headers()["content-type"], "application/json");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({"error": {"key": "NO_ROUTE", "message": "no route", "request_id": "no-route-json"}})
+    );
+    let line = gw.access_log("no-route-json").await;
+    assert_eq!(line["error_key"], "NO_ROUTE", "{line}");
     let r = c
         .get(url(&gw, "echo.test", "/nomatch"))
         .send()
@@ -782,10 +864,19 @@ async fn invalid_backend_is_500_and_no_endpoints_is_503() {
         .await
         .unwrap();
     assert_eq!(r.status(), 500);
+    assert_eq!(r.headers()["x-gapura-error"], "NO_BACKEND");
     assert_eq!(r.text().await.unwrap(), "500 no valid backend\n");
-    let r = c.get(url(&gw, "echo.test", "/empty")).send().await.unwrap();
+    let r = c
+        .get(url(&gw, "echo.test", "/empty"))
+        .header("x-request-id", "empty")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["x-gapura-error"], "NO_ENDPOINTS");
     assert_eq!(r.text().await.unwrap(), "503 no ready endpoints\n");
+    let line = gw.access_log("empty").await;
+    assert_eq!(line["error_key"], "NO_ENDPOINTS", "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -818,10 +909,19 @@ async fn connect_failure_retries_once_on_another_endpoint() {
 #[tokio::test(flavor = "multi_thread")]
 async fn backend_timeout_is_504_and_zero_disables_it() {
     let (gw, c) = setup().await;
-    let r = c.get(url(&gw, "echo.test", "/slow")).send().await.unwrap();
+    let r = c
+        .get(url(&gw, "echo.test", "/slow"))
+        .header("x-request-id", "slow")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 504);
+    assert_eq!(r.headers()["x-gapura-error"], "UPSTREAM_TIMEOUT");
+    let line = gw.access_log("slow").await;
+    assert_eq!(line["error_key"], "UPSTREAM_TIMEOUT", "{line}");
     let r = c
         .get(url(&gw, "echo.test", "/noslow"))
+        .header("x-request-id", "noslow")
         .send()
         .await
         .unwrap();
@@ -830,6 +930,12 @@ async fn backend_timeout_is_504_and_zero_disables_it() {
         200,
         "0s disables the timeout, the 600 ms upstream still answers"
     );
+    assert!(
+        r.headers().get("x-gapura-error").is_none(),
+        "an upstream's answer carries no key"
+    );
+    let line = gw.access_log("noslow").await;
+    assert!(line["error_key"].is_null(), "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -978,6 +1084,7 @@ async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
         .await
         .unwrap();
     assert_eq!(r.status(), 429, "the request past the allowance");
+    assert_eq!(r.headers()["x-gapura-error"], "RATE_LIMITED");
     assert_eq!(r.headers()["x-ratelimit-limit"], "3");
     assert_eq!(r.headers()["x-ratelimit-remaining"], "0");
     let retry: u64 = r.headers()["retry-after"]
@@ -990,6 +1097,7 @@ async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
         "the rest of this hour's window: {retry}"
     );
     assert!(r.headers().contains_key("x-request-id"));
+    assert_eq!(r.text().await.unwrap(), "429 too many requests\n");
     // The rejection is a fact of the route, so it is counted where the traffic is.
     let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
         .await
@@ -998,6 +1106,79 @@ async fn a_rate_limited_route_answers_429_with_the_headers_a_client_reads() {
         .await
         .unwrap();
     assert!(metrics.contains("gapura_rate_limited_total"), "{metrics}");
+}
+
+/// A key_auth route on `/keyed`, and two callers: one without a key, one with a key no consumer
+/// was issued. The key says which of the two, and nothing about why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_api_key_is_401_and_says_missing_or_invalid() {
+    use gapura_core::config::{KeyAuthPolicy, PathMatch, Plugin, Protocol};
+    use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_store_gateway(StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: String::new(),
+            name: "keyed".into(),
+            service: "echo".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix("/keyed".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        plugins: vec![StorePlugin {
+            workspace: String::new(),
+            route: Some("keyed".into()),
+            service: None,
+            plugin: Plugin::KeyAuth(KeyAuthPolicy::default()),
+        }],
+        ..StoreSnapshot::default()
+    })
+    .await;
+    let c = client(&gw);
+    let r = c
+        .get(url(&gw, "echo.test", "/keyed"))
+        .header("x-request-id", "no-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers()["www-authenticate"], "Key realm=\"x-api-key\"");
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_KEY_MISSING");
+    assert_eq!(r.text().await.unwrap(), "401 unauthorized\n");
+    let line = gw.access_log("no-key").await;
+    assert_eq!(line["status"], 401, "{line}");
+    assert_eq!(line["error_key"], "AUTH_KEY_MISSING", "{line}");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/keyed"))
+        .header("x-api-key", "never-issued")
+        .header("accept", "application/json")
+        .header("x-request-id", "bad-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_KEY_INVALID");
+    assert_eq!(r.headers()["content-type"], "application/json");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({"error": {"key": "AUTH_KEY_INVALID", "message": "unauthorized", "request_id": "bad-key"}})
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1086,8 +1267,15 @@ async fn two_host_lines_are_refused_as_400() {
     sock.read_to_end(&mut response).await.unwrap();
     let response = String::from_utf8_lossy(&response);
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("x-gapura-error: invalid_request_target"),
+        "{response}"
+    );
     let line = gw.access_log("two-hosts").await;
     assert_eq!(line["status"], 400, "{line}");
+    assert_eq!(line["error_key"], "INVALID_REQUEST_TARGET", "{line}");
     assert_eq!(line["route"], "-", "no route is consulted: {line}");
     assert!(line["upstream"].is_null(), "{line}");
 }
