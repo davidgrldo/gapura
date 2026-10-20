@@ -369,6 +369,7 @@ impl Limit {
         RateLimit {
             limit: self.limit,
             window_ms: self.per.window_ms(),
+            by: gapura_core::config::LimitBy::Ip,
         }
     }
 }
@@ -637,7 +638,11 @@ mod tests {
             assert_eq!(got.limit, limit);
             assert_eq!(
                 got.rate_limit(),
-                RateLimit { limit, window_ms },
+                RateLimit {
+                    limit,
+                    window_ms,
+                    by: gapura_core::config::LimitBy::Ip,
+                },
                 "{limit}/{per}"
             );
             assert_eq!(

@@ -97,14 +97,43 @@ pub struct MatchEntry {
     pub rule: usize,
 }
 
-/// A per-rule request limit, from the backend Service's `gapura.dev/rate-limit` annotation
-/// ("20/min"; seconds, minutes or hours). Enforced by the data plane per replica and keyed by
-/// client IP: with N replicas the effective allowance is N x limit, which is the honest shape
-/// for a gateway with no database, and `gapura.dev/rate-limit-by: ip` is the only keying.
+/// A per-rule request limit: from the backend Service's `gapura.dev/rate-limit` annotation
+/// ("20/min"; seconds, minutes or hours), or from a store `rate_limit` policy. Enforced by the
+/// data plane per replica: with N replicas the effective allowance is N x limit, which is the
+/// honest shape for a gateway whose replicas share no counter. The annotation path counts by
+/// client IP only (`gapura.dev/rate-limit-by: ip`); a store policy may also count by consumer
+/// or by a header, see [`LimitBy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimit {
     pub limit: u32,
     pub window_ms: u64,
+    /// Absent on the wire when it is [`LimitBy::Ip`], so a limit that counts by address
+    /// serialises exactly as one written before this field existed.
+    #[serde(default, skip_serializing_if = "LimitBy::is_ip")]
+    pub by: LimitBy,
+}
+
+/// What a [`RateLimit`] counts by: one window per client address, per consumer, or per value of
+/// one request header.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitBy {
+    /// Each client address, as the access log names it; an IPv6 /64 counts as one.
+    #[default]
+    Ip,
+    /// Each consumer a `key_auth` policy identified. A request no policy identified counts by
+    /// address instead, so a route that lets anonymous callers through still limits them.
+    Consumer,
+    /// Each value of this request header, named in lowercase; a request without it counts by
+    /// address. Only as honest as whoever sets the header: a client that sets it itself picks a
+    /// fresh window per value, so this belongs behind a proxy that overwrites it.
+    Header(String),
+}
+
+impl LimitBy {
+    pub fn is_ip(&self) -> bool {
+        matches!(self, LimitBy::Ip)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -496,5 +525,40 @@ mod tests {
         let back: Config = serde_json::from_value(empty)
             .expect("a Config missing every field must load as the default");
         assert_eq!(back, Config::default());
+    }
+
+    fn per_ip(limit: u32) -> RateLimit {
+        RateLimit {
+            limit,
+            window_ms: 60_000,
+            by: LimitBy::Ip,
+        }
+    }
+
+    /// Counting by address is what every limit did before `by` existed, so it must stay absent
+    /// on the wire: a configuration that does not use the others serialises byte-for-byte as
+    /// before, and its ETag does not change. The other two round-trip as written.
+    #[test]
+    fn what_a_limit_counts_by_is_absent_on_the_wire_when_it_is_the_address() {
+        let wire = serde_json::to_value(per_ip(5)).unwrap();
+        assert_eq!(wire, serde_json::json!({"limit": 5, "window_ms": 60_000}));
+        let old: RateLimit =
+            serde_json::from_value(wire).expect("a limit from before `by` still reads");
+        assert_eq!(old.by, LimitBy::Ip);
+        for (by, json) in [
+            (LimitBy::Consumer, serde_json::json!("consumer")),
+            (
+                LimitBy::Header("x-tenant".into()),
+                serde_json::json!({"header": "x-tenant"}),
+            ),
+        ] {
+            let limit = RateLimit {
+                by: by.clone(),
+                ..per_ip(5)
+            };
+            let wire = serde_json::to_value(&limit).unwrap();
+            assert_eq!(wire["by"], json);
+            assert_eq!(serde_json::from_value::<RateLimit>(wire).unwrap(), limit);
+        }
     }
 }

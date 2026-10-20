@@ -747,7 +747,8 @@ mod tests {
             parse_rate_limit(json!({"limit": 120, "window_ms": 60_000})).unwrap(),
             gapura_core::config::RateLimit {
                 limit: 120,
-                window_ms: 60_000
+                window_ms: 60_000,
+                by: gapura_core::config::LimitBy::Ip,
             }
         );
         for bad in [

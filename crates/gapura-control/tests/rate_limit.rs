@@ -20,7 +20,7 @@ use axum::http::{Request, StatusCode};
 use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::Store;
-use gapura_core::config::{Config, Plugin, RateLimit};
+use gapura_core::config::{Config, LimitBy, Plugin, RateLimit};
 use gapura_core::store::StoreSettings;
 use serde_json::json;
 use tower::ServiceExt;
@@ -340,6 +340,7 @@ fn per_minute(limit: u32) -> Option<RateLimit> {
     Some(RateLimit {
         limit,
         window_ms: 60_000,
+        by: LimitBy::Ip,
     })
 }
 
@@ -361,7 +362,8 @@ async fn the_compiled_rule_carries_the_limit() {
             limit_on(&config, COMPILED_ROUTE),
             Some(RateLimit {
                 limit: 20,
-                window_ms
+                window_ms,
+                by: LimitBy::Ip,
             }),
             "{per}"
         );
@@ -374,7 +376,8 @@ async fn the_compiled_rule_carries_the_limit() {
         limit_on(&compiled(&store).await, COMPILED_ROUTE),
         Some(RateLimit {
             limit: 1_000_000,
-            window_ms: 3_600_000
+            window_ms: 3_600_000,
+            by: LimitBy::Ip,
         })
     );
 }
@@ -910,7 +913,8 @@ async fn a_stored_limit_in_another_shape_fails_the_snapshot() {
         limit_on(&compiled(&store).await, COMPILED_ROUTE),
         Some(RateLimit {
             limit: 10,
-            window_ms: 1_000
+            window_ms: 1_000,
+            by: LimitBy::Ip,
         })
     );
     assert_eq!(policy_audits(&store).await.len(), 1);

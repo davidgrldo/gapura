@@ -113,7 +113,11 @@ mod tests {
     use super::*;
 
     fn rl(limit: u32, window_ms: u64) -> RateLimit {
-        RateLimit { limit, window_ms }
+        RateLimit {
+            limit,
+            window_ms,
+            by: gapura_core::config::LimitBy::Ip,
+        }
     }
 
     #[test]

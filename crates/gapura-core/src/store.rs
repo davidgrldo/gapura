@@ -1737,7 +1737,11 @@ mod tests {
     }
 
     fn limit(limit: u32, window_ms: u64) -> RateLimit {
-        RateLimit { limit, window_ms }
+        RateLimit {
+            limit,
+            window_ms,
+            by: crate::config::LimitBy::Ip,
+        }
     }
 
     fn rate_limit(

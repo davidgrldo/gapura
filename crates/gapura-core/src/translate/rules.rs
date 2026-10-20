@@ -4,11 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use crate::config::RateLimit;
 use crate::config::{
     Cluster, Filters, HeaderOps, KvMatch, Mirror, PathMatch, PathRewrite, Redirect, Rewrite,
     RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
+use crate::config::{LimitBy, RateLimit};
 use crate::duration;
 use crate::input::{
     HeaderModifier, HttpBackendRef, HttpRoute, HttpRouteFilter, HttpRouteMatch, PathModifier,
@@ -1149,7 +1149,11 @@ fn parse_rate_limit(value: &str) -> Option<RateLimit> {
         "h" => 3_600_000,
         _ => return None,
     };
-    Some(RateLimit { limit, window_ms })
+    Some(RateLimit {
+        limit,
+        window_ms,
+        by: LimitBy::Ip,
+    })
 }
 
 #[cfg(test)]
@@ -1162,21 +1166,24 @@ mod rate_limit_tests {
             parse_rate_limit("20/min"),
             Some(RateLimit {
                 limit: 20,
-                window_ms: 60_000
+                window_ms: 60_000,
+                by: LimitBy::Ip,
             })
         );
         assert_eq!(
             parse_rate_limit("1/s"),
             Some(RateLimit {
                 limit: 1,
-                window_ms: 1_000
+                window_ms: 1_000,
+                by: LimitBy::Ip,
             })
         );
         assert_eq!(
             parse_rate_limit("5/h"),
             Some(RateLimit {
                 limit: 5,
-                window_ms: 3_600_000
+                window_ms: 3_600_000,
+                by: LimitBy::Ip,
             })
         );
         assert_eq!(parse_rate_limit("0/min"), None);
