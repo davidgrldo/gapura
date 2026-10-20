@@ -408,8 +408,8 @@ pub async fn list_rate_limit(
 
 /// `?target=…&consumer=…`, as `delete_rate_limit` reads it: the consumer's own limit when
 /// `consumer` names one, the limit on everyone when it is absent. Like the body of a `PUT`, it
-/// names these two fields and nothing else, so a misspelt `consumer` is refused rather than read
-/// as no consumer at all, which would remove the limit on everyone. `target` may be left out
+/// refuses any key it does not know, so a misspelt `consumer` is refused rather than read as no
+/// consumer at all, which would remove the limit on everyone. `target` may be left out
 /// here only so that `delete_rate_limit` can refuse a query without one as an empty one, as
 /// `target_in` does.
 #[derive(Deserialize)]

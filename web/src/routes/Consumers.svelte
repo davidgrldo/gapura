@@ -46,7 +46,9 @@
           consumers,
           keyAuth: own ? { header: own.header, from: 'workspace', updated_at: own.updated_at } : null,
           jwt: token ? { issuer: token.issuer, from: 'workspace' } : null,
-          rateLimit: limited ? { limit: limited.limit, per: limited.per, from: 'workspace', updated_at: limited.updated_at } : null,
+          rateLimit: limited
+            ? { limit: limited.limit, per: limited.per, by: limited.by, from: 'workspace', updated_at: limited.updated_at }
+            : null,
         }
         failed = undefined
       },

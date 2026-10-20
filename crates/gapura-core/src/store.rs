@@ -280,7 +280,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
                 backend_request_ms: service.read_timeout_ms.map(u64::from),
                 request_ms: None,
             },
-            rate_limit: rate_limit_for(&snap.rate_limits, route),
+            rate_limit: limit_on_everyone(&snap.rate_limits, route),
             plugins,
         });
 
@@ -476,10 +476,11 @@ fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
         .collect()
 }
 
-/// The request limit that applies to one route: the most specific, as [`plugins_for`] picks a
+/// The limit on everyone that applies to one route: the most specific, as [`plugins_for`] picks a
 /// policy of one kind, and the first of two equally specific ones. `None` when there is none,
-/// which is no limit.
-fn rate_limit_for(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimit> {
+/// which is no limit on everyone. A consumer's own limit is not read here, and
+/// [`Config::rate_limit_for`] reads the whole ladder.
+fn limit_on_everyone(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimit> {
     let mut chosen: Option<(u8, &RateLimit)> = None;
     for l in all {
         // A consumer's own limit is not a limit on everyone: it goes to the consumer table.
@@ -504,7 +505,7 @@ fn rate_limit_for(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimi
 /// The limits that are a consumer's own, as [`Config::consumer_rate_limits`] holds them: for
 /// each consumer with any, its limit on each served route -- the one on the route, else the one
 /// on the route's service -- and its limit on no route or service, which covers the rest. The
-/// most specific wins and the first of two equally specific ones, as in [`rate_limit_for`].
+/// most specific wins and the first of two equally specific ones, as in [`limit_on_everyone`].
 ///
 /// Only served routes get a `routes` entry. A row naming a route that is not served would
 /// otherwise leave an entry no rule can reach, and the table is written to every data plane. A

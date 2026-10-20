@@ -12,18 +12,20 @@ means what it usually does, moving from one version below to a later one. Releas
   takes `consumer`, for a limit that applies only once `key_auth` has identified that consumer,
   whether it sits everywhere in the workspace, on one route or on one service; and `by`: `ip`
   (the default), `consumer`, or `header:<name>`. By `consumer` with none identified, or by a
-  header that is missing, empty or sent more than once, a request counts by its address, and a
-  limit keeps at most 65,536 header windows per replica, after which a new value counts by
-  address too. The most specific limit wins in Kong's order: the consumer's on the route, on the
-  route's service, on the consumer alone, then the limit on everyone on the route, the service,
-  the workspace. A consumer's own limit counts in a window apart from the rule's, and counts stay
-  per replica. Only a limit can be a consumer's own: the key and JWT policies are what identify
-  the consumer. A header is only as honest as whoever sets it, so count by one only behind a
-  proxy that overwrites it. Migration `0011_consumer_policies` lets a policy row name a consumer
-  as well as a route or service. `GET /api/workspaces/{ws}/rate-limit` lists consumers' own
-  limits after the limits on everyone, each with `consumer`, and every row shows `by` when it is
-  not `ip`, as the service and route lists do. An API client looking up a target's limit on
-  everyone in that list has to skip the rows that carry `consumer`, which are consumers' own.
+  header that is missing, empty or sent more than once, a request counts by its address. So does
+  a new header value once a window name holds 65,536 header windows on a replica; the cap is per
+  window name, so a consumer's own header-counted limit has one cap for each rule it reaches.
+  The most specific limit wins in Kong's order: the consumer's on the route, on the route's
+  service, on the consumer alone, then the limit on everyone on the route, the service, the
+  workspace. A consumer's own limit counts in a window apart from the rule's, and counts stay
+  per replica. Only `key_auth` identifies a consumer: on a route with only a JWT requirement,
+  neither a consumer's own limit nor `by: consumer` applies, and requests count by address. A
+  header is only as honest as whoever sets it, so count by one only behind a proxy that
+  overwrites it. Migration `0011_consumer_policies` lets a policy row name a consumer as well as
+  a route or service. `GET /api/workspaces/{ws}/rate-limit` lists consumers' own limits after
+  the limits on everyone, each with `consumer`, and every row shows `by` when it is not `ip`, as
+  the service and route lists do. An API client looking up a target's limit on everyone in that
+  list has to skip the rows that carry `consumer`, which are consumers' own.
   `DELETE /api/workspaces/{ws}/rate-limit` takes `&consumer=` to remove a consumer's own limit
   and leave the one on everyone, and refuses any other key in its query, so a misspelt one
   removes nothing. Deleting a consumer removes its own limits and the audit entry lists them;
@@ -31,7 +33,11 @@ means what it usually does, moving from one version below to a later one. Releas
   consumer. The console cannot yet set a consumer's own limit, a later change adds that; for now
   it only no longer mistakes a consumer's row for a limit on everyone. Upgrade data planes before
   the control plane: an older data plane ignores consumers' own limits and counts every limit by
-  address.
+  address. To roll the control plane back past this release, first remove every consumer's own
+  limit and every limit that counts by anything but `ip`. An older control plane starts on a
+  database with `0011` applied, but fails every snapshot when a limit has a `by` other than `ip`,
+  and takes a consumer's own row for the limit on everyone. A rolling update runs old and new
+  control planes side by side for a while, so set none of these until it has finished.
 - Every answer the gateway gives on its own now names its cause: a stable key such as
   `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
   `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an

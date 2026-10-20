@@ -11,8 +11,9 @@
   // same reasons: it changes how much may be asked rather than where traffic goes, its refusal is
   // not the sheet's, and Enter in its input applies it rather than saving the sheet.
   // - `target` is `workspace`, `service:{name}` or `route:{name}`;
-  // - `applies` is the limit the list says applies to it, `{ limit, per, from, updated_at }` or
-  //   null, where `from` may be a broader target, which is changed where it is set, not here.
+  // - `applies` is the limit the list says applies to it, `{ limit, per, by, from, updated_at }`
+  //   or null, where `by` is left out for the address and `from` may be a broader target, which
+  //   is changed where it is set, not here.
   //   `updated_at` is the policy row's stamp, which an apply sends back; when it is left out, it
   //   is read here;
   // - `onchanged` fetches the list again, which brings the new `applies`, and settles once it is
@@ -71,7 +72,9 @@
         if (mine !== latest) return
         // Consumers' own limits share this list, and a stamp of theirs is not this limit's.
         const row = list.find((r) => r.target === target && !r.consumer)
-        seen = row && row.limit === own.limit && row.per === own.per ? row.updated_at : ''
+        // `by` is compared too: a limit changed to count by something else since the list was
+        // read is not the one this form shows, and its stamp would let an apply replace it unseen.
+        seen = row && row.limit === own.limit && row.per === own.per && row.by === own.by ? row.updated_at : ''
         reading = false
       },
       () => {
@@ -96,6 +99,11 @@
           target,
           limit,
           per,
+          // What the limit counts by is not edited here, so the edit keeps it: the server reads a
+          // missing `by` as the address, and editing 10 a minute to 20 on a limit that counts by
+          // `header:x-tenant` would otherwise quietly make it per address. Absent when it
+          // counts by address, as the lists show it.
+          by: own?.by,
           // None when nothing is set here: the server then refuses to replace one set since.
           seen_updated_at: own === null ? undefined : seen,
         })
