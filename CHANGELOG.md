@@ -8,6 +8,26 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store request limit can be a consumer's own (#NNN). `PUT /api/workspaces/{ws}/rate-limit`
+  takes `consumer`, for a limit that applies only once `key_auth` has identified that consumer,
+  whether it sits everywhere in the workspace, on one route or on one service; and `by`: `ip`
+  (the default), `consumer`, or `header:<name>`. By `consumer` with none identified, or by a
+  header that is missing, empty or sent more than once, a request counts by its address, and a
+  limit keeps at most 65,536 header windows per replica, after which a new value counts by
+  address too. The most specific limit wins in Kong's order: the consumer's on the route, on the
+  route's service, on the consumer alone, then the limit on everyone on the route, the service,
+  the workspace. A consumer's own limit counts in a window apart from the rule's, and counts stay
+  per replica. Only a limit can be a consumer's own: the key and JWT policies are what identify
+  the consumer. A header is only as honest as whoever sets it, so count by one only behind a
+  proxy that overwrites it. Migration `0011_consumer_policies` lets a policy row name a consumer
+  as well as a route or service. `GET /api/workspaces/{ws}/rate-limit` lists consumers' own
+  limits after the limits on everyone, each with `consumer`, and every row shows `by` when it is
+  not `ip`, as the service and route lists do. Deleting a consumer removes its own limits and the
+  audit entry lists them; deleting a route or service that carries a consumer's own limit is
+  refused, naming the consumer. The console cannot yet set a consumer's own limit, a later change
+  adds that; for now it only no longer mistakes a consumer's row for a limit on everyone. Upgrade
+  data planes before the control plane: an older data plane ignores consumers' own limits and
+  counts every limit by address.
 - Every answer the gateway gives on its own now names its cause: a stable key such as
   `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
   `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an

@@ -439,6 +439,10 @@ pub fn uppercase_escapes(path: &str) -> String {
 /// a route-level JWT policy replaces a workspace-level JWT policy and leaves everything else
 /// alone, because the alternative is that attaching one narrow policy silently drops every
 /// broad one.
+///
+/// A consumer is not one of the targets here: the policies are what identify the consumer, so
+/// none can depend on it. Only a request limit can be a consumer's own; see
+/// [`consumer_rate_limits`].
 fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
     let mut chosen: Vec<(u8, &Plugin)> = Vec::new();
     for p in all {
