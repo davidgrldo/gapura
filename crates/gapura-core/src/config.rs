@@ -209,9 +209,10 @@ pub enum LimitBy {
     /// because it validates the name on write. Only a single, non-empty line counts: a request
     /// without the header, with it repeated or with it empty counts by address instead, because
     /// a front proxy that appends a line rather than replacing it leaves the client's own line
-    /// first, and honouring either would let the client pick its window. Past 65,536 values on
-    /// one limit, within its window on one replica, a new value counts by address too, so a
-    /// client choosing values cannot grow the data plane's table at its request rate. Only as
+    /// first, and honouring either would let the client pick its window. Past 65,536 windows
+    /// held by one limit -- ended ones not yet swept count too, and the cap applies separately
+    /// to each limit and on each replica -- a new value counts by address too, so a client
+    /// choosing values cannot grow the data plane's table at its request rate. Only as
     /// honest as whoever sets the header: a client that sets it itself picks a fresh window per
     /// value, so this belongs behind a proxy that overwrites it.
     Header(String),

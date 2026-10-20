@@ -98,6 +98,11 @@ pub struct Ctx {
     /// rather than written straight onto the request, because the upstream header can only be
     /// set after the inbound one is removed, and that happens later.
     consumer: Option<String>,
+    /// [`Config::consumer_rate_limits`](gapura_core::config::Config::consumer_rate_limits)'
+    /// key for the caller, `workspace/username`, which picks the consumer's own request limit
+    /// and counts a limit by consumer. `consumer` alone is what the upstream is told: within a
+    /// workspace the name is unique, across workspaces it is not.
+    consumer_id: Option<String>,
     /// The headers that carried an API key a key_auth policy accepted. The key is the gateway's
     /// to check, not the upstream's to see: it is removed before forwarding, the way the caller's
     /// name replaces it.
@@ -550,6 +555,7 @@ impl ProxyHttp for GapuraProxy {
             client_abort: false,
             mirrored: false,
             consumer: None,
+            consumer_id: None,
             key_headers: Vec::new(),
         }
     }
@@ -654,11 +660,10 @@ impl ProxyHttp for GapuraProxy {
                 matched,
                 cluster,
             } => {
-                // Policies run before the limit, so that a limit can one day be counted per
-                // consumer rather than per address: the consumer is not known until the
-                // credential has been checked. Both run after the match and before anything
-                // upstream is touched, for the same reason -- a refused request must cost the
-                // backend nothing.
+                // Policies run before the limit, because the limit may be the consumer's own and
+                // may count per consumer, and the consumer is not known until the credential has
+                // been checked. Both run after the match and before anything upstream is
+                // touched, for the same reason -- a refused request must cost the backend nothing.
                 // A clone of the Arc, not a borrow of the context: answering needs `&mut ctx`.
                 let rt = Arc::clone(ctx.runtime.as_ref().expect("set above"));
                 let route = rt.config.listeners[listener].rules[rule].route.clone();
@@ -692,6 +697,10 @@ impl ProxyHttp for GapuraProxy {
                                 // header is set in upstream_request_filter, after the inbound one
                                 // has been removed.
                                 Ok(consumer) => {
+                                    ctx.consumer_id = Some(gapura_core::credentials::consumer_id(
+                                        policy.workspace.as_deref().unwrap_or_default(),
+                                        consumer,
+                                    ));
                                     ctx.consumer = Some(consumer.to_string());
                                     ctx.key_headers.push(policy.header.clone());
                                     None
@@ -723,25 +732,39 @@ impl ProxyHttp for GapuraProxy {
                     }
                 }
 
-                // The rule's limit, if its backend Service asked for one, is enforced here:
-                // after the match (the route is known), before any upstream work (the limit
-                // must not cost the backend anything). Same client answer the access log
-                // records, so a limited request names the same client a served one would.
-                if let Some(rl) = &rt.config.listeners[listener].rules[rule].rate_limit {
+                // The limit is enforced here: after the match (the route is known) and the
+                // policies (the consumer is known, and its own limit replaces the rule's), before
+                // any upstream work (the limit must not cost the backend anything). Same client
+                // answer the access log records, so a limited request names the same client a
+                // served one would.
+                let r = &rt.config.listeners[listener].rules[rule];
+                if let Some((rl, own)) = rt.config.rate_limit_for(r, ctx.consumer_id.as_deref()) {
                     // Keyed per rule, not per route (#185): one HTTPRoute can carry rules with
                     // different limits (/login at 5/h, / at 100/s), and a shared route key means
                     // the rules reset each other's windows, so the tighter limit never trips.
-                    let r = &rt.config.listeners[listener].rules[rule];
                     let route = format!("{}#{}", r.route, r.rule_index);
-                    if let Some(ip) = effective_client_ip(
+                    // A consumer's own limit counts apart from the rule's: one window for two
+                    // limits would let each spend the other's allowance. The metric keeps the
+                    // rule's label, since a label per consumer grows without bound.
+                    let window = match (own, ctx.consumer_id.as_deref()) {
+                        (true, Some(consumer)) => format!("{route}@{consumer}"),
+                        _ => route.clone(),
+                    };
+                    let ip = effective_client_ip(
                         session,
                         &self.trusted_proxies,
                         &self.trusted_client_headers,
+                    );
+                    if let Some(client) = rate_limit::client(
+                        &rl.by,
+                        ip,
+                        ctx.consumer_id.as_deref(),
+                        &session.req_header().headers,
                     ) {
                         if let rate_limit::Outcome::Limited {
                             limit,
                             retry_after_secs,
-                        } = self.limiter.check(&route, ip, Some(ip), rl)
+                        } = self.limiter.check(&window, client, ip, rl)
                         {
                             METRICS
                                 .rate_limited_total

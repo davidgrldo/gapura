@@ -24,13 +24,6 @@ pub enum Outcome {
 /// window with that address. A header's value is held as the first 16 bytes of its SHA-256:
 /// the value is the client's to choose, and a window must not cost whatever it chose to send.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the request path counts by address until it asks `client` who a request is"
-    )
-)]
 pub enum Client {
     Ip(IpAddr),
     Consumer(String),
@@ -41,13 +34,6 @@ impl Client {
     /// The client a header's `value` names. Raw bytes rather than text, so a value that is not
     /// ASCII -- a tenant id a proxy set in UTF-8 -- is a client of its own and is not mistaken
     /// for a request that carried no header.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the request path counts by address until it asks `client` who a request is"
-        )
-    )]
     pub fn header(value: &[u8]) -> Client {
         let digest = Sha256::digest(value);
         let mut short = [0; 16];
@@ -71,13 +57,6 @@ impl From<IpAddr> for Client {
 /// first, so counting the first of several would let the client choose its own window; the
 /// request counts by address instead, the rule one `Authorization` (#190, #212) and one `Host`
 /// line already follow, and an empty value names no one, so it does the same.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the request path counts by address until it asks `client` who a request is"
-    )
-)]
 pub fn client(
     by: &LimitBy,
     ip: Option<IpAddr>,
@@ -299,7 +278,7 @@ impl RateLimiter {
         if cap_still_full {
             tracing::warn!(
                 route,
-                "this limit's header windows are full: a new header value now counts by address"
+                "this limit's header windows are full: a new header value now counts by address, or not at all without an address"
             );
         }
         outcome
