@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Store routes can strip the matched path, as Kong's `strip_path` does: with "Strip the matched
+  path" ticked in the route sheet (`strip_path: true` in the API), a request for `/test/ping` on
+  a `/test` route reaches the upstream as `/ping`, and an exact path reaches it as `/`. Off by
+  default, unlike Kong's, so existing routes and the configuration served for them are unchanged;
+  a replace that does not name `strip_path` keeps the stored value. A regular expression has no
+  prefix to strip, so the API refuses the two together, and a stored route with both is not
+  served and is named in the control plane's log. Migration `0010_route_strip_path` adds the
+  column.
 - OIDC sign-in no longer lets anonymous requests run up the identity provider's rate limits
   (#253). Discovery (the discovery document and the signing keys) ran on every `GET /auth/login`
   and every callback; the client it builds is now kept for five minutes and shared, concurrent

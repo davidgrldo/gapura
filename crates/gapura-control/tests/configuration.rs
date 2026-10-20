@@ -2202,3 +2202,273 @@ async fn a_stored_route_whose_path_names_path_parameters_is_not_served() {
     let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
     assert_eq!(served, config);
 }
+
+/// A route `test` to `orders` on `api.example.com` for the prefix `/test`, with `strip_path` as
+/// given, or without it.
+fn strip_route(strip_path: Option<bool>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "name": "test", "service": "orders", "hosts": ["api.example.com"],
+        "paths": [{"type": "prefix", "value": "/test"}]
+    });
+    if let Some(strip_path) = strip_path {
+        body["strip_path"] = strip_path.into();
+    }
+    body
+}
+
+/// The `strip_path` of every route audit entry, oldest first, as (before, after).
+async fn audited_strip_path(store: &Store) -> Vec<(serde_json::Value, serde_json::Value)> {
+    store
+        .client()
+        .await
+        .unwrap()
+        .query(
+            "select coalesce(before->'strip_path', 'null'), coalesce(after->'strip_path', 'null')
+               from audit_log where object_kind = 'route' order by id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect()
+}
+
+/// The path rewrite `/v1/config` gives `route`'s rule.
+async fn served_path_rewrite(
+    store: &Store,
+    route: &str,
+) -> Option<gapura_core::config::PathRewrite> {
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
+    let rule = served.listeners[0]
+        .rules
+        .iter()
+        .find(|r| r.route == route)
+        .unwrap_or_else(|| panic!("no rule {route}"));
+    rule.filters
+        .rewrite
+        .as_ref()
+        .expect("a store rule always rewrites the host")
+        .path
+        .clone()
+}
+
+#[tokio::test]
+async fn a_route_s_strip_path_is_stored_audited_and_served() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &strip_route(Some(true)).to_string(),
+    )
+    .await;
+    // Without `strip_path`: off.
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    assert_eq!(row(&app, ROUTES, "test", s.vi).await["strip_path"], true);
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["strip_path"],
+        false
+    );
+    assert_eq!(
+        audited_strip_path(&store).await,
+        [
+            (serde_json::Value::Null, true.into()),
+            (serde_json::Value::Null, false.into()),
+        ]
+    );
+    assert_eq!(
+        served_path_rewrite(&store, "default/test").await,
+        Some(gapura_core::config::PathRewrite::ReplacePrefixMatch(
+            "/".into()
+        ))
+    );
+    assert_eq!(
+        served_path_rewrite(&store, "default/orders-api").await,
+        None
+    );
+
+    // A replace that sends back what it read writes nothing.
+    let before = everything(&store).await;
+    let mut listed = row(&app, ROUTES, "test", s.ed).await;
+    for added in ["key_auth", "jwt", "rate_limit"] {
+        listed.as_object_mut().unwrap().remove(added);
+    }
+    ok(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/test"),
+        s.ed,
+        &listed.to_string(),
+    )
+    .await;
+    assert_eq!(everything(&store).await, before);
+}
+
+#[tokio::test]
+async fn a_replace_that_names_no_strip_path_keeps_it_and_false_clears_it() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &strip_route(Some(true)).to_string(),
+    )
+    .await;
+    let put = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let mut body = body;
+            body["updated_at"] = seen(&app, ROUTES, "test", s.ed).await.into();
+            ok(
+                &app,
+                "PUT",
+                &format!("{ROUTES}/test"),
+                s.ed,
+                &body.to_string(),
+            )
+            .await;
+        }
+    };
+
+    // A priority change from a client that sends no `strip_path`, as the console did before it
+    // had the box.
+    let mut body = strip_route(None);
+    body["priority"] = 7.into();
+    put(body).await;
+    let listed = row(&app, ROUTES, "test", s.vi).await;
+    assert_eq!(listed["priority"], 7);
+    assert_eq!(listed["strip_path"], true, "kept, not cleared");
+    assert_eq!(
+        audited_strip_path(&store).await.last(),
+        Some(&(true.into(), true.into())),
+        "the audit entry shows it kept"
+    );
+    assert!(served_path_rewrite(&store, "default/test").await.is_some());
+
+    // `false` clears it.
+    let mut body = strip_route(Some(false));
+    body["priority"] = 7.into();
+    put(body).await;
+    assert_eq!(row(&app, ROUTES, "test", s.vi).await["strip_path"], false);
+    assert_eq!(
+        audited_strip_path(&store).await.last(),
+        Some(&(true.into(), false.into()))
+    );
+    assert_eq!(served_path_rewrite(&store, "default/test").await, None);
+}
+
+#[tokio::test]
+async fn strip_path_beside_a_regex_is_refused_and_a_stored_one_is_not_served() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let s = seed(&store).await;
+    let app = console(Some(store.clone()));
+    ok(&app, "POST", SERVICES, s.ed, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ed, ROUTE).await;
+    ok(
+        &app,
+        "POST",
+        ROUTES,
+        s.ed,
+        &strip_route(Some(true)).to_string(),
+    )
+    .await;
+    let before = everything(&store).await;
+    let regex = serde_json::json!([
+        {"type": "prefix", "value": "/test"},
+        {"type": "regex", "value": "/test/[0-9]+"}
+    ]);
+    let refused = |answer: &str| {
+        assert_eq!(json(answer)["field"], "strip_path", "{answer}");
+        assert_eq!(
+            sentence(answer),
+            "Strip path works with prefix and exact paths; a regular expression has no prefix to strip."
+        );
+    };
+
+    // A create that sends both.
+    let mut body = strip_route(Some(true));
+    body["name"] = "regex".into();
+    body["paths"] = regex.clone();
+    let (status, answer) = send(
+        &app,
+        "POST",
+        ROUTES,
+        Some(s.ed),
+        FROM_THE_CONSOLE,
+        &body.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    refused(&answer);
+
+    // A replace that sends a regex and no `strip_path` would keep the stored `true` beside it.
+    for strip_path in [None, Some(true)] {
+        let mut body = strip_route(strip_path);
+        body["paths"] = regex.clone();
+        body["updated_at"] = seen(&app, ROUTES, "test", s.ed).await.into();
+        let (status, answer) = send(
+            &app,
+            "PUT",
+            &format!("{ROUTES}/test"),
+            Some(s.ed),
+            FROM_THE_CONSOLE,
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{strip_path:?}: {answer}");
+        refused(&answer);
+    }
+    assert_eq!(everything(&store).await, before, "a refusal writes nothing");
+
+    // Turning it off in the same save takes the regex.
+    let mut body = strip_route(Some(false));
+    body["paths"] = regex;
+    body["updated_at"] = seen(&app, ROUTES, "test", s.ed).await.into();
+    ok(
+        &app,
+        "PUT",
+        &format!("{ROUTES}/test"),
+        s.ed,
+        &body.to_string(),
+    )
+    .await;
+
+    // Both, written by SQL by hand: not served, and named, while the other route is.
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute("update routes set strip_path = true where name = 'test'")
+        .await
+        .unwrap();
+    let (_, snapshot) = store.snapshot().await.unwrap();
+    let refused = gapura_core::store::refused_routes(&snapshot);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, "default/test");
+    assert!(refused[0].1.contains("strip path"), "{}", refused[0].1);
+    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
+    let rules: Vec<&str> = served.listeners[0]
+        .rules
+        .iter()
+        .map(|r| r.route.as_str())
+        .collect();
+    assert_eq!(rules, ["default/orders-api"]);
+}

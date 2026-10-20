@@ -16,6 +16,7 @@
       "HEAD"
     ],
     "headers": [],
+    "strip_path": false,
     "priority": 10,
     "updated_at": "2026-09-30T08:13:02.417766Z",
     "key_auth": {
@@ -32,6 +33,7 @@
     "paths": [],
     "methods": [],
     "headers": [],
+    "strip_path": false,
     "priority": 0,
     "updated_at": "2026-09-28T14:41:12.033918Z",
     "key_auth": {

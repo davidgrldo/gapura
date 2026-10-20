@@ -212,8 +212,8 @@ async fn serve(
     }
     // Said when a data plane is sent a configuration, not on every poll, so it is logged once
     // per change and data plane rather than every few seconds: a route stored before the console
-    // refused it -- one matching on the consumer header (#228), or one whose exact or prefix path
-    // contains `;` (#247) -- is left out of it.
+    // refused it -- one matching on the consumer header (#228), one whose exact or prefix path
+    // contains `;` (#247), or one that strips a regex path -- is left out of it.
     for (route, reason) in refused_routes(&snapshot) {
         tracing::warn!(%route, reason, "not serving a route");
     }

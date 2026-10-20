@@ -54,6 +54,7 @@
   let hosts = $state([])
   let paths = $state([])
   let headers = $state([])
+  let strip = $state(false)
   let checked = $state({})
   let saving = $state(false)
   // `{ sentence, field, stale }` from a refused write; `field` puts the sentence beside its input.
@@ -83,6 +84,8 @@
     paths = route ? route.paths.map((p) => ({ ...p })) : [{ type: 'prefix', value: '/' }]
     // A new route starts with none: most routes match any headers.
     headers = route ? (route.headers ?? []).map((h) => ({ ...h })) : []
+    // Off unless the route has it, as the server's default is.
+    strip = route?.strip_path ?? false
     checked = Object.fromEntries(METHODS.map((m) => [m, route?.methods.includes(m) ?? false]))
     saving = false
     error = undefined
@@ -99,6 +102,7 @@
     if (field === 'hosts') return `${id}-add-host`
     if (field === 'paths') return `${id}-add-path`
     if (field === 'headers') return `${id}-add-header`
+    if (field === 'strip_path') return `${id}-strip_path`
     if (field === 'methods' || /^methods\[\d+\]$/.test(field)) return `${id}-method-${METHODS[0]}`
     const host = /^hosts\[(\d+)\]$/.exec(field)
     if (host) return Number(host[1]) < hosts.length ? `${id}-host-${host[1]}` : undefined
@@ -217,6 +221,8 @@
       // Always sent, the empty list included: a PUT without `headers` keeps the stored ones, so
       // leaving it out would make removing the last row do nothing.
       headers,
+      // Always sent too, so turning it off clears it rather than keeping the stored value.
+      strip_path: strip,
     }
     // service_updated_at: the stamp of the service this route points at, so a stale tab
     // that names a service someone re-created gets 409 instead of silently moving to
@@ -407,6 +413,18 @@
               A prefix matches whole segments: /api matches /api/x, not /apix. A regex must match
               the whole path; end it with .* to match a prefix. No paths: every path.
             </p>
+            <div class="grid gap-1.5">
+              <label class="flex items-center gap-2">
+                <input id="{id}-strip_path" type="checkbox" bind:checked={strip} aria-invalid={invalid('strip_path')} aria-describedby="{id}-strip_path-help {described('strip_path') ?? ''}" />
+                Strip the matched path
+              </label>
+              <p id="{id}-strip_path-help" class="text-xs text-muted-foreground">
+                The upstream gets the path without the part this route matched: a request for
+                /test/ping on a /test route reaches the upstream as /ping; an exact path reaches it
+                as /.
+              </p>
+              {@render problem('strip_path')}
+            </div>
           </fieldset>
 
           <fieldset class="grid gap-2">

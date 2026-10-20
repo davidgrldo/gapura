@@ -70,6 +70,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0009_sign_up",
         include_str!("../../migrations/0009_sign_up.sql"),
     ),
+    (
+        "0010_route_strip_path",
+        include_str!("../../migrations/0010_route_strip_path.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
@@ -240,7 +244,7 @@ impl Store {
         let routes = tx
             .query(
                 "select w.name as workspace, r.name, s.name as service, r.hosts, r.methods,
-                        r.paths, r.headers, r.priority,
+                        r.paths, r.headers, r.strip_path, r.priority,
                         r.workspace_id <> s.workspace_id as foreign_service
                    from routes r
                    join services s   on s.id = r.service_id
@@ -278,6 +282,7 @@ impl Store {
                     methods: r.get("methods"),
                     paths,
                     headers,
+                    strip_path: r.get("strip_path"),
                     priority: r.get("priority"),
                 })
             })

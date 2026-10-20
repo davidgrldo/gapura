@@ -144,7 +144,15 @@
               </Table.Cell>
               <Table.Cell class="font-mono">{r.service}</Table.Cell>
               <Table.Cell class="font-mono">{anyOf(r.hosts)}</Table.Cell>
-              <Table.Cell class="font-mono">{paths(r.paths)}</Table.Cell>
+              <Table.Cell class="font-mono">
+                {paths(r.paths)}
+                {#if r.strip_path}
+                  <span class="inline-flex font-sans" title="The upstream gets the path without the part this route matched">
+                    <Tag tone="idle"><span aria-hidden="true">strip</span></Tag>
+                    <span class="sr-only">, the upstream gets the path without the part this route matched</span>
+                  </span>
+                {/if}
+              </Table.Cell>
               <Table.Cell class="font-mono">{anyOf(r.methods)}</Table.Cell>
               <Table.Cell class="font-mono">
                 <!-- Each header a chip of its own, since a value may hold spaces and commas that
