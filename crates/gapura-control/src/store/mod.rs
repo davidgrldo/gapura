@@ -560,10 +560,11 @@ pub(crate) const RATE_LIMIT: &str = "rate_limit";
 /// so a route keeps the limit it was last served rather than losing it.
 fn parse_rate_limit(config: serde_json::Value) -> Result<gapura_core::config::RateLimit> {
     crate::consumers::Limit::from_config(config)
-        .map(crate::consumers::Limit::rate_limit)
+        .map(|limit| limit.rate_limit())
         .context(
-            "the configuration does not fit a rate_limit policy: a limit from 1 to 1000000 and \
-             a window_ms of 1000, 60000 or 3600000",
+            "the configuration does not fit a rate_limit policy: a limit from 1 to 1000000, \
+             a window_ms of 1000, 60000 or 3600000, and a by of ip, consumer or a lowercase \
+             header name",
         )
 }
 
@@ -756,12 +757,21 @@ mod tests {
                 by: gapura_core::config::LimitBy::Ip,
             }
         );
+        assert_eq!(
+            parse_rate_limit(json!({"limit": 10, "window_ms": 1_000, "by": "consumer"})).unwrap(),
+            gapura_core::config::RateLimit {
+                limit: 10,
+                window_ms: 1_000,
+                by: gapura_core::config::LimitBy::Consumer,
+            }
+        );
         for bad in [
             json!({"limit": 0, "window_ms": 60_000}),
             json!({"limit": 10, "window_ms": 0}),
             json!({"limit": 10, "window_ms": 30_000}),
             json!({"limit": 10}),
-            json!({"limit": 10, "window_ms": 1_000, "by": "consumer"}),
+            json!({"limit": 10, "window_ms": 1_000, "by": "everyone"}),
+            json!({"limit": 10, "window_ms": 1_000, "by": {"header": "Host"}}),
             json!({}),
         ] {
             assert!(parse_rate_limit(bad.clone()).is_err(), "accepted {bad}");

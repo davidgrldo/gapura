@@ -17,8 +17,8 @@ use super::grants::{audit, retrying, Entry};
 use super::{hash, hex, Store, WriteError, PREFIX_LEN, RATE_LIMIT};
 use crate::configuration::Action;
 use crate::consumers::{
-    usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, Limit, PolicyView,
-    RateLimitView, Target,
+    shown_by, usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, Limit,
+    PolicyView, RateLimitView, Target,
 };
 use crate::grants::Refusal;
 use anyhow::{Context, Result};
@@ -151,7 +151,7 @@ fn stored_jwt(config: serde_json::Value) -> anyhow::Result<JwtPolicy> {
 }
 
 /// The `{target, kind, limit, per}` an audit row records of a request limit.
-fn rate_limit_audit(target: &Target, limit: Limit) -> serde_json::Value {
+fn rate_limit_audit(target: &Target, limit: &Limit) -> serde_json::Value {
     serde_json::json!({
         "target": target.as_text(),
         "kind": "rate_limit",
@@ -903,8 +903,10 @@ impl Store {
                 let limit = stored_rate_limit(row.get("config"))?;
                 Ok(RateLimitView {
                     target: target.as_text(),
+                    consumer: None,
                     limit: limit.limit,
                     per: limit.per,
+                    by: shown_by(&limit.by),
                     updated_at: row.get("updated_at"),
                 })
             })
@@ -922,8 +924,10 @@ impl Store {
         limit: Limit,
         seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_put_rate_limit(caller, workspace, target, limit, seen_updated_at))
-            .await
+        retrying(move || {
+            self.try_put_rate_limit(caller, workspace, target, limit.clone(), seen_updated_at)
+        })
+        .await
     }
 
     async fn try_put_rate_limit(
@@ -948,7 +952,7 @@ impl Store {
             Some((id, current, enabled, _)) => {
                 let current = Limit::from_config(current);
                 // Nothing to write, so nothing to audit and nothing for the data planes to reload.
-                if enabled && current == Some(limit) {
+                if enabled && current.as_ref() == Some(&limit) {
                     return Ok(());
                 }
                 tx.execute(
@@ -959,7 +963,7 @@ impl Store {
                 .await?;
                 // A disabled row is no limit, so taking it over is audited as creating one.
                 let before = if enabled {
-                    current.map(|c| rate_limit_audit(target, c))
+                    current.map(|c| rate_limit_audit(target, &c))
                 } else {
                     None
                 };
@@ -992,7 +996,7 @@ impl Store {
                 object_id: Some(id),
                 workspace: Some(workspace),
                 before,
-                after: Some(rate_limit_audit(target, limit)),
+                after: Some(rate_limit_audit(target, &limit)),
             },
         )
         .await?;
@@ -1030,7 +1034,7 @@ impl Store {
             .await?;
         // A row the compiler could not read is recorded by what it was, as far as it goes.
         let before = match Limit::from_config(config) {
-            Some(limit) => rate_limit_audit(target, limit),
+            Some(limit) => rate_limit_audit(target, &limit),
             None => serde_json::json!({ "target": target.as_text(), "kind": "rate_limit" }),
         };
         audit(

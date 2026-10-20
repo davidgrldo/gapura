@@ -726,7 +726,7 @@ async fn bad_input_is_named_and_writes_nothing() {
         "PUT",
         LIMITS,
         Some(s.ed),
-        &json!({"target": "workspace", "limit": 10, "per": "minute", "by": "consumer"}).to_string(),
+        &json!({"target": "workspace", "limit": 10, "per": "minute", "tier": "gold"}).to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
@@ -885,7 +885,8 @@ async fn a_stored_limit_in_another_shape_fails_the_snapshot() {
     for config in [
         json!({"limit": 10, "window_ms": 5_000}),
         json!({"limit": 0, "window_ms": 1_000}),
-        json!({"limit": 10, "window_ms": 1_000, "by": "consumer"}),
+        json!({"limit": 10, "window_ms": 1_000, "by": "everyone"}),
+        json!({"limit": 10, "window_ms": 1_000, "by": {"header": "Host"}}),
         json!({"limit": "ten", "window_ms": 1_000}),
     ] {
         db.execute("delete from plugins", &[]).await.unwrap();

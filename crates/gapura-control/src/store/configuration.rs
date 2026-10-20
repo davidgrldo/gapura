@@ -306,6 +306,7 @@ impl Requirements {
         RateLimitRequirementView {
             limit: limit.limit,
             per: limit.per,
+            by: crate::consumers::shown_by(&limit.by),
             from,
             updated_at,
         }
