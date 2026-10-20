@@ -206,9 +206,14 @@ pub enum LimitBy {
     /// address instead, so a route that lets anonymous callers through still limits them.
     Consumer,
     /// Each value of this request header, named in lowercase -- the control plane stores it so,
-    /// because it validates the name on write -- and a request without it counts by address.
-    /// Only as honest as whoever sets the header: a client that sets it itself picks a fresh
-    /// window per value, so this belongs behind a proxy that overwrites it.
+    /// because it validates the name on write. Only a single, non-empty line counts: a request
+    /// without the header, with it repeated or with it empty counts by address instead, because
+    /// a front proxy that appends a line rather than replacing it leaves the client's own line
+    /// first, and honouring either would let the client pick its window. Past 65,536 values on
+    /// one limit, within its window on one replica, a new value counts by address too, so a
+    /// client choosing values cannot grow the data plane's table at its request rate. Only as
+    /// honest as whoever sets the header: a client that sets it itself picks a fresh window per
+    /// value, so this belongs behind a proxy that overwrites it.
     Header(String),
 }
 

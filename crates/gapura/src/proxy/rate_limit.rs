@@ -38,7 +38,9 @@ pub enum Client {
 }
 
 impl Client {
-    /// The client a header's `value` names.
+    /// The client a header's `value` names. Raw bytes rather than text, so a value that is not
+    /// ASCII -- a tenant id a proxy set in UTF-8 -- is a client of its own and is not mistaken
+    /// for a request that carried no header.
     #[cfg_attr(
         not(test),
         expect(
@@ -46,8 +48,8 @@ impl Client {
             reason = "the request path counts by address until it asks `client` who a request is"
         )
     )]
-    pub fn header(value: &str) -> Client {
-        let digest = Sha256::digest(value.as_bytes());
+    pub fn header(value: &[u8]) -> Client {
+        let digest = Sha256::digest(value);
         let mut short = [0; 16];
         short.copy_from_slice(&digest[..16]);
         Client::Header(short)
@@ -63,6 +65,12 @@ impl From<IpAddr> for Client {
 /// The client a request counts as under `by`: its consumer or its value of the header when it
 /// has one, else its address. `None` when the address is what is needed and it is unknown,
 /// which is no limit, as it was before a limit could count anything else.
+///
+/// A header counts only when the request carries exactly one non-empty line of it. A front
+/// proxy that appends its own line rather than replacing the client's leaves the client's line
+/// first, so counting the first of several would let the client choose its own window; the
+/// request counts by address instead, the rule one `Authorization` (#190, #212) and one `Host`
+/// line already follow, and an empty value names no one, so it does the same.
 #[cfg_attr(
     not(test),
     expect(
@@ -79,10 +87,15 @@ pub fn client(
     let named = match by {
         LimitBy::Ip => None,
         LimitBy::Consumer => consumer.map(|c| Client::Consumer(c.to_string())),
-        LimitBy::Header(name) => headers
-            .get(name.as_str())
-            .and_then(|v| v.to_str().ok())
-            .map(Client::header),
+        LimitBy::Header(name) => {
+            let mut lines = headers.get_all(name.as_str()).iter();
+            match (lines.next(), lines.next()) {
+                (Some(line), None) if !line.as_bytes().is_empty() => {
+                    Some(Client::header(line.as_bytes()))
+                }
+                _ => None,
+            }
+        }
     };
     named.or_else(|| ip.map(Client::Ip))
 }
@@ -90,9 +103,18 @@ pub fn client(
 /// A table this small is never swept: below it, stale windows cost less than looking for them.
 const SWEEP_FLOOR: usize = 65_536;
 
-/// The most header windows that live at once. A client choosing the header's value can open a
-/// window per request, which the sweep frees only once it ends; past this a new value counts by
-/// the request's address instead, as a request without the header does.
+/// The most header windows one window name holds at once, on one replica. A client choosing the
+/// header's value can open a window per request, which the sweep frees only once it has ended,
+/// so without a cap one limit could grow the table at its request rate; past this a new value
+/// counts by the request's address instead, as a request without the header does. Windows
+/// still held are what count, ended ones not yet swept included, which is why a request that
+/// meets the cap sweeps (see `CAPPED_SWEEP_MS`). The cap is per name -- the `route` a window is
+/// counted under -- so a limit whose clients choose the value fills only its own allowance,
+/// never another limit's. Memory is therefore bounded by the number of window names that count
+/// by a header, times this: a rule's name comes from configuration, and a consumer's own limit
+/// counts under a name of its own, which a request reaches only by presenting that consumer's
+/// valid key, so a client needs a key for every name it would add to the bound. The documented
+/// figure on [`LimitBy::Header`] is this one.
 const HEADER_WINDOWS: usize = 65_536;
 
 /// How often a request that meets `HEADER_WINDOWS` may sweep, in milliseconds. Without it,
@@ -114,24 +136,57 @@ struct Table {
     /// The size at which the next sweep runs. Reset after each sweep to twice what survived,
     /// so a sweep that frees little is not repeated on the very next request.
     sweep_at: usize,
-    /// How many of `windows` count a header's value, which `HEADER_WINDOWS` caps.
-    headers: usize,
+    /// How many of `windows` count a header's value, per window name, which `HEADER_WINDOWS`
+    /// caps for each name separately. A name with none is absent.
+    header_windows: HashMap<String, usize>,
     /// When the last sweep ran, in epoch milliseconds.
     swept_ms: u64,
 }
 
 impl Table {
+    /// How many header windows `route` holds, ended ones not yet swept included.
+    fn held(&self, route: &str) -> usize {
+        self.header_windows.get(route).copied().unwrap_or(0)
+    }
+
     /// Drops every window that has ended -- a live one holds a count that a reset would hand
-    /// back to its client, which is the bypass -- and counts what is left.
+    /// back to its client, which is the bypass -- and counts the header windows that are left.
     fn sweep(&mut self, now_ms: u64) {
         self.windows.retain(|_, w| w.ends_ms > now_ms);
-        self.headers = self
-            .windows
-            .keys()
-            .filter(|(_, c)| matches!(c, Client::Header(_)))
-            .count();
+        self.header_windows.clear();
+        for (route, client) in self.windows.keys() {
+            if matches!(client, Client::Header(_)) {
+                add_header_window(&mut self.header_windows, route);
+            }
+        }
         self.sweep_at = (self.windows.len() * 2).max(SWEEP_FLOOR);
         self.swept_ms = now_ms;
+    }
+}
+
+/// Counts one more header window under `route`. The name is copied only the first time it is
+/// seen, so a flood of new values does not allocate a name per window.
+fn add_header_window(counts: &mut HashMap<String, usize>, route: &str) {
+    match counts.get_mut(route) {
+        Some(n) => *n += 1,
+        None => {
+            counts.insert(route.to_string(), 1);
+        }
+    }
+}
+
+/// The address a limit counts a client by. An IPv6 /64 is the granularity an address limit
+/// works at: without this, a client rotating source addresses inside one /64 gets a fresh
+/// window per address (#189), which makes the limit effectively off for IPv6 and fills the map
+/// with windows the sweep cannot reclaim until they expire.
+fn grouped(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::from(octets)
+        }
+        v4 => v4,
     }
 }
 
@@ -145,7 +200,7 @@ impl Default for RateLimiter {
             table: Mutex::new(Table {
                 windows: HashMap::new(),
                 sweep_at: SWEEP_FLOOR,
-                headers: 0,
+                header_windows: HashMap::new(),
                 swept_ms: 0,
             }),
         }
@@ -153,9 +208,9 @@ impl Default for RateLimiter {
 }
 
 impl RateLimiter {
-    /// Counts one request of `client` against `rl` under `route`. `ip` is the request's own
-    /// address, which only the header cap needs: past `HEADER_WINDOWS` a new header value
-    /// counts by it instead of opening one more window.
+    /// Counts one request of `client` against `rl` under the window name `route`. `ip` is the
+    /// request's own address, which only the header cap needs: past `HEADER_WINDOWS` a new
+    /// header value counts by it instead of opening one more window.
     pub fn check(
         &self,
         route: &str,
@@ -180,66 +235,74 @@ impl RateLimiter {
     ) -> Outcome {
         let window_ms = rl.window_ms.max(1);
         let ends_ms = (now_ms / window_ms + 1) * window_ms;
-        let mut table = self.table.lock().unwrap();
-        // Unique keys are bounded by the unique (rule, client) pairs seen within a window, and
-        // header clients further by `HEADER_WINDOWS`. The sweep is a full scan under the one
-        // lock every worker shares, so it runs only once the table has doubled since the last
-        // one (and never below the floor): each sweep is paid for by as many inserts as it
-        // scans, and the table never holds more than twice its live windows.
-        if table.windows.len() > table.sweep_at {
-            table.sweep(now_ms);
-        }
-        let mut client = client.into();
-        if let Client::Header(_) = client {
-            let key = (route.to_string(), client.clone());
-            if !table.windows.contains_key(&key) && table.headers >= HEADER_WINDOWS {
-                if now_ms >= table.swept_ms.saturating_add(CAPPED_SWEEP_MS) {
+        // The key is built once, before the lock every worker shares is taken.
+        let client = match client.into() {
+            Client::Ip(addr) => Client::Ip(grouped(addr)),
+            named => named,
+        };
+        let mut key = (route.to_string(), client);
+        // Set when this call swept because `route`'s header windows were full and found them
+        // still full. Logged after the lock is released: a subscriber that blocks on its
+        // output must not hold up every worker's limit check.
+        let mut cap_still_full = false;
+        let outcome = 'counted: {
+            let mut table = self.table.lock().unwrap();
+            // Unique keys are bounded by the unique (rule, client) pairs seen within a window,
+            // and header clients further by `HEADER_WINDOWS` for each window name. The sweep is
+            // a full scan under the one lock every worker shares, so it runs only once the table
+            // has doubled since the last one (and never below the floor): each sweep is paid
+            // for by as many inserts as it scans, and the table never holds more than twice its
+            // live windows. The one other sweep is a full header cap's, below, at most once a
+            // second.
+            if table.windows.len() > table.sweep_at {
+                table.sweep(now_ms);
+            }
+            if matches!(key.1, Client::Header(_)) && !table.windows.contains_key(&key) {
+                // A clock that stepped back is taken as a second gone by, or the sweep would
+                // wait for it to catch up with the one that ran before the step.
+                let due = now_ms < table.swept_ms
+                    || now_ms >= table.swept_ms.saturating_add(CAPPED_SWEEP_MS);
+                if table.held(route) >= HEADER_WINDOWS && due {
                     table.sweep(now_ms);
+                    cap_still_full = table.held(route) >= HEADER_WINDOWS;
                 }
-                if table.headers >= HEADER_WINDOWS {
-                    client = match ip {
-                        Some(ip) => Client::Ip(ip),
-                        None => return Outcome::Allowed,
-                    };
+                if table.held(route) >= HEADER_WINDOWS {
+                    // Counted by address, as a request without the header is; with no address
+                    // there is nothing to count by, and an unaddressed request never was.
+                    match ip {
+                        Some(addr) => key.1 = Client::Ip(grouped(addr)),
+                        None => break 'counted Outcome::Allowed,
+                    }
+                } else {
+                    add_header_window(&mut table.header_windows, route);
                 }
             }
-        }
-        // An IPv6 /64 is the granularity an address limit works at: without this, a client
-        // rotating source addresses inside one /64 gets a fresh window per address (#189), which
-        // makes the limit effectively off for IPv6 and fills the map with windows the sweep
-        // cannot reclaim until they expire.
-        if let Client::Ip(ip) = client {
-            client = Client::Ip(match ip.to_canonical() {
-                IpAddr::V6(v6) => {
-                    let mut octets = v6.octets();
-                    octets[8..].fill(0);
-                    IpAddr::from(octets)
-                }
-                v4 => v4,
-            });
-        }
-        let key = (route.to_string(), client);
-        if matches!(key.1, Client::Header(_)) && !table.windows.contains_key(&key) {
-            table.headers += 1;
-        }
-        let w = table
-            .windows
-            .entry(key)
-            .or_insert(Window { ends_ms, count: 0 });
-        // A window that ended, or one created under a different window length (the rule
-        // changed on a reload), starts over in the current window.
-        if w.ends_ms != ends_ms {
-            *w = Window { ends_ms, count: 0 };
-        }
-        if w.count >= rl.limit {
-            Outcome::Limited {
-                limit: rl.limit,
-                retry_after_secs: ((ends_ms.saturating_sub(now_ms)) / 1000).max(1),
+            let w = table
+                .windows
+                .entry(key)
+                .or_insert(Window { ends_ms, count: 0 });
+            // A window that ended, or one created under a different window length (the rule
+            // changed on a reload), starts over in the current window.
+            if w.ends_ms != ends_ms {
+                *w = Window { ends_ms, count: 0 };
             }
-        } else {
-            w.count += 1;
-            Outcome::Allowed
+            if w.count >= rl.limit {
+                Outcome::Limited {
+                    limit: rl.limit,
+                    retry_after_secs: ((ends_ms.saturating_sub(now_ms)) / 1000).max(1),
+                }
+            } else {
+                w.count += 1;
+                Outcome::Allowed
+            }
+        };
+        if cap_still_full {
+            tracing::warn!(
+                route,
+                "this limit's header windows are full: a new header value now counts by address"
+            );
         }
+        outcome
     }
 }
 
@@ -421,7 +484,7 @@ mod tests {
             Outcome::Allowed
         ));
         assert!(matches!(
-            l.check_at("r", Client::header("198.51.100.1"), None, &one, 1_000),
+            l.check_at("r", Client::header(b"198.51.100.1"), None, &one, 1_000),
             Outcome::Allowed
         ));
         assert!(matches!(
@@ -457,9 +520,9 @@ mod tests {
         );
         assert_eq!(
             client(&tenant, Some(ip), None, &headers),
-            Some(Client::header("acme"))
+            Some(Client::header(b"acme"))
         );
-        assert_ne!(Client::header("acme"), Client::header("acme2"));
+        assert_ne!(Client::header(b"acme"), Client::header(b"acme2"));
         assert_eq!(
             client(&tenant, Some(ip), None, &none),
             Some(Client::Ip(ip)),
@@ -484,39 +547,159 @@ mod tests {
         let ip: IpAddr = "198.51.100.1".parse().unwrap();
         let hour = rl(1, 3_600_000);
         for n in 0..HEADER_WINDOWS {
-            l.check_at("r", Client::header(&n.to_string()), Some(ip), &hour, 0);
+            l.check_at(
+                "r",
+                Client::header(n.to_string().as_bytes()),
+                Some(ip),
+                &hour,
+                0,
+            );
         }
-        assert_eq!(l.table.lock().unwrap().headers, HEADER_WINDOWS);
+        assert_eq!(l.table.lock().unwrap().header_windows["r"], HEADER_WINDOWS);
         // The address's own window is untouched so far: the first new value spends it ...
         assert!(matches!(
-            l.check_at("r", Client::header("new-1"), Some(ip), &hour, 0),
+            l.check_at("r", Client::header(b"new-1"), Some(ip), &hour, 0),
             Outcome::Allowed
         ));
         // ... and the second new value finds it spent.
         assert!(matches!(
-            l.check_at("r", Client::header("new-2"), Some(ip), &hour, 0),
+            l.check_at("r", Client::header(b"new-2"), Some(ip), &hour, 0),
             Outcome::Limited { .. }
         ));
         // A value counted before the cap keeps its window, which the loop spent.
         assert!(matches!(
-            l.check_at("r", Client::header("0"), Some(ip), &hour, 0),
+            l.check_at("r", Client::header(b"0"), Some(ip), &hour, 0),
             Outcome::Limited { .. }
         ));
         assert!(matches!(
-            l.check_at("r", Client::header("new-3"), None, &hour, 0),
+            l.check_at("r", Client::header(b"new-3"), None, &hour, 0),
             Outcome::Allowed
         ));
-        assert_eq!(l.table.lock().unwrap().headers, HEADER_WINDOWS);
+        assert_eq!(l.table.lock().unwrap().header_windows["r"], HEADER_WINDOWS);
         // The hour is over: meeting the cap sweeps, and the new value gets a window of its own.
         let later = 3_600_000 + 1;
         assert!(matches!(
-            l.check_at("r", Client::header("new-4"), Some(ip), &hour, later),
+            l.check_at("r", Client::header(b"new-4"), Some(ip), &hour, later),
             Outcome::Allowed
         ));
         assert!(matches!(
-            l.check_at("r", Client::header("new-4"), Some(ip), &hour, later),
+            l.check_at("r", Client::header(b"new-4"), Some(ip), &hour, later),
             Outcome::Limited { .. }
         ));
-        assert_eq!(l.table.lock().unwrap().headers, 1);
+        assert_eq!(l.table.lock().unwrap().header_windows["r"], 1);
+    }
+
+    /// A rule whose clients choose the header's value fills its own allowance and no one else's:
+    /// at the cap on "a", a new value on "b" still opens a window of its own.
+    #[test]
+    fn a_full_rule_leaves_another_rules_header_windows_alone() {
+        let l = RateLimiter::default();
+        let hour = rl(1, 3_600_000);
+        for n in 0..HEADER_WINDOWS {
+            l.check_at(
+                "a",
+                Client::header(n.to_string().as_bytes()),
+                None,
+                &hour,
+                0,
+            );
+        }
+        let new = || Client::header(b"new");
+        // "a" is full, and with no address a new value there is not counted at all.
+        assert!(matches!(
+            l.check_at("a", new(), None, &hour, 0),
+            Outcome::Allowed
+        ));
+        assert!(matches!(
+            l.check_at("b", new(), None, &hour, 0),
+            Outcome::Allowed
+        ));
+        let table = l.table.lock().unwrap();
+        assert!(!table.windows.contains_key(&("a".to_string(), new())));
+        assert!(table.windows.contains_key(&("b".to_string(), new())));
+        assert_eq!(table.header_windows["a"], HEADER_WINDOWS);
+        assert_eq!(table.header_windows["b"], 1);
+    }
+
+    /// The header counts only as a single, non-empty line, whatever a proxy in front did to it;
+    /// a value that is not ASCII is still a value.
+    #[test]
+    fn only_a_single_non_empty_header_line_counts_by_the_header() {
+        let ip: IpAddr = "198.51.100.1".parse().unwrap();
+        let tenant = LimitBy::Header("x-tenant".into());
+        let by = |headers: &http::HeaderMap| client(&tenant, Some(ip), None, headers);
+
+        // A proxy that appends leaves the client's own line first: neither line is believed.
+        let mut two = http::HeaderMap::new();
+        two.append("x-tenant", "client-chosen".parse().unwrap());
+        two.append("x-tenant", "acme".parse().unwrap());
+        assert_eq!(by(&two), Some(Client::Ip(ip)), "two lines");
+
+        let mut same = http::HeaderMap::new();
+        same.append("x-tenant", "acme".parse().unwrap());
+        same.append("x-tenant", "acme".parse().unwrap());
+        assert_eq!(by(&same), Some(Client::Ip(ip)), "the same line twice");
+
+        let mut empty = http::HeaderMap::new();
+        empty.insert("x-tenant", http::HeaderValue::from_static(""));
+        assert_eq!(by(&empty), Some(Client::Ip(ip)), "an empty value");
+
+        let mut utf8 = http::HeaderMap::new();
+        utf8.insert(
+            "x-tenant",
+            http::HeaderValue::from_bytes(b"caf\xc3\xa9").unwrap(),
+        );
+        assert_eq!(by(&utf8), Some(Client::header(b"caf\xc3\xa9")));
+        assert_ne!(by(&utf8), Some(Client::header(b"cafe")));
+    }
+
+    /// A request that meets a full cap may sweep, but at most once a second: the scan is under
+    /// the lock every worker shares, and a flood of new values would otherwise repeat it on
+    /// every request. Rule "r" throughout, and no address, so that nothing falls back to an
+    /// address window, which would push the table past its doubling sweep and confuse this.
+    #[test]
+    fn a_full_cap_sweeps_at_most_once_a_second() {
+        let l = RateLimiter::default();
+        let hour = rl(1, 3_600_000);
+        let second = rl(1, 1_000);
+        let has = |value: &[u8]| {
+            l.table
+                .lock()
+                .unwrap()
+                .windows
+                .contains_key(&("r".to_string(), Client::header(value)))
+        };
+        for n in 0..HEADER_WINDOWS - 1 {
+            l.check_at(
+                "r",
+                Client::header(n.to_string().as_bytes()),
+                None,
+                &hour,
+                0,
+            );
+        }
+        // One more, in a window that ends at 2000: "r" is now full.
+        l.check_at("r", Client::header(b"short"), None, &second, 1_500);
+        assert_eq!(l.table.lock().unwrap().header_windows["r"], HEADER_WINDOWS);
+        // The first request to meet the cap sweeps; nothing has ended, so nothing is freed and
+        // the new value is not counted.
+        assert!(matches!(
+            l.check_at("r", Client::header(b"early"), None, &hour, 1_600),
+            Outcome::Allowed
+        ));
+        assert!(!has(b"early"));
+        // The short window has ended, but the last sweep was half a second ago: not again yet.
+        assert!(matches!(
+            l.check_at("r", Client::header(b"late"), None, &hour, 2_100),
+            Outcome::Allowed
+        ));
+        assert!(!has(b"late"), "no second sweep within the second");
+        // A second after that sweep, the ended window is freed and the value gets its own.
+        assert!(matches!(
+            l.check_at("r", Client::header(b"late"), None, &hour, 2_600),
+            Outcome::Allowed
+        ));
+        assert!(has(b"late"));
+        assert_eq!(l.table.lock().unwrap().header_windows["r"], HEADER_WINDOWS);
     }
 }
