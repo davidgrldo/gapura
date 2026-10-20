@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- A store request limit can be a consumer's own (#NNN). `PUT /api/workspaces/{ws}/rate-limit`
+- A store request limit can be a consumer's own (#264). `PUT /api/workspaces/{ws}/rate-limit`
   takes `consumer`, for a limit that applies only once `key_auth` has identified that consumer,
   whether it sits everywhere in the workspace, on one route or on one service; and `by`: `ip`
   (the default), `consumer`, or `header:<name>`. By `consumer` with none identified, or by a
