@@ -247,6 +247,9 @@ pub struct AccessLog<'a> {
     pub client_ip: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub error: Option<String>,
+    /// Why the gateway answered this request itself, when it did: the key it sent the caller in
+    /// `X-Gapura-Error`. `null` for an upstream's answer, a redirect and a client that went away.
+    pub error_key: Option<&'static str>,
 }
 
 pub fn write_access_log(entry: &AccessLog<'_>) {
@@ -362,12 +365,17 @@ mod tests {
             client_ip: None,
             user_agent: None,
             error: None,
+            error_key: None,
         };
         let v: serde_json::Value = serde_json::to_value(&entry).unwrap();
         assert_eq!(v["status"], 200);
         assert_eq!(v["route"], "apps/echo");
         assert_eq!(v["mirrored"], false);
         assert!(v["client_ip"].is_null());
+        assert!(
+            v["error_key"].is_null(),
+            "an upstream's answer carries no key"
+        );
         assert!(
             v.get("query").is_none(),
             "the query field is absent, not null, when the deployment did not ask for it"
@@ -403,10 +411,12 @@ mod tests {
             client_ip: None,
             user_agent: None,
             error: None,
+            error_key: Some("UPSTREAM_TIMEOUT"),
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(v["client_abort"], true);
         assert_eq!(v["upstream_duration_ms"], 3);
+        assert_eq!(v["error_key"], "UPSTREAM_TIMEOUT");
     }
 
     #[test]

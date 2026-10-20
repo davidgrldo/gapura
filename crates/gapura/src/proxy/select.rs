@@ -5,6 +5,8 @@ use std::net::{IpAddr, SocketAddr};
 use gapura_core::config::{Cluster, PathMatch, PathRewrite, Redirect, WeightedBackend};
 use rand::Rng;
 
+use crate::proxy::failure::ErrorKey;
+
 /// Answer locally instead of proxying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Local {
@@ -15,10 +17,10 @@ pub enum Local {
 }
 
 impl Local {
-    pub fn status(self) -> u16 {
+    pub fn key(self) -> ErrorKey {
         match self {
-            Local::NoBackend => 500,
-            Local::NoEndpoints => 503,
+            Local::NoBackend => ErrorKey::NoBackend,
+            Local::NoEndpoints => ErrorKey::NoEndpoints,
         }
     }
 }

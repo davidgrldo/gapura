@@ -242,10 +242,7 @@ mod tests {
         for key in ALL {
             let s = key.as_str();
             assert!(seen.insert(s), "{s} twice");
-            assert!(
-                s.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
-                "{s}"
-            );
+            assert!(s.chars().all(|c| c.is_ascii_uppercase() || c == '_'), "{s}");
             assert!((400..600).contains(&key.status()), "{s}");
             let m = key.message();
             assert!(!m.is_empty() && !m.contains("pingora"), "{s}: {m}");
@@ -387,7 +384,12 @@ mod tests {
         use gapura_core::credentials::Refusal as Key;
         use gapura_core::jwt::Refusal as Jwt;
         assert_eq!(ErrorKey::from(&Jwt::Missing), ErrorKey::AuthJwtMissing);
-        for r in [Jwt::Malformed, Jwt::UnknownKey, Jwt::BadSignature, Jwt::Claims] {
+        for r in [
+            Jwt::Malformed,
+            Jwt::UnknownKey,
+            Jwt::BadSignature,
+            Jwt::Claims,
+        ] {
             assert_eq!(ErrorKey::from(&r), ErrorKey::AuthJwtInvalid);
         }
         assert_eq!(ErrorKey::from(&Key::Missing), ErrorKey::AuthKeyMissing);

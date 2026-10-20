@@ -3,7 +3,7 @@
 //! One request, top to bottom: `request_filter` (match, answer locally or pick a cluster),
 //! `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite, headers),
 //! `response_filter` (response headers), `fail_to_connect` (retry once), `fail_to_proxy`
-//! (502/504 mapping), `logging` (access log + metrics).
+//! (the error key and its status, from `failure::classify`), `logging` (access log + metrics).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -28,6 +28,7 @@ use pingora::{Error, ErrorSource, ErrorType, Result};
 use tokio::sync::Semaphore;
 
 use crate::proxy::attrs::Extracted;
+use crate::proxy::failure::ErrorKey;
 use crate::proxy::select::{
     pick_backend, pick_endpoint, random_roll, redirect_location, rewrite_path, Local,
 };
@@ -79,6 +80,8 @@ pub struct Ctx {
     scheme: &'static str,
     port: u16,
     local_status: Option<u16>,
+    /// Why the gateway answered this request itself, when it did; the access log's `error_key`.
+    error_key: Option<ErrorKey>,
     /// Whether the one retry after a failure on a reused upstream connection has been spent.
     reuse_retried: bool,
     started: Instant,
@@ -194,18 +197,6 @@ fn idempotent(method: &http::Method) -> bool {
     .contains(method)
 }
 
-fn reason_phrase(code: u16) -> &'static str {
-    match code {
-        400 => "bad request target",
-        404 => "no route",
-        500 => "no valid backend",
-        502 => "bad gateway",
-        503 => "no ready endpoints",
-        504 => "gateway timeout",
-        _ => "error",
-    }
-}
-
 /// Small header-op adapter so the same `HeaderOps` apply to requests and responses.
 trait HeaderTarget {
     fn set(&mut self, name: &str, value: &str) -> Result<()>;
@@ -251,53 +242,52 @@ fn apply_header_ops(target: &mut impl HeaderTarget, ops: &HeaderOps) -> Result<(
     Ok(())
 }
 
-/// A locally generated error response: plain text, request id, never any internal detail.
-/// The rate-limit answer: like `write_local`, plus the three headers a throttled client reads.
-async fn write_429(
-    session: &mut Session,
-    limit: u32,
-    retry_after_secs: u64,
-    request_id: &str,
-) -> Result<()> {
-    let body = "429 too many requests\n";
-    let mut resp = ResponseHeader::build(429u16, Some(6))?;
-    resp.insert_header("Content-Type", "text/plain; charset=utf-8")?;
-    resp.insert_header("Content-Length", body.len().to_string())?;
-    resp.insert_header("Cache-Control", "no-store")?;
-    resp.insert_header("Retry-After", retry_after_secs.to_string())?;
-    resp.insert_header("X-RateLimit-Limit", limit.to_string())?;
-    resp.insert_header("X-RateLimit-Remaining", "0")?;
-    resp.insert_header("X-Request-Id", request_id.to_string())?;
-    session.write_response_header(Box::new(resp), false).await?;
-    session
-        .write_response_body(Some(Bytes::from(body)), true)
-        .await
-}
-
-async fn write_local(session: &mut Session, code: u16, request_id: &str) -> Result<()> {
-    let body = format!("{code} {}\n", reason_phrase(code));
-    let mut resp = ResponseHeader::build(code, Some(4))?;
-    resp.insert_header("Content-Type", "text/plain; charset=utf-8")?;
-    resp.insert_header("Content-Length", body.len().to_string())?;
-    resp.insert_header("Cache-Control", "no-store")?;
-    resp.insert_header("X-Request-Id", request_id.to_string())?;
-    session.write_response_header(Box::new(resp), false).await?;
-    session
-        .write_response_body(Some(Bytes::from(body)), true)
-        .await
-}
-
-/// The JWT and key_auth refusal answer: the challenge plus the framing every other local
-/// answer carries. `Content-Length: 0` matters beyond tidiness -- without it the body is
-/// close-delimited, so the connection closes after every 401 even while pingora announces
+/// The head and body of a locally generated error answer: the key in `X-Gapura-Error` and in
+/// the body, plain text unless the caller prefers JSON, the request id, and never any internal
+/// detail. `extra` carries what one kind of answer adds: the challenge on a 401, the limit
+/// headers on a 429. `Content-Length` is always explicit: without it the body is
+/// close-delimited, and the connection closes after every error while pingora announces
 /// keep-alive.
-fn refusal_response(challenge: &str, request_id: &str) -> Result<ResponseHeader> {
-    let mut resp = ResponseHeader::build(401u16, Some(4))?;
-    resp.insert_header(http::header::WWW_AUTHENTICATE, challenge)?;
-    resp.insert_header("Content-Length", "0")?;
+fn error_response(
+    key: ErrorKey,
+    request_id: &str,
+    json: bool,
+    extra: &[(&'static str, String)],
+) -> Result<(ResponseHeader, Bytes)> {
+    let (content_type, body) = failure::render(key, request_id, json);
+    let mut resp = ResponseHeader::build(key.status(), Some(5 + extra.len()))?;
+    resp.insert_header("Content-Type", content_type)?;
+    resp.insert_header("Content-Length", body.len().to_string())?;
     resp.insert_header("Cache-Control", "no-store")?;
     resp.insert_header("X-Request-Id", request_id)?;
-    Ok(resp)
+    resp.insert_header(failure::HEADER, key.as_str())?;
+    for (name, value) in extra {
+        resp.insert_header(*name, value.as_str())?;
+    }
+    Ok((resp, Bytes::from(body)))
+}
+
+/// Answer the request with `key`, and record it for the access log.
+async fn write_error(
+    session: &mut Session,
+    ctx: &mut Ctx,
+    key: ErrorKey,
+    extra: &[(&'static str, String)],
+) -> Result<()> {
+    ctx.local_status = Some(key.status());
+    ctx.error_key = Some(key);
+    // Every Accept line, joined: RFC 9110 section 5.3 makes them one list.
+    let accept: Vec<&str> = session
+        .req_header()
+        .headers
+        .get_all(http::header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    let json = failure::wants_json(&accept.join(","));
+    let (resp, body) = error_response(key, &ctx.request_id, json, extra)?;
+    session.write_response_header(Box::new(resp), false).await?;
+    session.write_response_body(Some(body), true).await
 }
 
 /// Whether `ex` would match a different rule once its `;params` are stripped, the way a servlet
@@ -320,7 +310,8 @@ fn path_params_change_the_route(rt: &Runtime, port: u16, ex: &Extracted) -> bool
     rule_for(&ex.path) != rule_for(&stripped)
 }
 
-/// Why a JWT policy refuses `req`, with the challenge to answer; `None` admits it.
+/// Why a JWT policy refuses `req` -- its key, the metric's reason, and the challenge to answer
+/// with; `None` admits it.
 ///
 /// Every Authorization line is forwarded upstream, so the check must cover every line, not just
 /// the first (#190). Lines are counted raw (#212): counting only those that parse as UTF-8 and as
@@ -332,16 +323,20 @@ fn jwt_refusal(
     req: &RequestHeader,
     policy: &gapura_core::config::JwtPolicy,
     keys: &jwt::Keys,
-) -> Option<(&'static str, &'static str)> {
+) -> Option<(ErrorKey, &'static str, &'static str)> {
     let mut lines = req.headers.get_all(http::header::AUTHORIZATION).iter();
     let first = lines.next();
     if lines.next().is_some() {
-        return Some(("multiple_bearer", "one credential per request"));
+        return Some((
+            ErrorKey::AuthJwtInvalid,
+            "multiple_bearer",
+            "one credential per request",
+        ));
     }
     let presented = jwt::bearer(first.and_then(|v| v.to_str().ok()));
     jwt::verify(policy, keys, presented)
         .err()
-        .map(|r| (r.as_str(), "Bearer"))
+        .map(|r| (ErrorKey::from(&r), r.as_str(), "Bearer"))
 }
 
 /// The client address after the trusted-proxy walk, the same answer the access log records:
@@ -509,6 +504,7 @@ impl ProxyHttp for GapuraProxy {
             scheme: "http",
             port: 0,
             local_status: None,
+            error_key: None,
             reuse_retried: false,
             started: Instant::now(),
             upstream_started: None,
@@ -544,8 +540,7 @@ impl ProxyHttp for GapuraProxy {
                 // The same holds for a host the backend may read differently from the one we
                 // would match (two Host lines, or one that disagrees with the authority).
                 tracing::debug!(reason = why, "refusing a request target");
-                ctx.local_status = Some(400);
-                write_local(session, 400, &ctx.request_id).await?;
+                write_error(session, ctx, ErrorKey::InvalidRequestTarget, &[]).await?;
                 return Ok(true);
             }
         }
@@ -555,8 +550,7 @@ impl ProxyHttp for GapuraProxy {
                 reason = "path parameters change the route",
                 "refusing a request target"
             );
-            ctx.local_status = Some(400);
-            write_local(session, 400, &ctx.request_id).await?;
+            write_error(session, ctx, ErrorKey::InvalidRequestTarget, &[]).await?;
             return Ok(true);
         }
 
@@ -626,48 +620,54 @@ impl ProxyHttp for GapuraProxy {
                 // credential has been checked. Both run after the match and before anything
                 // upstream is touched, for the same reason -- a refused request must cost the
                 // backend nothing.
-                let rt = ctx.runtime.as_ref().expect("set above");
+                // A clone of the Arc, not a borrow of the context: answering needs `&mut ctx`.
+                let rt = Arc::clone(ctx.runtime.as_ref().expect("set above"));
                 let route = rt.config.listeners[listener].rules[rule].route.clone();
                 for plugin in &rt.config.listeners[listener].rules[rule].plugins {
-                    let refusal: Option<(&'static str, &'static str, String)> = match plugin {
-                        gapura_core::config::Plugin::Jwt(policy) => {
-                            // No keys for this document means it did not parse at swap time.
-                            // Refusing is the safe direction: the alternative is passing traffic
-                            // through unverified because a configuration error made verification
-                            // impossible.
-                            let empty = jwt::Keys::default();
-                            let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                            jwt_refusal(session.req_header(), policy, keys)
-                                .map(|(reason, challenge)| ("jwt", reason, challenge.to_string()))
-                        }
-                        gapura_core::config::Plugin::KeyAuth(policy) => {
-                            let presented = session
-                                .req_header()
-                                .headers
-                                .get(&policy.header)
-                                .and_then(|v| v.to_str().ok());
-                            match gapura_core::credentials::identify(
-                                &rt.config,
-                                presented,
-                                policy.workspace.as_deref(),
-                            ) {
-                                // Carried on the context rather than written here: the upstream
-                                // header is set in upstream_request_filter, after the inbound one
-                                // has been removed.
-                                Ok(consumer) => {
-                                    ctx.consumer = Some(consumer.to_string());
-                                    ctx.key_headers.push(policy.header.clone());
-                                    None
-                                }
-                                Err(r) => Some((
-                                    "key_auth",
-                                    r.as_str(),
-                                    format!("Key realm=\"{}\"", policy.header),
-                                )),
+                    let refusal: Option<(ErrorKey, &'static str, &'static str, String)> =
+                        match plugin {
+                            gapura_core::config::Plugin::Jwt(policy) => {
+                                // No keys for this document means it did not parse at swap time.
+                                // Refusing is the safe direction: the alternative is passing traffic
+                                // through unverified because a configuration error made verification
+                                // impossible.
+                                let empty = jwt::Keys::default();
+                                let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
+                                jwt_refusal(session.req_header(), policy, keys).map(
+                                    |(key, reason, challenge)| {
+                                        (key, "jwt", reason, challenge.to_string())
+                                    },
+                                )
                             }
-                        }
-                    };
-                    if let Some((kind, reason, challenge)) = refusal {
+                            gapura_core::config::Plugin::KeyAuth(policy) => {
+                                let presented = session
+                                    .req_header()
+                                    .headers
+                                    .get(&policy.header)
+                                    .and_then(|v| v.to_str().ok());
+                                match gapura_core::credentials::identify(
+                                    &rt.config,
+                                    presented,
+                                    policy.workspace.as_deref(),
+                                ) {
+                                    // Carried on the context rather than written here: the upstream
+                                    // header is set in upstream_request_filter, after the inbound one
+                                    // has been removed.
+                                    Ok(consumer) => {
+                                        ctx.consumer = Some(consumer.to_string());
+                                        ctx.key_headers.push(policy.header.clone());
+                                        None
+                                    }
+                                    Err(r) => Some((
+                                        ErrorKey::from(&r),
+                                        "key_auth",
+                                        r.as_str(),
+                                        format!("Key realm=\"{}\"", policy.header),
+                                    )),
+                                }
+                            }
+                        };
+                    if let Some((key, kind, reason, challenge)) = refusal {
                         METRICS
                             .policy_refused_total
                             .with_label_values(&[&route, kind, reason])
@@ -677,13 +677,10 @@ impl ProxyHttp for GapuraProxy {
                         // records route="-" tells an operator nothing.
                         ctx.listener = Some(listener);
                         ctx.rule = Some(rule);
-                        ctx.local_status = Some(401);
-                        // No detail in the body. Which reason it was is an operator's business,
-                        // and telling a caller narrows the search for whoever is guessing.
-                        let header = refusal_response(&challenge, &ctx.request_id)?;
-                        session
-                            .write_response_header(Box::new(header), true)
-                            .await?;
+                        // Missing or invalid is all the key says. Which check failed is an
+                        // operator's business (the metric's reason), and telling a caller
+                        // narrows the search for whoever is guessing.
+                        write_error(session, ctx, key, &[("WWW-Authenticate", challenge)]).await?;
                         return Ok(true);
                     }
                 }
@@ -714,8 +711,17 @@ impl ProxyHttp for GapuraProxy {
                                 .inc();
                             ctx.listener = Some(listener);
                             ctx.rule = Some(rule);
-                            ctx.local_status = Some(429);
-                            write_429(session, limit, retry_after_secs, &ctx.request_id).await?;
+                            write_error(
+                                session,
+                                ctx,
+                                ErrorKey::RateLimited,
+                                &[
+                                    ("Retry-After", retry_after_secs.to_string()),
+                                    ("X-RateLimit-Limit", limit.to_string()),
+                                    ("X-RateLimit-Remaining", "0".to_string()),
+                                ],
+                            )
+                            .await?;
                             return Ok(true);
                         }
                     }
@@ -736,13 +742,11 @@ impl ProxyHttp for GapuraProxy {
                 Ok(true)
             }
             Decision::Local(local) => {
-                ctx.local_status = Some(local.status());
-                write_local(session, local.status(), &ctx.request_id).await?;
+                write_error(session, ctx, local.key(), &[]).await?;
                 Ok(true)
             }
             Decision::NotFound => {
-                ctx.local_status = Some(404);
-                write_local(session, 404, &ctx.request_id).await?;
+                write_error(session, ctx, ErrorKey::NoRoute, &[]).await?;
                 Ok(true)
             }
         }
@@ -976,26 +980,15 @@ impl ProxyHttp for GapuraProxy {
     async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
         let upstream = matches!(e.esource(), ErrorSource::Upstream);
         // Mark it above the status mapping so that every path through this function reaches it: a
-        // downstream failure yields code 0 and an abort mid-body has already written a response,
+        // downstream failure yields no key and an abort mid-body has already written a response,
         // so neither reaches the error-response branch below. What the flag means then rests on
-        // the `ErrorSource::Downstream => 0` arm a few lines down -- code 0 is what keeps an abort
-        // from being answered and logged as an error of ours.
+        // `failure::classify` returning `None` for a downstream failure -- no key is what keeps
+        // an abort from being answered and logged as an error of ours.
         if matches!(e.esource(), ErrorSource::Downstream) {
             ctx.client_abort = true;
         }
-        let code = match e.etype() {
-            ErrorType::HTTPStatus(code) => *code,
-            ErrorType::ConnectTimedout | ErrorType::ReadTimedout | ErrorType::WriteTimedout
-                if upstream =>
-            {
-                504
-            }
-            _ => match e.esource() {
-                ErrorSource::Upstream => 502,
-                ErrorSource::Downstream => 0,
-                ErrorSource::Internal | ErrorSource::Unset => 500,
-            },
-        };
+        let key = failure::classify(e);
+        let code = key.map_or(0, ErrorKey::status);
         if upstream {
             let kind = match e.etype() {
                 ErrorType::ReadTimedout | ErrorType::WriteTimedout => "timeout",
@@ -1022,12 +1015,11 @@ impl ProxyHttp for GapuraProxy {
         // Only answer when nothing has been sent yet: a failure mid-body must not append an error
         // text to the streamed response. Pingora drops the downstream connection after this, so
         // say so in the header instead of advertising keep-alive.
-        if code > 0 && session.response_written().is_none() {
+        if let Some(key) = key.filter(|_| session.response_written().is_none()) {
             session.set_keepalive(None);
-            if let Err(write_err) = write_local(session, code, &ctx.request_id).await {
+            if let Err(write_err) = write_error(session, ctx, key, &[]).await {
                 tracing::debug!(error = %write_err, "could not write error response, client likely gone");
             }
-            ctx.local_status = Some(code);
         }
         FailToProxy {
             error_code: code,
@@ -1091,6 +1083,7 @@ impl ProxyHttp for GapuraProxy {
             client_ip: client_ip.as_deref(),
             user_agent: user_agent.as_deref(),
             error: e.map(|e| e.to_string()),
+            error_key: ctx.error_key.map(ErrorKey::as_str),
         });
     }
 }
@@ -1272,20 +1265,45 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_refusal_carries_the_framing_of_any_local_answer() {
-        // Like the 429 and the local errors: an explicit empty length so the connection is not
-        // close-delimited (pingora would still say keep-alive and then close), no-store so no
-        // cache keeps a refusal, and the request id where every other answer carries it.
-        let resp = refusal_response("Bearer", "req-1").unwrap();
+    fn every_local_error_answer_carries_the_same_framing() {
+        // An explicit length so the connection is not close-delimited (pingora would still say
+        // keep-alive and then close), no-store so no cache keeps an error, the request id where
+        // every other answer carries it, and the key.
+        let challenge = [("WWW-Authenticate", "Bearer".to_string())];
+        let (resp, body) =
+            error_response(ErrorKey::AuthJwtMissing, "req-1", false, &challenge).unwrap();
         assert_eq!(resp.status.as_u16(), 401);
         assert_eq!(resp.headers.get("www-authenticate").unwrap(), "Bearer");
         assert_eq!(
+            resp.headers.get("x-gapura-error").unwrap(),
+            "AUTH_JWT_MISSING"
+        );
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
             resp.headers.get("content-length").unwrap(),
-            "0",
+            body.len().to_string().as_str(),
             "the body must not be close-delimited"
         );
         assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
         assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-1");
+        assert_eq!(&body[..], b"401 unauthorized\n");
+
+        let (resp, body) = error_response(ErrorKey::NoRoute, "req-2", true, &[]).unwrap();
+        assert_eq!(resp.status.as_u16(), 404);
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            resp.headers.get("content-length").unwrap(),
+            body.len().to_string().as_str()
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"]["key"], "NO_ROUTE");
+        assert_eq!(v["error"]["request_id"], "req-2");
     }
 
     #[test]
@@ -1400,10 +1418,9 @@ mod tests {
                 [forged.as_bytes(), good.as_bytes()],
                 [good.as_bytes(), forged.as_bytes()],
             ] {
-                assert_eq!(
-                    jwt_refusal(&with_lines(&lines), &policy, &keys).map(|r| r.0),
-                    Some("multiple_bearer")
-                );
+                let refusal = jwt_refusal(&with_lines(&lines), &policy, &keys);
+                assert_eq!(refusal.map(|r| r.1), Some("multiple_bearer"));
+                assert_eq!(refusal.map(|r| r.0), Some(ErrorKey::AuthJwtInvalid));
             }
         }
 
@@ -1415,7 +1432,7 @@ mod tests {
             forged.push(0x80);
             let good = format!("Bearer {}", token(SECRET, "me"));
             assert_eq!(
-                jwt_refusal(&with_lines(&[&forged, good.as_bytes()]), &policy, &keys).map(|r| r.0),
+                jwt_refusal(&with_lines(&[&forged, good.as_bytes()]), &policy, &keys).map(|r| r.1),
                 Some("multiple_bearer")
             );
         }
@@ -1429,12 +1446,12 @@ mod tests {
             for line in [tab.as_bytes(), &non_utf8, b"Basic dXNlcjpwYXNz"] {
                 assert_eq!(
                     jwt_refusal(&with_lines(&[line]), &policy, &keys),
-                    Some(("missing", "Bearer"))
+                    Some((ErrorKey::AuthJwtMissing, "missing", "Bearer"))
                 );
             }
             assert_eq!(
                 jwt_refusal(&with_lines(&[]), &policy, &keys),
-                Some(("missing", "Bearer"))
+                Some((ErrorKey::AuthJwtMissing, "missing", "Bearer"))
             );
         }
     }
@@ -1573,15 +1590,6 @@ spec:
                 path_params_change_the_route(&rt, 80, &with(path)),
                 "{path} must be refused"
             );
-        }
-    }
-
-    #[test]
-    fn reason_phrases_never_leak_internals() {
-        for code in [404u16, 500, 502, 503, 504, 418] {
-            let phrase = reason_phrase(code);
-            assert!(!phrase.is_empty());
-            assert!(!phrase.contains("pingora"));
         }
     }
 }
