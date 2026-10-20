@@ -8,6 +8,18 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Every answer the gateway gives on its own now names its cause: a stable key such as
+  `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
+  `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an
+  upstream's answer, a redirect, or a client that went away). A request whose `Accept` prefers
+  `application/json` gets the body as `{"error":{"key","message","request_id"}}`; every other
+  request keeps the plain text it got before, with two exceptions: a 401 now says
+  `401 unauthorized` where its body was empty, and a 500 for a fault of the gateway's own says
+  `internal error` rather than `no valid backend`, which only a missing backend means. No status
+  changes. The README's "Error keys" lists the set; a key is never renamed or reused.
+- A JWT route refusing a request with more than one `Authorization` line now challenges with
+  `WWW-Authenticate: Bearer error="invalid_request"` (RFC 6750). It sent the prose
+  `one credential per request`, which is not a challenge a client can parse.
 - The data plane remembers endpoints that keep failing. Until now each request chose by
   round-robin with no memory, so a dead pod cost every other request a failed connect (or a full
   connect timeout) and an instance stuck answering 503 kept its share. Now five consecutive
