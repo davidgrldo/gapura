@@ -110,8 +110,10 @@ pub struct StorePlugin {
 /// service, or to neither and so to every route in the workspace, the most specific winning --
 /// and, besides, to one consumer or to everyone.
 ///
-/// Not a [`Plugin`]: the data plane enforces [`RouteRule::rate_limit`], the field the Kubernetes
-/// `gapura.dev/rate-limit` annotation sets, rather than running something from the plugin list.
+/// Not a [`Plugin`]: a limit on everyone sets [`RouteRule::rate_limit`], the field the Kubernetes
+/// `gapura.dev/rate-limit` annotation sets, which the data plane enforces rather than running
+/// something from the plugin list. A consumer's own limit goes to [`Config::consumer_rate_limits`]
+/// instead and never touches that field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreRateLimit {
     /// The workspace this limit belongs to; it applies to routes of that workspace only.
@@ -123,9 +125,13 @@ pub struct StoreRateLimit {
     /// [`StoreService::name`], when this is attached to every route using one service.
     #[serde(default)]
     pub service: Option<String>,
-    /// [`StoreCredential::consumer`], when this limit is that consumer's own. It then applies
-    /// only to requests a `key_auth` policy identified as that consumer, and comes before every
-    /// limit that is no consumer's: see [`compile`] and
+    /// [`StoreCredential::consumer`], when this limit is that consumer's own. It names a
+    /// consumer of this row's own workspace, because the key of
+    /// [`Config::consumer_rate_limits`](crate::config::Config::consumer_rate_limits) is built
+    /// from this row's workspace and this name, so a name that only another workspace has
+    /// reaches nobody. It then applies only to requests a `key_auth` policy identified as that
+    /// consumer, and comes before every limit that is no consumer's: see
+    /// [`Config::consumer_rate_limits`](crate::config::Config::consumer_rate_limits) and
     /// [`Config::rate_limit_for`](crate::config::Config::rate_limit_for) for the order.
     #[serde(default)]
     pub consumer: Option<String>,
@@ -496,8 +502,10 @@ fn rate_limit_for(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimi
 /// on the route's service -- and its limit on no route or service, which covers the rest. The
 /// most specific wins and the first of two equally specific ones, as in [`rate_limit_for`].
 ///
-/// Only served routes get an entry. A row naming a route that is not served would otherwise
-/// leave an entry no rule can reach, and the table is written to every data plane.
+/// Only served routes get a `routes` entry. A row naming a route that is not served would
+/// otherwise leave an entry no rule can reach, and the table is written to every data plane. A
+/// consumer-wide `any` is kept whichever routes are served, which is harmless: an entry no rule
+/// reaches costs one key.
 fn consumer_rate_limits(
     all: &[StoreRateLimit],
     routes: &[&StoreRoute],

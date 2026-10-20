@@ -100,7 +100,9 @@ impl Config {
     /// the consumer's limit on the route, else on its service -- both resolved into
     /// [`ConsumerRateLimits::routes`] -- else on the consumer alone, else the rule's own. That is
     /// Kong's precedence (`plugins_iterator.lua`) restricted to the attachments the store has: a
-    /// store route has exactly one service, so Kong's route+service is our route.
+    /// store route has exactly one service, so Kong's consumer+route+service is our
+    /// consumer+route, and our route alone is Kong's route alone, which ranks below a
+    /// consumer-wide limit as it does in Kong.
     ///
     /// `consumer` is the key [`Config::consumer_rate_limits`] is keyed by, and is known only once
     /// a `key_auth` policy accepted a key. That is why a limit is the only thing that can be a
