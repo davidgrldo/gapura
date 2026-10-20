@@ -17,8 +17,8 @@ use super::grants::{audit, retrying, rights, Entry};
 use super::{Store, WriteError};
 use crate::access::User;
 use crate::configuration::{
-    self, Action, HeaderMatch, HeadersOnReplace, JwtRequirementView, KeyAuthView, PathMatch,
-    Protocol, RateLimitRequirementView, Route, RouteView, Service, ServiceView, Tls, TlsOnReplace,
+    self, Action, HeaderMatch, JwtRequirementView, KeptOnReplace, KeyAuthView, PathMatch, Protocol,
+    RateLimitRequirementView, Route, RouteView, Service, ServiceView, Tls, TlsOnReplace,
 };
 use crate::consumers::Limit;
 use crate::grants::Refusal;
@@ -87,6 +87,7 @@ fn route_from(row: &tokio_postgres::Row) -> Result<Route> {
         paths,
         methods: row.get("methods"),
         headers,
+        strip_path: row.get("strip_path"),
         priority: row.get("priority"),
     })
 }
@@ -359,7 +360,7 @@ impl Store {
             .query(
                 &format!(
                     "select r.id, r.service_id, r.name, s.name as service, r.hosts, r.methods,
-                            r.paths, r.headers, r.priority, {} as updated_at,
+                            r.paths, r.headers, r.strip_path, r.priority, {} as updated_at,
                             {} as service_updated_at
                        from routes r join services s on s.id = r.service_id
                       where r.workspace_id = $1 order by r.priority desc, r.name",
@@ -653,8 +654,8 @@ impl Store {
 
     /// Replaces the route called `current`, which may rename it, when `seen` is its
     /// `updated_at` as last read and `service_seen`, when sent, is the `updated_at` of the
-    /// service the route pointed at then. `headers` says whether `r.headers` is written or the
-    /// stored ones are kept.
+    /// service the route pointed at then. `kept` says which of `r`'s fields are not written but
+    /// kept as stored.
     #[allow(clippy::too_many_arguments)]
     pub async fn replace_route(
         &self,
@@ -664,13 +665,13 @@ impl Store {
         r: &Route,
         seen: &str,
         service_seen: Option<&str>,
-        headers: HeadersOnReplace,
+        kept: KeptOnReplace,
     ) -> Result<(), WriteError> {
         retrying(move || {
             self.try_write_route(
                 caller,
                 workspace,
-                Some((current, seen, service_seen, headers)),
+                Some((current, seen, service_seen, kept)),
                 r,
             )
         })
@@ -684,7 +685,7 @@ impl Store {
         &self,
         caller: Uuid,
         workspace: Uuid,
-        replacing: Option<(&str, &str, Option<&str>, HeadersOnReplace)>,
+        replacing: Option<(&str, &str, Option<&str>, KeptOnReplace)>,
         r: &Route,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
@@ -694,12 +695,12 @@ impl Store {
         // meanwhile answers that, not some other refusal its new contents would earn.
         let existing = match replacing {
             None => None,
-            Some((current, seen, service_seen, headers)) => {
+            Some((current, seen, service_seen, kept)) => {
                 let Some(row) = tx
                     .query_opt(
                         &format!(
                             "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths,
-                                    r.headers, r.priority, {} as updated_at,
+                                    r.headers, r.strip_path, r.priority, {} as updated_at,
                                     {} as service_updated_at
                                from routes r join services s on s.id = r.service_id
                               where r.workspace_id = $1 and r.name = $2 for update of r",
@@ -730,17 +731,28 @@ impl Store {
                     }
                 }
                 let before = route_from(&row).map_err(WriteError::Store)?;
-                Some((row.get::<_, Uuid>("id"), before, headers))
+                Some((row.get::<_, Uuid>("id"), before, kept))
             }
         };
         // Read under the `for update` above, so what is kept is what is there when this writes.
         let r = &match &existing {
-            Some((_, before, HeadersOnReplace::Kept)) => Route {
-                headers: before.headers.clone(),
+            Some((_, before, kept)) => Route {
+                headers: if kept.headers {
+                    before.headers.clone()
+                } else {
+                    r.headers.clone()
+                },
+                strip_path: if kept.strip_path {
+                    before.strip_path
+                } else {
+                    r.strip_path
+                },
                 ..r.clone()
             },
-            _ => r.clone(),
+            None => r.clone(),
         };
+        // A kept `strip_path` was checked against the paths it was stored with, not these.
+        configuration::strip_path_fits(r).map_err(WriteError::Field)?;
         // On a replace as well as a create, so a save that keeps `hosts: []` is checked too.
         may_route(&tx, &actor, workspace, &r.hosts).await?;
         let Some(service) = tx
@@ -764,8 +776,8 @@ impl Store {
                 let Some(row) = tx
                     .query_opt(
                         "insert into routes (workspace_id, service_id, name, hosts, methods,
-                                             paths, headers, priority)
-                         values ($1, $2, $3, $4, $5, $6, $7, $8)
+                                             paths, headers, strip_path, priority)
+                         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                          on conflict (workspace_id, name) do nothing returning id",
                         &[
                             &workspace,
@@ -775,6 +787,7 @@ impl Store {
                             &r.methods,
                             &paths,
                             &headers,
+                            &r.strip_path,
                             &r.priority,
                         ],
                     )
@@ -823,7 +836,8 @@ impl Store {
                 }
                 tx.execute(
                     "update routes set service_id = $2, name = $3, hosts = $4, methods = $5,
-                            paths = $6, headers = $7, priority = $8, updated_at = now()
+                            paths = $6, headers = $7, strip_path = $8, priority = $9,
+                            updated_at = now()
                       where id = $1",
                     &[
                         &id,
@@ -833,6 +847,7 @@ impl Store {
                         &r.methods,
                         &paths,
                         &headers,
+                        &r.strip_path,
                         &r.priority,
                     ],
                 )
@@ -879,7 +894,7 @@ impl Store {
         let Some(row) = tx
             .query_opt(
                 "select r.id, r.name, s.name as service, r.hosts, r.methods, r.paths, r.headers,
-                        r.priority
+                        r.strip_path, r.priority
                    from routes r join services s on s.id = r.service_id
                   where r.workspace_id = $1 and r.name = $2 for update of r",
                 &[&workspace, &name],

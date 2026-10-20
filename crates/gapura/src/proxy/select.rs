@@ -242,6 +242,72 @@ mod tests {
         );
     }
 
+    /// A store route with `strip_path`, as the control plane compiles it and the proxy applies
+    /// it: the rule's rewrite taken with the path of the entry that won.
+    #[test]
+    fn a_store_route_that_strips_its_path_sends_the_upstream_the_rest() {
+        use gapura_core::matcher::RegexMap;
+        use gapura_core::store::{StoreRoute, StoreService, StoreSettings};
+        use gapura_core::{compile, RequestAttrs, StoreSnapshot};
+
+        let snap = StoreSnapshot {
+            services: vec![StoreService {
+                workspace: String::new(),
+                name: "gin-ping-api".into(),
+                protocol: gapura_core::config::Protocol::Http,
+                host: "gin.internal".into(),
+                port: 8080,
+                connect_timeout_ms: None,
+                read_timeout_ms: None,
+                tls_verify: true,
+                tls_ca_pem: None,
+                tls_sni: None,
+            }],
+            routes: vec![StoreRoute {
+                workspace: String::new(),
+                name: "test".into(),
+                service: "gin-ping-api".into(),
+                hosts: Vec::new(),
+                paths: vec![
+                    PathMatch::Prefix("/test".into()),
+                    PathMatch::Exact("/health".into()),
+                ],
+                methods: Vec::new(),
+                headers: Vec::new(),
+                strip_path: true,
+                priority: 0,
+            }],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let upstream_path = |path: &str| {
+            let hit = cfg
+                .match_port_with(
+                    80,
+                    &RequestAttrs {
+                        host: "api.example.com",
+                        path,
+                        method: "GET",
+                        headers: &[],
+                        query: &[],
+                    },
+                    &RegexMap::default(),
+                )
+                .unwrap_or_else(|| panic!("{path} matches no route"));
+            let rewrite = hit.rule.filters.rewrite.as_ref().unwrap();
+            rewrite_path(
+                rewrite.path.as_ref().expect("a path rewrite"),
+                path,
+                &hit.entry.matcher.path,
+            )
+        };
+        assert_eq!(upstream_path("/test/ping"), "/ping");
+        assert_eq!(upstream_path("/test/a/b"), "/a/b");
+        assert_eq!(upstream_path("/test"), "/");
+        assert_eq!(upstream_path("/test/"), "/");
+        assert_eq!(upstream_path("/health"), "/");
+    }
+
     #[test]
     fn redirect_location_port_and_scheme_rules() {
         let m = PathMatch::Prefix("/".into());

@@ -226,9 +226,12 @@ pub struct RouteInput {
     #[serde(default)]
     pub methods: Vec<String>,
     /// Absent on a create = none; absent on a replace = the headers the route has, so a client
-    /// that does not know about them cannot erase them. See [`HeadersOnReplace`].
+    /// that does not know about them cannot erase them. See [`KeptOnReplace`].
     #[serde(default)]
     pub headers: Option<Vec<HeaderMatch>>,
+    /// Absent on a create = off; absent on a replace = what the route has, as `headers`.
+    #[serde(default)]
+    pub strip_path: Option<bool>,
     #[serde(default)]
     pub priority: i32,
     /// Required on `PUT`, the value last read; refused on `POST`.
@@ -260,17 +263,44 @@ pub struct Route {
     pub methods: Vec<String>,
     /// Every one must be present with exactly this value. Names lowercased; empty = any headers.
     pub headers: Vec<HeaderMatch>,
+    /// Whether the upstream gets the path without the part the route matched. Never with a
+    /// regex path, which has no prefix to strip; see [`strip_path_fits`].
+    pub strip_path: bool,
     pub priority: i32,
 }
 
-/// Whether a replace writes the headers it validated or keeps the ones the route has, as
-/// [`TlsOnReplace`] does for a service's TLS settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeadersOnReplace {
-    /// The request sent `headers`, perhaps empty: write what it says.
-    AsSent,
-    /// The request named no `headers`: keep the stored ones.
-    Kept,
+/// What a replace keeps of the route as stored, because the request did not name it, as
+/// [`TlsOnReplace`] does for a service's TLS settings: a client from before a field existed must
+/// not erase it. A field the request sent, `headers: []` included, is written as sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeptOnReplace {
+    /// The request named no `headers`.
+    pub headers: bool,
+    /// The request named no `strip_path`.
+    pub strip_path: bool,
+}
+
+impl KeptOnReplace {
+    /// What `input` leaves out.
+    pub fn of(input: &RouteInput) -> Self {
+        Self {
+            headers: input.headers.is_none(),
+            strip_path: input.strip_path.is_none(),
+        }
+    }
+}
+
+/// Refuses stripping beside a regex path, on `strip_path`: the data plane strips the prefix a
+/// request matched, and a regex has none. Asked of a request and again of a replace once the
+/// stored value is kept, which was checked against other paths.
+pub fn strip_path_fits(route: &Route) -> Result<(), FieldError> {
+    if route.strip_path && route.paths.iter().any(|p| p.kind == "regex") {
+        return Err(field(
+            "strip_path",
+            "Strip path works with prefix and exact paths; a regular expression has no prefix to strip.",
+        ));
+    }
+    Ok(())
 }
 
 /// The key requirement that applies to a service or route, and where it comes from: the most
@@ -845,8 +875,10 @@ pub fn route(input: RouteInput, kind: Write) -> Result<(Route, Option<String>), 
         paths,
         methods,
         headers,
+        strip_path: input.strip_path.unwrap_or(false),
         priority: input.priority,
     };
+    strip_path_fits(&route)?;
     Ok((route, updated_at(kind, input.updated_at)?))
 }
 
@@ -1197,6 +1229,7 @@ mod tests {
                 name: "X-Version".into(),
                 value: "2".into(),
             }]),
+            strip_path: None,
             priority: 5,
             updated_at: Some("2026-10-07T03:00:00.000000Z".into()),
             service_updated_at: Some("2026-10-07T02:00:00.000000Z".into()),
@@ -1356,6 +1389,32 @@ mod tests {
         let (r, _) = route(input, Write::Replace).unwrap();
         assert!(r.hosts.is_empty() && r.paths.is_empty() && r.methods.is_empty());
         assert!(r.headers.is_empty());
+    }
+
+    #[test]
+    fn strip_path_is_off_unless_sent_and_never_beside_a_regex() {
+        let (r, _) = route(route_input(), Write::Replace).unwrap();
+        assert!(!r.strip_path, "absent is off");
+        let mut input = route_input();
+        input.paths.truncate(1);
+        input.strip_path = Some(true);
+        assert!(route(input, Write::Replace).unwrap().0.strip_path);
+        // `route_input`'s second path is a regex.
+        let input = RouteInput {
+            strip_path: Some(true),
+            ..route_input()
+        };
+        let error = route(input, Write::Replace).unwrap_err();
+        assert_eq!(error.field, "strip_path");
+        assert_eq!(
+            error.sentence,
+            "Strip path works with prefix and exact paths; a regular expression has no prefix to strip."
+        );
+        let input = RouteInput {
+            strip_path: Some(false),
+            ..route_input()
+        };
+        assert!(route(input, Write::Replace).is_ok());
     }
 
     fn path(kind: &str, value: &str) -> PathInput {

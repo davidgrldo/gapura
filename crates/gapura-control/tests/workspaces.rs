@@ -855,6 +855,7 @@ async fn write(
                 paths: Vec::new(),
                 methods: Vec::new(),
                 headers: Vec::new(),
+                strip_path: false,
                 priority: 0,
             };
             store.create_route(caller, workspace, &route).await

@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{
     Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, KvMatch, ListenerConfig, PathMatch,
-    Plugin, PortEntry, Protocol, RateLimit, ResolveTarget, Rewrite, RouteMatch, RouteRule,
-    Timeouts, WeightedBackend,
+    PathRewrite, Plugin, PortEntry, Protocol, RateLimit, ResolveTarget, Rewrite, RouteMatch,
+    RouteRule, Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -77,6 +77,12 @@ pub struct StoreRoute {
     /// case and compiled lowercase; values are compared exactly. Empty means any headers.
     #[serde(default)]
     pub headers: Vec<KvMatch>,
+    /// Kong's `strip_path`: the upstream gets the request's path without the part the winning
+    /// path matched, so `/test/ping` on a `/test` prefix reaches it as `/ping`, and an exact path
+    /// as `/`. Off by default, unlike Kong's, so a route stored before it is served as it was. A
+    /// regex has no prefix to strip, so a route with one is not served; see [`refused_routes`].
+    #[serde(default)]
+    pub strip_path: bool,
     /// Higher wins. Explicit rather than derived from match specificity, so an operator can see
     /// and set the order; ties break on name so the output never depends on row order.
     #[serde(default)]
@@ -181,8 +187,9 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     // foreign key should make it unreachable and the console should refuse it first; this is
     // what stands between those two being wrong and a crash.
     //
-    // A route that matches on the consumer header (#228), or whose exact or prefix path names
-    // `;params` (#247), is not served at all; see [`refused_routes`].
+    // A route that matches on the consumer header (#228), whose exact or prefix path names
+    // `;params` (#247), or that strips a regex path, is not served at all; see
+    // [`refused_routes`].
     let mut routes: Vec<&StoreRoute> = snap
         .routes
         .iter()
@@ -239,10 +246,14 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             matches: matches.clone(),
             // Kong's default (`preserve_host = false`): the upstream is addressed by the
             // service's own host, not by whatever name the client used to reach the gateway.
+            // Stripping is the Gateway API's prefix replacement with `/`, which the data plane
+            // applies per winning match: the prefix it matched, or all of an exact path.
             filters: Filters {
                 rewrite: Some(Rewrite {
                     hostname: Some(upstream_authority(service)),
-                    path: None,
+                    path: route
+                        .strip_path
+                        .then(|| PathRewrite::ReplacePrefixMatch("/".to_string())),
                 }),
                 ..Filters::default()
             },
@@ -332,6 +343,9 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 ///   resolving a path, so `GET /api;v=2` would run this route's policies while the backend
 ///   serves `/api`, whose route may carry others. Dropping only that path could leave the route
 ///   with none, which means every path.
+/// - [`StoreRoute::strip_path`] with a regex path. A regex has no prefix to strip, and the data
+///   plane cannot compute one for it. Dropping only the regex would narrow the route, and
+///   serving it without stripping would send the upstream paths it was set up not to get.
 pub fn refused_routes(snap: &StoreSnapshot) -> Vec<(String, &'static str)> {
     snap.routes
         .iter()
@@ -351,7 +365,16 @@ fn refusal(route: &StoreRoute) -> Option<&'static str> {
             "an exact or prefix path contains ;, which servlet backends read as path parameters; remove the ; to serve it",
         );
     }
+    if strips_a_regex(route) {
+        return Some(
+            "it strips the matched path, and a regular expression has no prefix to strip; turn off strip path or use prefix and exact paths to serve it",
+        );
+    }
     None
+}
+
+fn strips_a_regex(route: &StoreRoute) -> bool {
+    route.strip_path && route.paths.iter().any(|p| matches!(p, PathMatch::Regex(_)))
 }
 
 fn names_path_parameters(route: &StoreRoute) -> bool {
@@ -634,6 +657,7 @@ mod tests {
             paths: vec![PathMatch::Prefix(path.into())],
             methods: Vec::new(),
             headers: Vec::new(),
+            strip_path: false,
             priority,
         }
     }
@@ -1148,6 +1172,7 @@ mod tests {
                 ],
                 methods: vec!["GET".into(), "POST".into()],
                 headers: Vec::new(),
+                strip_path: false,
                 priority: 0,
             }],
         };
@@ -1436,6 +1461,137 @@ mod tests {
                 .rules
                 .len(),
             1
+        );
+    }
+
+    /// The path rewrite the one rule compiled from `route` carries.
+    fn path_rewrite_of(route: StoreRoute) -> Option<PathRewrite> {
+        let snap = StoreSnapshot {
+            services: vec![svc("gin-ping-api", "gin.internal", 8080)],
+            routes: vec![route],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        cfg.listeners[0].rules[0]
+            .filters
+            .rewrite
+            .as_ref()
+            .expect("a store rule always rewrites the host")
+            .path
+            .clone()
+    }
+
+    /// Kong's `strip_path`: the matched prefix is replaced with `/`, which the data plane turns
+    /// into the rest of the path, and the host rewrite stays beside it.
+    #[test]
+    fn a_route_that_strips_its_path_replaces_the_matched_prefix_with_a_slash() {
+        let mut test = route("test", "gin-ping-api", "/test", 0);
+        test.strip_path = true;
+        let snap = StoreSnapshot {
+            services: vec![svc("gin-ping-api", "gin.internal", 8080)],
+            routes: vec![test],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(
+            cfg.listeners[0].rules[0].filters.rewrite,
+            Some(Rewrite {
+                hostname: Some("gin.internal:8080".into()),
+                path: Some(PathRewrite::ReplacePrefixMatch("/".into())),
+            })
+        );
+        assert!(refused_routes(&snap).is_empty());
+        assert_eq!(hit(&cfg, 80, "any", "/test/ping", "GET"), Some("test"));
+    }
+
+    #[test]
+    fn a_route_that_does_not_strip_its_path_leaves_it_alone() {
+        assert_eq!(
+            path_rewrite_of(route("test", "gin-ping-api", "/test", 0)),
+            None
+        );
+    }
+
+    /// The ETag is the digest of the compiled bytes, so a route that does not strip must compile
+    /// to exactly what it did before the field existed, whether it says `false` or was written
+    /// without it.
+    #[test]
+    fn a_route_that_does_not_strip_compiles_exactly_as_before() {
+        for older in [
+            serde_json::json!({
+                "name": "api", "service": "orders",
+                "paths": [{"Prefix": "/v1"}], "methods": ["GET"], "priority": 0
+            }),
+            serde_json::json!({
+                "name": "api", "service": "orders",
+                "paths": [{"Prefix": "/v1"}], "methods": ["GET"], "priority": 0,
+                "strip_path": false
+            }),
+        ] {
+            let older: StoreRoute = serde_json::from_value(older).unwrap();
+            assert!(!older.strip_path);
+            let snap = StoreSnapshot {
+                services: vec![svc("orders", "orders.internal", 8080)],
+                routes: vec![older],
+                ..Default::default()
+            };
+            let body = serde_json::to_vec(&compile(&snap, &StoreSettings::default())).unwrap();
+            let digest: String = Sha256::digest(&body)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(digest, PRE_HEADERS_DIGEST);
+        }
+    }
+
+    /// A regex has no prefix to strip, and the data plane cannot compute one, so a route that
+    /// strips one is left out whole -- not served unstripped, nor without the regex -- and named,
+    /// while a regex route that does not strip and the other routes compile as before.
+    #[test]
+    fn a_route_that_strips_a_regex_path_is_not_served() {
+        let mut mixed = ws_route("shop", "mixed", "orders", "api.example");
+        mixed.priority = 10;
+        mixed.strip_path = true;
+        mixed.paths = vec![
+            PathMatch::Prefix("/items".into()),
+            PathMatch::Regex("/items/[0-9]+".into()),
+        ];
+        let mut regex = ws_route("shop", "matrix", "orders", "api.example");
+        regex.priority = 5;
+        regex.paths = vec![PathMatch::Regex("/m/[0-9]+".into())];
+        let snap = StoreSnapshot {
+            services: vec![ws_svc("shop", "orders", "orders.internal")],
+            routes: vec![
+                mixed,
+                regex,
+                ws_route("shop", "public", "orders", "api.example"),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let ids: Vec<&str> = cfg.listeners[0]
+            .rules
+            .iter()
+            .map(|r| r.route.as_str())
+            .collect();
+        assert_eq!(ids, ["shop/matrix", "shop/public"]);
+        assert!(cfg.listeners[0].rules.iter().all(|r| r
+            .filters
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .path
+            .is_none()));
+        assert_eq!(
+            refused_routes(&snap),
+            [(
+                "shop/mixed".to_string(),
+                "it strips the matched path, and a regular expression has no prefix to strip; turn off strip path or use prefix and exact paths to serve it"
+            )]
+        );
+        assert_eq!(
+            hit(&cfg, 80, "api.example", "/items/1", "GET"),
+            Some("shop/public")
         );
     }
 
