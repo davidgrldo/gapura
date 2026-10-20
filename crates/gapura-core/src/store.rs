@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    Cluster, ClusterTls, Config, Filters, KeyAuthPolicy, KvMatch, ListenerConfig, PathMatch,
-    PathRewrite, Plugin, PortEntry, Protocol, RateLimit, ResolveTarget, Rewrite, RouteMatch,
-    RouteRule, Timeouts, WeightedBackend,
+    Cluster, ClusterTls, Config, ConsumerRateLimits, Filters, KeyAuthPolicy, KvMatch,
+    ListenerConfig, PathMatch, PathRewrite, Plugin, PortEntry, Protocol, RateLimit, ResolveTarget,
+    Rewrite, RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -106,8 +106,9 @@ pub struct StorePlugin {
     pub plugin: Plugin,
 }
 
-/// A request limit, attached as a [`StorePlugin`] is: to one route, to every route of one service,
-/// or to neither and so to every route in the workspace, the most specific winning.
+/// A request limit, attached as a [`StorePlugin`] is -- to one route, to every route of one
+/// service, or to neither and so to every route in the workspace, the most specific winning --
+/// and, besides, to one consumer or to everyone.
 ///
 /// Not a [`Plugin`]: the data plane enforces [`RouteRule::rate_limit`], the field the Kubernetes
 /// `gapura.dev/rate-limit` annotation sets, rather than running something from the plugin list.
@@ -122,6 +123,12 @@ pub struct StoreRateLimit {
     /// [`StoreService::name`], when this is attached to every route using one service.
     #[serde(default)]
     pub service: Option<String>,
+    /// [`StoreCredential::consumer`], when this limit is that consumer's own. It then applies
+    /// only to requests a `key_auth` policy identified as that consumer, and comes before every
+    /// limit that is no consumer's: see [`compile`] and
+    /// [`Config::rate_limit_for`](crate::config::Config::rate_limit_for) for the order.
+    #[serde(default)]
+    pub consumer: Option<String>,
     pub limit: RateLimit,
 }
 
@@ -328,7 +335,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .filter(|c| !c.workspace.is_empty())
             .map(|c| (c.key_hash.clone(), c.workspace.clone()))
             .collect(),
-        consumer_rate_limits: Default::default(),
+        consumer_rate_limits: consumer_rate_limits(&snap.rate_limits, &routes),
     }
 }
 
@@ -465,6 +472,10 @@ fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
 fn rate_limit_for(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimit> {
     let mut chosen: Option<(u8, &RateLimit)> = None;
     for l in all {
+        // A consumer's own limit is not a limit on everyone: it goes to the consumer table.
+        if l.consumer.is_some() {
+            continue;
+        }
         let Some(rank) = rank(
             &l.workspace,
             l.route.as_deref(),
@@ -480,9 +491,59 @@ fn rate_limit_for(all: &[StoreRateLimit], route: &StoreRoute) -> Option<RateLimi
     chosen.map(|(_, limit)| limit.clone())
 }
 
+/// The limits that are a consumer's own, as [`Config::consumer_rate_limits`] holds them: for
+/// each consumer with any, its limit on each served route -- the one on the route, else the one
+/// on the route's service -- and its limit on no route or service, which covers the rest. The
+/// most specific wins and the first of two equally specific ones, as in [`rate_limit_for`].
+///
+/// Only served routes get an entry. A row naming a route that is not served would otherwise
+/// leave an entry no rule can reach, and the table is written to every data plane.
+fn consumer_rate_limits(
+    all: &[StoreRateLimit],
+    routes: &[&StoreRoute],
+) -> BTreeMap<String, ConsumerRateLimits> {
+    let mut out: BTreeMap<String, ConsumerRateLimits> = BTreeMap::new();
+    // How specific the limit each (consumer, route) holds so far is.
+    let mut held: BTreeMap<(String, String), u8> = BTreeMap::new();
+    for l in all {
+        let Some(username) = &l.consumer else {
+            continue;
+        };
+        let consumer = crate::credentials::consumer_id(&l.workspace, username);
+        if l.route.is_none() && l.service.is_none() {
+            let entry = out.entry(consumer).or_default();
+            if entry.any.is_none() {
+                entry.any = Some(l.limit.clone());
+            }
+            continue;
+        }
+        for route in routes {
+            let Some(rank) = rank(
+                &l.workspace,
+                l.route.as_deref(),
+                l.service.as_deref(),
+                route,
+            ) else {
+                continue;
+            };
+            let id = route_id(route);
+            let key = (consumer.clone(), id.clone());
+            if held.get(&key).is_none_or(|best| *best < rank) {
+                held.insert(key, rank);
+                out.entry(consumer.clone())
+                    .or_default()
+                    .routes
+                    .insert(id, l.limit.clone());
+            }
+        }
+    }
+    out
+}
+
 /// How specifically a policy attached to `on_route` or `on_service` in `workspace` applies to
 /// `route`: 2 on the route itself, 1 on its service, 0 on the whole workspace, `None` when it
-/// does not apply at all.
+/// does not apply at all. A consumer's own limit is ranked the same way within the consumer's
+/// tier, which [`consumer_rate_limits`] keeps apart.
 fn rank(
     workspace: &str,
     on_route: Option<&str>,
@@ -1755,6 +1816,7 @@ mod tests {
             workspace: ws.into(),
             route: route.map(str::to_string),
             service: service.map(str::to_string),
+            consumer: None,
             limit: limit(per_minute, 60_000),
         }
     }
@@ -1887,6 +1949,120 @@ mod tests {
         assert_eq!(rate_limit_on(&cfg, "api"), None);
         let body = serde_json::to_string(&cfg).unwrap();
         assert!(!body.contains("rate_limit"), "{body}");
+    }
+
+    fn consumer_limit(
+        ws: &str,
+        consumer: &str,
+        route: Option<&str>,
+        service: Option<&str>,
+        per_minute: u32,
+    ) -> StoreRateLimit {
+        StoreRateLimit {
+            consumer: Some(consumer.into()),
+            ..rate_limit(ws, route, service, per_minute)
+        }
+    }
+
+    /// Kong's order, restricted to the attachments the store has: route+consumer,
+    /// service+consumer, consumer, route, service, workspace, each beating the next. Taking the
+    /// tiers away from the top one at a time hands the request to the next each time, and row
+    /// order decides nothing.
+    #[test]
+    fn a_consumer_s_own_limit_comes_before_any_other_most_specific_first() {
+        let tiers = [
+            consumer_limit("a", "mobile", Some("api"), None, 6),
+            consumer_limit("a", "mobile", None, Some("orders"), 5),
+            consumer_limit("a", "mobile", None, None, 4),
+            rate_limit("a", Some("api"), None, 3),
+            rate_limit("a", None, Some("orders"), 2),
+            rate_limit("a", None, None, 1),
+        ];
+        let snap = |rate_limits: Vec<StoreRateLimit>| StoreSnapshot {
+            services: vec![ws_svc("a", "orders", "o.internal")],
+            routes: vec![ws_route("a", "api", "orders", "a.example")],
+            rate_limits,
+            ..Default::default()
+        };
+        // What everyone without a limit of their own gets, tier by tier.
+        let base = [3, 3, 3, 3, 2, 1];
+        for skip in 0..tiers.len() {
+            let cfg = compile(&snap(tiers[skip..].to_vec()), &StoreSettings::default());
+            let rule = &cfg.listeners[0].rules[0];
+            let got = cfg
+                .rate_limit_for(rule, Some("a/mobile"))
+                .map(|(l, own)| (l.limit, own));
+            assert_eq!(
+                got,
+                Some((6 - skip as u32, skip < 3)),
+                "the top {skip} gone"
+            );
+            let other = cfg
+                .rate_limit_for(rule, Some("a/web"))
+                .map(|(l, own)| (l.limit, own));
+            assert_eq!(other, Some((base[skip], false)), "the top {skip} gone");
+
+            let mut reversed = tiers[skip..].to_vec();
+            reversed.reverse();
+            assert_eq!(compile(&snap(reversed), &StoreSettings::default()), cfg);
+        }
+    }
+
+    /// A consumer's limit on a service covers that service's served routes and no other, under
+    /// each route's id; a row naming a route that is not served, or one of another workspace,
+    /// adds nothing; and none of it is a limit on everyone.
+    #[test]
+    fn a_consumer_s_limit_reaches_only_the_routes_it_names() {
+        let snap = StoreSnapshot {
+            services: vec![
+                ws_svc("a", "orders", "o.internal"),
+                ws_svc("a", "billing", "b.internal"),
+                ws_svc("b", "orders", "o.b.internal"),
+            ],
+            routes: vec![
+                ws_route("a", "api", "orders", "a.example"),
+                ws_route("a", "web", "orders", "w.example"),
+                ws_route("a", "pay", "billing", "p.example"),
+                ws_route("b", "api", "orders", "b.example"),
+            ],
+            rate_limits: vec![
+                consumer_limit("a", "mobile", None, Some("orders"), 5),
+                consumer_limit("a", "mobile", Some("ghost"), None, 99),
+                consumer_limit("b", "mobile", Some("api"), None, 7),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        let a = &cfg.consumer_rate_limits["a/mobile"];
+        assert_eq!(a.routes.keys().collect::<Vec<_>>(), ["a/api", "a/web"]);
+        assert_eq!(a.routes["a/api"], limit(5, 60_000));
+        assert_eq!(a.any, None);
+        let b = &cfg.consumer_rate_limits["b/mobile"];
+        assert_eq!(b.routes.keys().collect::<Vec<_>>(), ["b/api"]);
+        assert_eq!(b.routes["b/api"], limit(7, 60_000));
+        for rule in &cfg.listeners[0].rules {
+            assert_eq!(rule.rate_limit, None, "{}", rule.route);
+        }
+    }
+
+    /// A consumer row that names only a route that is not served leaves no entry at all, and a
+    /// snapshot with no consumer rows compiles to no table, so its bytes are what they were.
+    #[test]
+    fn no_consumer_limit_that_applies_is_no_table() {
+        let snap = StoreSnapshot {
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            rate_limits: vec![
+                rate_limit("", Some("api"), None, 3),
+                consumer_limit("", "mobile", Some("ghost"), None, 9),
+            ],
+            ..Default::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert!(cfg.consumer_rate_limits.is_empty());
+        assert_eq!(rate_limit_on(&cfg, "api"), Some(limit(3, 60_000)));
+        let body = serde_json::to_string(&cfg).unwrap();
+        assert!(!body.contains("consumer_rate_limits"), "{body}");
     }
 
     /// Every bound port carries every route, and each listener's table indexes its own listener.

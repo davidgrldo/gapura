@@ -332,6 +332,7 @@ impl Store {
                     workspace,
                     route,
                     service,
+                    consumer: None,
                     limit,
                 });
                 continue;
