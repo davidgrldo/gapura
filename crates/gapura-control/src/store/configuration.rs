@@ -163,25 +163,45 @@ pub(super) fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
 /// that would drop a route's key-auth or JWT policy or request limit unseen: delete and create
 /// again, and the route answers without asking for credentials, or without limit, with no audit
 /// entry saying the policy went. `column` is `route_id` or `service_id`, `kind` the word for the
-/// row. A consumer's own limit on the row counts too, and the sentence says where it is removed.
+/// row. A consumer's own limit on the row counts too, and the sentence names each consumer that
+/// has one and says where it is removed; with none, the sentence is what it was before a
+/// consumer could have a limit of its own.
 async fn no_policies(
     tx: &Transaction<'_>,
     column: &str,
     id: Uuid,
     kind: &str,
 ) -> Result<(), WriteError> {
+    // Only a consumer of this workspace is named: one of another, which only SQL written by hand
+    // can attach, counts as a policy here but is never named, since the caller may hold no role
+    // in its workspace.
     let row = tx
         .query_one(
-            &format!("select count(*), count(consumer_id) from plugins where {column} = $1"),
+            &format!(
+                "select count(*), count(distinct c.username),
+                        string_agg(distinct c.username, ', ' order by c.username)
+                   from plugins p
+                   left join consumers c
+                          on c.id = p.consumer_id and c.workspace_id = p.workspace_id
+                  where p.{column} = $1"
+            ),
             &[&id],
         )
         .await?;
-    let (attached, for_consumers): (i64, i64) = (row.get(0), row.get(1));
-    // A consumer's own limit is set and removed on the consumer, so say where to look.
-    let whose = if for_consumers > 0 {
-        " A consumer's own limit is removed from that consumer."
-    } else {
-        ""
+    let (attached, owners, names): (i64, i64, Option<String>) =
+        (row.get(0), row.get(1), row.get(2));
+    // A consumer's own limit is set and removed as that consumer's, so say whose they are and
+    // where to look.
+    let whose = match names {
+        Some(names) if owners == 1 => format!(
+            " {names} has a limit of its own here, which is removed from that consumer, \
+             not from the {kind}."
+        ),
+        Some(names) => format!(
+            " {names} have limits of their own here, which are removed from those consumers, \
+             not from the {kind}."
+        ),
+        None => String::new(),
     };
     match attached {
         0 => Ok(()),

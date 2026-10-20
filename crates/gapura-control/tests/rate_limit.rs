@@ -290,14 +290,27 @@ fn put(target: &str, limit: u32, per: &str) -> String {
     json!({"target": target, "limit": limit, "per": per}).to_string()
 }
 
-/// The `updated_at` the list shows for `target`'s own limit, if it has one.
+/// The `updated_at` the list shows for `target`'s own limit on everyone, if it has one. A
+/// consumer's own limit on the same target is another row with a stamp of its own, which this
+/// never picks.
 async fn stamp(app: &axum::Router, target: &str, as_: Uuid) -> Option<String> {
+    stamp_for(app, target, None, as_).await
+}
+
+/// The `updated_at` the list shows for the limit on `target` that is `consumer`'s own, or, for
+/// `None`, the one on everyone there, if there is one.
+async fn stamp_for(
+    app: &axum::Router,
+    target: &str,
+    consumer: Option<&str>,
+    as_: Uuid,
+) -> Option<String> {
     read(app, LIMITS, as_)
         .await
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["target"] == target)
+        .find(|row| row["target"] == target && row["consumer"].as_str() == consumer)
         .map(|row| row["updated_at"].as_str().expect("a stamp").to_string())
 }
 
@@ -310,11 +323,13 @@ fn seen(body: &str, seen: Option<&str>) -> String {
     body.to_string()
 }
 
-/// A PUT the console makes: from a fresh read of the list, so with the stamp of the limit set on
-/// its target when there is one (#223). It must succeed.
+/// A PUT the console makes: from a fresh read of the list, so with the stamp of the limit it
+/// replaces when there is one (#223) -- the consumer's own when the body names a consumer, else
+/// the one on everyone. It must succeed.
 async fn apply(app: &axum::Router, as_: Uuid, body: &str) {
-    let target = parse(body)["target"].as_str().unwrap().to_string();
-    let read_at = stamp(app, &target, as_).await;
+    let sent = parse(body);
+    let target = sent["target"].as_str().unwrap();
+    let read_at = stamp_for(app, target, sent["consumer"].as_str(), as_).await;
     ok(app, "PUT", LIMITS, as_, &seen(body, read_at.as_deref())).await;
 }
 
@@ -968,4 +983,546 @@ async fn a_route_holds_one_limit_on_everyone_and_one_per_consumer() {
         )
         .await;
     assert!(both.is_err(), "a route and a service at once");
+}
+
+/// A body for a consumer's own limit.
+fn put_for(target: &str, consumer: &str, limit: u32, per: &str, by: &str) -> String {
+    json!({"target": target, "consumer": consumer, "limit": limit, "per": per, "by": by})
+        .to_string()
+}
+
+/// The point of the feature on the control side: a consumer's own limit, on a route and on
+/// nothing, reaches the compiled table under `workspace/username`, counted by what it says,
+/// lists after the limits on everyone, and leaves the rule's own limit alone.
+#[tokio::test]
+async fn a_consumer_s_own_limit_reaches_the_compiled_table() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put("route:orders-api", 3, "second"),
+    )
+    .await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("route:orders-api", "mobile", 7, "minute", "consumer"),
+    )
+    .await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("workspace", "mobile", 50, "hour", "header:x-tenant"),
+    )
+    .await;
+
+    let config = compiled(&store).await;
+    assert_eq!(
+        limit_on(&config, COMPILED_ROUTE),
+        Some(RateLimit {
+            limit: 3,
+            window_ms: 1_000,
+            by: LimitBy::Ip
+        })
+    );
+    let mobile = &config.consumer_rate_limits["default/mobile"];
+    assert_eq!(
+        mobile.routes[COMPILED_ROUTE],
+        RateLimit {
+            limit: 7,
+            window_ms: 60_000,
+            by: LimitBy::Consumer
+        }
+    );
+    assert_eq!(
+        mobile.any,
+        Some(RateLimit {
+            limit: 50,
+            window_ms: 3_600_000,
+            by: LimitBy::Header("x-tenant".into())
+        })
+    );
+    assert_eq!(
+        unstamped(read(&app, LIMITS, s.vi).await),
+        json!([
+            {"target": "route:orders-api", "limit": 3, "per": "second"},
+            {"target": "workspace", "consumer": "mobile", "limit": 50, "per": "hour", "by": "header:x-tenant"},
+            {"target": "route:orders-api", "consumer": "mobile", "limit": 7, "per": "minute", "by": "consumer"},
+        ])
+    );
+    // The route list shows the limit on everyone, never a consumer's.
+    let route = row(&app, ROUTES, "orders-api", s.vi).await;
+    assert_eq!(route["rate_limit"]["limit"], 3);
+    assert!(route["rate_limit"].get("by").is_none(), "{route}");
+}
+
+/// The consumer's limit and the one on everyone on one target are written, replaced and removed
+/// apart; removing one leaves the other, and a key requirement on the same route reads its own
+/// row, not a consumer's limit.
+#[tokio::test]
+async fn a_consumer_s_limit_and_the_limit_on_everyone_are_written_apart() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("route:orders-api", "mobile", 7, "minute", "ip"),
+    )
+    .await;
+    // No stamp: the target has no limit on everyone yet, whatever the consumer has.
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put("route:orders-api", 3, "second"),
+    )
+    .await;
+    ok(
+        &app,
+        "PUT",
+        "/api/workspaces/default/key-auth",
+        s.ed,
+        r#"{"target":"route:orders-api"}"#,
+    )
+    .await;
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("{LIMITS}?target=route:orders-api&consumer=mobile"),
+        Some(s.ed),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = send(
+        &app,
+        "DELETE",
+        &format!("{LIMITS}?target=route:orders-api&consumer=mobile"),
+        Some(s.ed),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        sentence(&body),
+        "route:orders-api has no request limit for mobile."
+    );
+    assert_eq!(
+        limit_on(&compiled(&store).await, COMPILED_ROUTE).map(|l| l.limit),
+        Some(3),
+        "the limit on everyone is still there"
+    );
+    assert!(compiled(&store).await.consumer_rate_limits.is_empty());
+}
+
+/// A consumer that is not there, a consumer name no consumer could have, and anything to count
+/// by that is not ip, consumer or a header the gateway may read are refused, and write nothing.
+#[tokio::test]
+async fn an_unknown_consumer_or_count_is_refused_and_writes_nothing() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    let before = everything(&store).await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        LIMITS,
+        Some(s.ed),
+        &put_for("workspace", "ghost", 5, "minute", "ip"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        sentence(&body),
+        "There is no consumer named ghost in this workspace."
+    );
+    for (body, field) in [
+        (put_for("workspace", "a b", 5, "minute", "ip"), "consumer"),
+        (
+            put_for("workspace", "mobile", 5, "minute", "everyone"),
+            "by",
+        ),
+        (put_for("workspace", "mobile", 5, "minute", "header:"), "by"),
+        (
+            put_for("workspace", "mobile", 5, "minute", "header:host"),
+            "by",
+        ),
+    ] {
+        let (status, answer) = send(&app, "PUT", LIMITS, Some(s.ed), &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {answer}");
+        assert_eq!(parse(&answer)["field"], field, "{body}");
+    }
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("{LIMITS}?target=workspace&consumer=a%20b"),
+        Some(s.ed),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(everything(&store).await, before);
+}
+
+/// The audit row names the consumer and what the limit counts by.
+#[tokio::test]
+async fn the_audit_names_the_consumer_and_the_count() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("service:orders", "mobile", 9, "minute", "consumer"),
+    )
+    .await;
+    let audits = policy_audits(&store).await;
+    let (action, before, after) = audits.last().expect("an audit row");
+    assert_eq!(action, "create");
+    assert_eq!(before, &json!(null));
+    assert_eq!(
+        after,
+        &json!({"target": "service:orders", "kind": "rate_limit", "consumer": "mobile",
+                "limit": 9, "per": "minute", "by": "consumer"})
+    );
+}
+
+/// A consumer of another workspace attached to this workspace's policy -- which only SQL written
+/// by hand can make -- fails the snapshot rather than attach to a same-named consumer here, and
+/// fails the list rather than show as a limit on everyone. Deleting a route with a consumer's
+/// limit on it is refused and says where to remove it, and deleting the consumer takes its limits
+/// with it, which the audit entry for the consumer lists.
+#[tokio::test]
+async fn a_consumer_s_limit_is_bound_to_its_workspace_and_its_consumer() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("route:orders-api", "mobile", 7, "minute", "ip"),
+    )
+    .await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("workspace", "mobile", 50, "hour", "consumer"),
+    )
+    .await;
+
+    // Deletes need the admin role.
+    let (status, body) = send(
+        &app,
+        "DELETE",
+        &format!("{ROUTES}/orders-api"),
+        Some(s.ada),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        sentence(&body).contains("removed from that consumer"),
+        "{body}"
+    );
+
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("{CONSUMERS}/mobile"),
+        Some(s.ada),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(read(&app, LIMITS, s.vi).await, json!([]));
+    // The limits that went with the consumer are in its audit entry, in the order the list
+    // showed them, since no policy entry records their going.
+    let db = store.client().await.unwrap();
+    let before: serde_json::Value = db
+        .query_one(
+            "select before from audit_log where object_kind = 'consumer' and action = 'delete'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        before,
+        json!({"name": "mobile", "keys": [], "limits": [
+            {"target": "workspace", "limit": 50, "per": "hour", "by": "consumer"},
+            {"target": "route:orders-api", "limit": 7, "per": "minute"},
+        ]})
+    );
+
+    db.execute(
+        "insert into consumers (workspace_id, username)
+         select id, 'stranger' from workspaces where name = 'payments'",
+        &[],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "insert into plugins (workspace_id, name, config, consumer_id)
+         select w.id, 'rate_limit', '{\"limit\": 5, \"window_ms\": 1000}', c.id
+           from workspaces w, consumers c where w.name = 'default' and c.username = 'stranger'",
+        &[],
+    )
+    .await
+    .unwrap();
+    let err = store.snapshot().await.expect_err("a foreign consumer");
+    assert!(format!("{err:#}").contains("another workspace"), "{err:#}");
+    let (status, body) = send(&app, "GET", LIMITS, Some(s.vi), "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+/// A consumer of another workspace is not one of this workspace's: naming it here, to set a limit
+/// or to remove one, is answered as naming a consumer that is not there, and writes nothing.
+#[tokio::test]
+async fn a_consumer_of_another_workspace_is_not_found_here() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let root: Uuid = store
+        .client()
+        .await
+        .unwrap()
+        .query_one("select id from users where username = 'root'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    ok(
+        &app,
+        "POST",
+        "/api/workspaces/payments/consumers",
+        root,
+        r#"{"name":"stranger"}"#,
+    )
+    .await;
+    let before = everything(&store).await;
+    for (method, path, body) in [
+        (
+            "PUT",
+            LIMITS.to_string(),
+            put_for("workspace", "stranger", 5, "minute", "ip"),
+        ),
+        (
+            "PUT",
+            LIMITS.to_string(),
+            put_for("route:orders-api", "stranger", 5, "minute", "consumer"),
+        ),
+        (
+            "DELETE",
+            format!("{LIMITS}?target=workspace&consumer=stranger"),
+            String::new(),
+        ),
+    ] {
+        // The superuser, who reaches both workspaces, is answered no differently.
+        for who in [s.ed, root] {
+            let (status, answer) = send(&app, method, &path, Some(who), &body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {answer}");
+            assert_eq!(
+                sentence(&answer),
+                "There is no consumer named stranger in this workspace."
+            );
+        }
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "none of it wrote anything"
+    );
+}
+
+/// #223 for a consumer's own limit: it has a stamp of its own, apart from the limit on everyone on
+/// the same target, and only that stamp replaces it. The other row's stamp, or none when it has
+/// one, is stale, both ways round, and writes nothing.
+#[tokio::test]
+async fn a_consumer_s_limit_is_replaced_only_with_its_own_stamp() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let target = "route:orders-api";
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(&app, "PUT", LIMITS, s.ed, &put(target, 3, "second")).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for(target, "mobile", 7, "minute", "ip"),
+    )
+    .await;
+    let everyone = stamp(&app, target, s.vi).await;
+    let own = stamp_for(&app, target, Some("mobile"), s.vi).await;
+    assert!(everyone.is_some() && own.is_some(), "both are listed");
+    assert_ne!(everyone, own, "each row has a stamp of its own");
+    let stale = |body: String| {
+        let app = &app;
+        async move {
+            let (status, answer) = send(app, "PUT", LIMITS, Some(s.ed), &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}: {answer}");
+            assert_eq!(
+                sentence(&answer),
+                "Someone else changed this policy. Reload it and apply your change again."
+            );
+        }
+    };
+
+    let before = everything(&store).await;
+    let changed = put_for(target, "mobile", 8, "minute", "ip");
+    stale(seen(&changed, everyone.as_deref())).await;
+    stale(changed.clone()).await;
+    stale(seen(&put(target, 4, "second"), own.as_deref())).await;
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+
+    ok(&app, "PUT", LIMITS, s.ed, &seen(&changed, own.as_deref())).await;
+    let config = compiled(&store).await;
+    assert_eq!(
+        config.consumer_rate_limits["default/mobile"].routes[COMPILED_ROUTE].limit,
+        8
+    );
+    assert_eq!(
+        limit_on(&config, COMPILED_ROUTE).map(|l| l.limit),
+        Some(3),
+        "the limit on everyone is as it was"
+    );
+}
+
+/// Saving a consumer's limit as it already is, from a fresh read, writes nothing: no row, no audit
+/// entry and no new version for the data planes.
+#[tokio::test]
+async fn saving_a_consumer_s_limit_unchanged_writes_nothing() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    let body = put_for("workspace", "mobile", 50, "hour", "header:x-tenant");
+    ok(&app, "PUT", LIMITS, s.ed, &body).await;
+    let before = everything(&store).await;
+    apply(&app, s.ed, &body).await;
+    assert_eq!(everything(&store).await, before, "a save of nothing");
+}
+
+/// A consumer's limit on a service reaches the compiled table under each of the service's routes,
+/// and holds the service as a limit on everyone does: deleting the service is refused with a
+/// sentence that names each consumer whose limit is there.
+#[tokio::test]
+async fn a_consumer_s_limit_on_a_service_reaches_its_routes_and_holds_the_service() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("service:orders", "mobile", 9, "minute", "consumer"),
+    )
+    .await;
+    let config = compiled(&store).await;
+    let mobile = &config.consumer_rate_limits["default/mobile"];
+    assert_eq!(
+        mobile.routes[COMPILED_ROUTE],
+        RateLimit {
+            limit: 9,
+            window_ms: 60_000,
+            by: LimitBy::Consumer
+        }
+    );
+    assert_eq!(mobile.any, None);
+    assert_eq!(limit_on(&config, COMPILED_ROUTE), None, "none on everyone");
+
+    // The route goes first: a service no route uses is the one whose policies are counted.
+    ok(&app, "DELETE", &format!("{ROUTES}/orders-api"), s.ada, "").await;
+    let refused = |said: &'static str| {
+        let (app, store) = (&app, &store);
+        async move {
+            let before = everything(store).await;
+            let (status, body) = send(
+                app,
+                "DELETE",
+                &format!("{SERVICES}/orders"),
+                Some(s.ada),
+                "",
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(sentence(&body), said);
+            assert_eq!(everything(store).await, before);
+        }
+    };
+    refused(
+        "1 policy is attached to this service. Remove it first. mobile has a limit of its own \
+         here, which is removed from that consumer, not from the service.",
+    )
+    .await;
+
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"partner"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for("service:orders", "partner", 5, "second", "ip"),
+    )
+    .await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put("service:orders", 100, "minute"),
+    )
+    .await;
+    refused(
+        "3 policies are attached to this service. Remove them first. mobile, partner have limits \
+         of their own here, which are removed from those consumers, not from the service.",
+    )
+    .await;
 }

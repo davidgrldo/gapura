@@ -200,6 +200,22 @@ fn rate_limit_audit(target: &Target, consumer: Option<&str>, limit: &Limit) -> s
     entry
 }
 
+/// The `{target, limit, per, by}` the audit entry of a deleted consumer records of a limit of its
+/// own that went with it: what `rate_limit_audit` records, without the kind and the consumer,
+/// which the entry already says, and `by` only when it counts by something other than the
+/// address. A row the compiler could not read is recorded by its target alone.
+fn own_limit_audit(target: &Target, config: serde_json::Value) -> serde_json::Value {
+    let mut entry = serde_json::json!({ "target": target.as_text() });
+    if let Some(limit) = Limit::from_config(config) {
+        entry["limit"] = limit.limit.into();
+        entry["per"] = serde_json::json!(limit.per);
+        if let Some(by) = shown_by(&limit.by) {
+            entry["by"] = by.into();
+        }
+    }
+    entry
+}
+
 /// A stored `rate_limit` configuration as the limit the compiler reads it as. One that does not
 /// fit fails the compiler too, so it is an error here, not a limit shown as none.
 fn stored_rate_limit(config: serde_json::Value) -> anyhow::Result<Limit> {
@@ -296,8 +312,12 @@ impl Store {
         Ok(())
     }
 
-    /// Deletes the consumer called `name` and its keys, which needs the admin role. The audit
-    /// entry lists the prefixes of the keys that went with it.
+    /// Deletes the consumer called `name`, its keys and its own request limits, which needs the
+    /// admin role. The audit entry lists the prefixes of the keys that went with it and, under
+    /// `limits`, each limit of its own that did -- its target, limit and window, and what it
+    /// counted by when that was not the address -- in the order `rate_limits` lists them, since
+    /// no policy entry records their going. A consumer with no limits of its own has no `limits`
+    /// in its entry, which so reads as it did before a consumer could have any.
     pub async fn delete_consumer(
         &self,
         caller: Uuid,
@@ -340,6 +360,36 @@ impl Store {
             .iter()
             .map(|r| r.get(0))
             .collect();
+        // Its own limits go with it by `on delete cascade` too, unseen unless this entry records
+        // them. A limit write holds the consumer `for share`, as issuing does, so none can change
+        // between this read and the delete. Only this workspace's rows are read, by the joins
+        // `rate_limits` reads them with, so the entry never names another workspace's route.
+        let limits: Vec<serde_json::Value> = tx
+            .query(
+                "select p.config, s.name as service, r.name as route
+                   from plugins p
+                   left join services s on s.id = p.service_id
+                   left join routes r on r.id = p.route_id
+                  where p.consumer_id = $1 and p.workspace_id = $2 and p.name = $3 and p.enabled
+                  order by case when p.service_id is not null then 1
+                                when p.route_id is not null then 2
+                                else 0 end,
+                           coalesce(s.name, r.name)",
+                &[&id, &workspace, &RATE_LIMIT],
+            )
+            .await?
+            .iter()
+            .map(|r| {
+                own_limit_audit(
+                    &target_of(r.get("service"), r.get("route")),
+                    r.get("config"),
+                )
+            })
+            .collect();
+        let mut before = serde_json::json!({ "name": name, "keys": keys });
+        if !limits.is_empty() {
+            before["limits"] = limits.into();
+        }
         // The keys go with it by `on delete cascade`.
         tx.execute("delete from consumers where id = $1", &[&id])
             .await?;
@@ -351,7 +401,7 @@ impl Store {
                 object_kind: "consumer",
                 object_id: Some(id),
                 workspace: Some(workspace),
-                before: Some(serde_json::json!({ "name": name, "keys": keys })),
+                before: Some(before),
                 after: None,
             },
         )
@@ -918,18 +968,22 @@ impl Store {
     }
 
     /// A workspace's request limits: those on everyone first, in the order `policies` lists key
-    /// requirements, then each consumer's own by consumer, in the same order.
+    /// requirements, then each consumer's own by consumer, in the same order. A consumer is
+    /// joined by its workspace as well as its id, so a limit for a consumer of another workspace,
+    /// which only SQL written by hand can attach, never shows that workspace's username: the
+    /// compiler refuses such a row, so it is an error here, not a limit listed as one on everyone.
     pub async fn rate_limits(&self, workspace: Uuid) -> Result<Vec<RateLimitView>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
                 &format!(
                     "select p.config, s.name as service, r.name as route, c.username as consumer,
-                            {} as updated_at
+                            p.consumer_id is not null as owned, {} as updated_at
                        from plugins p
                        left join services s on s.id = p.service_id
                        left join routes r on r.id = p.route_id
-                       left join consumers c on c.id = p.consumer_id
+                       left join consumers c
+                              on c.id = p.consumer_id and c.workspace_id = p.workspace_id
                       where p.workspace_id = $1 and p.name = $2 and p.enabled
                       order by c.username nulls first,
                                case when p.service_id is not null then 1
@@ -944,10 +998,17 @@ impl Store {
         rows.iter()
             .map(|row| {
                 let target = target_of(row.get("service"), row.get("route"));
+                let consumer: Option<String> = row.get("consumer");
+                if row.get::<_, bool>("owned") && consumer.is_none() {
+                    anyhow::bail!(
+                        "the rate_limit policy on {} is for a consumer of another workspace",
+                        target.as_text()
+                    );
+                }
                 let limit = stored_rate_limit(row.get("config"))?;
                 Ok(RateLimitView {
                     target: target.as_text(),
-                    consumer: row.get("consumer"),
+                    consumer,
                     limit: limit.limit,
                     per: limit.per,
                     by: shown_by(&limit.by),
