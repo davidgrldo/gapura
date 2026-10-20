@@ -22,12 +22,16 @@ means what it usually does, moving from one version below to a later one. Releas
   proxy that overwrites it. Migration `0011_consumer_policies` lets a policy row name a consumer
   as well as a route or service. `GET /api/workspaces/{ws}/rate-limit` lists consumers' own
   limits after the limits on everyone, each with `consumer`, and every row shows `by` when it is
-  not `ip`, as the service and route lists do. Deleting a consumer removes its own limits and the
-  audit entry lists them; deleting a route or service that carries a consumer's own limit is
-  refused, naming the consumer. The console cannot yet set a consumer's own limit, a later change
-  adds that; for now it only no longer mistakes a consumer's row for a limit on everyone. Upgrade
-  data planes before the control plane: an older data plane ignores consumers' own limits and
-  counts every limit by address.
+  not `ip`, as the service and route lists do. An API client looking up a target's limit on
+  everyone in that list has to skip the rows that carry `consumer`, which are consumers' own.
+  `DELETE /api/workspaces/{ws}/rate-limit` takes `&consumer=` to remove a consumer's own limit
+  and leave the one on everyone, and refuses any other key in its query, so a misspelt one
+  removes nothing. Deleting a consumer removes its own limits and the audit entry lists them;
+  deleting a route or service that carries a consumer's own limit is refused, naming the
+  consumer. The console cannot yet set a consumer's own limit, a later change adds that; for now
+  it only no longer mistakes a consumer's row for a limit on everyone. Upgrade data planes before
+  the control plane: an older data plane ignores consumers' own limits and counts every limit by
+  address.
 - Every answer the gateway gives on its own now names its cause: a stable key such as
   `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
   `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an

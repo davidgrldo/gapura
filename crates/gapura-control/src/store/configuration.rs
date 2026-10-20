@@ -178,8 +178,9 @@ async fn no_policies(
     let row = tx
         .query_one(
             &format!(
-                "select count(*), count(distinct c.username),
-                        string_agg(distinct c.username, ', ' order by c.username)
+                "select count(*),
+                        coalesce(array_agg(distinct c.username order by c.username)
+                                   filter (where c.username is not null), '{{}}')
                    from plugins p
                    left join consumers c
                           on c.id = p.consumer_id and c.workspace_id = p.workspace_id
@@ -188,21 +189,10 @@ async fn no_policies(
             &[&id],
         )
         .await?;
-    let (attached, owners, names): (i64, i64, Option<String>) =
-        (row.get(0), row.get(1), row.get(2));
+    let (attached, names): (i64, Vec<String>) = (row.get(0), row.get(1));
     // A consumer's own limit is set and removed as that consumer's, so say whose they are and
     // where to look.
-    let whose = match names {
-        Some(names) if owners == 1 => format!(
-            " {names} has a limit of its own here, which is removed from that consumer, \
-             not from the {kind}."
-        ),
-        Some(names) => format!(
-            " {names} have limits of their own here, which are removed from those consumers, \
-             not from the {kind}."
-        ),
-        None => String::new(),
-    };
+    let whose = configuration::own_limits(&names, kind);
     match attached {
         0 => Ok(()),
         1 => Err(Refusal::Conflict(format!(

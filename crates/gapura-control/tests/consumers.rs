@@ -821,6 +821,9 @@ async fn deleting_a_consumer_takes_its_keys_and_says_which() {
     assert_eq!(actor, "ada");
     assert!(no_after);
     assert_eq!(before["name"], "mobile");
+    // A consumer with no limits of its own has no `limits` in its entry, which so reads as it
+    // did before a consumer could have any.
+    assert!(before.get("limits").is_none(), "{before}");
     let mut keys: Vec<String> = serde_json::from_value(before["keys"].clone()).unwrap();
     keys.sort();
     let mut expected = vec![first, second];

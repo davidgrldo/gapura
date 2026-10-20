@@ -407,12 +407,27 @@ pub async fn list_rate_limit(
 }
 
 /// `?target=…&consumer=…`, as `delete_rate_limit` reads it: the consumer's own limit when
-/// `consumer` names one, the limit on everyone when it is absent.
+/// `consumer` names one, the limit on everyone when it is absent. Like the body of a `PUT`, it
+/// names these two fields and nothing else, so a misspelt `consumer` is refused rather than read
+/// as no consumer at all, which would remove the limit on everyone. `target` may be left out
+/// here only so that `delete_rate_limit` can refuse a query without one as an empty one, as
+/// `target_in` does.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitQuery {
-    target: String,
+    #[serde(default)]
+    target: Option<String>,
     #[serde(default)]
     consumer: Option<String>,
+}
+
+/// What `delete_rate_limit` answers a query it cannot read: one that names a field it does not
+/// know, or one field twice. It is refused beside `target`, the field every such query needs.
+fn unread_rate_limit_query() -> FieldError {
+    FieldError {
+        field: "target".into(),
+        sentence: "Name target, and consumer for a consumer's own limit, and nothing else.".into(),
+    }
 }
 
 /// `PUT /api/workspaces/{ws}/rate-limit`: limit requests on the workspace, a service or a route,
@@ -465,7 +480,7 @@ pub async fn put_rate_limit(
 
 /// `DELETE /api/workspaces/{ws}/rate-limit?target=…&consumer=…`: stop limiting requests there,
 /// for the consumer `consumer` names alone, or for everyone when it is absent. Either leaves the
-/// other in place.
+/// other in place. A query naming anything else is refused, and removes nothing.
 pub async fn delete_rate_limit(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -481,17 +496,16 @@ pub async fn delete_rate_limit(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let Ok(Query(query)) = query else {
+        return field_error(unread_rate_limit_query());
+    };
     // A query that names no target is refused as an empty one, beside `target`, as `target_in`
     // refuses it.
-    let (target, consumer) = match query {
-        Ok(Query(q)) => (Target::parse(&q.target), q.consumer),
-        Err(_) => (Target::parse(""), None),
-    };
-    let target = match target {
+    let target = match Target::parse(query.target.as_deref().unwrap_or("")) {
         Ok(t) => t,
         Err(e) => return field_error(e),
     };
-    let consumer = match consumers::consumer_named(consumer.as_deref()) {
+    let consumer = match consumers::consumer_named(query.consumer.as_deref()) {
         Ok(c) => c,
         Err(e) => return field_error(e),
     };

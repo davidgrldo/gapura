@@ -362,15 +362,20 @@ impl Store {
             .collect();
         // Its own limits go with it by `on delete cascade` too, unseen unless this entry records
         // them. A limit write holds the consumer `for share`, as issuing does, so none can change
-        // between this read and the delete. Only this workspace's rows are read, by the joins
-        // `rate_limits` reads them with, so the entry never names another workspace's route.
+        // between this read and the delete. Only this workspace's rows are read, and their
+        // service or route is joined by this workspace too, so the entry never names another
+        // workspace's: a row on one, which only SQL written by hand can make, is left out rather
+        // than recorded as a limit on this whole workspace.
         let limits: Vec<serde_json::Value> = tx
             .query(
                 "select p.config, s.name as service, r.name as route
                    from plugins p
-                   left join services s on s.id = p.service_id
-                   left join routes r on r.id = p.route_id
+                   left join services s
+                          on s.id = p.service_id and s.workspace_id = p.workspace_id
+                   left join routes r on r.id = p.route_id and r.workspace_id = p.workspace_id
                   where p.consumer_id = $1 and p.workspace_id = $2 and p.name = $3 and p.enabled
+                    and (p.service_id is null) = (s.id is null)
+                    and (p.route_id is null) = (r.id is null)
                   order by case when p.service_id is not null then 1
                                 when p.route_id is not null then 2
                                 else 0 end,

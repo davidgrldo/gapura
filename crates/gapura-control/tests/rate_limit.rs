@@ -1068,10 +1068,85 @@ async fn a_consumer_s_own_limit_reaches_the_compiled_table() {
 }
 
 /// The consumer's limit and the one on everyone on one target are written, replaced and removed
-/// apart; removing one leaves the other, and a key requirement on the same route reads its own
-/// row, not a consumer's limit.
+/// apart: replacing or removing one leaves the other as it was, and a key requirement set on the
+/// same route meanwhile still reads as set, since it reads its own row, not a consumer's limit.
 #[tokio::test]
 async fn a_consumer_s_limit_and_the_limit_on_everyone_are_written_apart() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let target = "route:orders-api";
+    // The compiled limit on everyone on the route, and mobile's own there.
+    let limits = || async {
+        let config = compiled(&store).await;
+        let own = config
+            .consumer_rate_limits
+            .get("default/mobile")
+            .and_then(|m| m.routes.get(COMPILED_ROUTE))
+            .map(|l| l.limit);
+        (limit_on(&config, COMPILED_ROUTE).map(|l| l.limit), own)
+    };
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        LIMITS,
+        s.ed,
+        &put_for(target, "mobile", 7, "minute", "ip"),
+    )
+    .await;
+    // No stamp: the target has no limit on everyone yet, whatever the consumer has.
+    ok(&app, "PUT", LIMITS, s.ed, &put(target, 3, "second")).await;
+    assert_eq!(limits().await, (Some(3), Some(7)));
+    apply(&app, s.ed, &put_for(target, "mobile", 9, "minute", "ip")).await;
+    assert_eq!(
+        limits().await,
+        (Some(3), Some(9)),
+        "replacing the consumer's"
+    );
+    apply(&app, s.ed, &put(target, 4, "second")).await;
+    assert_eq!(
+        limits().await,
+        (Some(4), Some(9)),
+        "replacing the one on everyone"
+    );
+
+    ok(
+        &app,
+        "PUT",
+        "/api/workspaces/default/key-auth",
+        s.ed,
+        r#"{"target":"route:orders-api"}"#,
+    )
+    .await;
+    let off = format!("{LIMITS}?target={target}&consumer=mobile");
+    ok(&app, "DELETE", &off, s.ed, "").await;
+    let (status, body) = send(&app, "DELETE", &off, Some(s.ed), "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        sentence(&body),
+        "route:orders-api has no request limit for mobile."
+    );
+    assert_eq!(limits().await, (Some(4), None), "removing the consumer's");
+    assert!(compiled(&store).await.consumer_rate_limits.is_empty());
+    let route = row(&app, ROUTES, "orders-api", s.vi).await;
+    assert_eq!(
+        unstamped(route["key_auth"].clone()),
+        json!({"header": "x-api-key", "from": "route"})
+    );
+    assert_eq!(
+        unstamped(route["rate_limit"].clone()),
+        json!({"limit": 4, "per": "second", "from": "route"})
+    );
+}
+
+/// A query naming a field the DELETE does not read is refused rather than ignored: a misspelt
+/// `consumer` read as no consumer would remove the limit on everyone, the one it meant to keep.
+/// So is a field named twice. Both limits are still there afterwards, and nothing is written.
+#[tokio::test]
+async fn a_misspelt_query_key_removes_nothing() {
     let Some((store, _guard)) = fresh_store().await else {
         return;
     };
@@ -1083,54 +1158,48 @@ async fn a_consumer_s_limit_and_the_limit_on_everyone_are_written_apart() {
         "PUT",
         LIMITS,
         s.ed,
-        &put_for("route:orders-api", "mobile", 7, "minute", "ip"),
-    )
-    .await;
-    // No stamp: the target has no limit on everyone yet, whatever the consumer has.
-    ok(
-        &app,
-        "PUT",
-        LIMITS,
-        s.ed,
         &put("route:orders-api", 3, "second"),
     )
     .await;
     ok(
         &app,
         "PUT",
-        "/api/workspaces/default/key-auth",
+        LIMITS,
         s.ed,
-        r#"{"target":"route:orders-api"}"#,
+        &put_for("route:orders-api", "mobile", 7, "minute", "ip"),
     )
     .await;
-    let (status, _) = send(
-        &app,
-        "DELETE",
-        &format!("{LIMITS}?target=route:orders-api&consumer=mobile"),
-        Some(s.ed),
-        "",
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, body) = send(
-        &app,
-        "DELETE",
-        &format!("{LIMITS}?target=route:orders-api&consumer=mobile"),
-        Some(s.ed),
-        "",
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let before = everything(&store).await;
+    for query in [
+        "target=route:orders-api&Consumer=mobile",
+        "target=route:orders-api&consumers=mobile",
+        "target=route:orders-api&tier=gold",
+        "target=route:orders-api&consumer=mobile&consumer=mobile",
+    ] {
+        let (status, answer) =
+            send(&app, "DELETE", &format!("{LIMITS}?{query}"), Some(s.ed), "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {answer}");
+        assert_eq!(parse(&answer)["field"], "target", "{query}");
+        assert_eq!(
+            sentence(&answer),
+            "Name target, and consumer for a consumer's own limit, and nothing else."
+        );
+    }
     assert_eq!(
-        sentence(&body),
-        "route:orders-api has no request limit for mobile."
+        everything(&store).await,
+        before,
+        "none of it removed anything"
     );
+    let config = compiled(&store).await;
     assert_eq!(
-        limit_on(&compiled(&store).await, COMPILED_ROUTE).map(|l| l.limit),
+        limit_on(&config, COMPILED_ROUTE).map(|l| l.limit),
         Some(3),
         "the limit on everyone is still there"
     );
-    assert!(compiled(&store).await.consumer_rate_limits.is_empty());
+    assert_eq!(
+        config.consumer_rate_limits["default/mobile"].routes[COMPILED_ROUTE].limit,
+        7
+    );
 }
 
 /// A consumer that is not there, a consumer name no consumer could have, and anything to count
@@ -1173,15 +1242,25 @@ async fn an_unknown_consumer_or_count_is_refused_and_writes_nothing() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {answer}");
         assert_eq!(parse(&answer)["field"], field, "{body}");
     }
-    let (status, _) = send(
-        &app,
-        "DELETE",
-        &format!("{LIMITS}?target=workspace&consumer=a%20b"),
-        Some(s.ed),
-        "",
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The query is held to the same rules: a consumer no consumer could have, or an empty one,
+    // is refused beside `consumer`, and a consumer named with no target is refused as a query
+    // with no target is, beside `target`.
+    for (query, field) in [
+        ("target=workspace&consumer=a%20b", "consumer"),
+        ("target=workspace&consumer=", "consumer"),
+        ("consumer=mobile", "target"),
+    ] {
+        let (status, answer) =
+            send(&app, "DELETE", &format!("{LIMITS}?{query}"), Some(s.ed), "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {answer}");
+        assert_eq!(parse(&answer)["field"], field, "{query}");
+        if field == "target" {
+            assert_eq!(
+                sentence(&answer),
+                "Name workspace, service:<name> or route:<name>."
+            );
+        }
+    }
     assert_eq!(everything(&store).await, before);
 }
 
@@ -1521,8 +1600,8 @@ async fn a_consumer_s_limit_on_a_service_reaches_its_routes_and_holds_the_servic
     )
     .await;
     refused(
-        "3 policies are attached to this service. Remove them first. mobile, partner have limits \
-         of their own here, which are removed from those consumers, not from the service.",
+        "3 policies are attached to this service. Remove them first. mobile and partner have \
+         limits of their own here, which are removed from those consumers, not from the service.",
     )
     .await;
 }

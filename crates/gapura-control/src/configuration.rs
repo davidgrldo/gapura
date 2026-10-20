@@ -760,6 +760,41 @@ pub fn hosts_overlap(a: &str, b: &str) -> bool {
     a == b || gapura_core::hostname::matches(a, b) || gapura_core::hostname::matches(b, a)
 }
 
+/// How many consumers a refused delete names before it only counts the rest.
+const NAMED_CONSUMERS: usize = 3;
+
+/// What a refused route or service delete adds for the consumers whose own limits hang off the
+/// row, `names` in the order they are named: who they are, joined as the console joins a list
+/// ("a", "a and b", "a, b and c"), three at most and then how many more, and that each is
+/// removed from its consumer, not from the `kind`. Empty when there are none, so the refusal
+/// reads as it did before a consumer could have a limit of its own.
+pub fn own_limits(names: &[String], kind: &str) -> String {
+    let (named, more) = names.split_at(names.len().min(NAMED_CONSUMERS));
+    let mut listed = named.to_vec();
+    if !more.is_empty() {
+        listed.push(format!("{} more", more.len()));
+    }
+    let Some((last, rest)) = listed.split_last() else {
+        return String::new();
+    };
+    let list = if rest.is_empty() {
+        last.clone()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    if names.len() == 1 {
+        format!(
+            " {list} has a limit of its own here, which is removed from that consumer, not from \
+             the {kind}."
+        )
+    } else {
+        format!(
+            " {list} have limits of their own here, which are removed from those consumers, not \
+             from the {kind}."
+        )
+    }
+}
+
 /// A route with no hosts takes every host on the data plane's ports, so only a superuser may
 /// write one. The store asks this when a route's hosts are empty.
 pub fn may_route_any_host(caller: &User) -> Result<(), Refusal> {
@@ -1896,5 +1931,32 @@ mod tests {
             ))
         );
         assert!(may_claim_wildcard(&root, "*.com").is_ok());
+    }
+
+    /// The consumers a refused delete names, as the console joins a list, three at most; none
+    /// adds nothing at all.
+    #[test]
+    fn own_limits_names_three_consumers_at_most() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(own_limits(&[], "route"), "");
+        assert_eq!(
+            own_limits(&names(&["a"]), "route"),
+            " a has a limit of its own here, which is removed from that consumer, not from the \
+             route."
+        );
+        for (given, listed) in [
+            (&["a", "b"][..], "a and b"),
+            (&["a", "b", "c"], "a, b and c"),
+            (&["a", "b", "c", "d"], "a, b, c and 1 more"),
+            (&["a", "b", "c", "d", "e"], "a, b, c and 2 more"),
+        ] {
+            assert_eq!(
+                own_limits(&names(given), "service"),
+                format!(
+                    " {listed} have limits of their own here, which are removed from those \
+                     consumers, not from the service."
+                )
+            );
+        }
     }
 }
