@@ -330,7 +330,8 @@ fn jwt_refusal(
         return Some((
             ErrorKey::AuthJwtInvalid,
             "multiple_bearer",
-            "one credential per request",
+            // RFC 6750 section 3.1: more than one credential is a malformed request.
+            "Bearer error=\"invalid_request\"",
         ));
     }
     let presented = jwt::bearer(first.and_then(|v| v.to_str().ok()));
@@ -1421,6 +1422,24 @@ mod tests {
                 assert_eq!(refusal.map(|r| r.1), Some("multiple_bearer"));
                 assert_eq!(refusal.map(|r| r.0), Some(ErrorKey::AuthJwtInvalid));
             }
+        }
+
+        #[test]
+        fn two_authorization_lines_are_challenged_as_an_invalid_request() {
+            // RFC 6750 section 3.1: a request carrying more than one credential is
+            // `invalid_request`. The challenge must parse as one (RFC 9110 section 11.6.1): the
+            // prose this used to send read as an auth scheme named "one".
+            let (policy, keys) = policy();
+            let good = format!("Bearer {}", token(SECRET, "me"));
+            let refusal = jwt_refusal(
+                &with_lines(&[good.as_bytes(), good.as_bytes()]),
+                &policy,
+                &keys,
+            );
+            assert_eq!(
+                refusal.map(|r| r.2),
+                Some("Bearer error=\"invalid_request\"")
+            );
         }
 
         #[test]

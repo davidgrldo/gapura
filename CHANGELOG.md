@@ -17,6 +17,9 @@ means what it usually does, moving from one version below to a later one. Releas
   `401 unauthorized` where its body was empty, and a 500 for a fault of the gateway's own says
   `internal error` rather than `no valid backend`, which only a missing backend means. No status
   changes. The README's "Error keys" lists the set; a key is never renamed or reused.
+- A JWT route refusing a request with more than one `Authorization` line now challenges with
+  `WWW-Authenticate: Bearer error="invalid_request"` (RFC 6750). It sent the prose
+  `one credential per request`, which is not a challenge a client can parse.
 - The chart can run a data plane that serves the routes created in the console. Until now every
   gateway it started read the cluster (`--kubernetes`), so a store route was compiled and served
   to nobody. `dataPlane.enabled` adds a second Deployment and Service, `<fullname>-data-plane`,
