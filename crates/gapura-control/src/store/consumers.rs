@@ -7,10 +7,11 @@
 //! answer, and the audit row records its prefix and expiry.
 //!
 //! A policy write takes its locks in one order: the caller's grant rows `FOR SHARE`; the service
-//! or route it targets `FOR SHARE`, so the target cannot be deleted under it; the policy row
-//! `FOR UPDATE`; `config_state`, through the trigger. Only an enabled `key_auth`, `jwt` or
-//! `rate_limit` row with no consumer is a policy here, as it is to the compiler; a disabled one, which only SQL written
-//! by hand can make, reads as none, and switching the requirement on takes it over.
+//! or route it targets `FOR SHARE`, so the target cannot be deleted under it; the consumer it is
+//! for, `FOR SHARE`, likewise; the policy row `FOR UPDATE`; `config_state`, through the trigger.
+//! Only an enabled `key_auth`, `jwt` or `rate_limit` row is a policy here, as it is to the
+//! compiler, and only a `rate_limit` row may be a consumer's own; a disabled one, which only SQL
+//! written by hand can make, reads as none, and switching the requirement on takes it over.
 
 use super::configuration::{decide, json, updated_at};
 use super::grants::{audit, retrying, Entry};
@@ -53,12 +54,16 @@ async fn target_row(
     Ok(Some((column, row.get("id"))))
 }
 
-/// The `name` policy row on a target `target_row` resolved, read `FOR UPDATE`: its id, its
-/// configuration, whether it is enabled, and its `updated_at` as the API shows it.
+/// The `name` policy row on a target `target_row` resolved, for the consumer `consumer_row`
+/// resolved or for none, read `FOR UPDATE`: its id, its configuration, whether it is enabled,
+/// and its `updated_at` as the API shows it. A consumer's own row and the row on everyone are two
+/// rows on one target, and each write reads only its own -- `is not distinct from` matches a
+/// null consumer to the row with none.
 async fn plugin_row(
     tx: &Transaction<'_>,
     workspace: Uuid,
     resolved: Option<(&str, Uuid)>,
+    consumer: Option<Uuid>,
     name: &str,
 ) -> Result<Option<(Uuid, serde_json::Value, bool, String)>, WriteError> {
     let row = match resolved {
@@ -67,11 +72,11 @@ async fn plugin_row(
                 &format!(
                     "select id, config, enabled, {} as updated_at from plugins
                       where workspace_id = $1 and name = $2 and service_id is null
-                        and route_id is null and consumer_id is null
+                        and route_id is null and consumer_id is not distinct from $3
                         for update",
                     updated_at("updated_at")
                 ),
-                &[&workspace, &name],
+                &[&workspace, &name, &consumer],
             )
             .await?
         }
@@ -79,10 +84,11 @@ async fn plugin_row(
             tx.query_opt(
                 &format!(
                     "select id, config, enabled, {} as updated_at from plugins
-                      where {column} = $1 and name = $2 for update",
+                      where {column} = $1 and name = $2 and consumer_id is not distinct from $3
+                        for update",
                     updated_at("updated_at")
                 ),
-                &[&id, &name],
+                &[&id, &name, &consumer],
             )
             .await?
         }
@@ -95,6 +101,31 @@ async fn plugin_row(
             r.get("updated_at"),
         )
     }))
+}
+
+/// The consumer `name` names in `workspace`, read `FOR SHARE` so it cannot be deleted under the
+/// write, as `target_row` holds the route or service; `None` for a policy on everyone.
+async fn consumer_row(
+    tx: &Transaction<'_>,
+    workspace: Uuid,
+    name: Option<&str>,
+) -> Result<Option<Uuid>, WriteError> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let Some(row) = tx
+        .query_opt(
+            "select id from consumers where workspace_id = $1 and username = $2 for share",
+            &[&workspace, &name],
+        )
+        .await?
+    else {
+        return Err(Refusal::NotFound(format!(
+            "There is no consumer named {name} in this workspace."
+        ))
+        .into());
+    };
+    Ok(Some(row.get("id")))
 }
 
 /// Whether a policy write was made from a fresh read (#197, #223): `shown` is the `updated_at` a
@@ -122,7 +153,7 @@ async fn policy_row(
     workspace: Uuid,
     resolved: Option<(&str, Uuid)>,
 ) -> Result<Option<(Uuid, Option<String>, bool, String)>, WriteError> {
-    let row = plugin_row(tx, workspace, resolved, "key_auth").await?;
+    let row = plugin_row(tx, workspace, resolved, None, "key_auth").await?;
     Ok(row.map(|(id, config, enabled, updated_at)| {
         let header = config
             .get("header")
@@ -150,14 +181,23 @@ fn stored_jwt(config: serde_json::Value) -> anyhow::Result<JwtPolicy> {
     serde_json::from_value(config).context("a jwt policy does not fit its shape")
 }
 
-/// The `{target, kind, limit, per}` an audit row records of a request limit.
-fn rate_limit_audit(target: &Target, limit: &Limit) -> serde_json::Value {
-    serde_json::json!({
+/// The `{target, kind, limit, per}` an audit row records of a request limit, with `consumer` when
+/// it is a consumer's own and `by` when it counts by something other than the address, so a row
+/// on everyone counted by address reads as it did before either existed.
+fn rate_limit_audit(target: &Target, consumer: Option<&str>, limit: &Limit) -> serde_json::Value {
+    let mut entry = serde_json::json!({
         "target": target.as_text(),
         "kind": "rate_limit",
         "limit": limit.limit,
         "per": limit.per,
-    })
+    });
+    if let Some(consumer) = consumer {
+        entry["consumer"] = consumer.into();
+    }
+    if let Some(by) = shown_by(&limit.by) {
+        entry["by"] = by.into();
+    }
+    entry
 }
 
 /// A stored `rate_limit` configuration as the limit the compiler reads it as. One that does not
@@ -765,7 +805,7 @@ impl Store {
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
         let config = json(policy);
-        let row = plugin_row(&tx, workspace, resolved, "jwt").await?;
+        let row = plugin_row(&tx, workspace, resolved, None, "jwt").await?;
         // #197: otherwise a second editor's rotation is undone silently by a stale sheet.
         let shown = row
             .as_ref()
@@ -847,7 +887,8 @@ impl Store {
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
-        let Some((id, config, true, _)) = plugin_row(&tx, workspace, resolved, "jwt").await? else {
+        let Some((id, config, true, _)) = plugin_row(&tx, workspace, resolved, None, "jwt").await?
+        else {
             return Err(
                 Refusal::NotFound(format!("{} has no JWT requirement.", target.as_text())).into(),
             );
@@ -876,19 +917,22 @@ impl Store {
         Ok(())
     }
 
-    /// A workspace's request limits, in the order `policies` lists key requirements.
+    /// A workspace's request limits: those on everyone first, in the order `policies` lists key
+    /// requirements, then each consumer's own by consumer, in the same order.
     pub async fn rate_limits(&self, workspace: Uuid) -> Result<Vec<RateLimitView>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
                 &format!(
-                    "select p.config, s.name as service, r.name as route, {} as updated_at
+                    "select p.config, s.name as service, r.name as route, c.username as consumer,
+                            {} as updated_at
                        from plugins p
                        left join services s on s.id = p.service_id
                        left join routes r on r.id = p.route_id
-                      where p.workspace_id = $1 and p.name = $2 and p.consumer_id is null
-                        and p.enabled
-                      order by case when p.service_id is not null then 1
+                       left join consumers c on c.id = p.consumer_id
+                      where p.workspace_id = $1 and p.name = $2 and p.enabled
+                      order by c.username nulls first,
+                               case when p.service_id is not null then 1
                                     when p.route_id is not null then 2
                                     else 0 end,
                                coalesce(s.name, r.name)",
@@ -903,7 +947,7 @@ impl Store {
                 let limit = stored_rate_limit(row.get("config"))?;
                 Ok(RateLimitView {
                     target: target.as_text(),
-                    consumer: None,
+                    consumer: row.get("consumer"),
                     limit: limit.limit,
                     per: limit.per,
                     by: shown_by(&limit.by),
@@ -913,19 +957,29 @@ impl Store {
             .collect()
     }
 
-    /// Limits requests on `target` to `limit`, which needs the editor role, when
-    /// `seen_updated_at` is the stamp of the limit set there as last read, or `None` when none
-    /// was. The same limit again writes nothing.
+    /// Limits requests on `target`, for `consumer` alone when one is named, to `limit`, which
+    /// needs the editor role, when `seen_updated_at` is the stamp of the limit this write
+    /// replaces as last read -- the consumer's own there when one is named, else the one on
+    /// everyone -- or `None` when none was. The two are separate rows with stamps of their own,
+    /// so a stamp read off one never answers for the other. The same limit again writes nothing.
     pub async fn put_rate_limit(
         &self,
         caller: Uuid,
         workspace: Uuid,
         target: &Target,
+        consumer: Option<&str>,
         limit: Limit,
         seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
         retrying(move || {
-            self.try_put_rate_limit(caller, workspace, target, limit.clone(), seen_updated_at)
+            self.try_put_rate_limit(
+                caller,
+                workspace,
+                target,
+                consumer,
+                limit.clone(),
+                seen_updated_at,
+            )
         })
         .await
     }
@@ -935,6 +989,7 @@ impl Store {
         caller: Uuid,
         workspace: Uuid,
         target: &Target,
+        consumer: Option<&str>,
         limit: Limit,
         seen_updated_at: Option<&str>,
     ) -> Result<(), WriteError> {
@@ -942,8 +997,9 @@ impl Store {
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
+        let owner = consumer_row(&tx, workspace, consumer).await?;
         let config = limit.config();
-        let row = plugin_row(&tx, workspace, resolved, RATE_LIMIT).await?;
+        let row = plugin_row(&tx, workspace, resolved, owner, RATE_LIMIT).await?;
         let shown = row
             .as_ref()
             .filter(|r| r.2 && Limit::from_config(r.1.clone()).is_some());
@@ -963,13 +1019,14 @@ impl Store {
                 .await?;
                 // A disabled row is no limit, so taking it over is audited as creating one.
                 let before = if enabled {
-                    current.map(|c| rate_limit_audit(target, &c))
+                    current.map(|c| rate_limit_audit(target, consumer, &c))
                 } else {
                     None
                 };
                 (if enabled { "update" } else { "create" }, id, before)
             }
-            // Two writers meet at the unique index, as switching key_auth on does.
+            // Two writers meet at the unique index, as switching key_auth on does: the one on
+            // everyone or the consumer's own, whichever this write is.
             None => {
                 let (service, route) = match resolved {
                     Some(("service_id", id)) => (Some(id), None),
@@ -978,10 +1035,11 @@ impl Store {
                 };
                 let row = tx
                     .query_one(
-                        "insert into plugins (workspace_id, name, config, service_id, route_id)
-                         values ($1, $2, $3, $4, $5)
+                        "insert into plugins
+                                (workspace_id, name, config, service_id, route_id, consumer_id)
+                         values ($1, $2, $3, $4, $5, $6)
                          returning id",
-                        &[&workspace, &RATE_LIMIT, &config, &service, &route],
+                        &[&workspace, &RATE_LIMIT, &config, &service, &route, &owner],
                     )
                     .await?;
                 ("create", row.get("id"), None)
@@ -996,7 +1054,7 @@ impl Store {
                 object_id: Some(id),
                 workspace: Some(workspace),
                 before,
-                after: Some(rate_limit_audit(target, &limit)),
+                after: Some(rate_limit_audit(target, consumer, &limit)),
             },
         )
         .await?;
@@ -1004,14 +1062,17 @@ impl Store {
         Ok(())
     }
 
-    /// Stops limiting requests on `target`, which needs the editor role, like limiting them.
+    /// Stops limiting requests on `target`, for `consumer` alone when one is named, which needs
+    /// the editor role, like limiting them. Only that one limit goes: the consumer's own leaves
+    /// the one on everyone in place, and the other way round.
     pub async fn delete_rate_limit(
         &self,
         caller: Uuid,
         workspace: Uuid,
         target: &Target,
+        consumer: Option<&str>,
     ) -> Result<(), WriteError> {
-        retrying(move || self.try_delete_rate_limit(caller, workspace, target)).await
+        retrying(move || self.try_delete_rate_limit(caller, workspace, target, consumer)).await
     }
 
     async fn try_delete_rate_limit(
@@ -1019,23 +1080,37 @@ impl Store {
         caller: Uuid,
         workspace: Uuid,
         target: &Target,
+        consumer: Option<&str>,
     ) -> Result<(), WriteError> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
-        let Some((id, config, true, _)) = plugin_row(&tx, workspace, resolved, RATE_LIMIT).await?
+        let owner = consumer_row(&tx, workspace, consumer).await?;
+        let Some((id, config, true, _)) =
+            plugin_row(&tx, workspace, resolved, owner, RATE_LIMIT).await?
         else {
-            return Err(
-                Refusal::NotFound(format!("{} has no request limit.", target.as_text())).into(),
-            );
+            let whose = consumer.map(|c| format!(" for {c}")).unwrap_or_default();
+            return Err(Refusal::NotFound(format!(
+                "{} has no request limit{whose}.",
+                target.as_text()
+            ))
+            .into());
         };
         tx.execute("delete from plugins where id = $1", &[&id])
             .await?;
-        // A row the compiler could not read is recorded by what it was, as far as it goes.
+        // A row the compiler could not read is recorded by what it was, as far as it goes: its
+        // target, its kind and, when it is a consumer's own, whose it was.
         let before = match Limit::from_config(config) {
-            Some(limit) => rate_limit_audit(target, &limit),
-            None => serde_json::json!({ "target": target.as_text(), "kind": "rate_limit" }),
+            Some(limit) => rate_limit_audit(target, consumer, &limit),
+            None => {
+                let mut entry =
+                    serde_json::json!({ "target": target.as_text(), "kind": "rate_limit" });
+                if let Some(consumer) = consumer {
+                    entry["consumer"] = consumer.into();
+                }
+                entry
+            }
         };
         audit(
             &tx,

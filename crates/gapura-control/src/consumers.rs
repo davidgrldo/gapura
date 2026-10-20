@@ -120,6 +120,12 @@ pub struct KeyAuthInput {
 /// data plane writes for the upstream (`gapura_core::credentials::CONSUMER_HEADER`, set in
 /// `upstream_request_filter` after it removes the inbound one). `authorization` is not here:
 /// people send keys in it.
+///
+/// The list binds what is already stored, not only what is written next: `Limit::from_config`
+/// reads a stored limit's `by` header back through `header`, so a name added here later makes
+/// every stored limit counting by that header fail the snapshot, and no data plane gets new
+/// configuration until those rows are gone. A migration has to move such rows off the name before
+/// a binary with the longer list ships.
 const RESERVED_HEADERS: &[&str] = &[
     gapura_core::credentials::CONSUMER_HEADER,
     "host",
@@ -330,8 +336,9 @@ pub struct RateLimitInput {
     pub seen_updated_at: Option<String>,
 }
 
-/// A request limit: at most `limit` requests per `per` from each client `by` counts -- an
-/// address, a consumer or a header's value -- counted by each data plane replica separately.
+/// A request limit: at most `limit` requests per `per` from each client, as `by` tells them
+/// apart -- by address, by consumer or by a header's value -- counted by each data plane replica
+/// separately.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limit {
     pub limit: u32,

@@ -437,6 +437,7 @@ pub async fn put_rate_limit(
                     caller.me.id,
                     workspace,
                     &target,
+                    None,
                     limit,
                     input.seen_updated_at.as_deref(),
                 )
@@ -465,7 +466,7 @@ pub async fn delete_rate_limit(
     match target_in(query) {
         Ok(target) => written(
             store
-                .delete_rate_limit(caller.me.id, workspace, &target)
+                .delete_rate_limit(caller.me.id, workspace, &target, None)
                 .await,
         ),
         Err(e) => field_error(e),

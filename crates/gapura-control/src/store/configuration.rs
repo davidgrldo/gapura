@@ -163,28 +163,34 @@ pub(super) fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
 /// that would drop a route's key-auth or JWT policy or request limit unseen: delete and create
 /// again, and the route answers without asking for credentials, or without limit, with no audit
 /// entry saying the policy went. `column` is `route_id` or `service_id`, `kind` the word for the
-/// row.
+/// row. A consumer's own limit on the row counts too, and the sentence says where it is removed.
 async fn no_policies(
     tx: &Transaction<'_>,
     column: &str,
     id: Uuid,
     kind: &str,
 ) -> Result<(), WriteError> {
-    let attached: i64 = tx
+    let row = tx
         .query_one(
-            &format!("select count(*) from plugins where {column} = $1"),
+            &format!("select count(*), count(consumer_id) from plugins where {column} = $1"),
             &[&id],
         )
-        .await?
-        .get(0);
+        .await?;
+    let (attached, for_consumers): (i64, i64) = (row.get(0), row.get(1));
+    // A consumer's own limit is set and removed on the consumer, so say where to look.
+    let whose = if for_consumers > 0 {
+        " A consumer's own limit is removed from that consumer."
+    } else {
+        ""
+    };
     match attached {
         0 => Ok(()),
         1 => Err(Refusal::Conflict(format!(
-            "1 policy is attached to this {kind}. Remove it first."
+            "1 policy is attached to this {kind}. Remove it first.{whose}"
         ))
         .into()),
         n => Err(Refusal::Conflict(format!(
-            "{n} policies are attached to this {kind}. Remove them first."
+            "{n} policies are attached to this {kind}. Remove them first.{whose}"
         ))
         .into()),
     }
