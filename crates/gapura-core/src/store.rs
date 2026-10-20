@@ -232,6 +232,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
                 host: service.host.clone(),
                 port: service.port,
             }),
+            outlier: None,
         });
 
         let matches = expand(route);

@@ -481,6 +481,7 @@ mod tests {
                     host: host.into(),
                     port: 8080,
                 }),
+                outlier: None,
             },
         );
         c
@@ -598,6 +599,7 @@ mod tests {
                         host: format!("{name}.apps"),
                         port: 8080,
                     }),
+                    outlier: None,
                 },
             );
         }
