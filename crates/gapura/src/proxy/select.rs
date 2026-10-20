@@ -53,27 +53,42 @@ pub fn endpoint_addr(e: &Endpoint) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, e.port))
 }
 
-/// Endpoint at the round-robin cursor, skipping addresses already tried by this request.
+/// Endpoint for this attempt, as `(index, address)`: the one at the round-robin cursor, unless
+/// this request already tried it or outlier detection ejected it. Then one of those still
+/// eligible, chosen by the same cursor, so the skipped endpoint's share spreads evenly instead of
+/// landing on its neighbour. With more than `max_ejected_percent` of the cluster ejected,
+/// ejection is ignored (healthy panic); and when only ejected endpoints are left untried, one of
+/// them is used. An ejection makes an endpoint less likely; it never fails a request that would
+/// otherwise have had somewhere to go.
 pub fn pick_endpoint(
     cluster: &Cluster,
     cursor: usize,
     tried: &[SocketAddr],
-) -> Result<SocketAddr, Local> {
+    ejected: impl Fn(usize) -> bool,
+    max_ejected_percent: u8,
+) -> Result<(usize, SocketAddr), Local> {
     let n = cluster.endpoints.len();
     if n == 0 {
         return Err(Local::NoEndpoints);
     }
-    for i in 0..n {
-        let e = &cluster.endpoints[(cursor % n + i) % n];
-        let Ok(ip) = e.address.parse::<IpAddr>() else {
-            continue;
-        };
-        let addr = SocketAddr::new(ip, e.port);
-        if !tried.contains(&addr) {
-            return Ok(addr);
-        }
+    let untried = |i: usize| endpoint_addr(&cluster.endpoints[i]).filter(|a| !tried.contains(a));
+    let start = cursor % n;
+    if let Some(addr) = untried(start).filter(|_| !ejected(start)) {
+        return Ok((start, addr));
     }
-    Err(Local::NoEndpoints)
+    let panic = (0..n).filter(|&i| ejected(i)).count() * 100 > n * usize::from(max_ejected_percent);
+    let left: Vec<(usize, SocketAddr)> =
+        (0..n).filter_map(|i| untried(i).map(|a| (i, a))).collect();
+    let healthy: Vec<(usize, SocketAddr)> = left
+        .iter()
+        .copied()
+        .filter(|&(i, _)| panic || !ejected(i))
+        .collect();
+    let pool = if healthy.is_empty() { &left } else { &healthy };
+    if pool.is_empty() {
+        return Err(Local::NoEndpoints);
+    }
+    Ok(pool[cursor % pool.len()])
 }
 
 /// New path for a RequestRedirect or URLRewrite path modifier. `matched` is the PathMatch that
@@ -146,8 +161,6 @@ pub fn redirect_location(
 
 #[cfg(test)]
 mod tests {
-    use gapura_core::config::Endpoint;
-
     use super::*;
 
     fn wb(cluster: Option<&str>, weight: u32) -> WeightedBackend {
@@ -201,17 +214,88 @@ mod tests {
         };
         let a: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let b: SocketAddr = "[fd00::2]:8080".parse().unwrap();
-        assert_eq!(pick_endpoint(&c, 0, &[]), Ok(a));
-        assert_eq!(pick_endpoint(&c, 1, &[]), Ok(b));
+        let none = |_: usize| false;
+        assert_eq!(pick_endpoint(&c, 0, &[], none, 50), Ok((0, a)));
+        assert_eq!(pick_endpoint(&c, 1, &[], none, 50), Ok((1, b)));
         assert_eq!(
-            pick_endpoint(&c, usize::MAX, &[]),
-            Ok(b),
+            pick_endpoint(&c, usize::MAX, &[], none, 50),
+            Ok((1, b)),
             "cursor wrap must not overflow"
         );
-        assert_eq!(pick_endpoint(&c, 0, &[a]), Ok(b));
-        assert_eq!(pick_endpoint(&c, 0, &[a, b]), Err(Local::NoEndpoints));
+        assert_eq!(pick_endpoint(&c, 0, &[a], none, 50), Ok((1, b)));
         assert_eq!(
-            pick_endpoint(&Cluster::default(), 0, &[]),
+            pick_endpoint(&c, 0, &[a, b], none, 50),
+            Err(Local::NoEndpoints)
+        );
+        assert_eq!(
+            pick_endpoint(&Cluster::default(), 0, &[], none, 50),
+            Err(Local::NoEndpoints)
+        );
+    }
+
+    fn cluster(n: usize) -> Cluster {
+        Cluster {
+            endpoints: (0..n)
+                .map(|i| Endpoint {
+                    address: format!("10.0.0.{}", i + 1),
+                    port: 80,
+                })
+                .collect(),
+            ..Cluster::default()
+        }
+    }
+
+    fn addr(i: usize) -> SocketAddr {
+        SocketAddr::from(([10, 0, 0, i as u8 + 1], 80))
+    }
+
+    #[test]
+    fn an_ejected_endpoints_share_spreads_evenly_over_the_rest() {
+        let c = cluster(4);
+        let mut hits = [0; 4];
+        for cursor in 0..400 {
+            hits[pick_endpoint(&c, cursor, &[], |i| i == 0, 50).unwrap().0] += 1;
+        }
+        assert_eq!(hits[0], 0);
+        let (lo, hi) = (
+            hits[1..].iter().min().unwrap(),
+            hits[1..].iter().max().unwrap(),
+        );
+        assert!(hi - lo <= 1, "{hits:?}");
+    }
+
+    #[test]
+    fn half_ejected_is_honoured_and_more_than_half_panics() {
+        let two = cluster(2);
+        for cursor in 0..10 {
+            assert_eq!(
+                pick_endpoint(&two, cursor, &[], |i| i == 0, 50),
+                Ok((1, addr(1)))
+            );
+        }
+        let three = cluster(3);
+        let picked: std::collections::BTreeSet<usize> = (0..30)
+            .map(|cursor| pick_endpoint(&three, cursor, &[], |i| i < 2, 50).unwrap().0)
+            .collect();
+        assert_eq!(
+            picked,
+            [0, 1, 2].into(),
+            "with 2 of 3 out, ejection is ignored"
+        );
+    }
+
+    #[test]
+    fn ejection_never_leaves_a_request_with_nowhere_to_go() {
+        let one = cluster(1);
+        assert_eq!(pick_endpoint(&one, 7, &[], |_| true, 50), Ok((0, addr(0))));
+        let two = cluster(2);
+        assert_eq!(
+            pick_endpoint(&two, 0, &[addr(1)], |i| i == 0, 50),
+            Ok((0, addr(0))),
+            "the retry goes to the ejected endpoint rather than nowhere"
+        );
+        assert_eq!(
+            pick_endpoint(&two, 0, &[addr(0), addr(1)], |_| true, 50),
             Err(Local::NoEndpoints)
         );
     }

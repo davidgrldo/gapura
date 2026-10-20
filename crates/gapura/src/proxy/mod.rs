@@ -73,6 +73,8 @@ pub struct Ctx {
     cluster: Option<String>,
     tried: Vec<SocketAddr>,
     upstream: Option<SocketAddr>,
+    /// The outlier record of the endpoint this attempt went to.
+    health: Option<Arc<outlier::Health>>,
     extracted: Option<Extracted>,
     request_id: String,
     traceparent: String,
@@ -437,12 +439,17 @@ fn mirror_parts(upstream: &RequestHeader, endpoint: SocketAddr) -> (String, http
 /// mirror path can touch the primary's decision or its response. Responses from the mirror are
 /// ignored per the Gateway API definition.
 fn fire_mirror(rt: &Arc<Runtime>, mirror: &Mirror, upstream: &RequestHeader, ctx: &mut Ctx) {
-    // Same selection as a primary: round-robin cursor over the mirror cluster's endpoints.
+    // Same selection as a primary: round-robin cursor over the mirror cluster's endpoints,
+    // ejected ones skipped. A mirror's own outcome is not recorded: nothing reads its answer.
     // A cluster that vanished between translate and now, or has no endpoints, is an error like
     // any other mirror failure: counted, never felt by the primary.
     let endpoint = rt.config.clusters.get(&mirror.cluster).and_then(|cluster| {
         let cursor = rt.next_index(&mirror.cluster).unwrap_or(0);
-        pick_endpoint(cluster, cursor, &[]).ok()
+        let ejected = outlier::ejected_at(rt.health(&mirror.cluster), outlier::now_ms());
+        let max_out = cluster.outlier.unwrap_or_default().max_ejected_percent;
+        pick_endpoint(cluster, cursor, &[], ejected, max_out)
+            .ok()
+            .map(|(_, addr)| addr)
     });
     let Some(endpoint) = endpoint else {
         METRICS
@@ -503,6 +510,7 @@ impl ProxyHttp for GapuraProxy {
             cluster: None,
             tried: Vec::new(),
             upstream: None,
+            health: None,
             extracted: None,
             request_id: String::new(),
             traceparent: String::new(),
@@ -762,9 +770,18 @@ impl ProxyHttp for GapuraProxy {
             Error::explain(ErrorType::InternalError, "cluster missing from config")
         })?;
         let cursor = rt.next_index(&key).unwrap_or(0);
-        let addr = pick_endpoint(cluster, cursor, &ctx.tried)
-            .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "no endpoint left to try"))?;
+        let records = rt.health(&key);
+        let max_out = cluster.outlier.unwrap_or_default().max_ejected_percent;
+        let (index, addr) = pick_endpoint(
+            cluster,
+            cursor,
+            &ctx.tried,
+            outlier::ejected_at(records, outlier::now_ms()),
+            max_out,
+        )
+        .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "no endpoint left to try"))?;
         ctx.upstream = Some(addr);
+        ctx.health = records.get(index).cloned().flatten();
         let mut peer = match &cluster.tls {
             None => HttpPeer::new(addr, false, String::new()),
             Some(tls) => {
