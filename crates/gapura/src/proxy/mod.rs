@@ -2,14 +2,17 @@
 //!
 //! One request, top to bottom: `request_filter` (match, answer locally or pick a cluster),
 //! `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite, headers),
-//! `response_filter` (response headers), `fail_to_connect` (retry once), `fail_to_proxy`
-//! (the error key and its status, from `failure::classify`), `logging` (access log + metrics).
+//! `upstream_response_filter` (the endpoint's outcome), `response_filter` (response headers),
+//! `fail_to_connect` (retry once), `fail_to_proxy` (the error key and its status, from
+//! `failure::classify`), `logging` (access log + metrics). Outcomes feed passive outlier
+//! detection (`outlier`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
 pub use gapura_core::client_ip as client;
 pub mod failure;
 pub mod jwt;
+pub mod outlier;
 pub mod rate_limit;
 pub mod select;
 pub mod tls;
@@ -29,6 +32,7 @@ use tokio::sync::Semaphore;
 
 use crate::proxy::attrs::Extracted;
 use crate::proxy::failure::ErrorKey;
+use crate::proxy::outlier::Outcome;
 use crate::proxy::select::{
     pick_backend, pick_endpoint, random_roll, redirect_location, rewrite_path, Local,
 };
@@ -74,6 +78,8 @@ pub struct Ctx {
     cluster: Option<String>,
     tried: Vec<SocketAddr>,
     upstream: Option<SocketAddr>,
+    /// The outlier record of the endpoint this attempt went to.
+    health: Option<Arc<outlier::Health>>,
     extracted: Option<Extracted>,
     request_id: String,
     traceparent: String,
@@ -106,6 +112,32 @@ impl Ctx {
             .get(self.listener?)?
             .rules
             .get(self.rule?)
+    }
+
+    /// Count this attempt's outcome against the endpoint it went to.
+    fn record(&self, outcome: Outcome) {
+        let (Some(health), Some(rt), Some(key)) = (&self.health, &self.runtime, &self.cluster)
+        else {
+            return;
+        };
+        let p = rt
+            .config
+            .clusters
+            .get(key)
+            .and_then(|c| c.outlier)
+            .unwrap_or_default();
+        if let Some(out_for) = health.record(outcome, outlier::now_ms(), &p) {
+            METRICS
+                .upstream_ejections_total
+                .with_label_values(&[key])
+                .inc();
+            tracing::warn!(
+                cluster = %key,
+                endpoint = ?self.upstream,
+                seconds = out_for.as_secs(),
+                "ejecting an endpoint after consecutive failures"
+            );
+        }
     }
 
     fn route_label(&self) -> &str {
@@ -433,12 +465,17 @@ fn mirror_parts(upstream: &RequestHeader, endpoint: SocketAddr) -> (String, http
 /// mirror path can touch the primary's decision or its response. Responses from the mirror are
 /// ignored per the Gateway API definition.
 fn fire_mirror(rt: &Arc<Runtime>, mirror: &Mirror, upstream: &RequestHeader, ctx: &mut Ctx) {
-    // Same selection as a primary: round-robin cursor over the mirror cluster's endpoints.
+    // Same selection as a primary: round-robin cursor over the mirror cluster's endpoints,
+    // ejected ones skipped. A mirror's own outcome is not recorded: nothing reads its answer.
     // A cluster that vanished between translate and now, or has no endpoints, is an error like
     // any other mirror failure: counted, never felt by the primary.
     let endpoint = rt.config.clusters.get(&mirror.cluster).and_then(|cluster| {
         let cursor = rt.next_index(&mirror.cluster).unwrap_or(0);
-        pick_endpoint(cluster, cursor, &[]).ok()
+        let ejected = outlier::ejected_at(rt.health(&mirror.cluster), outlier::now_ms());
+        let max_out = cluster.outlier.unwrap_or_default().max_ejected_percent;
+        pick_endpoint(cluster, cursor, &[], ejected, max_out)
+            .ok()
+            .map(|(_, addr)| addr)
     });
     let Some(endpoint) = endpoint else {
         METRICS
@@ -499,6 +536,7 @@ impl ProxyHttp for GapuraProxy {
             cluster: None,
             tried: Vec::new(),
             upstream: None,
+            health: None,
             extracted: None,
             request_id: String::new(),
             traceparent: String::new(),
@@ -766,9 +804,18 @@ impl ProxyHttp for GapuraProxy {
             Error::explain(ErrorType::InternalError, "cluster missing from config")
         })?;
         let cursor = rt.next_index(&key).unwrap_or(0);
-        let addr = pick_endpoint(cluster, cursor, &ctx.tried)
-            .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "no endpoint left to try"))?;
+        let records = rt.health(&key);
+        let max_out = cluster.outlier.unwrap_or_default().max_ejected_percent;
+        let (index, addr) = pick_endpoint(
+            cluster,
+            cursor,
+            &ctx.tried,
+            outlier::ejected_at(records, outlier::now_ms()),
+            max_out,
+        )
+        .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "no endpoint left to try"))?;
         ctx.upstream = Some(addr);
+        ctx.health = records.get(index).cloned().flatten();
         let mut peer = match &cluster.tls {
             None => HttpPeer::new(addr, false, String::new()),
             Some(tls) => {
@@ -910,6 +957,21 @@ impl ProxyHttp for GapuraProxy {
         Ok(())
     }
 
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
+        // The gateway failures, as Envoy counts them: the endpoint answered, but the way a broken
+        // proxy or an overloaded instance does. A 500 is the application's, usually the request's.
+        ctx.record(match upstream_response.status.as_u16() {
+            502..=504 => Outcome::Failure,
+            _ => Outcome::Success,
+        });
+        Ok(())
+    }
+
     async fn response_filter(
         &self,
         _session: &mut Session,
@@ -963,6 +1025,7 @@ impl ProxyHttp for GapuraProxy {
             .upstream_errors_total
             .with_label_values(&[&cluster, "connect"])
             .inc();
+        ctx.record(Outcome::Failure);
         if let Some(addr) = ctx.upstream {
             ctx.tried.push(addr);
         }
@@ -1004,7 +1067,12 @@ impl ProxyHttp for GapuraProxy {
                 }
                 _ => "other",
             };
-            // connect failures were already counted in fail_to_connect
+            // A connect failure was counted, and recorded against its endpoint, in fail_to_connect.
+            // A read error is most often a pooled connection the backend had already closed,
+            // which says nothing about the endpoint; a timeout does.
+            if kind == "timeout" {
+                ctx.record(Outcome::Failure);
+            }
             if kind != "connect" {
                 METRICS
                     .upstream_errors_total

@@ -20,6 +20,21 @@ means what it usually does, moving from one version below to a later one. Releas
 - A JWT route refusing a request with more than one `Authorization` line now challenges with
   `WWW-Authenticate: Bearer error="invalid_request"` (RFC 6750). It sent the prose
   `one credential per request`, which is not a challenge a client can parse.
+- The data plane remembers endpoints that keep failing. Until now each request chose by
+  round-robin with no memory, so a dead pod cost every other request a failed connect (or a full
+  connect timeout) and an instance stuck answering 503 kept its share. Now five consecutive
+  failures -- a connect error, an upstream read or write timeout, or a 502, 503 or 504 -- take an
+  endpoint out of rotation for 30 s, then 60 s, 90 s and so on up to 5 minutes each time it is
+  ejected again. When its time is up it is back on probation: one failure ejects it again, five
+  successes clear its history. A 500 does not count, and neither does a read error on a pooled
+  connection. If more than half of a backend's endpoints are out, ejection is ignored for it, as
+  Envoy's panic threshold does, and an ejected endpoint is still used when it is the only one
+  left to try: the change makes a failing endpoint less likely to be picked, never a request
+  answered 503 that would have been sent somewhere before. The record is kept by address outside
+  the configuration, so a reload neither resets it nor keeps it for an address that left. New
+  metrics: `gapura_upstream_ejections_total{cluster}` and
+  `gapura_upstream_ejected_endpoints{cluster}`. On by default with these values; the
+  configuration has a per-backend setting for them that nothing fills in yet.
 - The chart can run a data plane that serves the routes created in the console. Until now every
   gateway it started read the cluster (`--kubernetes`), so a store route was compiled and served
   to nobody. `dataPlane.enabled` adds a second Deployment and Service, `<fullname>-data-plane`,

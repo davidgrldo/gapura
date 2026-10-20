@@ -20,6 +20,10 @@ pub struct Metrics {
     pub request_duration_seconds: HistogramVec,
     /// labels: cluster, kind (`connect`, `timeout`, `read`, `other`)
     pub upstream_errors_total: IntCounterVec,
+    /// labels: cluster. Endpoints taken out of rotation by passive outlier detection.
+    pub upstream_ejections_total: IntCounterVec,
+    /// labels: cluster. Endpoints out of rotation right now; worked out when /metrics is read.
+    pub upstream_ejected_endpoints: IntGaugeVec,
     /// labels: result (`success`, `failure`)
     pub config_reloads_total: IntCounterVec,
     pub config_last_reload_timestamp_seconds: IntGauge,
@@ -66,6 +70,18 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
         "gapura_upstream_errors_total",
         "Upstream errors by cluster and kind",
         &["cluster", "kind"]
+    )
+    .expect("metric registered once"),
+    upstream_ejections_total: register_int_counter_vec!(
+        "gapura_upstream_ejections_total",
+        "Endpoints ejected by passive outlier detection, by cluster",
+        &["cluster"]
+    )
+    .expect("metric registered once"),
+    upstream_ejected_endpoints: register_int_gauge_vec!(
+        "gapura_upstream_ejected_endpoints",
+        "Endpoints currently ejected by passive outlier detection, by cluster",
+        &["cluster"]
     )
     .expect("metric registered once"),
     config_reloads_total: register_int_counter_vec!(

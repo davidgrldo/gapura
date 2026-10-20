@@ -907,6 +907,36 @@ async fn connect_failure_retries_once_on_another_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_dead_endpoint_is_ejected_and_stops_receiving_traffic() {
+    let (gw, c) = setup().await;
+    // `flaky` is the dead 127.0.0.1:1 and the live echo, dead first. Each request moves the
+    // round-robin cursor twice (the retry asks again), so every first attempt lands on the dead
+    // endpoint until five connect errors in a row eject it.
+    for i in 0..20 {
+        let r = c.get(url(&gw, "echo.test", "/retry")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "request {i}");
+    }
+    let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // Every attempt on the dead endpoint is a connect error: five after twenty requests means it
+    // got nothing once it was ejected.
+    for needle in [
+        r#"gapura_upstream_errors_total{cluster="apps/flaky:80",kind="connect"} 5"#,
+        r#"gapura_upstream_ejections_total{cluster="apps/flaky:80"} 1"#,
+        r#"gapura_upstream_ejected_endpoints{cluster="apps/flaky:80"} 1"#,
+    ] {
+        assert!(
+            metrics.contains(needle),
+            "{needle} missing from:\n{metrics}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn backend_timeout_is_504_and_zero_disables_it() {
     let (gw, c) = setup().await;
     let r = c
