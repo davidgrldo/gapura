@@ -741,7 +741,7 @@ impl ProxyHttp for GapuraProxy {
                         if let rate_limit::Outcome::Limited {
                             limit,
                             retry_after_secs,
-                        } = self.limiter.check(&route, ip, rl)
+                        } = self.limiter.check(&route, ip, Some(ip), rl)
                         {
                             METRICS
                                 .rate_limited_total
