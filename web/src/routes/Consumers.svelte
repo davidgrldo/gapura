@@ -17,9 +17,11 @@
   // svelte-ignore state_referenced_locally
   let workspace = $state(remembered(me.roles))
   const role = $derived(me.roles.find((r) => r.workspace === workspace)?.role)
-  // `{ consumers, keyAuth, jwt, rateLimit }`, read together: the workspace-wide key requirement
-  // sits above the table, and is what the consumers' keys are asked for; the workspace-wide JWT
-  // requirement and request limit sit under it.
+  // `{ consumers, keyAuth, jwt, rateLimit, limits, targets }`, read together: the workspace-wide
+  // key requirement sits above the table, and is what the consumers' keys are asked for; the
+  // workspace-wide JWT requirement and request limit sit under it. `limits` is the whole limits
+  // list, which each consumer's sheet finds its own limits in, and `targets` is every target a
+  // limit can sit on, which a sheet's Add a limit offers the ones it has none on yet of.
   let answer = $state(undefined)
   let failed = $state(undefined)
   // The newest request's number, so a slow answer for a workspace the reader has left cannot
@@ -35,8 +37,10 @@
       get(base(workspace, 'key-auth')),
       get(base(workspace, 'jwt')),
       get(base(workspace, 'rate-limit')),
+      get(base(workspace, 'services')),
+      get(base(workspace, 'routes')),
     ]).then(
-      ([consumers, keyAuths, jwts, limits]) => {
+      ([consumers, keyAuths, jwts, limits, services, routes]) => {
         if (mine !== latest) return
         const own = keyAuths.find((r) => r.target === 'workspace')
         const token = jwts.find((r) => r.target === 'workspace')
@@ -49,6 +53,14 @@
           rateLimit: limited
             ? { limit: limited.limit, per: limited.per, by: limited.by, from: 'workspace', updated_at: limited.updated_at }
             : null,
+          // Every limit, for the consumers' sheets to find their own in, and every target a limit
+          // can sit on, for Add a limit.
+          limits,
+          targets: [
+            'workspace',
+            ...services.map((s) => `service:${s.name}`),
+            ...routes.map((r) => `route:${r.name}`),
+          ],
         }
         failed = undefined
       },
@@ -142,7 +154,7 @@
                 {/if}
               </Table.Cell>
               <Table.Cell class="text-right">
-                <ConsumerSheet mode="edit" consumer={c} {workspace} {role} onsaved={load} onremoved={focusHeading} />
+                <ConsumerSheet mode="edit" consumer={c} {workspace} {role} limits={answer.limits} targets={answer.targets} onsaved={load} onremoved={focusHeading} />
               </Table.Cell>
             </Table.Row>
           {/each}

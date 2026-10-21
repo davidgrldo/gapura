@@ -3,26 +3,31 @@
   import * as Sheet from '$lib/components/ui/sheet/index.js'
   import { Button } from '$lib/components/ui/button/index.js'
   import { Input } from '$lib/components/ui/input/index.js'
+  import NativeSelect from './NativeSelect.svelte'
+  import RateLimitControl from './RateLimitControl.svelte'
   import SecretBox from './SecretBox.svelte'
   import Tag from './Tag.svelte'
   import { write } from './api.js'
-  import { base, when } from './configuration.js'
+  import { base, targetWords, when } from './configuration.js'
   import { can } from './workspace.js'
   import Plus from 'phosphor-svelte/lib/Plus'
 
   // The Consumers page's one sheet:
   // - `create` is New consumer, for editors and admins: a name, and nothing else;
-  // - `edit` shows one consumer's keys. An editor can issue a key, an admin can also revoke one
-  //   and delete the consumer; a viewer sees the keys and no controls at all.
+  // - `edit` shows one consumer's keys and its own request limits. An editor can issue a key and
+  //   set a limit, an admin can also revoke a key and delete the consumer; a viewer sees both and
+  //   no controls at all.
   // An issued key is shown once, in a box that stays until the sheet closes. Issuing and revoking
   // fetch the list again without closing the sheet: rows are keyed by name, so this sheet stays
   // mounted under the new list and the box with it. Questions (delete, revoke, close without
   // copying) are asked in the footer, as ServiceSheet asks its delete question, and open on the
   // button that keeps things as they are.
+  // `limits` is the workspace's limits list and `targets` every target a limit can sit on; the sheet
+  // draws the consumer's own limits from the one and offers the rest of the other in Add a limit.
   // `onsaved` fetches the list again and returns a promise that settles once it is drawn or has
   // failed, and never rejects. `onremoved` is where focus goes when the new list no longer has the
   // row this sheet's button was in.
-  let { mode, consumer = undefined, workspace, role, onsaved, onremoved = undefined } = $props()
+  let { mode, consumer = undefined, workspace, role, limits = [], targets = [], onsaved, onremoved = undefined } = $props()
 
   const id = $props.id()
   const issuer = $derived(mode === 'edit' && can.write(role))
@@ -69,6 +74,7 @@
     question = null
     issued = null
     copied = false
+    adding = ''
   }
 
   // The fields this sheet draws, and the ids of their inputs. A refusal naming anything else has
@@ -80,6 +86,22 @@
   const described = (field) => (invalid(field) ? `${id}-${field}-error` : undefined)
   const here = () => `${base(workspace, 'consumers')}/${encodeURIComponent(consumer.name)}`
   const keys = $derived(consumer?.keys ?? [])
+  // This consumer's own request limits, as the limits list has them, and the targets it has none
+  // on yet, which Add a limit offers.
+  const mine = $derived(limits.filter((r) => r.consumer === consumer?.name))
+  const free = $derived(targets.filter((t) => !mine.some((r) => r.target === t)))
+  // The target picked in Add a limit, '' for none: its control is drawn under the picker.
+  let adding = $state('')
+  let limitsHeading = $state(null)
+  // The list a limit's control applied against has been read again: Add a limit starts over, and
+  // focus goes to the section, which a control that has gone with the old list cannot keep.
+  async function limitsChanged() {
+    await onsaved()
+    adding = ''
+    await tick()
+    limitsHeading?.focus()
+  }
+  const kindOf = (target) => target.split(':')[0]
 
   // One request. Resolves with `{ answer }` once the server has made the change, or with nothing
   // after a refusal, which is then on screen with focus on the input it names, or else on what
@@ -259,7 +281,9 @@
       return `Revoke ${question.prefix}? Requests with this key are refused from the gateway's next poll.`
     }
     const n = keys.length
-    const what = n === 0 ? '' : n === 1 ? ' and its 1 key' : ` and its ${n} keys`
+    const m = mine.length
+    const parts = [n === 1 ? 'its 1 key' : n > 1 ? `its ${n} keys` : '', m === 1 ? 'its own request limit' : m > 1 ? `its ${m} own request limits` : ''].filter(Boolean)
+    const what = parts.length === 0 ? '' : ` and ${parts.join(' and ')}`
     return `Delete ${consumer?.name}${what}? This cannot be undone.`
   })
   const CONFIRM = { close: 'Close', revoke: 'Revoke', delete: 'Delete' }
@@ -362,6 +386,48 @@
                 </li>
               {/each}
             </ul>
+          {/if}
+        </section>
+        <section class="grid gap-2" aria-labelledby="{id}-limits">
+          <h3 id="{id}-limits" bind:this={limitsHeading} tabindex="-1" class="font-medium outline-none">Request limits of its own</h3>
+          <p class="text-xs text-muted-foreground">
+            Once a key names {consumer.name}, these replace the limits on everyone: one on a route first, then one on its
+            service, then one everywhere.
+          </p>
+          {#if mine.length === 0 && !issuer}
+            <p class="text-sm text-muted-foreground">None.</p>
+          {/if}
+          {#each mine as row (row.target)}
+            <RateLimitControl
+              {workspace}
+              target={row.target}
+              consumer={consumer.name}
+              legend={targetWords(row.target, workspace)}
+              applies={{ limit: row.limit, per: row.per, by: row.by, from: kindOf(row.target), updated_at: row.updated_at }}
+              {role}
+              onchanged={limitsChanged}
+            />
+          {/each}
+          {#if issuer && free.length > 0}
+            <div class="grid gap-1.5">
+              <label for="{id}-add" class="font-medium">Add a limit</label>
+              <NativeSelect id="{id}-add" bind:value={adding}>
+                <option value="">Choose where…</option>
+                {#each free as t (t)}<option value={t}>{targetWords(t, workspace)}</option>{/each}
+              </NativeSelect>
+            </div>
+            {#if adding}
+              {#key adding}
+                <RateLimitControl
+                  {workspace}
+                  target={adding}
+                  consumer={consumer.name}
+                  legend={targetWords(adding, workspace)}
+                  {role}
+                  onchanged={limitsChanged}
+                />
+              {/key}
+            {/if}
           {/if}
         </section>
       {/if}
