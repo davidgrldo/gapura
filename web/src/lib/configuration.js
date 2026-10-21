@@ -22,8 +22,10 @@ export function byParts(by) {
   if (typeof by === 'string' && by.startsWith('header:')) return { mode: 'header', header: by.slice(7) }
   return { mode: 'ip', header: '' }
 }
-// The form's mode and header put back together as the server reads `by`.
-export const byText = (mode, header) => (mode === 'header' ? `header:${header.trim()}` : mode)
+// The form's mode and header put back together as the server reads `by`. The header's name is
+// lowercased, as the server stores it, so a name typed in capitals is not "changed" from the
+// stored lowercase one, which is how KeyAuthControl compares its header too.
+export const byText = (mode, header) => (mode === 'header' ? `header:${header.trim().toLowerCase()}` : mode)
 // How a list or a read-only line says what a limit counts by.
 export function countedBy(by) {
   const { mode, header } = byParts(by)

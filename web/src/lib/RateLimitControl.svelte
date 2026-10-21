@@ -188,18 +188,33 @@
   const described = (field, help) =>
     [placed === field ? `${id}-${field}-error` : null, help].filter(Boolean).join(' ') || undefined
 
-  // What the help line under the inputs says, by what the limit counts.
+  // What the help line under the inputs says first, by what the limit counts. It has no full stop
+  // of its own: the template ends it with one, before the clause about replicas that every mode
+  // shares.
   const counted = $derived(
     mode === 'consumer'
       ? consumer === undefined
         ? 'Per consumer an API key names; a request with no key counts by its address'
-        : `All of ${consumer}'s requests together`
+        : `All of ${consumer}'s requests together, on each route apart`
       : mode === 'header'
-        ? 'Per value of this header; a request without it, or with it sent twice, counts by its address. Only as honest as whoever sets the header: count by one only behind a proxy that overwrites it'
+        ? 'Per value of this header; a request without it, with it empty, or with it sent twice counts by its address. Only as honest as whoever sets the header: count by one only behind a proxy that overwrites it'
         : consumer === undefined
           ? 'Per client address'
           : `Per client address ${consumer} calls from`,
   )
+
+  // What is said under the control about the consumers whose own limit is on this target. When a
+  // limit applies here it is theirs that replaces it for them; when nothing does, they simply
+  // have one. The Consumers page is where they are changed, so it is only pointed at from a
+  // control that is not already on it: the limit on everyone is drawn there.
+  const note = $derived.by(() => {
+    if (others.length === 0) return ''
+    const one = others.length === 1
+    const has = `${listed(others)} ${one ? 'has its' : 'have their'} own limit here`
+    const replaces = applies ? `, which replaces this one for ${one ? 'it' : 'them'}` : ''
+    const where = target === 'workspace' ? '' : ` Change ${one ? 'it' : 'those'} on the Consumers page.`
+    return `${has}${replaces}.${where}`
+  })
 </script>
 
 {#snippet problem(field)}
@@ -278,7 +293,7 @@
         </div>
         {@render problem('by')}
         <p id="{id}-help" class="text-xs text-muted-foreground">
-          {counted}, counted by each gateway replica separately: with 3 replicas a client can make up to 3 × this.
+          {counted}. Counted by each gateway replica separately: with 3 replicas a client can make up to 3 × this.
         </p>
       {/if}
       {#if error && !placed}
@@ -297,12 +312,8 @@
     {:else}
       <p>Not limited.</p>
     {/if}
-    {#if others.length > 0}
-      <p class="text-xs text-muted-foreground">
-        {listed(others)}
-        {others.length === 1 ? 'has its' : 'have their'} own limit here, which replaces this one for
-        {others.length === 1 ? 'it' : 'them'}. Change {others.length === 1 ? 'it' : 'those'} on the Consumers page.
-      </p>
+    {#if note}
+      <p class="text-xs text-muted-foreground">{note}</p>
     {/if}
   </fieldset>
 </form>

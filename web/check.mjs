@@ -289,10 +289,16 @@ for (const per of PER) {
 // What a limit can count by is consumers.rs's limit_by, read from it for the same reason: a way
 // the server adds and this console does not offer could not be chosen, and one this console
 // offers that the server does not read is refused. Its literal arms are the plain ways, and its
-// `header:` prefix is the header one.
+// `header:` prefix is the header one. A prefix of any other form is one this reader does not
+// understand, so it fails the build rather than pass without being offered.
 const limitBy = consumersSource.match(/fn limit_by\([\s\S]*?\n\}/)
 if (!limitBy) throw new Error(`${CONSUMERS} has no fn limit_by`)
-const serverBy = [...limitBy[0].matchAll(/^\s*"([a-z]+)" =>/gm)].map((m) => m[1])
+const serverBy = [...limitBy[0].matchAll(/^\s*"([a-z_-]+)" =>/gm)].map((m) => m[1])
+for (const [, prefix] of limitBy[0].matchAll(/strip_prefix\("([^"]*)"/g)) {
+  if (prefix !== 'header:') {
+    throw new Error(`${CONSUMERS}: limit_by reads a "${prefix}" prefix, which this check cannot read yet`)
+  }
+}
 if (/strip_prefix\("header:"\)/.test(limitBy[0])) serverBy.push('header')
 if (serverBy.length === 0) throw new Error(`${CONSUMERS}: found fn limit_by but could not read any way out of it`)
 const { BY, BY_LABEL } = await import('./src/lib/configuration.js')
