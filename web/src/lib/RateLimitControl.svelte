@@ -77,19 +77,23 @@
   // A list that leaves the stamp out has it read from the limits list. One that no longer says
   // what `applies` does is not this read's, so an empty stamp is kept, which the server refuses
   // as stale. The limit on everyone reads the list whatever the stamp, for the consumers whose own
-  // limit replaces it here.
+  // limit replaces it here. What is decided is kept in locals, and `seen` and `reading` are only
+  // ever written in here, never read back: an effect that reads what it writes depends on it, and
+  // the list's answer writing them would start the effect over and fetch again, for ever.
   $effect(() => {
     applies
     const mine = ++latest
-    seen = applies?.updated_at
-    reading = own !== null && seen === undefined
+    const stamp = applies?.updated_at
+    const needsStamp = own !== null && stamp === undefined
     const naming = consumer === undefined
-    if (!reading && !naming) return
+    seen = stamp
+    reading = needsStamp
+    if (!needsStamp && !naming) return
     get(base(workspace, 'rate-limit')).then(
       (list) => {
         if (mine !== latest) return
         if (naming) others = list.filter((r) => r.target === target && r.consumer).map((r) => r.consumer)
-        if (!reading) return
+        if (!needsStamp) return
         // The row of this very limit: the one on everyone names no consumer, a consumer's names it.
         const row = list.find((r) => r.target === target && r.consumer === consumer)
         // `by` is compared too: a limit changed to count by something else since the list was
@@ -100,7 +104,7 @@
       () => {
         if (mine !== latest) return
         if (naming) others = []
-        if (!reading) return
+        if (!needsStamp) return
         seen = ''
         reading = false
       },
