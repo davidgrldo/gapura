@@ -111,6 +111,9 @@ pub struct RateLimit {
 pub struct RouteRule {
     /// `namespace/name` of the HTTPRoute.
     pub route: String,
+    /// The rule's place within its own route, never within the whole table: with `route` it
+    /// names the rule's rate-limit window and metric label, so it must not move when another
+    /// route comes or goes. Always 0 for a store route, which is one rule.
     pub rule_index: usize,
     /// RFC 3339 creationTimestamp of the route, for precedence.
     pub creation_timestamp: String,

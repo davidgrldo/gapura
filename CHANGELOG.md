@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A store route's rate limit no longer resets when another route is added, removed or
+  re-prioritised. Its window was named after the route's place in the whole route table, so a
+  change ahead of it renamed the window of every route sorted after: a route at its limit got a
+  fresh allowance, and its `gapura_rate_limited_total` series moved to a new `route` label. The
+  label is now `<route>#0` for every store route and stays put, so after upgrading every store
+  route but the first in the table moves to a new series once. The Kubernetes path is
+  unchanged: its index was already the rule's place in its own HTTPRoute.
 - Upstream TLS verification no longer trusts the emSign roots RustSec has flagged. `rustls-webpki`
   moves from 0.103.15 to 0.103.16, which stops accepting certificate paths that run through the
   distrusted emSign intermediates (RUSTSEC-2026-0382), and `webpki-roots` from 1.0.9 to 1.0.10,
