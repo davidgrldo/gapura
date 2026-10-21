@@ -87,11 +87,17 @@
   const here = () => `${base(workspace, 'consumers')}/${encodeURIComponent(consumer.name)}`
   const keys = $derived(consumer?.keys ?? [])
   // This consumer's own request limits, as the limits list has them, and the targets it has none
-  // on yet, which Add a limit offers.
-  const mine = $derived(limits.filter((r) => r.consumer === consumer?.name))
+  // on yet, which Add a limit offers. In create mode there is no consumer, and a limit on everyone
+  // names none either, so comparing the two would match every one of those limits: only a consumer
+  // has limits of its own to find.
+  const mine = $derived(consumer ? limits.filter((r) => r.consumer === consumer.name) : [])
   const free = $derived(targets.filter((t) => !mine.some((r) => r.target === t)))
-  // The target picked in Add a limit, '' for none: its control is drawn under the picker.
+  // The target picked in Add a limit, '' for none, as the select last set it. A list read since may
+  // have given that target a limit of this consumer's, which is then no longer an option, so the
+  // picker and the control under it go by `picked`, which is the target only while it is still
+  // free. It is worked out, not written back, so nothing here reads what it writes.
   let adding = $state('')
+  const picked = $derived(free.includes(adding) ? adding : '')
   let limitsHeading = $state(null)
   // The list a limit's control applied against has been read again: Add a limit starts over, and
   // focus goes to the section, which a control that has gone with the old list cannot keep.
@@ -411,18 +417,18 @@
           {#if issuer && free.length > 0}
             <div class="grid gap-1.5">
               <label for="{id}-add" class="font-medium">Add a limit</label>
-              <NativeSelect id="{id}-add" bind:value={adding}>
+              <NativeSelect id="{id}-add" bind:value={() => picked, (value) => (adding = value)}>
                 <option value="">Choose where…</option>
                 {#each free as t (t)}<option value={t}>{targetWords(t, workspace)}</option>{/each}
               </NativeSelect>
             </div>
-            {#if adding}
-              {#key adding}
+            {#if picked}
+              {#key picked}
                 <RateLimitControl
                   {workspace}
-                  target={adding}
+                  target={picked}
                   consumer={consumer.name}
-                  legend={targetWords(adding, workspace)}
+                  legend={targetWords(picked, workspace)}
                   {role}
                   onchanged={limitsChanged}
                 />
