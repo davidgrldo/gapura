@@ -15,6 +15,11 @@ means what it usually does, moving from one version below to a later one. Releas
   label is now `<route>#0` for every store route and stays put, so after upgrading every store
   route but the first in the table moves to a new series once. The Kubernetes path is
   unchanged: its index was already the rule's place in its own HTTPRoute.
+- Upstream TLS verification no longer trusts the emSign roots RustSec has flagged. `rustls-webpki`
+  moves from 0.103.15 to 0.103.16, which stops accepting certificate paths that run through the
+  distrusted emSign intermediates (RUSTSEC-2026-0382), and `webpki-roots` from 1.0.9 to 1.0.10,
+  which drops `emSign ECC Root CA - G3` from the bundled roots (RUSTSEC-2026-0381). Both are
+  `Cargo.lock` changes only; the advisories were also failing CI's `deny` job.
 - Every answer the gateway gives on its own now names its cause: a stable key such as
   `NO_ROUTE`, `AUTH_JWT_INVALID`, `RATE_LIMITED` or `UPSTREAM_CONNECT_TIMEOUT`, in an
   `X-Gapura-Error` header and in a new `error_key` field of the access log (`null` for an
