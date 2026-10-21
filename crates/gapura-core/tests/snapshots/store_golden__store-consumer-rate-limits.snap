@@ -1,0 +1,171 @@
+---
+source: crates/gapura-core/tests/store_golden.rs
+expression: cfg
+---
+listeners:
+  - id: "store/http:80"
+    port: 80
+    protocol: Http
+    hostname: ~
+    tls: ~
+    rules:
+      - route: shop/api
+        rule_index: 0
+        creation_timestamp: ""
+        matches:
+          - path:
+              Prefix: /
+            headers: []
+            query: []
+            method: ~
+        filters:
+          request_headers:
+            set: []
+            add: []
+            remove: []
+          response_headers:
+            set: []
+            add: []
+            remove: []
+          redirect: ~
+          rewrite:
+            hostname: "orders.internal:8080"
+            path: ~
+          mirror: ~
+        backends:
+          - cluster: "orders.internal:8080"
+            weight: 1
+        timeouts:
+          request_ms: ~
+          backend_request_ms: ~
+        rate_limit:
+          limit: 20
+          window_ms: 60000
+          by:
+            header: x-tenant
+      - route: shop/pay
+        rule_index: 0
+        creation_timestamp: ""
+        matches:
+          - path:
+              Prefix: /
+            headers: []
+            query: []
+            method: ~
+        filters:
+          request_headers:
+            set: []
+            add: []
+            remove: []
+          response_headers:
+            set: []
+            add: []
+            remove: []
+          redirect: ~
+          rewrite:
+            hostname: "billing.internal:8080"
+            path: ~
+          mirror: ~
+        backends:
+          - cluster: "billing.internal:8080"
+            weight: 1
+        timeouts:
+          request_ms: ~
+          backend_request_ms: ~
+        rate_limit:
+          limit: 100
+          window_ms: 60000
+      - route: shop/web
+        rule_index: 0
+        creation_timestamp: ""
+        matches:
+          - path:
+              Prefix: /
+            headers: []
+            query: []
+            method: ~
+        filters:
+          request_headers:
+            set: []
+            add: []
+            remove: []
+          response_headers:
+            set: []
+            add: []
+            remove: []
+          redirect: ~
+          rewrite:
+            hostname: "orders.internal:8080"
+            path: ~
+          mirror: ~
+        backends:
+          - cluster: "orders.internal:8080"
+            weight: 1
+        timeouts:
+          request_ms: ~
+          backend_request_ms: ~
+        rate_limit:
+          limit: 100
+          window_ms: 60000
+ports:
+  80:
+    - listener: 0
+      hostname: api.example
+      matcher:
+        path:
+          Prefix: /
+        headers: []
+        query: []
+        method: ~
+      rule: 0
+    - listener: 0
+      hostname: pay.example
+      matcher:
+        path:
+          Prefix: /
+        headers: []
+        query: []
+        method: ~
+      rule: 1
+    - listener: 0
+      hostname: web.example
+      matcher:
+        path:
+          Prefix: /
+        headers: []
+        query: []
+        method: ~
+      rule: 2
+clusters:
+  "billing.internal:8080":
+    endpoints: []
+    tls: ~
+    resolve:
+      host: billing.internal
+      port: 8080
+  "orders.internal:8080":
+    endpoints: []
+    tls: ~
+    resolve:
+      host: orders.internal
+      port: 8080
+consumer_rate_limits:
+  shop/mobile:
+    routes:
+      shop/api:
+        limit: 9
+        window_ms: 60000
+        by: consumer
+      shop/web:
+        limit: 8
+        window_ms: 60000
+        by: consumer
+    any:
+      limit: 7
+      window_ms: 60000
+  shop/partner:
+    routes:
+      shop/pay:
+        limit: 500
+        window_ms: 60000
+        by: consumer

@@ -1,6 +1,6 @@
 //! `/api/workspaces/{ws}/consumers`, `/key-auth`, `/jwt` and `/rate-limit`: store mode's
 //! consumers, their API keys, the requirements that a request carry one or a JWT, and the limits
-//! on how many requests come, per workspace.
+//! on how many requests come, per workspace, for everyone or for one consumer alone.
 //!
 //! The same shape as `configuration_api`, whose helpers these use: the caller first, then the
 //! path, then the workspace and the role the action needs, then the body, then the store, which
@@ -237,7 +237,7 @@ pub async fn put_key_auth(
     })
 }
 
-/// `?target=`, as `delete_key_auth`, `delete_jwt` and `delete_rate_limit` read it.
+/// `?target=`, as `delete_key_auth` and `delete_jwt` read it.
 #[derive(Deserialize)]
 pub struct TargetQuery {
     target: String,
@@ -406,7 +406,34 @@ pub async fn list_rate_limit(
     }
 }
 
-/// `PUT /api/workspaces/{ws}/rate-limit`: limit requests on the workspace, a service or a route.
+/// `?target=…&consumer=…`, as `delete_rate_limit` reads it: the consumer's own limit when
+/// `consumer` names one, the limit on everyone when it is absent. Like the body of a `PUT`, it
+/// refuses any key it does not know, so a misspelt `consumer` is refused rather than read as no
+/// consumer at all, which would remove the limit on everyone. `target` may be left out
+/// here only so that `delete_rate_limit` can refuse a query without one as an empty one, as
+/// `target_in` does.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitQuery {
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    consumer: Option<String>,
+}
+
+/// What `delete_rate_limit` answers a query it cannot read: one that names a field it does not
+/// know, or one field twice. It is refused beside `target`, the field every such query needs.
+fn unread_rate_limit_query() -> FieldError {
+    FieldError {
+        field: "target".into(),
+        sentence: "Name target, and consumer for a consumer's own limit, and nothing else.".into(),
+    }
+}
+
+/// `PUT /api/workspaces/{ws}/rate-limit`: limit requests on the workspace, a service or a route,
+/// for everyone or, when the body names a `consumer`, for that consumer alone. The two are
+/// separate limits with stamps of their own, so the `seen_updated_at` sent is that of the one
+/// this write replaces.
 pub async fn put_rate_limit(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -430,6 +457,10 @@ pub async fn put_rate_limit(
         Ok(t) => t,
         Err(e) => return field_error(e),
     };
+    let consumer = match consumers::consumer_named(input.consumer.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return field_error(e),
+    };
     match consumers::rate_limit(&input) {
         Ok(limit) => written(
             store
@@ -437,6 +468,7 @@ pub async fn put_rate_limit(
                     caller.me.id,
                     workspace,
                     &target,
+                    consumer.as_deref(),
                     limit,
                     input.seen_updated_at.as_deref(),
                 )
@@ -446,12 +478,14 @@ pub async fn put_rate_limit(
     }
 }
 
-/// `DELETE /api/workspaces/{ws}/rate-limit?target=…`: stop limiting requests there.
+/// `DELETE /api/workspaces/{ws}/rate-limit?target=…&consumer=…`: stop limiting requests there,
+/// for the consumer `consumer` names alone, or for everyone when it is absent. Either leaves the
+/// other in place. A query naming anything else is refused, and removes nothing.
 pub async fn delete_rate_limit(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: Result<Path<String>, PathRejection>,
-    query: Result<Query<TargetQuery>, QueryRejection>,
+    query: Result<Query<RateLimitQuery>, QueryRejection>,
 ) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
@@ -462,12 +496,22 @@ pub async fn delete_rate_limit(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
-    match target_in(query) {
-        Ok(target) => written(
-            store
-                .delete_rate_limit(caller.me.id, workspace, &target)
-                .await,
-        ),
-        Err(e) => field_error(e),
-    }
+    let Ok(Query(query)) = query else {
+        return field_error(unread_rate_limit_query());
+    };
+    // A query that names no target is refused as an empty one, beside `target`, as `target_in`
+    // refuses it.
+    let target = match Target::parse(query.target.as_deref().unwrap_or("")) {
+        Ok(t) => t,
+        Err(e) => return field_error(e),
+    };
+    let consumer = match consumers::consumer_named(query.consumer.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return field_error(e),
+    };
+    written(
+        store
+            .delete_rate_limit(caller.me.id, workspace, &target, consumer.as_deref())
+            .await,
+    )
 }

@@ -6,7 +6,7 @@
 //! deletes consumers and revokes keys.
 
 use crate::configuration::{self, FieldError};
-use gapura_core::config::{JwtPolicy, RateLimit};
+use gapura_core::config::{JwtPolicy, LimitBy, RateLimit};
 use gapura_core::jwt::JwksError;
 use k8s_openapi::jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -120,6 +120,12 @@ pub struct KeyAuthInput {
 /// data plane writes for the upstream (`gapura_core::credentials::CONSUMER_HEADER`, set in
 /// `upstream_request_filter` after it removes the inbound one). `authorization` is not here:
 /// people send keys in it.
+///
+/// The list binds what is already stored, not only what is written next: `Limit::from_config`
+/// reads a stored limit's `by` header back through `header`, so a name added here later makes
+/// every stored limit counting by that header fail the snapshot, and no data plane gets new
+/// configuration until those rows are gone. A migration has to move such rows off the name before
+/// a binary with the longer list ships.
 const RESERVED_HEADERS: &[&str] = &[
     gapura_core::credentials::CONSUMER_HEADER,
     "host",
@@ -316,6 +322,13 @@ pub struct RateLimitInput {
     pub limit: Option<serde_json::Value>,
     #[serde(default)]
     pub per: Option<serde_json::Value>,
+    /// The consumer whose own limit this is; absent for a limit on everyone.
+    #[serde(default)]
+    pub consumer: Option<String>,
+    /// What the limit counts by: `ip` (the default when absent or null), `consumer` or
+    /// `header:<name>`.
+    #[serde(default)]
+    pub by: Option<serde_json::Value>,
     /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
     /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
     /// does one sent when there is no requirement to replace.
@@ -323,58 +336,112 @@ pub struct RateLimitInput {
     pub seen_updated_at: Option<String>,
 }
 
-/// A request limit: at most `limit` requests per `per`, from each client address, counted by each
-/// data plane replica separately.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// A request limit: at most `limit` requests per `per` from each client, as `by` tells them
+/// apart -- by address, by consumer or by a header's value -- counted by each data plane replica
+/// separately.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limit {
     pub limit: u32,
     pub per: Per,
+    pub by: LimitBy,
 }
 
 /// The configuration a `rate_limit` row stores, and nothing else: an unknown field is a shape this
-/// binary does not know, not one to ignore.
+/// binary does not know, not one to ignore. `by` is absent for the address, so a row written
+/// before it existed reads as it always did.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredLimit {
     limit: u32,
     window_ms: u64,
+    #[serde(default, skip_serializing_if = "LimitBy::is_ip")]
+    by: LimitBy,
 }
 
 impl Limit {
-    /// What the row stores: `{"limit": n, "window_ms": ms}`.
-    pub fn config(self) -> serde_json::Value {
+    /// What the row stores: `{"limit": n, "window_ms": ms}`, with `by` when it is not `ip`.
+    pub fn config(&self) -> serde_json::Value {
         serde_json::to_value(StoredLimit {
             limit: self.limit,
             window_ms: self.per.window_ms(),
+            by: self.by.clone(),
         })
-        .expect("two numbers always serialise")
+        .expect("two numbers and a name always serialise")
     }
 
     /// A stored configuration read back, when it is one the API could have written: a limit of
-    /// 1 to `MAX_RATE_LIMIT` and a window of a second, a minute or an hour. Anything else is
-    /// `None`, and the compiler refuses it rather than serve a limit the console cannot show.
+    /// 1 to `MAX_RATE_LIMIT`, a window of a second, a minute or an hour, and a header to count by
+    /// that `header` accepts as it is stored, lowercase. Anything else is `None`, and the
+    /// compiler refuses it rather than serve a limit the console cannot show.
     pub fn from_config(config: serde_json::Value) -> Option<Limit> {
         let stored: StoredLimit = serde_json::from_value(config).ok()?;
         if !(1..=MAX_RATE_LIMIT).contains(&stored.limit) {
             return None;
         }
+        if let LimitBy::Header(name) = &stored.by {
+            if header(Some(name)).ok().as_ref() != Some(name) {
+                return None;
+            }
+        }
         Some(Limit {
             limit: stored.limit,
             per: Per::of_window(stored.window_ms)?,
+            by: stored.by,
         })
     }
 
     /// What the data plane enforces.
-    pub fn rate_limit(self) -> RateLimit {
+    pub fn rate_limit(&self) -> RateLimit {
         RateLimit {
             limit: self.limit,
             window_ms: self.per.window_ms(),
+            by: self.by.clone(),
         }
     }
 }
 
+/// What a limit counts by, as a request sends it: `ip`, also when absent or null; `consumer`; or
+/// `header:<name>`, with a name `header` accepts, stored lowercase.
+fn limit_by(value: Option<&serde_json::Value>) -> Result<LimitBy, FieldError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(LimitBy::Ip);
+    };
+    let refused = || field("by", "Use ip, consumer or header:<name>.");
+    match value.as_str().ok_or_else(refused)? {
+        "ip" => Ok(LimitBy::Ip),
+        "consumer" => Ok(LimitBy::Consumer),
+        text => match text.strip_prefix("header:").map(str::trim) {
+            Some(name) if !name.is_empty() => header(Some(name))
+                .map(LimitBy::Header)
+                .map_err(|e| field("by", e.sentence)),
+            _ => Err(refused()),
+        },
+    }
+}
+
+/// `by` as the API spells it: `ip`, `consumer` or `header:<name>`.
+pub fn by_text(by: &LimitBy) -> String {
+    match by {
+        LimitBy::Ip => "ip".to_string(),
+        LimitBy::Consumer => "consumer".to_string(),
+        LimitBy::Header(name) => format!("header:{name}"),
+    }
+}
+
+/// `by` as a list or an audit row shows it: absent for the address, which every limit counted
+/// by before `by` existed, so those rows read as they did.
+pub fn shown_by(by: &LimitBy) -> Option<String> {
+    (!by.is_ip()).then(|| by_text(by))
+}
+
+/// The consumer a request names a limit for, by the rule a consumer is created with; `None`
+/// for a limit on everyone.
+pub fn consumer_named(name: Option<&str>) -> Result<Option<String>, FieldError> {
+    name.map(|n| configuration::name(n, "consumer")).transpose()
+}
+
 /// A request limit as a request sends it: `limit` a whole number from 1 to `MAX_RATE_LIMIT`,
-/// `per` one of `second`, `minute` and `hour`.
+/// `per` one of `second`, `minute` and `hour`, and `by` what it counts by, which `limit_by` reads.
 pub fn rate_limit(input: &RateLimitInput) -> Result<Limit, FieldError> {
     let limit = input
         .limit
@@ -394,15 +461,21 @@ pub fn rate_limit(input: &RateLimitInput) -> Result<Limit, FieldError> {
         Some("hour") => Per::Hour,
         _ => return Err(field("per", "Use second, minute or hour.")),
     };
-    Ok(Limit { limit, per })
+    let by = limit_by(input.by.as_ref())?;
+    Ok(Limit { limit, per, by })
 }
 
-/// A request limit as the list shows it.
+/// A request limit as the list shows it. `consumer` and `by` are absent for a limit on everyone
+/// counted by address, so such a row reads as it did before either existed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RateLimitView {
     pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
     pub limit: u32,
     pub per: Per,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
     /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
     pub updated_at: String,
 }
@@ -621,6 +694,8 @@ mod tests {
             target: "workspace".into(),
             limit: Some(limit),
             per: Some(per),
+            consumer: None,
+            by: None,
             seen_updated_at: None,
         }
     }
@@ -637,7 +712,11 @@ mod tests {
             assert_eq!(got.limit, limit);
             assert_eq!(
                 got.rate_limit(),
-                RateLimit { limit, window_ms },
+                RateLimit {
+                    limit,
+                    window_ms,
+                    by: gapura_core::config::LimitBy::Ip,
+                },
                 "{limit}/{per}"
             );
             assert_eq!(
@@ -682,9 +761,81 @@ mod tests {
             target: "workspace".into(),
             limit: None,
             per: None,
+            consumer: None,
+            by: None,
             seen_updated_at: None,
         };
         assert_eq!(rate_limit(&missing).unwrap_err().field, "limit");
+    }
+
+    #[test]
+    fn a_limit_counts_by_the_address_unless_it_names_a_consumer_or_a_header() {
+        use serde_json::json;
+        let with_by = |by: serde_json::Value| RateLimitInput {
+            by: Some(by),
+            ..limit_input(json!(10), json!("minute"))
+        };
+        assert_eq!(
+            rate_limit(&limit_input(json!(10), json!("minute")))
+                .unwrap()
+                .by,
+            LimitBy::Ip
+        );
+        for (by, want) in [
+            (json!(null), LimitBy::Ip),
+            (json!("ip"), LimitBy::Ip),
+            (json!("consumer"), LimitBy::Consumer),
+            (json!("header:X-Tenant"), LimitBy::Header("x-tenant".into())),
+            (
+                json!("header: x-tenant "),
+                LimitBy::Header("x-tenant".into()),
+            ),
+        ] {
+            let got = rate_limit(&with_by(by.clone())).unwrap();
+            assert_eq!(got.by, want, "{by}");
+            assert_eq!(
+                Limit::from_config(got.config()),
+                Some(got.clone()),
+                "read back {by}"
+            );
+            assert_eq!(got.rate_limit().by, want, "what the data plane counts by");
+        }
+        for bad in [
+            json!("everyone"),
+            json!("header:"),
+            json!("header:host"),
+            json!("header:a b"),
+            json!("Consumer"),
+            json!(7),
+        ] {
+            assert_eq!(
+                rate_limit(&with_by(bad.clone())).unwrap_err().field,
+                "by",
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            by_text(&LimitBy::Header("x-tenant".into())),
+            "header:x-tenant"
+        );
+        assert_eq!(shown_by(&LimitBy::Ip), None);
+        assert_eq!(shown_by(&LimitBy::Consumer).as_deref(), Some("consumer"));
+    }
+
+    #[test]
+    fn a_consumer_is_named_as_a_consumer_is_created() {
+        assert_eq!(consumer_named(None).unwrap(), None);
+        assert_eq!(
+            consumer_named(Some("mobile")).unwrap().as_deref(),
+            Some("mobile")
+        );
+        for bad in ["", "a b", ".."] {
+            assert_eq!(
+                consumer_named(Some(bad)).unwrap_err().field,
+                "consumer",
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -698,6 +849,10 @@ mod tests {
             json!({"window_ms": 1_000}),
             json!({"limit": "10", "window_ms": 1_000}),
             json!({"limit": 10, "window_ms": 1_000, "by": "header"}),
+            json!({"limit": 10, "window_ms": 1_000, "by": "everyone"}),
+            json!({"limit": 10, "window_ms": 1_000, "by": {"header": ""}}),
+            json!({"limit": 10, "window_ms": 1_000, "by": {"header": "Host"}}),
+            json!({"limit": 10, "window_ms": 1_000, "by": {"header": "X-Tenant"}}),
             json!(null),
         ] {
             assert_eq!(Limit::from_config(bad.clone()), None, "{bad}");

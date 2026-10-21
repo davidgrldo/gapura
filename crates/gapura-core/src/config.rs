@@ -40,6 +40,88 @@ pub struct Config {
     /// that predates it sends none, while the policies that would read it name no workspace.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credential_workspaces: BTreeMap<String, String>,
+    /// Request limits that are a consumer's own, keyed `workspace/username` -- the bare username
+    /// in a configuration without workspaces -- the form [`RouteRule::route`] names routes in.
+    /// Picked by [`Config::rate_limit_for`] once a `key_auth` policy has identified the caller.
+    ///
+    /// A table beside the rules rather than a variant in each, for the reason `credentials` is
+    /// held once: a limit attached to a consumer alone covers every route of its workspace, and
+    /// copied into every rule it would multiply by consumers, routes and listeners.
+    ///
+    /// A limit a consumer has on a service resolves into one [`ConsumerRateLimits::routes`]
+    /// entry per route of that service, so the table grows with rows and routes and never with
+    /// listeners: a route served on three listeners is still one key.
+    ///
+    /// Absent on the wire while empty, like the two maps above, so a configuration that gives no
+    /// consumer a limit of its own serialises byte-for-byte as before and its ETag does not move.
+    ///
+    /// A data plane that predates this table ignores it and enforces only the rules' own limits.
+    /// That is loose, not loud: nothing fails, and a consumer with a limit of its own is held to
+    /// the rule's instead, which may be none. So data planes are upgraded before the control
+    /// plane starts sending the table, not after.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub consumer_rate_limits: BTreeMap<String, ConsumerRateLimits>,
+}
+
+/// One consumer's own request limits, which replace a rule's [`RouteRule::rate_limit`] for that
+/// consumer: Kong's order, a consumer's limit before any limit on everyone.
+///
+/// How these limits count is part of what they mean, and the data plane has to count them the
+/// same way. Each limit, whether it sits in `routes` or is `any`, counts on each rule apart --
+/// per route in store mode, where a route has one rule -- exactly as a limit on a whole
+/// workspace does: a limit that is the consumer's on no route in particular is "N on every
+/// route", never one counter shared across the routes it covers. A consumer-wide limit that
+/// spent itself on one route would make that route's traffic starve the others, which is not
+/// what attaching a limit to a consumer says.
+///
+/// The data plane counts a consumer's own limit in a window apart from the rule's, keyed with the
+/// consumer, so a consumer that has one is not also counted against the limit everyone else
+/// shares, and the two never draw on one another. Within that window [`RateLimit::by`] still
+/// applies: `ip` counts the consumer's requests per client address, `consumer` counts all of
+/// them together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerRateLimits {
+    /// By [`RouteRule::route`]: the consumer's limit on that route, else on that route's
+    /// service. The store resolves the two, so the data plane looks up one key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub routes: BTreeMap<String, RateLimit>,
+    /// The consumer's limit on no route or service: every route of its workspace not in
+    /// `routes`. No workspace check is needed when it is read, because a consumer is only ever
+    /// identified on a route of its own workspace. Two things guarantee that: the store's
+    /// `plugins_for` sets the `key_auth` policy's workspace on every route that has one, and
+    /// [`credentials::identify`](crate::credentials::identify) then accepts only that
+    /// workspace's keys. A configuration without workspaces has a single one anyway, so there is
+    /// no other for a consumer to be identified in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub any: Option<RateLimit>,
+}
+
+impl Config {
+    /// The request limit for a request `rule` matched, and whether it is the consumer's own:
+    /// the consumer's limit on the route, else on its service -- both resolved into
+    /// [`ConsumerRateLimits::routes`] -- else on the consumer alone, else the rule's own. That is
+    /// Kong's precedence (`plugins_iterator.lua`) restricted to the attachments the store has: a
+    /// store route has exactly one service, so Kong's consumer+route+service is our
+    /// consumer+route, and our route alone is Kong's route alone, which ranks below a
+    /// consumer-wide limit as it does in Kong.
+    ///
+    /// `consumer` is the key [`Config::consumer_rate_limits`] is keyed by, and is known only once
+    /// a `key_auth` policy accepted a key. That is why a limit is the only thing that can be a
+    /// consumer's own: the policies are what find the consumer out, so none of them can depend
+    /// on it, and an anonymous caller never reaches a consumer's limit.
+    pub fn rate_limit_for<'a>(
+        &'a self,
+        rule: &'a RouteRule,
+        consumer: Option<&str>,
+    ) -> Option<(&'a RateLimit, bool)> {
+        let own = consumer
+            .and_then(|c| self.consumer_rate_limits.get(c))
+            .and_then(|c| c.routes.get(&rule.route).or(c.any.as_ref()));
+        match own {
+            Some(limit) => Some((limit, true)),
+            None => rule.rate_limit.as_ref().map(|limit| (limit, false)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,14 +179,54 @@ pub struct MatchEntry {
     pub rule: usize,
 }
 
-/// A per-rule request limit, from the backend Service's `gapura.dev/rate-limit` annotation
-/// ("20/min"; seconds, minutes or hours). Enforced by the data plane per replica and keyed by
-/// client IP: with N replicas the effective allowance is N x limit, which is the honest shape
-/// for a gateway with no database, and `gapura.dev/rate-limit-by: ip` is the only keying.
+/// A per-rule request limit: from the backend Service's `gapura.dev/rate-limit` annotation
+/// ("20/min"; seconds, minutes or hours), or from a store `rate_limit` policy. Enforced by the
+/// data plane per replica: with N replicas the effective allowance is N x limit, which is the
+/// honest shape for a gateway whose replicas share no counter. The annotation path counts by
+/// client IP only (`gapura.dev/rate-limit-by: ip`); a store policy may also count by consumer
+/// or by a header, see [`LimitBy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimit {
     pub limit: u32,
     pub window_ms: u64,
+    /// Absent on the wire when it is [`LimitBy::Ip`], so a limit that counts by address
+    /// serialises exactly as one written before this field existed.
+    #[serde(default, skip_serializing_if = "LimitBy::is_ip")]
+    pub by: LimitBy,
+}
+
+/// What a [`RateLimit`] counts by: one window per client address, per consumer, or per value of
+/// one request header.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitBy {
+    /// Each client address, as the access log names it; an IPv6 /64 counts as one.
+    #[default]
+    Ip,
+    /// Each consumer a `key_auth` policy identified. A request no policy identified counts by
+    /// address instead, so a route that lets anonymous callers through still limits them.
+    Consumer,
+    /// Each value of this request header, named in lowercase -- the control plane stores it so,
+    /// because it validates the name on write. Only a single, non-empty line counts: a request
+    /// without the header, with it repeated or with it empty counts by address instead, because
+    /// a front proxy that appends a line rather than replacing it leaves the client's own line
+    /// first, and honouring either would let the client pick its window. Past 65,536 windows
+    /// held per window name -- a rule has one, and a consumer's own limit has one for each rule
+    /// it reaches; ended windows not yet swept count too, and the cap applies separately to each
+    /// name and on each replica -- a new value counts by address too, so a client choosing
+    /// values cannot grow the data plane's table at its request rate. Only as
+    /// honest as whoever sets the header: a client that sets it itself picks a fresh window per
+    /// value, so this belongs behind a proxy that overwrites it.
+    Header(String),
+}
+
+impl LimitBy {
+    /// Whether this is the default, which [`RateLimit::by`] leaves off the wire (its
+    /// `skip_serializing_if`). Public because the crates that build a limit from a store row
+    /// decide the same thing when they write one out.
+    pub fn is_ip(&self) -> bool {
+        matches!(self, LimitBy::Ip)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -425,6 +547,7 @@ mod tests {
             )]),
             credentials: BTreeMap::from([("abc123".to_string(), "team-orders".to_string())]),
             credential_workspaces: Default::default(),
+            consumer_rate_limits: Default::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
@@ -489,6 +612,65 @@ mod tests {
         );
     }
 
+    /// The consumer table is invisible on the wire while empty, and so is whichever half of an
+    /// entry is unused: a configuration that gives no consumer a limit of its own has to
+    /// serialise byte-for-byte as before, or its ETag changes for no reason, and an entry with
+    /// only a consumer-wide limit should not carry an empty `routes` any more than the reverse.
+    #[test]
+    fn an_empty_consumer_table_is_absent_on_the_wire_and_so_is_an_unused_half_of_an_entry() {
+        let wire = serde_json::to_value(Config::default()).unwrap();
+        assert!(
+            wire.get("consumer_rate_limits").is_none(),
+            "an empty table must not be serialised: {wire}"
+        );
+
+        let cfg = Config {
+            consumer_rate_limits: BTreeMap::from([
+                (
+                    "shop/mobile".to_string(),
+                    ConsumerRateLimits {
+                        routes: BTreeMap::new(),
+                        any: Some(RateLimit {
+                            by: LimitBy::Consumer,
+                            ..per_ip(8)
+                        }),
+                    },
+                ),
+                (
+                    "shop/batch".to_string(),
+                    ConsumerRateLimits {
+                        routes: BTreeMap::from([("shop/api".to_string(), per_ip(9))]),
+                        any: None,
+                    },
+                ),
+            ]),
+            ..Config::default()
+        };
+        let wire = serde_json::to_value(&cfg).unwrap();
+        let table = &wire["consumer_rate_limits"];
+        assert!(
+            table["shop/mobile"].get("routes").is_none(),
+            "an entry with no routes must not carry `routes`: {table}"
+        );
+        assert_eq!(table["shop/mobile"]["any"]["by"], "consumer");
+        assert!(
+            table["shop/batch"].get("any").is_none(),
+            "an entry with no `any` must not carry it: {table}"
+        );
+        assert_eq!(table["shop/batch"]["routes"]["shop/api"]["limit"], 9);
+        let back: Config = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, cfg, "the table must round-trip unchanged");
+
+        let any_only: ConsumerRateLimits =
+            serde_json::from_str(r#"{"any": {"limit": 5, "window_ms": 60000}}"#)
+                .expect("an entry written with only `any` must read");
+        assert!(
+            any_only.routes.is_empty(),
+            "a missing `routes` must mean none"
+        );
+        assert_eq!(any_only.any, Some(per_ip(5)));
+    }
+
     /// The other direction, which is easy to miss: the data plane keeps a disk cache, so
     /// after an upgrade a NEW binary reads a config an OLD one wrote. Every field a future
     /// version adds has to be able to be absent, which is what `#[serde(default)]` on the
@@ -499,5 +681,118 @@ mod tests {
         let back: Config = serde_json::from_value(empty)
             .expect("a Config missing every field must load as the default");
         assert_eq!(back, Config::default());
+    }
+
+    fn per_ip(limit: u32) -> RateLimit {
+        RateLimit {
+            limit,
+            window_ms: 60_000,
+            by: LimitBy::Ip,
+        }
+    }
+
+    fn rule(route: &str, limit: Option<RateLimit>) -> RouteRule {
+        RouteRule {
+            route: route.into(),
+            rule_index: 0,
+            creation_timestamp: String::new(),
+            matches: vec![],
+            filters: Filters::default(),
+            backends: vec![],
+            timeouts: Timeouts::default(),
+            rate_limit: limit,
+            plugins: vec![],
+        }
+    }
+
+    /// The consumer's limit on the route, else its limit anywhere, else the rule's own: and the
+    /// rule's own for anyone with nothing of their own, or with no consumer identified at all.
+    #[test]
+    fn a_consumer_s_own_limit_replaces_the_rule_s_and_anyone_else_gets_the_rule_s() {
+        let cfg = Config {
+            consumer_rate_limits: BTreeMap::from([
+                (
+                    "shop/mobile".to_string(),
+                    ConsumerRateLimits {
+                        routes: BTreeMap::from([("shop/api".to_string(), per_ip(9))]),
+                        any: Some(per_ip(8)),
+                    },
+                ),
+                ("shop/batch".to_string(), ConsumerRateLimits::default()),
+            ]),
+            ..Config::default()
+        };
+        let api = rule("shop/api", Some(per_ip(1)));
+        let web = rule("shop/web", Some(per_ip(1)));
+        let open = rule("shop/open", None);
+        let got = |rule: &RouteRule, consumer: Option<&str>| {
+            cfg.rate_limit_for(rule, consumer)
+                .map(|(l, own)| (l.limit, own))
+        };
+        assert_eq!(
+            got(&api, Some("shop/mobile")),
+            Some((9, true)),
+            "on the route"
+        );
+        assert_eq!(
+            got(&web, Some("shop/mobile")),
+            Some((8, true)),
+            "anywhere else"
+        );
+        assert_eq!(
+            got(&open, Some("shop/mobile")),
+            Some((8, true)),
+            "even where no one else is limited"
+        );
+        assert_eq!(
+            got(&api, Some("shop/batch")),
+            Some((1, false)),
+            "nothing of its own"
+        );
+        assert_eq!(got(&api, Some("shop/unknown")), Some((1, false)));
+        assert_eq!(got(&api, None), Some((1, false)), "no consumer identified");
+        assert_eq!(got(&open, None), None);
+    }
+
+    /// Counting by address is what every limit did before `by` existed, so it must stay absent
+    /// on the wire: a configuration that does not use the others serialises byte-for-byte as
+    /// before, and its ETag does not change. The other two round-trip as written, and the address
+    /// spelt out reads as the address while a name nobody knows does not read at all.
+    #[test]
+    fn what_a_limit_counts_by_is_absent_on_the_wire_when_it_is_the_address() {
+        let wire = serde_json::to_value(per_ip(5)).unwrap();
+        assert_eq!(wire, serde_json::json!({"limit": 5, "window_ms": 60_000}));
+        let old: RateLimit =
+            serde_json::from_value(wire).expect("a limit from before `by` still reads");
+        assert_eq!(old.by, LimitBy::Ip);
+        for (by, json) in [
+            (LimitBy::Consumer, serde_json::json!("consumer")),
+            (
+                LimitBy::Header("x-tenant".into()),
+                serde_json::json!({"header": "x-tenant"}),
+            ),
+        ] {
+            let limit = RateLimit {
+                by: by.clone(),
+                ..per_ip(5)
+            };
+            let wire = serde_json::to_value(&limit).unwrap();
+            assert_eq!(wire["by"], json);
+            assert_eq!(serde_json::from_value::<RateLimit>(wire).unwrap(), limit);
+        }
+        // Writing the default out by hand is harmless and reads as the default; a name this
+        // binary does not know is an error, not the default. A limit that fell back to counting
+        // by address on a misspelt (or newer) `by` would silently be a different limit from the
+        // one that was written, so it has to fail the load, as an unknown variant does anywhere.
+        let explicit: RateLimit =
+            serde_json::from_str(r#"{"limit":5,"window_ms":60000,"by":"ip"}"#)
+                .expect("`ip` is spelt out by hand as often as it is left off");
+        assert_eq!(explicit.by, LimitBy::Ip);
+        let unknown =
+            serde_json::from_str::<RateLimit>(r#"{"limit":5,"window_ms":60000,"by":"tenant"}"#);
+        assert!(
+            unknown.is_err(),
+            "an unknown `by` must not fall back to the address: {unknown:?}"
+        );
     }
 }

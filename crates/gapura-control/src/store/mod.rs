@@ -74,6 +74,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0010_route_strip_path",
         include_str!("../../migrations/0010_route_strip_path.sql"),
     ),
+    (
+        "0011_consumer_policies",
+        include_str!("../../migrations/0011_consumer_policies.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
@@ -288,25 +292,31 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Only the ones attached to a route or a service, or to neither. A policy scoped to a
-        // consumer needs consumers, which this phase does not have yet. A row that is selected and
-        // cannot be read fails the whole snapshot: see `parse_plugin` for why that, and not
-        // leaving the row out, is the safe direction. A `rate_limit` row is a policy row too, but
-        // not a plugin the data plane runs: it goes to `rate_limits`, which set the rule's field.
+        // Every policy on everyone, and the request limits that are a consumer's own: a limit is
+        // the only policy a consumer can have, since the others are what find the consumer out.
+        // A consumer-scoped row of another kind, which only SQL written by hand can make, is
+        // left out, which is safe: it could only add a check for a caller already identified.
+        // A row that is selected and cannot be read fails the whole snapshot: see `parse_plugin`
+        // for why that, and not leaving the row out, is the safe direction. A `rate_limit` row is
+        // a policy row too, but not a plugin the data plane runs: it goes to `rate_limits`, which
+        // set the rule's field and the consumer table.
         let mut plugins = Vec::new();
         let mut rate_limits = Vec::new();
         let rows = tx
             .query(
                 "select w.name as workspace, p.name, p.config, r.name as route, s.name as service,
+                        c.username as consumer,
                         coalesce(r.workspace_id <> p.workspace_id, false)
-                          or coalesce(s.workspace_id <> p.workspace_id, false) as foreign_target
+                          or coalesce(s.workspace_id <> p.workspace_id, false)
+                          or coalesce(c.workspace_id <> p.workspace_id, false) as foreign_target
                    from plugins p
-                   join workspaces w    on w.id = p.workspace_id
-                   left join routes r   on r.id = p.route_id
-                   left join services s on s.id = p.service_id
-                  where p.enabled and p.consumer_id is null
+                   join workspaces w     on w.id = p.workspace_id
+                   left join routes r    on r.id = p.route_id
+                   left join services s  on s.id = p.service_id
+                   left join consumers c on c.id = p.consumer_id
+                  where p.enabled and (p.consumer_id is null or p.name = $1)
                   order by w.name, p.name, p.id",
-                &[],
+                &[&RATE_LIMIT],
             )
             .await?;
         for r in rows {
@@ -315,13 +325,15 @@ impl Store {
             let workspace: String = r.get("workspace");
             let route: Option<String> = r.get("route");
             let service: Option<String> = r.get("service");
-            // The foreign keys allow a policy to name another workspace's route or service.
-            // Compiled, it would attach to a same-named route in its own workspace instead --
-            // the wrong target, silently -- so it fails the snapshot like any unreadable row.
+            let consumer: Option<String> = r.get("consumer");
+            // The foreign keys allow a policy to name another workspace's route, service or
+            // consumer. Compiled, it would attach to a same-named route in its own workspace
+            // instead, or count a same-named consumer of its own workspace -- the wrong target or
+            // the wrong caller, silently -- so it fails the snapshot like any unreadable row.
             if r.get::<_, bool>("foreign_target") {
                 anyhow::bail!(
-                    "policy {name:?} in workspace {workspace:?} names a route or service of \
-                     another workspace"
+                    "policy {name:?} in workspace {workspace:?} names a route, service or \
+                     consumer of another workspace"
                 );
             }
             let context =
@@ -332,6 +344,7 @@ impl Store {
                     workspace,
                     route,
                     service,
+                    consumer,
                     limit,
                 });
                 continue;
@@ -555,10 +568,11 @@ pub(crate) const RATE_LIMIT: &str = "rate_limit";
 /// so a route keeps the limit it was last served rather than losing it.
 fn parse_rate_limit(config: serde_json::Value) -> Result<gapura_core::config::RateLimit> {
     crate::consumers::Limit::from_config(config)
-        .map(crate::consumers::Limit::rate_limit)
+        .map(|limit| limit.rate_limit())
         .context(
-            "the configuration does not fit a rate_limit policy: a limit from 1 to 1000000 and \
-             a window_ms of 1000, 60000 or 3600000",
+            "the configuration does not fit a rate_limit policy: a limit from 1 to 1000000, \
+             a window_ms of 1000, 60000 or 3600000, and a by of ip, consumer or a lowercase \
+             header name",
         )
 }
 
@@ -747,7 +761,16 @@ mod tests {
             parse_rate_limit(json!({"limit": 120, "window_ms": 60_000})).unwrap(),
             gapura_core::config::RateLimit {
                 limit: 120,
-                window_ms: 60_000
+                window_ms: 60_000,
+                by: gapura_core::config::LimitBy::Ip,
+            }
+        );
+        assert_eq!(
+            parse_rate_limit(json!({"limit": 10, "window_ms": 1_000, "by": "consumer"})).unwrap(),
+            gapura_core::config::RateLimit {
+                limit: 10,
+                window_ms: 1_000,
+                by: gapura_core::config::LimitBy::Consumer,
             }
         );
         for bad in [
@@ -755,7 +778,8 @@ mod tests {
             json!({"limit": 10, "window_ms": 0}),
             json!({"limit": 10, "window_ms": 30_000}),
             json!({"limit": 10}),
-            json!({"limit": 10, "window_ms": 1_000, "by": "consumer"}),
+            json!({"limit": 10, "window_ms": 1_000, "by": "everyone"}),
+            json!({"limit": 10, "window_ms": 1_000, "by": {"header": "Host"}}),
             json!({}),
         ] {
             assert!(parse_rate_limit(bad.clone()).is_err(), "accepted {bad}");

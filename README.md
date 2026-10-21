@@ -37,6 +37,9 @@ a separate control plane is optional rather than required:
   configuration only as its SHA-256 hash, so a stolen config cache yields nothing to replay, and
   the presented key maps straight to the consumer it was issued to; a token that does not verify
   is refused with `401` and a `WWW-Authenticate` challenge before the request goes upstream.
+  In store mode a request limit can also be a consumer's own -- everywhere, or on one route or
+  service -- and can count per consumer or per value of a header as well as per address; a
+  consumer's own limit comes before any limit on everyone, in Kong's order.
 - **Operations**: Prometheus metrics, a JSON access log carrying trace context and the client
   address as seen behind trusted proxies, a Grafana dashboard and example alerts, status written
   only by the replica holding the Lease, an address per Gateway when one shared address is not
