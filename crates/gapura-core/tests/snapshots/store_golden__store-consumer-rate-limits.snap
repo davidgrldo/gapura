@@ -44,7 +44,7 @@ listeners:
           by:
             header: x-tenant
       - route: shop/pay
-        rule_index: 1
+        rule_index: 0
         creation_timestamp: ""
         matches:
           - path:
@@ -76,7 +76,7 @@ listeners:
           limit: 100
           window_ms: 60000
       - route: shop/web
-        rule_index: 2
+        rule_index: 0
         creation_timestamp: ""
         matches:
           - path:

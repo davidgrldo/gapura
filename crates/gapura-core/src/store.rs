@@ -249,11 +249,16 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
         });
 
         let matches = expand(route);
-        let rule_index = rules.len();
+        // The rule's place in the whole table, which the port table points at. It is not the
+        // rule's `rule_index`: that names the rule's rate-limit window and its metric label,
+        // and a place in the whole table moves whenever a route is added, removed or
+        // re-prioritised ahead of it, resetting the window. A store route is one rule, so its
+        // index within its route is always 0, as an HTTPRoute with one rule's is.
+        let position = rules.len();
         let plugins = plugins_for(&snap.plugins, route);
         rules.push(RouteRule {
             route: route_id(route),
-            rule_index,
+            rule_index: 0,
             // Gateway API breaks precedence ties on creation time. The store breaks them on an
             // explicit priority, so there is nothing to put here and nothing that reads it.
             creation_timestamp: String::new(),
@@ -286,10 +291,10 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 
         for m in matches {
             if route.hosts.is_empty() {
-                table.push((None, m, rule_index));
+                table.push((None, m, position));
             } else {
                 for host in &route.hosts {
-                    table.push((Some(host.clone()), m.clone(), rule_index));
+                    table.push((Some(host.clone()), m.clone(), position));
                 }
             }
         }
@@ -1179,6 +1184,35 @@ mod tests {
         };
         let cfg = compile(&snap, &StoreSettings::default());
         assert_eq!(hit(&cfg, 80, "any", "/anything", "GET"), Some("specific"));
+    }
+
+    /// The data plane names a rule's rate-limit window and its `gapura_rate_limited_total`
+    /// label `route#rule_index`. When that index was the rule's place in the whole table, a
+    /// route added ahead of this one renamed its window: a route at its limit got a fresh
+    /// allowance and its metric moved to a new series.
+    #[test]
+    fn a_route_added_ahead_of_another_leaves_its_window_name_alone() {
+        let window = |cfg: &Config| {
+            let r = cfg.listeners[0]
+                .rules
+                .iter()
+                .find(|r| r.route == "orders")
+                .expect("orders is served");
+            format!("{}#{}", r.route, r.rule_index)
+        };
+        let mut snap = StoreSnapshot {
+            services: vec![svc("v1", "v1.internal", 80)],
+            routes: vec![route("orders", "v1", "/orders", 0)],
+            ..Default::default()
+        };
+        let before = window(&compile(&snap, &StoreSettings::default()));
+        snap.routes.push(route("ahead", "v1", "/ahead", 10));
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(
+            cfg.listeners[0].rules[0].route, "ahead",
+            "the new route sorts first, so orders moved down the table"
+        );
+        assert_eq!(window(&cfg), before);
     }
 
     /// Row order must not reach the output, or two replicas querying the same rows could serve
