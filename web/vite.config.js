@@ -48,8 +48,10 @@ import tailwindcss from '@tailwindcss/vite'
 // JWKS as the text it was pasted as: `GET /api/workspaces/<name>/jwt` answers it without the JWKS
 // and with how many keys it lists, and `?target=` answers one of them whole, or 404 when that
 // target has none. The rows' `jwt` tells the same story, as their `key_auth` does.
-// rate-limit.json holds the request limits set there, `[{ target, limit, per }]`, as
-// `GET /api/workspaces/<name>/rate-limit` answers it, and the rows' `rate_limit` tells the same story.
+// rate-limit.json holds the request limits set there, `[{ target, consumer?, limit, per, by?, updated_at }]`,
+// as `GET /api/workspaces/<name>/rate-limit` answers it: the limits on everyone first, then each
+// consumer's own, `by` absent for the address. The rows' `rate_limit` tells the same story for the
+// limits on everyone.
 //
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
 // service or route created on its list, replaced or deleted by name, a consumer created or
