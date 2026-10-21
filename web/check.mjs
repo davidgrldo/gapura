@@ -286,7 +286,23 @@ if (JSON.stringify(serverPer) !== JSON.stringify(PER)) {
 for (const per of PER) {
   if (!PER_SHORT[per]) throw new Error(`PER_SHORT in src/lib/configuration.js has no tag for ${per}`)
 }
-console.log('ok: the request-limit control offers the bounds and windows the server accepts')
+// What a limit can count by is consumers.rs's limit_by, read from it for the same reason: a way
+// the server adds and this console does not offer could not be chosen, and one this console
+// offers that the server does not read is refused. Its literal arms are the plain ways, and its
+// `header:` prefix is the header one.
+const limitBy = consumersSource.match(/fn limit_by\([\s\S]*?\n\}/)
+if (!limitBy) throw new Error(`${CONSUMERS} has no fn limit_by`)
+const serverBy = [...limitBy[0].matchAll(/^\s*"([a-z]+)" =>/gm)].map((m) => m[1])
+if (/strip_prefix\("header:"\)/.test(limitBy[0])) serverBy.push('header')
+if (serverBy.length === 0) throw new Error(`${CONSUMERS}: found fn limit_by but could not read any way out of it`)
+const { BY, BY_LABEL } = await import('./src/lib/configuration.js')
+if (JSON.stringify(serverBy) !== JSON.stringify(BY)) {
+  throw new Error(`BY in src/lib/configuration.js is ${BY}, the server's limit_by reads ${serverBy}`)
+}
+for (const mode of BY) {
+  if (!BY_LABEL[mode]) throw new Error(`BY_LABEL in src/lib/configuration.js has no label for ${mode}`)
+}
+console.log('ok: the request-limit control offers the bounds, windows and counts the server accepts')
 
 // The sheets offer a Reload button when a 409's sentence contains "Reload" (that is how they
 // tell a stale save from any other conflict), so the server's stale-edit sentence has to keep
