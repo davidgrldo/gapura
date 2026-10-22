@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console sets a consumer's own request limits (#NNN). A consumer's sheet lists the limits
+  of its own, each headed by where it sits (everywhere in the workspace, on a service or on a
+  route), and adds one on any target it has none on yet. Every request-limit control has Count
+  per: the client address, the consumer an API key names, or one header's value, with a sentence
+  on what each means and how a missing header falls back to the address. A limit on everyone
+  names the consumers whose own limit replaces it there. The service and route lists say what a
+  limit counts by, the audit log names a consumer's own limit by its target and the consumer, and
+  deleting a consumer says how many limits of its own go with it. The request-limit and API-key
+  controls no longer read the policy list over and over when a row's own stamp is missing.
 - A store request limit can be a consumer's own (#264). `PUT /api/workspaces/{ws}/rate-limit`
   takes `consumer`, for a limit that applies only once `key_auth` has identified that consumer,
   whether it sits everywhere in the workspace, on one route or on one service; and `by`: `ip`
