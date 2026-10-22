@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- The console sets a consumer's own request limits (#NNN). A consumer's sheet lists the limits
+- The console sets a consumer's own request limits (#267). A consumer's sheet lists the limits
   of its own, each headed by where it sits (everywhere in the workspace, on a service or on a
   route), and adds one on any target it has none on yet. Every request-limit control has Count
   per: the client address, the consumer an API key names, or one header's value, with a sentence
