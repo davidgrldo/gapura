@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! docker run -d --rm --name gapura-pg -e POSTGRES_PASSWORD=x -p 5433:5432 postgres:17-alpine
-//! GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control --test rate_limit
+//! GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control --test it rate_limit::
 //! ```
 
 use std::sync::Arc;
@@ -26,36 +26,7 @@ use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// One database, so the tests take turns, as in `consumers.rs`.
-static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn fresh_store() -> Option<(Arc<Store>, tokio::sync::MutexGuard<'static, ()>)> {
-    let url = match std::env::var("GAPURA_TEST_DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "GAPURA_TEST_DATABASE_URL must be set in CI"
-            );
-            eprintln!("skipped: set GAPURA_TEST_DATABASE_URL to run this");
-            return None;
-        }
-    };
-    let guard = ONE_AT_A_TIME.lock().await;
-    let store = Arc::new(Store::connect(&url).await.expect("connecting"));
-    store
-        .client()
-        .await
-        .expect("client")
-        .batch_execute(
-            "drop schema public cascade; create schema public;
-             grant all on schema public to public;",
-        )
-        .await
-        .expect("resetting the schema");
-    store.migrate().await.expect("migrating");
-    Some((store, guard))
-}
+use crate::common::fresh_store;
 
 const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 

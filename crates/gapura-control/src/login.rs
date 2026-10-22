@@ -2092,7 +2092,7 @@ mod against_a_stub_provider {
     }
 
     /// A store with nothing in it, when there is one to test against: the variable and the rule
-    /// tests/identity.rs uses. Cargo runs one test binary at a time, and the tests in this one
+    /// tests/it/common.rs uses. Cargo runs one test binary at a time, and the tests in this one
     /// that touch a database hold the guard that comes with it until they end, so resetting the
     /// schema here never pulls it from under another.
     async fn empty_store() -> Option<(
