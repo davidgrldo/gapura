@@ -99,13 +99,21 @@
   let adding = $state('')
   const picked = $derived(free.includes(adding) ? adding : '')
   let limitsHeading = $state(null)
-  // The list a limit's control applied against has been read again: Add a limit starts over, and
-  // focus goes to the section, which a control that has gone with the old list cannot keep.
-  async function limitsChanged() {
+  // The list a limit's control applied against has been read again, and `target` is the one it
+  // applied to: Add a limit starts over, and focus goes to the section's heading, but only when the
+  // control that applied is gone with the old list and cannot keep it. That is the control under
+  // Add a limit, which always unmounts, and a limit's own control once its limit has been deleted.
+  // One that stays after an edit takes focus back itself, on its checkbox, where the change was
+  // made, and the heading must not take it first: a screen reader would announce the heading and
+  // then be cut off by the checkbox. The picker's control is told apart by its target being the
+  // picked one, which only a target the consumer has no limit on can be; that is asked before the
+  // list is read, since afterwards the new limit is among the consumer's own.
+  async function limitsChanged(target) {
+    const added = target === picked
     await onsaved()
     adding = ''
     await tick()
-    limitsHeading?.focus()
+    if (added || !mine.some((r) => r.target === target)) limitsHeading?.focus()
   }
   const kindOf = (target) => target.split(':')[0]
 
@@ -289,7 +297,9 @@
     const n = keys.length
     const m = mine.length
     const parts = [n === 1 ? 'its 1 key' : n > 1 ? `its ${n} keys` : '', m === 1 ? 'its own request limit' : m > 1 ? `its ${m} own request limits` : ''].filter(Boolean)
-    const what = parts.length === 0 ? '' : ` and ${parts.join(' and ')}`
+    // One thing is joined with "and"; two are set off by a comma, so the delete does not read as
+    // three things strung together.
+    const what = parts.length === 0 ? '' : parts.length === 1 ? ` and ${parts[0]}` : `, ${parts.join(' and ')}`
     return `Delete ${consumer?.name}${what}? This cannot be undone.`
   })
   const CONFIRM = { close: 'Close', revoke: 'Revoke', delete: 'Delete' }
@@ -411,7 +421,7 @@
               legend={targetWords(row.target, workspace)}
               applies={{ limit: row.limit, per: row.per, by: row.by, from: kindOf(row.target), updated_at: row.updated_at }}
               {role}
-              onchanged={limitsChanged}
+              onchanged={() => limitsChanged(row.target)}
             />
           {/each}
           {#if issuer && free.length > 0}
@@ -430,7 +440,7 @@
                   consumer={consumer.name}
                   legend={targetWords(picked, workspace)}
                   {role}
-                  onchanged={limitsChanged}
+                  onchanged={() => limitsChanged(picked)}
                 />
               {/key}
             {/if}

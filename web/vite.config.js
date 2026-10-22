@@ -50,7 +50,8 @@ import tailwindcss from '@tailwindcss/vite'
 // target has none. The rows' `jwt` tells the same story, as their `key_auth` does.
 // rate-limit.json holds the request limits set there, `[{ target, consumer?, limit, per, by?, updated_at }]`,
 // as `GET /api/workspaces/<name>/rate-limit` answers it: the limits on everyone first, then each
-// consumer's own, `by` absent for the address. The rows' `rate_limit` tells the same story for the
+// consumer's own, by username and for one consumer the workspace's first, then its services', then
+// its routes', `by` absent for the address. The rows' `rate_limit` tells the same story for the
 // limits on everyone.
 //
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
