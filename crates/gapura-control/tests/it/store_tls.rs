@@ -14,7 +14,7 @@
 //!   postgres:17-alpine sh -c 'cp /tls/server.key.src /tmp/k && chown postgres /tmp/k && chmod 600 /tmp/k \
 //!   && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tmp/k'
 //! GAPURA_TEST_TLS_DATABASE_URL=postgres://postgres:x@localhost:5434/postgres \
-//!   GAPURA_TEST_DATABASE_CA=$PWD/ca.crt cargo test -p gapura-control --test store_tls
+//!   GAPURA_TEST_DATABASE_CA=$PWD/ca.crt cargo test -p gapura-control --test it store_tls::
 //! ```
 
 use gapura_control::store::Store;

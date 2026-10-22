@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! docker run -d --rm --name pg -e POSTGRES_PASSWORD=x -p 5433:5432 postgres:17-alpine
-//! GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control --test config_endpoint
+//! GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control --test it config_endpoint::
 //! ```
 
 use std::net::SocketAddr;
@@ -22,44 +22,15 @@ use gapura_core::matcher::{RegexMap, RequestAttrs};
 use gapura_core::store::StoreSettings;
 use tower::ServiceExt;
 
-/// One database, so the tests take turns. Each starts by dropping the schema, and two doing
-/// that at once delete each other's tables mid-run. The guard is held for the whole test rather
-/// than just the reset, because the race is between one test's reset and another's queries.
-static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::common::fresh_store;
 
+/// A fresh store, as `common::fresh_store` makes one, and the endpoint over it.
 async fn fixture() -> Option<(
     Arc<Store>,
     axum::Router,
     tokio::sync::MutexGuard<'static, ()>,
 )> {
-    let url = match std::env::var("GAPURA_TEST_DATABASE_URL") {
-        Ok(url) => url,
-        // Optional locally, mandatory in CI. Without this, a typo in the workflow's variable
-        // name would skip these tests and report a green build that proved nothing -- which is
-        // the exact failure they exist to catch, reproduced one level up.
-        Err(_) => {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "GAPURA_TEST_DATABASE_URL must be set in CI"
-            );
-            eprintln!("skipped: set GAPURA_TEST_DATABASE_URL to run this");
-            return None;
-        }
-    };
-    let guard = ONE_AT_A_TIME.lock().await;
-    let store = Arc::new(Store::connect(&url).await.expect("connecting"));
-    // Each run starts from nothing, so a failure is never yesterday's rows.
-    {
-        let pool_client = store.client().await.expect("client");
-        pool_client
-            .batch_execute(
-                "drop schema public cascade; create schema public;
-                 grant all on schema public to public;",
-            )
-            .await
-            .expect("resetting the schema");
-    }
-    store.migrate().await.expect("migrating");
+    let (store, guard) = fresh_store().await?;
     let api = Arc::new(ConfigApi {
         store: store.clone(),
         settings: StoreSettings {
