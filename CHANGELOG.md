@@ -8,6 +8,24 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A JWT requirement can take its keys from the URL its issuer publishes them at (#PR).
+  `PUT /api/workspaces/{ws}/jwt` takes `jwks_uri` (https, no user name, password or fragment, at
+  most 2048 characters) instead of `jwks`, never beside it, and optionally `jwks_ca_pem`: CA
+  certificates that verify that URL in place of the public roots, for an in-cluster IdP. The
+  control plane never fetches it. Each data plane does, in the background beside its
+  configuration poll and never on a request: every 10 minutes, or as the answer's
+  `Cache-Control: max-age` says within 1 minute to 1 hour, and again when a token names a key it
+  does not hold, at most once per 30 seconds (that token is refused; the next one verifies). A
+  failed fetch keeps the last good keys verifying, for as long as the IdP is unreachable and
+  across a restart: they are kept beside the configuration in the `--config-cache` file. A URL
+  that has never loaded refuses every token with `AUTH_JWT_INVALID`. A redirect, an answer over
+  64 KiB, one with no usable key, and one holding an `oct` or private key are failed fetches.
+  `gapura_jwks_fetch_errors_total{uri}` counts failures and
+  `gapura_jwks_last_success_timestamp_seconds{uri}` says when the keys being served were
+  fetched, 0 while they never were. A data plane older than this release refuses the routes such
+  a requirement guards rather than the whole configuration. The JWT list shows `jwks_uri` in place
+  of a key count, one target's requirement reads back with `jwks_uri` and `jwks_ca_pem`, and the
+  audit log records the URL. The console's form for it follows.
 - Policies run through a typed contract (#270), with no change in behaviour. Each policy kind
   declares the phases it runs in and how it reads a body, and the data plane compiles every
   rule's policies once per configuration into a list per phase. A rule whose policies cannot all run

@@ -37,6 +37,10 @@ a separate control plane is optional rather than required:
   configuration only as its SHA-256 hash, so a stolen config cache yields nothing to replay, and
   the presented key maps straight to the consumer it was issued to; a token that does not verify
   is refused with `401` and a `WWW-Authenticate` challenge before the request goes upstream.
+  A JWT requirement takes its keys pasted as a JWKS or from the `jwks_uri` its issuer publishes
+  them at, which each data plane fetches in the background and keeps through an IdP outage and
+  across a restart; `gapura_jwks_fetch_errors_total{uri}` and
+  `gapura_jwks_last_success_timestamp_seconds{uri}` say when it last could.
   In store mode a request limit can also be a consumer's own -- everywhere, or on one route or
   service -- and can count per consumer or per value of a header as well as per address; a
   consumer's own limit comes before any limit on everyone, in Kong's order.
