@@ -564,6 +564,13 @@ fn parse_plugin(name: &str, config: serde_json::Value) -> Result<Plugin> {
         "key_auth" => serde_json::from_value::<KeyAuthPolicy>(config)
             .map(Plugin::KeyAuth)
             .context("the configuration does not fit a key_auth policy"),
+        kind if crate::policies::KINDS.contains(&kind) => crate::policies::parse(kind, config)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "the configuration does not fit a {kind} policy: {}",
+                    e.sentence
+                )
+            }),
         other => anyhow::bail!("unknown policy name {other:?}"),
     }
 }
@@ -768,6 +775,11 @@ mod tests {
             "both"
         );
         assert!(parse_plugin("key_auth", json!({"header": 7})).is_err());
+        assert!(
+            parse_plugin("ip_restriction", json!({})).is_err(),
+            "lists nothing"
+        );
+        assert!(parse_plugin("ip_restriction", json!({"deny": ["nope"]})).is_err());
         assert!(parse_plugin("oauth2", json!({})).is_err(), "unknown name");
     }
 
@@ -819,6 +831,10 @@ mod tests {
         assert!(matches!(
             parse_plugin("key_auth", json!({"header": "x-api-key"})),
             Ok(Plugin::KeyAuth(_))
+        ));
+        assert!(matches!(
+            parse_plugin("ip_restriction", json!({"deny": ["10.0.0.0/8"]})),
+            Ok(Plugin::IpRestriction(_))
         ));
     }
 }
