@@ -8,6 +8,13 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Policies run through a typed contract (#270), with no change in behaviour. Each policy kind
+  declares the phases it runs in and how it reads a body, and the data plane compiles every
+  rule's policies once per configuration into a list per phase. A rule whose policies cannot all run
+  refuses every request with `INTERNAL_ERROR` and is logged once per configuration rather than
+  served without them; no configuration produces one today. Error keys gain parents: the four
+  `AUTH_*` keys share `UNAUTHORIZED`, which is never answered. This is the base that CORS,
+  request size limits and transformers will be built on.
 - The console sets a consumer's own request limits (#267). A consumer's sheet lists the limits
   of its own, each headed by where it sits (everywhere in the workspace, on a service or on a
   route), and adds one on any target it has none on yet. Every request-limit control has Count

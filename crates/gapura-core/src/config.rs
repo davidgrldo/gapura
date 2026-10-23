@@ -297,6 +297,68 @@ pub enum Plugin {
     KeyAuth(KeyAuthPolicy),
 }
 
+/// Where in a request a plugin runs. Each plugin declares its own ([`Plugin::phases`]) and runs
+/// in no other: the data plane compiles a rule's plugins into one list per phase, and a rule that
+/// never reaches a phase one of its plugins declares refuses every request rather than serve
+/// without it.
+///
+/// Declared, rather than read off whichever hooks a plugin happens to implement, which is
+/// Gravitee's way (gateway-api 7.0.0): its hooks default to doing nothing, so a policy placed in
+/// a phase it does not implement lets every request through without a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// After the rule matched and before anything upstream: admits, refuses or answers.
+    Access,
+    /// On the request sent upstream, once per attempt.
+    UpstreamRequest,
+    /// Once, after the answer was written, whatever it was: a refusal too.
+    Terminate,
+}
+
+/// How a plugin reads a body ([`Plugin::body`]).
+///
+/// No plugin reads one yet and the data plane feeds none, so a rule with a plugin declaring
+/// anything but `None` refuses every request rather than run the plugin without what it needs.
+/// Declared now so the first such plugin has to say which it is: Gravitee's `onChunks` reads like
+/// streaming, holds the whole body, and has no bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Body {
+    /// Never reads a body.
+    None,
+    /// Reads it chunk by chunk as it passes, holding none of it.
+    Stream,
+    /// Reads it whole, holding up to `max` bytes; a longer body is refused.
+    Buffered { max: usize },
+}
+
+impl Plugin {
+    /// What the wire calls it, its `kind` tag: for logs and metric labels, which must never
+    /// carry the policy itself -- a JWT policy carries key material.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Plugin::Jwt(_) => "jwt",
+            Plugin::KeyAuth(_) => "key_auth",
+        }
+    }
+
+    /// The phases this plugin runs in; see [`Phase`].
+    pub fn phases(&self) -> &'static [Phase] {
+        match self {
+            Plugin::Jwt(_) => &[Phase::Access],
+            // Access identifies the caller. On the way upstream the key is removed: it is the
+            // gateway's to check, not the upstream's to see.
+            Plugin::KeyAuth(_) => &[Phase::Access, Phase::UpstreamRequest],
+        }
+    }
+
+    /// How this plugin reads a body; see [`Body`].
+    pub fn body(&self) -> Body {
+        match self {
+            Plugin::Jwt(_) | Plugin::KeyAuth(_) => Body::None,
+        }
+    }
+}
+
 /// Reject a request unless it carries an API key issued to a consumer.
 ///
 /// This came after JWT on purpose: JWT proves the extension mechanism without touching the
@@ -681,6 +743,21 @@ mod tests {
         let back: Config = serde_json::from_value(empty)
             .expect("a Config missing every field must load as the default");
         assert_eq!(back, Config::default());
+    }
+
+    /// `kind` names a plugin in logs and metric labels, which must agree with what the wire
+    /// calls it.
+    #[test]
+    fn a_plugin_s_kind_is_its_tag_on_the_wire() {
+        for plugin in [
+            Plugin::Jwt(JwtPolicy::default()),
+            Plugin::KeyAuth(KeyAuthPolicy::default()),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&plugin).unwrap()["kind"],
+                plugin.kind()
+            );
+        }
     }
 
     fn per_ip(limit: u32) -> RateLimit {

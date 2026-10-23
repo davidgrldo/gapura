@@ -33,6 +33,9 @@ pub enum ErrorKey {
     AuthJwtMissing,
     /// A JWT policy found a token it does not accept. Which check failed is not said.
     AuthJwtInvalid,
+    /// Never answered: the parent of the four `AUTH_*` keys (see [`ErrorKey::parent`]), so what
+    /// is looked up by key can cover every refused credential at once.
+    Unauthorized,
     /// The rule's rate limit is spent for this client.
     RateLimited,
     /// Connecting to the upstream timed out.
@@ -60,6 +63,7 @@ impl ErrorKey {
             Self::AuthKeyInvalid => "AUTH_KEY_INVALID",
             Self::AuthJwtMissing => "AUTH_JWT_MISSING",
             Self::AuthJwtInvalid => "AUTH_JWT_INVALID",
+            Self::Unauthorized => "UNAUTHORIZED",
             Self::RateLimited => "RATE_LIMITED",
             Self::UpstreamConnectTimeout => "UPSTREAM_CONNECT_TIMEOUT",
             Self::UpstreamTimeout => "UPSTREAM_TIMEOUT",
@@ -76,7 +80,8 @@ impl ErrorKey {
             Self::AuthKeyMissing
             | Self::AuthKeyInvalid
             | Self::AuthJwtMissing
-            | Self::AuthJwtInvalid => 401,
+            | Self::AuthJwtInvalid
+            | Self::Unauthorized => 401,
             Self::NoRoute => 404,
             Self::RateLimited => 429,
             Self::NoBackend | Self::InternalError => 500,
@@ -97,13 +102,44 @@ impl ErrorKey {
             Self::AuthKeyMissing
             | Self::AuthKeyInvalid
             | Self::AuthJwtMissing
-            | Self::AuthJwtInvalid => "unauthorized",
+            | Self::AuthJwtInvalid
+            | Self::Unauthorized => "unauthorized",
             Self::RateLimited => "too many requests",
             Self::UpstreamConnectTimeout | Self::UpstreamTimeout => "gateway timeout",
             Self::UpstreamConnectError | Self::UpstreamTlsError | Self::UpstreamError => {
                 "bad gateway"
             }
             Self::InternalError => "internal error",
+        }
+    }
+
+    /// The less specific key this one is a case of; `None` for a key that is a cause of its own.
+    /// A parent always has its child's status, so an answer chosen by a parent -- the response
+    /// templates [`render`] leaves for later, looked up by key, then by its parents, then the
+    /// default -- never changes the status a caller was told. A typed chain rather than
+    /// Gravitee's `"parentErrorKey"` string parameter: a key cannot name a parent that is not one.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the response-template lookup")
+    )]
+    pub fn parent(self) -> Option<ErrorKey> {
+        match self {
+            Self::AuthKeyMissing
+            | Self::AuthKeyInvalid
+            | Self::AuthJwtMissing
+            | Self::AuthJwtInvalid => Some(Self::Unauthorized),
+            Self::UpstreamConnectTimeout => Some(Self::UpstreamTimeout),
+            Self::UpstreamTlsError => Some(Self::UpstreamConnectError),
+            Self::UpstreamConnectError => Some(Self::UpstreamError),
+            Self::InvalidRequestTarget
+            | Self::NoRoute
+            | Self::NoBackend
+            | Self::NoEndpoints
+            | Self::Unauthorized
+            | Self::RateLimited
+            | Self::UpstreamTimeout
+            | Self::UpstreamError
+            | Self::InternalError => None,
         }
     }
 }
@@ -218,7 +254,7 @@ pub fn render(key: ErrorKey, request_id: &str, json: bool) -> (&'static str, Str
 mod tests {
     use super::*;
 
-    const ALL: [ErrorKey; 15] = [
+    const ALL: [ErrorKey; 16] = [
         ErrorKey::InvalidRequestTarget,
         ErrorKey::NoRoute,
         ErrorKey::NoBackend,
@@ -227,6 +263,7 @@ mod tests {
         ErrorKey::AuthKeyInvalid,
         ErrorKey::AuthJwtMissing,
         ErrorKey::AuthJwtInvalid,
+        ErrorKey::Unauthorized,
         ErrorKey::RateLimited,
         ErrorKey::UpstreamConnectTimeout,
         ErrorKey::UpstreamTimeout,
@@ -247,6 +284,53 @@ mod tests {
             let m = key.message();
             assert!(!m.is_empty() && !m.contains("pingora"), "{s}: {m}");
         }
+    }
+
+    #[test]
+    fn a_parent_answers_like_its_child_and_no_key_is_its_own_ancestor() {
+        for key in ALL {
+            let mut seen = vec![key];
+            let mut at = key;
+            while let Some(parent) = at.parent() {
+                assert_eq!(
+                    parent.status(),
+                    key.status(),
+                    "{} -> {}",
+                    key.as_str(),
+                    parent.as_str()
+                );
+                assert!(
+                    !seen.contains(&parent),
+                    "{} is its own ancestor",
+                    key.as_str()
+                );
+                seen.push(parent);
+                at = parent;
+            }
+        }
+        for key in [
+            ErrorKey::AuthKeyMissing,
+            ErrorKey::AuthKeyInvalid,
+            ErrorKey::AuthJwtMissing,
+            ErrorKey::AuthJwtInvalid,
+        ] {
+            assert_eq!(
+                key.parent(),
+                Some(ErrorKey::Unauthorized),
+                "{}",
+                key.as_str()
+            );
+        }
+        assert_eq!(
+            ErrorKey::UpstreamConnectTimeout.parent(),
+            Some(ErrorKey::UpstreamTimeout)
+        );
+        assert_eq!(
+            ErrorKey::UpstreamTlsError
+                .parent()
+                .and_then(ErrorKey::parent),
+            Some(ErrorKey::UpstreamError)
+        );
     }
 
     #[test]
