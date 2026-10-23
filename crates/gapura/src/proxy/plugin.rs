@@ -12,7 +12,9 @@
 
 use std::net::IpAddr;
 
-use gapura_core::config::{Body, JwtPolicy, KeyAuthPolicy, Phase, Plugin, RouteRule};
+use gapura_core::config::{
+    Body, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase, Plugin, RouteRule,
+};
 use gapura_core::credentials;
 use pingora::http::{RequestHeader, ResponseHeader};
 
@@ -112,6 +114,7 @@ pub struct Chain {
 enum Access {
     Jwt(JwtPolicy),
     KeyAuth(KeyAuthPolicy),
+    IpRestriction(IpRestrictionPolicy),
     /// The rule's request limit, or the consumer's own. Not a plugin on the wire, but the last
     /// step of every chain; see [`Chain::compile`].
     RateLimit,
@@ -156,10 +159,10 @@ fn misplaced(phases: &[Phase], body: Body, reachable: &[Phase]) -> Option<&'stat
 }
 
 impl Chain {
-    /// Compile `rule`'s plugins, in order, into the list of each phase they run in, with the
-    /// request limit after them. `Err` when a plugin cannot run on this rule: a rule whose
-    /// policies cannot all run must not serve, or an auth policy that never runs would let every
-    /// request through.
+    /// Compile `rule`'s plugins into the list of each phase they run in, with the request limit
+    /// after them. The Access steps run in [`Access::rank`] order, not the order the policies
+    /// arrive in. `Err` when a plugin cannot run on this rule: a rule whose policies cannot all
+    /// run must not serve, or an auth policy that never runs would let every request through.
     ///
     /// The limit is not checked. It is not a plugin, and a Kubernetes redirect rule can carry one
     /// from its backend's annotation and has to keep redirecting.
@@ -181,8 +184,13 @@ impl Chain {
                         .upstream_request
                         .push(UpstreamRequest::RemoveHeader(policy.header.clone()));
                 }
+                Plugin::IpRestriction(policy) => {
+                    chain.access.push(Access::IpRestriction(policy.clone()))
+                }
             }
         }
+        // Stable, so policies of one rank keep the order they arrived in.
+        chain.access.sort_by_key(Access::rank);
         // Last, because the limit may be the consumer's own and may count per consumer, and the
         // consumer is not known until a policy has checked its credential.
         chain.access.push(Access::RateLimit);
@@ -222,6 +230,19 @@ impl Chain {
 }
 
 impl Access {
+    /// Where the step runs among the Access steps, lowest first, whatever order the policies
+    /// arrive in. The address is judged before any credential is read, so a denied address
+    /// cannot tell a good key from a bad one by its answer. The credential checks keep the
+    /// order they arrive in among themselves. The limit is last: it may be the consumer's own
+    /// and may count per consumer, and the consumer is not known until a credential is checked.
+    fn rank(&self) -> u8 {
+        match self {
+            Access::IpRestriction(_) => 1,
+            Access::Jwt(_) | Access::KeyAuth(_) => 2,
+            Access::RateLimit => 3,
+        }
+    }
+
     fn run(
         &self,
         proxy: &GapuraProxy,
@@ -249,7 +270,13 @@ impl Access {
                         {
                             proxy.store.want_jwks_refresh();
                         }
-                        refuse(rule, "jwt", reason, key, challenge.to_string())
+                        refuse(
+                            rule,
+                            "jwt",
+                            reason,
+                            key,
+                            vec![("WWW-Authenticate", challenge.to_string())],
+                        )
                     }
                 }
             }
@@ -274,26 +301,56 @@ impl Access {
                         "key_auth",
                         r.as_str(),
                         ErrorKey::from(&r),
-                        format!("Key realm=\"{}\"", policy.header),
+                        vec![(
+                            "WWW-Authenticate",
+                            format!("Key realm=\"{}\"", policy.header),
+                        )],
                     ),
                 }
             }
+            Access::IpRestriction(policy) => match policy.refusal(client_of(proxy, req, peer)) {
+                None => Flow::Continue,
+                Some(reason) => refuse(
+                    rule,
+                    "ip_restriction",
+                    reason,
+                    ErrorKey::IpForbidden,
+                    Vec::new(),
+                ),
+            },
             Access::RateLimit => limit(proxy, rt, rule, req, peer, cx),
         }
     }
 }
 
-/// Count a policy's refusal and say how to answer it. Missing or invalid is all the key says:
-/// which check failed is an operator's business (the metric's reason), and telling a caller
-/// narrows the search for whoever is guessing.
-fn refuse(rule: &RouteRule, kind: &str, reason: &str, key: ErrorKey, challenge: String) -> Flow {
+/// Count a policy's refusal and say how to answer it, with what that kind of answer adds: the
+/// challenge on a 401, nothing on a 403. Missing or invalid is all an auth key says: which check
+/// failed is an operator's business (the metric's reason), and telling a caller narrows the
+/// search for whoever is guessing.
+fn refuse(
+    rule: &RouteRule,
+    kind: &str,
+    reason: &str,
+    key: ErrorKey,
+    headers: Vec<(&'static str, String)>,
+) -> Flow {
     METRICS
         .policy_refused_total
         .with_label_values(&[rule.route.as_str(), kind, reason])
         .inc();
-    Flow::Fail(Failure {
-        key,
-        headers: vec![("WWW-Authenticate", challenge)],
+    Flow::Fail(Failure { key, headers })
+}
+
+/// The client address the access log names: the connection's, or behind a trusted proxy the one
+/// it forwarded. `None` when the connection has no IP address.
+fn client_of(proxy: &GapuraProxy, req: &RequestHeader, peer: Option<IpAddr>) -> Option<IpAddr> {
+    peer.map(|peer| {
+        client_ip_of(
+            req,
+            peer,
+            &proxy.trusted_proxies,
+            &proxy.trusted_client_headers,
+        )
     })
 }
 
@@ -326,14 +383,7 @@ fn limit(
         (true, Some(consumer)) => format!("{route}@{consumer}"),
         _ => route.clone(),
     };
-    let ip = peer.map(|peer| {
-        client_ip_of(
-            req,
-            peer,
-            &proxy.trusted_proxies,
-            &proxy.trusted_client_headers,
-        )
-    });
+    let ip = client_of(proxy, req, peer);
     let Some(client) = rate_limit::client(&rl.by, ip, consumer, &req.headers) else {
         return Flow::Continue;
     };
@@ -405,6 +455,7 @@ mod tests {
         for plugin in [
             Plugin::Jwt(JwtPolicy::default()),
             Plugin::KeyAuth(KeyAuthPolicy::default()),
+            ip_restriction(&["10.0.0.0/8"], &[]),
         ] {
             let chain = Chain::compile(&rule(vec![plugin.clone()])).unwrap();
             // The request limit closes every chain and is not the plugin's.
@@ -466,6 +517,14 @@ mod tests {
         })
     }
 
+    fn ip_restriction(allow: &[&str], deny: &[&str]) -> Plugin {
+        let nets = |list: &[&str]| list.iter().map(|s| s.parse().unwrap()).collect();
+        Plugin::IpRestriction(IpRestrictionPolicy {
+            allow: nets(allow),
+            deny: nets(deny),
+        })
+    }
+
     fn get() -> RequestHeader {
         RequestHeader::build("GET", b"/", None).unwrap()
     }
@@ -501,6 +560,40 @@ mod tests {
             let flow = chain.access(&proxy(), &rt, &r, &get(), None, &mut RequestCtx::default());
             assert_eq!(refused(flow).key, first);
         }
+    }
+
+    /// Listed after key_auth and run before it: a denied address is refused without its key
+    /// being read, so it never learns whether the key is good. An address the policy admits
+    /// goes on to the key check.
+    #[test]
+    fn an_address_is_refused_before_any_credential_is_read() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![key_auth(None), ip_restriction(&[], &["192.0.2.0/24"])]);
+        let chain = Chain::compile(&r).unwrap();
+        let from = |ip: &str| {
+            chain.access(
+                &proxy(),
+                &rt,
+                &r,
+                &get(),
+                Some(ip.parse().unwrap()),
+                &mut RequestCtx::default(),
+            )
+        };
+        let failure = refused(from("192.0.2.9"));
+        assert_eq!(failure.key, ErrorKey::IpForbidden);
+        assert!(failure.headers.is_empty(), "a 403 carries no challenge");
+        assert_eq!(refused(from("198.51.100.1")).key, ErrorKey::AuthKeyMissing);
+    }
+
+    /// No connection address, no client address: refused, never admitted.
+    #[test]
+    fn an_unknown_address_is_refused() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![ip_restriction(&["10.0.0.0/8"], &[])]);
+        let chain = Chain::compile(&r).unwrap();
+        let flow = chain.access(&proxy(), &rt, &r, &get(), None, &mut RequestCtx::default());
+        assert_eq!(refused(flow).key, ErrorKey::IpForbidden);
     }
 
     #[test]
