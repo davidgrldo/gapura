@@ -84,6 +84,10 @@ impl RequestCtx {
 
     /// Run `chain`'s Terminate steps -- the rule's, for a request attributed to one -- once,
     /// whatever answered it: a refused request too.
+    #[expect(
+        clippy::never_loop,
+        reason = "there is no Terminate step yet; this expectation fails once there is one"
+    )]
     pub fn terminate(&mut self, chain: Option<&Chain>) {
         if std::mem::replace(&mut self.terminated, true) {
             return;

@@ -1,11 +1,12 @@
 //! The Pingora data plane: request attributes, routing decisions, the ProxyHttp implementation, TLS.
 //!
-//! One request, top to bottom: `request_filter` (match, answer locally or pick a cluster),
-//! `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite, headers),
-//! `upstream_response_filter` (the endpoint's outcome), `response_filter` (response headers),
-//! `fail_to_connect` (retry once), `fail_to_proxy` (the error key and its status, from
-//! `failure::classify`), `logging` (access log + metrics). Outcomes feed passive outlier
-//! detection (`outlier`).
+//! One request, top to bottom: `request_filter` (match, the rule's Access steps, answer locally
+//! or pick a cluster), `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite,
+//! headers, the UpstreamRequest steps), `upstream_response_filter` (the endpoint's outcome),
+//! `response_filter` (response headers), `fail_to_connect` (retry once), `fail_to_proxy` (the
+//! error key and its status, from `failure::classify`), `logging` (access log + metrics, the
+//! Terminate steps). The steps are each rule's plugins, compiled per generation (`plugin`).
+//! Outcomes feed passive outlier detection (`outlier`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -34,6 +35,7 @@ use tokio::sync::Semaphore;
 use crate::proxy::attrs::Extracted;
 use crate::proxy::failure::ErrorKey;
 use crate::proxy::outlier::Outcome;
+use crate::proxy::plugin::{Failure, Flow, Invoke, RequestCtx};
 use crate::proxy::select::{
     pick_backend, pick_endpoint, random_roll, redirect_location, rewrite_path, Local,
 };
@@ -73,10 +75,9 @@ pub struct GapuraProxy {
 /// configuration generation alive for the whole request even if a reload happens meanwhile.
 pub struct Ctx {
     runtime: Option<Arc<Runtime>>,
-    listener: Option<usize>,
-    rule: Option<usize>,
+    /// What the rule's plugins know of the request: the route, the consumer, what invokes it.
+    req: RequestCtx,
     matched: Option<PathMatch>,
-    cluster: Option<String>,
     tried: Vec<SocketAddr>,
     upstream: Option<SocketAddr>,
     /// The outlier record of the endpoint this attempt went to.
@@ -95,34 +96,18 @@ pub struct Ctx {
     upstream_started: Option<Instant>,
     client_abort: bool,
     mirrored: bool,
-    /// Who the caller turned out to be, when a key_auth policy identified them. Carried here
-    /// rather than written straight onto the request, because the upstream header can only be
-    /// set after the inbound one is removed, and that happens later.
-    consumer: Option<String>,
-    /// [`Config::consumer_rate_limits`](gapura_core::config::Config::consumer_rate_limits)'
-    /// key for the caller, `workspace/username`, which picks the consumer's own request limit
-    /// and counts a limit by consumer. `consumer` alone is what the upstream is told: within a
-    /// workspace the name is unique, across workspaces it is not.
-    consumer_id: Option<String>,
-    /// The headers that carried an API key a key_auth policy accepted. The key is the gateway's
-    /// to check, not the upstream's to see: it is removed before forwarding, the way the caller's
-    /// name replaces it.
-    key_headers: Vec<String>,
 }
 
 impl Ctx {
     fn rule(&self) -> Option<&RouteRule> {
         let rt = self.runtime.as_ref()?;
-        rt.config
-            .listeners
-            .get(self.listener?)?
-            .rules
-            .get(self.rule?)
+        let (listener, rule) = self.req.route?;
+        rt.config.listeners.get(listener)?.rules.get(rule)
     }
 
     /// Count this attempt's outcome against the endpoint it went to.
     fn record(&self, outcome: Outcome) {
-        let (Some(health), Some(rt), Some(key)) = (&self.health, &self.runtime, &self.cluster)
+        let (Some(health), Some(rt), Some(key)) = (&self.health, &self.runtime, self.req.cluster())
         else {
             return;
         };
@@ -151,8 +136,8 @@ impl Ctx {
     }
 
     fn listener_label(&self) -> &str {
-        match (&self.runtime, self.listener) {
-            (Some(rt), Some(i)) => rt
+        match (&self.runtime, self.req.route) {
+            (Some(rt), Some((i, _))) => rt
                 .config
                 .listeners
                 .get(i)
@@ -166,6 +151,11 @@ impl Ctx {
 /// What `request_filter` decided.
 enum Decision {
     NotFound,
+    /// The rule's plugins cannot all run on it (see `Runtime::build`'s warning), so it refuses.
+    Misplaced {
+        listener: usize,
+        rule: usize,
+    },
     Local(Local),
     Redirect {
         status: u16,
@@ -326,6 +316,25 @@ async fn write_error(
     let (resp, body) = error_response(key, &ctx.request_id, json, extra)?;
     session.write_response_header(Box::new(resp), false).await?;
     session.write_response_body(Some(body), true).await
+}
+
+/// Answer the request as a step, or the router, decided; `Continue` answers nothing. Whether
+/// the request was answered is what `request_filter` returns.
+async fn answer(session: &mut Session, ctx: &mut Ctx, flow: Flow) -> Result<bool> {
+    match flow {
+        Flow::Continue => Ok(false),
+        Flow::Respond(resp) => {
+            let status = resp.status.as_u16();
+            session.write_response_header(resp, true).await?;
+            ctx.local_status = Some(status);
+            ctx.req.invoke = Invoke::Serve;
+            Ok(true)
+        }
+        Flow::Fail(failure) => {
+            write_error(session, ctx, failure.key, &failure.headers).await?;
+            Ok(true)
+        }
+    }
 }
 
 /// Whether `ex` would match a different rule once its `;params` are stripped, the way a servlet
@@ -536,10 +545,8 @@ impl ProxyHttp for GapuraProxy {
     fn new_ctx(&self) -> Ctx {
         Ctx {
             runtime: None,
-            listener: None,
-            rule: None,
+            req: RequestCtx::default(),
             matched: None,
-            cluster: None,
             tried: Vec::new(),
             upstream: None,
             health: None,
@@ -555,9 +562,6 @@ impl ProxyHttp for GapuraProxy {
             upstream_started: None,
             client_abort: false,
             mirrored: false,
-            consumer: None,
-            consumer_id: None,
-            key_headers: Vec::new(),
         }
     }
 
@@ -614,7 +618,14 @@ impl ProxyHttp for GapuraProxy {
                         Protocol::Https => "https",
                         Protocol::Http => "http",
                     };
-                    if let Some(redirect) = &hit.rule.filters.redirect {
+                    if !matches!(rt.chain(hit.listener_index, hit.entry.rule), Some(Ok(_))) {
+                        // Before the redirect, which is how a rule comes to reach none of its
+                        // plugins' phases: such a rule must not answer as though they had run.
+                        Decision::Misplaced {
+                            listener: hit.listener_index,
+                            rule: hit.entry.rule,
+                        }
+                    } else if let Some(redirect) = &hit.rule.filters.redirect {
                         // A remapped listener is dialed through a Service that maps the
                         // client-facing port onto the bound one: the Location must name the
                         // port the client used, never the internal socket.
@@ -661,139 +672,34 @@ impl ProxyHttp for GapuraProxy {
                 matched,
                 cluster,
             } => {
-                // Policies run before the limit, because the limit may be the consumer's own and
-                // may count per consumer, and the consumer is not known until the credential has
-                // been checked. Both run after the match and before anything upstream is
-                // touched, for the same reason -- a refused request must cost the backend nothing.
-                // A clone of the Arc, not a borrow of the context: answering needs `&mut ctx`.
+                // The rule's Access steps -- its policies, then its limit -- run after the match and
+                // before anything upstream is touched: a refused request must cost the backend
+                // nothing. A clone of the Arc, not a borrow of the context: answering needs
+                // `&mut ctx`.
                 let rt = Arc::clone(ctx.runtime.as_ref().expect("set above"));
-                let route = rt.config.listeners[listener].rules[rule].route.clone();
-                for plugin in &rt.config.listeners[listener].rules[rule].plugins {
-                    let refusal = match plugin {
-                        gapura_core::config::Plugin::Jwt(policy) => {
-                            // No keys for this document means it did not parse at swap time.
-                            // Refusing is the safe direction: the alternative is passing traffic
-                            // through unverified because a configuration error made verification
-                            // impossible.
-                            let empty = jwt::Keys::default();
-                            let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                            jwt_refusal(session.req_header(), policy, keys).map(
-                                |(key, reason, challenge)| {
-                                    (key, "jwt", reason, challenge.to_string())
-                                },
-                            )
-                        }
-                        gapura_core::config::Plugin::KeyAuth(policy) => {
-                            let presented = session
-                                .req_header()
-                                .headers
-                                .get(&policy.header)
-                                .and_then(|v| v.to_str().ok());
-                            match gapura_core::credentials::identify(
-                                &rt.config,
-                                presented,
-                                policy.workspace.as_deref(),
-                            ) {
-                                // Carried on the context rather than written here: the upstream
-                                // header is set in upstream_request_filter, after the inbound one
-                                // has been removed.
-                                Ok(consumer) => {
-                                    ctx.consumer_id = Some(gapura_core::credentials::consumer_id(
-                                        policy.workspace.as_deref().unwrap_or_default(),
-                                        consumer,
-                                    ));
-                                    ctx.consumer = Some(consumer.to_string());
-                                    ctx.key_headers.push(policy.header.clone());
-                                    None
-                                }
-                                Err(r) => Some((
-                                    ErrorKey::from(&r),
-                                    "key_auth",
-                                    r.as_str(),
-                                    format!("Key realm=\"{}\"", policy.header),
-                                )),
-                            }
-                        }
-                    };
-                    if let Some((key, kind, reason, challenge)) = refusal {
-                        METRICS
-                            .policy_refused_total
-                            .with_label_values(&[&route, kind, reason])
-                            .inc();
-                        // Attributed before answering, as the 429 below does: metrics, the
-                        // duration histogram and the access log read these, and a refusal that
-                        // records route="-" tells an operator nothing.
-                        ctx.listener = Some(listener);
-                        ctx.rule = Some(rule);
-                        // Missing or invalid is all the key says. Which check failed is an
-                        // operator's business (the metric's reason), and telling a caller
-                        // narrows the search for whoever is guessing.
-                        write_error(session, ctx, key, &[("WWW-Authenticate", challenge)]).await?;
-                        return Ok(true);
-                    }
-                }
-
-                // The limit is enforced here: after the match (the route is known) and the
-                // policies (the consumer is known, and its own limit replaces the rule's), before
-                // any upstream work (the limit must not cost the backend anything). When the limit
-                // counts by address, the address is the same answer the access log records, so a
-                // limited request names the same client a served one would; a limit that counts
-                // by consumer or by a header's value counts that instead, which the log does not
-                // name.
                 let r = &rt.config.listeners[listener].rules[rule];
-                if let Some((rl, own)) = rt.config.rate_limit_for(r, ctx.consumer_id.as_deref()) {
-                    // Keyed per rule, not per route (#185): one HTTPRoute can carry rules with
-                    // different limits (/login at 5/h, / at 100/s), and a shared route key means
-                    // the rules reset each other's windows, so the tighter limit never trips.
-                    let route = format!("{}#{}", r.route, r.rule_index);
-                    // A consumer's own limit counts apart from the rule's: one window for two
-                    // limits would let each spend the other's allowance. The metric keeps the
-                    // rule's label, since a label per consumer grows without bound.
-                    let window = match (own, ctx.consumer_id.as_deref()) {
-                        (true, Some(consumer)) => format!("{route}@{consumer}"),
-                        _ => route.clone(),
-                    };
-                    let ip = effective_client_ip(
-                        session,
-                        &self.trusted_proxies,
-                        &self.trusted_client_headers,
-                    );
-                    if let Some(client) = rate_limit::client(
-                        &rl.by,
-                        ip,
-                        ctx.consumer_id.as_deref(),
-                        &session.req_header().headers,
-                    ) {
-                        if let rate_limit::Outcome::Limited {
-                            limit,
-                            retry_after_secs,
-                        } = self.limiter.check(&window, client, ip, rl)
-                        {
-                            METRICS
-                                .rate_limited_total
-                                .with_label_values(&[&route])
-                                .inc();
-                            ctx.listener = Some(listener);
-                            ctx.rule = Some(rule);
-                            write_error(
-                                session,
-                                ctx,
-                                ErrorKey::RateLimited,
-                                &[
-                                    ("Retry-After", retry_after_secs.to_string()),
-                                    ("X-RateLimit-Limit", limit.to_string()),
-                                    ("X-RateLimit-Remaining", "0".to_string()),
-                                ],
-                            )
-                            .await?;
-                            return Ok(true);
-                        }
+                let peer = session
+                    .client_addr()
+                    .and_then(|a| a.as_inet())
+                    .map(|a| a.ip());
+                let flow = match rt.chain(listener, rule) {
+                    Some(Ok(chain)) => {
+                        chain.access(self, &rt, r, session.req_header(), peer, &mut ctx.req)
                     }
+                    // Answered as `Decision::Misplaced` before it got here.
+                    _ => Flow::Fail(Failure {
+                        key: ErrorKey::InternalError,
+                        headers: Vec::new(),
+                    }),
+                };
+                // Attributed before answering: metrics, the duration histogram and the access log
+                // read it, and a refusal that records route="-" tells an operator nothing.
+                ctx.req.route = Some((listener, rule));
+                if !matches!(flow, Flow::Continue) {
+                    return answer(session, ctx, flow).await;
                 }
-                ctx.listener = Some(listener);
-                ctx.rule = Some(rule);
                 ctx.matched = Some(matched);
-                ctx.cluster = Some(cluster);
+                ctx.req.invoke = Invoke::Upstream(cluster);
                 Ok(false)
             }
             Decision::Redirect { status, location } => {
@@ -801,8 +707,11 @@ impl ProxyHttp for GapuraProxy {
                 resp.insert_header("Location", location)?;
                 resp.insert_header("Content-Length", "0")?;
                 resp.insert_header("X-Request-Id", ctx.request_id.clone())?;
-                session.write_response_header(Box::new(resp), true).await?;
-                ctx.local_status = Some(status);
+                answer(session, ctx, Flow::Respond(Box::new(resp))).await
+            }
+            Decision::Misplaced { listener, rule } => {
+                ctx.req.route = Some((listener, rule));
+                write_error(session, ctx, ErrorKey::InternalError, &[]).await?;
                 Ok(true)
             }
             Decision::Local(local) => {
@@ -823,7 +732,7 @@ impl ProxyHttp for GapuraProxy {
                 "upstream_peer before request_filter",
             )
         })?;
-        let key = ctx.cluster.clone().ok_or_else(|| {
+        let key = ctx.req.cluster().map(str::to_string).ok_or_else(|| {
             Error::explain(ErrorType::InternalError, "upstream_peer without a cluster")
         })?;
         let cluster = rt.config.clusters.get(&key).ok_or_else(|| {
@@ -901,7 +810,7 @@ impl ProxyHttp for GapuraProxy {
         let Some(rt) = ctx.runtime.clone() else {
             return Ok(());
         };
-        let (Some(li), Some(ri)) = (ctx.listener, ctx.rule) else {
+        let Some((li, ri)) = ctx.req.route else {
             return Ok(());
         };
         let rule = &rt.config.listeners[li].rules[ri];
@@ -911,11 +820,14 @@ impl ProxyHttp for GapuraProxy {
         // upstream cannot tell the two apart. Stripping only when a policy ran would leave every
         // route without one forwarding whatever a caller claimed.
         upstream.remove_header(gapura_core::credentials::CONSUMER_HEADER);
-        if let Some(consumer) = &ctx.consumer {
-            upstream.insert_header(gapura_core::credentials::CONSUMER_HEADER, consumer.as_str())?;
+        if let Some(consumer) = &ctx.req.consumer {
+            upstream.insert_header(
+                gapura_core::credentials::CONSUMER_HEADER,
+                consumer.name.as_str(),
+            )?;
         }
-        for header in &ctx.key_headers {
-            upstream.remove_header(header.as_str());
+        if let Some(Ok(chain)) = rt.chain(li, ri) {
+            chain.upstream_request(upstream);
         }
 
         // Forward the path that was matched. Without this a normalised request would match one
@@ -1046,7 +958,7 @@ impl ProxyHttp for GapuraProxy {
         ctx: &mut Ctx,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        let cluster = ctx.cluster.clone().unwrap_or_else(|| "-".to_string());
+        let cluster = ctx.req.cluster().unwrap_or("-").to_string();
         METRICS
             .upstream_errors_total
             .with_label_values(&[&cluster, "connect"])
@@ -1102,7 +1014,7 @@ impl ProxyHttp for GapuraProxy {
             if kind != "connect" {
                 METRICS
                     .upstream_errors_total
-                    .with_label_values(&[ctx.cluster.as_deref().unwrap_or("-"), kind])
+                    .with_label_values(&[ctx.req.cluster().unwrap_or("-"), kind])
                     .inc();
             }
         }
@@ -1179,6 +1091,13 @@ impl ProxyHttp for GapuraProxy {
             error: e.map(|e| e.to_string()),
             error_key: ctx.error_key.map(ErrorKey::as_str),
         });
+        // Once the answer is out, whatever it was: a request refused in Access gets here too, and
+        // so a step can settle what it counted for one.
+        let chain = ctx
+            .req
+            .route
+            .and_then(|(l, r)| ctx.runtime.as_ref()?.chain(l, r)?.as_ref().ok());
+        ctx.req.terminate(chain);
     }
 }
 
