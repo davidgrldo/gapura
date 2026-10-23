@@ -233,14 +233,22 @@ impl Access {
     ) -> Flow {
         match self {
             Access::Jwt(policy) => {
-                // No keys for this document means it did not parse at swap time. Refusing is the
-                // safe direction: the alternative is passing traffic through unverified because a
-                // configuration error made verification impossible.
+                // No keys for this document means it did not parse at swap time, or its
+                // `jwks_uri` has never loaded. Refusing is the safe direction: the alternative is
+                // passing traffic through unverified because verification was impossible.
                 let empty = jwt::Keys::default();
                 let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
                 match jwt_refusal(req, policy, keys) {
                     None => Flow::Continue,
                     Some((key, reason, challenge)) => {
+                        // A key the policy does not hold may be one its IdP has just started
+                        // signing with. This request is refused either way; the control source
+                        // refetches on its next tick, at most once per 30 s.
+                        if policy.jwks_uri.is_some()
+                            && reason == gapura_core::jwt::Refusal::UnknownKey.as_str()
+                        {
+                            proxy.store.want_jwks_refresh();
+                        }
                         refuse(rule, "jwt", reason, key, challenge.to_string())
                     }
                 }

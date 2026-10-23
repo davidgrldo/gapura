@@ -23,6 +23,11 @@ pub fn compile(config: &Config) -> (HashMap<String, Keys>, usize) {
                 let Plugin::Jwt(policy) = plugin else {
                     continue;
                 };
+                // A `jwks_uri` whose first fetch has not landed: the control source logs why, and
+                // having no keys refuses every token without being counted as unusable ones.
+                if policy.jwks.is_empty() && policy.jwks_uri.is_some() {
+                    continue;
+                }
                 if out.contains_key(&policy.jwks) {
                     continue;
                 }

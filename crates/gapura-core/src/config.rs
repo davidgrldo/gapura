@@ -395,10 +395,23 @@ pub struct JwtPolicy {
     /// Required `aud`. `None` accepts any audience.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
-    /// A JWKS document, verbatim. Carried rather than fetched so that verification needs no
-    /// network at request time and no key material is invented by this crate; a `jwks_uri` that
-    /// the data plane refreshes is the next step and replaces only where this string comes from.
+    /// A JWKS document, verbatim. Carried rather than fetched at request time, so verifying needs
+    /// no network and no key material is invented by this crate. A `jwks_uri` policy arrives with
+    /// this empty, and the data plane writes in the last document it fetched there before the
+    /// configuration is swapped in: where the string comes from changes, not how it is read.
+    /// Always written, so a data plane older than `jwks_uri` still parses a configuration naming
+    /// one, finds no keys here and refuses those routes rather than the whole configuration.
+    #[serde(default)]
     pub jwks: String,
+    /// Where the issuer publishes its JWKS, `https` only. The control plane sets exactly one of
+    /// this and `jwks`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    /// PEM CA certificates that replace the bundled public roots for `jwks_uri` alone, as a store
+    /// service's `tls_ca_pem` does for its upstream: an in-cluster IdP presents a private CA's
+    /// certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

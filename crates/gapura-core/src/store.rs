@@ -1710,6 +1710,7 @@ mod tests {
             issuer: Some(issuer.into()),
             audience: None,
             jwks: "{}".into(),
+            ..Default::default()
         })
     }
 

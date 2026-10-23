@@ -543,6 +543,14 @@ async fn start_gateway_from(
 /// whatever `snapshot` compiles to once the gateway's HTTP port is known. Policies exist only in
 /// store mode, so this is the way to a refused credential.
 async fn start_store_gateway(snapshot: gapura_core::store::StoreSnapshot) -> Gateway {
+    start_store_gateway_with(snapshot, &[]).await
+}
+
+/// `start_store_gateway`, plus arguments the scenario needs on the command line.
+async fn start_store_gateway_with(
+    snapshot: gapura_core::store::StoreSnapshot,
+    extra: &[&str],
+) -> Gateway {
     let served = Arc::new(Mutex::new(String::new()));
     let body = Arc::clone(&served);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -579,7 +587,7 @@ async fn start_store_gateway(snapshot: gapura_core::store::StoreSnapshot) -> Gat
                 token.to_str().unwrap().to_string(),
             ]
         },
-        &[],
+        extra,
     )
     .await
 }
@@ -1626,4 +1634,247 @@ async fn a_consumer_s_own_limit_holds_it_and_no_one_else() {
         named.is_empty(),
         "a consumer's name is a metric label: {named:?}"
     );
+}
+
+const JWT_ISSUER: &str = "https://idp.e2e";
+
+/// A P-256 key pair: its public JWK, and its PKCS#8 for signing.
+struct EcKey {
+    jwk: Value,
+    pkcs8: Vec<u8>,
+}
+
+fn ec_key(kid: &str) -> EcKey {
+    use base64::Engine;
+    let pair = rcgen::KeyPair::generate().unwrap();
+    // An uncompressed SEC1 point: 0x04, then x, then y.
+    let point = pair.public_key_raw();
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    EcKey {
+        pkcs8: pair.serialize_der(),
+        jwk: json!({"kty": "EC", "crv": "P-256", "alg": "ES256", "kid": kid,
+                    "x": b64(&point[1..33]), "y": b64(&point[33..])}),
+    }
+}
+
+fn jwks_of(keys: &[&EcKey]) -> String {
+    json!({"keys": keys.iter().map(|k| k.jwk.clone()).collect::<Vec<_>>()}).to_string()
+}
+
+/// A token from `JWT_ISSUER`, valid until 2100, signed by `key` and naming its `kid`.
+fn signed_by(key: &EcKey) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    header.kid = key.jwk["kid"].as_str().map(str::to_string);
+    jsonwebtoken::encode(
+        &header,
+        &json!({"iss": JWT_ISSUER, "sub": "e2e", "exp": 4102444800u64}),
+        &jsonwebtoken::EncodingKey::from_ec_der(&key.pkcs8),
+    )
+    .unwrap()
+}
+
+/// A private CA's PEM, and a certificate for 127.0.0.1 it signed.
+fn idp_tls() -> (
+    String,
+    rustls::pki_types::CertificateDer<'static>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+) {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+    let ca_key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "e2e idp ca");
+    let ca = params.self_signed(&ca_key).unwrap();
+    let key = KeyPair::generate().unwrap();
+    let leaf = CertificateParams::new(vec!["127.0.0.1".to_string()])
+        .unwrap()
+        .signed_by(&key, &ca, &ca_key)
+        .unwrap();
+    (
+        ca.pem(),
+        leaf.der().clone(),
+        rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            key.serialize_der(),
+        )),
+    )
+}
+
+/// HTTPS on 127.0.0.1 answering every request with what `document` holds at the time, as an
+/// IdP's jwks_uri does. Aborting the handle takes it down: new connections are refused.
+async fn spawn_jwks_server(
+    cert: rustls::pki_types::CertificateDer<'static>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+    document: Arc<Mutex<String>>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert], key)
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let (acceptor, document) = (acceptor.clone(), Arc::clone(&document));
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let (mut buf, mut seen) = ([0u8; 4096], Vec::new());
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tls.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let body = document.lock().unwrap().clone();
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tls.write_all(answer.as_bytes()).await;
+                let _ = tls.shutdown().await;
+            });
+        }
+    });
+    (addr, server)
+}
+
+/// One route, `/guarded`, requiring a JWT from `JWT_ISSUER` whose keys are at `uri`.
+fn jwt_guarded(upstream: SocketAddr, uri: &str, ca_pem: &str) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{JwtPolicy, PathMatch, Plugin, Protocol};
+    use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: String::new(),
+            name: "guarded".into(),
+            service: "echo".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix("/guarded".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        plugins: vec![StorePlugin {
+            workspace: String::new(),
+            route: Some("guarded".into()),
+            service: None,
+            plugin: Plugin::Jwt(JwtPolicy {
+                issuer: Some(JWT_ISSUER.into()),
+                jwks_uri: Some(uri.into()),
+                jwks_ca_pem: Some(ca_pem.into()),
+                ..JwtPolicy::default()
+            }),
+        }],
+        ..StoreSnapshot::default()
+    }
+}
+
+async fn guarded(gw: &Gateway, token: &str) -> reqwest::Response {
+    client(gw)
+        .get(url(gw, "echo.test", "/guarded"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Ask `/guarded` with `token` until it answers `status`, for up to 10 s.
+async fn until_guarded_answers(gw: &Gateway, token: &str, status: u16) {
+    for _ in 0..100 {
+        if guarded(gw, token).await.status() == status {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("/guarded never answered {status}");
+}
+
+/// The point of the feature: keys come from the IdP's URL, a rotated key is picked up once a
+/// token names it, and the last good keys outlive the IdP -- while running and across a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_jwks_uri_is_fetched_rotated_and_outlives_its_idp() {
+    let (ca_pem, cert, key) = idp_tls();
+    let (first, second) = (ec_key("first"), ec_key("second"));
+    let document = Arc::new(Mutex::new(jwks_of(&[&first])));
+    let (idp, server) = spawn_jwks_server(cert, key, Arc::clone(&document)).await;
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let uri = format!("https://{idp}/jwks");
+    let cache = tempfile::tempdir().unwrap();
+    let cache_file = cache.path().join("cache.json");
+    let args = [
+        "--control-plane-interval",
+        "1",
+        "--config-cache",
+        cache_file.to_str().unwrap(),
+    ];
+
+    let gw = start_store_gateway_with(jwt_guarded(upstream, &uri, &ca_pem), &args).await;
+    until_guarded_answers(&gw, &signed_by(&first), 200).await;
+
+    // The IdP rotates. The first token naming the new key is refused, and asks for a refetch.
+    *document.lock().unwrap() = jwks_of(&[&second]);
+    until_guarded_answers(&gw, &signed_by(&second), 200).await;
+
+    // The IdP goes away: the keys already fetched keep verifying.
+    server.abort();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(guarded(&gw, &signed_by(&second)).await.status(), 200);
+    drop(gw);
+
+    // A restart with the IdP still down verifies with the cached keys from its first request,
+    // while its own fetch fails and is counted.
+    let gw = start_store_gateway_with(jwt_guarded(upstream, &uri, &ca_pem), &args).await;
+    assert_eq!(guarded(&gw, &signed_by(&second)).await.status(), 200);
+    wait_for_metric(
+        &gw,
+        &format!("gapura_jwks_fetch_errors_total{{uri=\"{uri}\"}} 1"),
+    )
+    .await;
+}
+
+/// A URL that has never answered leaves its policy with no keys, which refuses every token as
+/// invalid -- never admits one unverified.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_jwks_uri_that_never_loads_refuses_every_token() {
+    let (ca_pem, _, _) = idp_tls();
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let uri = format!("https://{dead}/jwks");
+    let gw = start_store_gateway_with(
+        jwt_guarded(upstream, &uri, &ca_pem),
+        &["--control-plane-interval", "1"],
+    )
+    .await;
+    let r = guarded(&gw, &signed_by(&ec_key("any"))).await;
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_JWT_INVALID");
+    assert_eq!(r.headers()["www-authenticate"], "Bearer");
+    wait_for_metric(
+        &gw,
+        &format!("gapura_jwks_last_success_timestamp_seconds{{uri=\"{uri}\"}} 0"),
+    )
+    .await;
 }

@@ -2,4 +2,5 @@
 
 pub mod control;
 pub mod file;
+pub mod jwks;
 pub mod kubernetes;

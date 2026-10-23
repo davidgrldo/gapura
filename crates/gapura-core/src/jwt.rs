@@ -14,6 +14,29 @@ use std::collections::HashMap;
 use crate::config::JwtPolicy;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
+/// The largest JWKS document a policy uses: room for dozens of keys, and a bound on what every
+/// configuration served to every data plane repeats. The control plane refuses a longer paste and
+/// the data plane stops reading a longer fetch.
+pub const MAX_JWKS_BYTES: usize = 64 * 1024;
+
+/// Whether a JWKS document holds key material that must never verify anything: an HMAC secret
+/// (`kty: "oct"`), which anyone who can read the document -- a workspace viewer, or the whole
+/// internet for a published `jwks_uri` -- could sign with; or a private key (`d`, `p`, `q`, `dp`,
+/// `dq` or `qi`, RFC 7517 section 4), which can *sign* tokens for every audience this gateway
+/// verifies. Verification needs public keys only. An unreadable document holds nothing.
+pub fn holds_a_secret(jwks: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(jwks).is_ok_and(|document| {
+        document["keys"].as_array().is_some_and(|keys| {
+            keys.iter().any(|key| {
+                key["kty"] == "oct"
+                    || ["d", "p", "q", "dp", "dq", "qi"]
+                        .iter()
+                        .any(|field| key.get(*field).is_some_and(|v| !v.is_null()))
+            })
+        })
+    })
+}
+
 /// Decoding keys by `kid`, plus the keys a JWKS offered without one.
 #[derive(Default)]
 pub struct Keys {
@@ -215,6 +238,7 @@ mod tests {
             issuer: Some("https://id.example".into()),
             audience: Some("orders".into()),
             jwks,
+            ..JwtPolicy::default()
         }
     }
 
@@ -492,5 +516,47 @@ mod tests {
         header.kid = Some("k1".into());
         let t = encode(&header, &good_claims(), &EncodingKey::from_secret(SECRET)).unwrap();
         assert!(verify(&p, &keys_for(&p), Some(&t)).is_err());
+    }
+
+    #[test]
+    fn a_jwks_uri_policy_reads_and_writes_beside_an_empty_document() {
+        let policy: JwtPolicy =
+            serde_json::from_value(json!({"issuer": "i", "jwks_uri": "https://idp.example/jwks"}))
+                .unwrap();
+        assert_eq!(
+            policy.jwks, "",
+            "no document until the data plane fetches one"
+        );
+        assert_eq!(policy.jwks_uri.as_deref(), Some("https://idp.example/jwks"));
+        let written = serde_json::to_value(&policy).unwrap();
+        assert_eq!(
+            written["jwks"], "",
+            "always written, so a data plane older than jwks_uri still parses the configuration"
+        );
+        assert!(written.get("jwks_ca_pem").is_none());
+        let verbatim = serde_json::to_value(JwtPolicy {
+            jwks: "{}".into(),
+            ..JwtPolicy::default()
+        })
+        .unwrap();
+        assert!(
+            verbatim.get("jwks_uri").is_none(),
+            "a verbatim policy is written as before"
+        );
+    }
+
+    #[test]
+    fn a_secret_is_found_beside_public_keys() {
+        let public = json!({"kty": "EC", "crv": "P-256", "alg": "ES256", "x": "x", "y": "y"});
+        let doc = |keys: Vec<serde_json::Value>| json!({ "keys": keys }).to_string();
+        assert!(!holds_a_secret(&doc(vec![public.clone()])));
+        assert!(holds_a_secret(&doc(vec![public.clone(), oct(Some("k"))])));
+        let mut private = public;
+        private["d"] = json!("d");
+        assert!(holds_a_secret(&doc(vec![private])));
+        assert!(
+            !holds_a_secret("not json"),
+            "unreadable is a different refusal"
+        );
     }
 }

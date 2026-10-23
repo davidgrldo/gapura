@@ -163,16 +163,20 @@ async fn policy_row(
     }))
 }
 
-/// The `{target, kind, issuer, audience, keys}` an audit row records of a JWT requirement: what
-/// it asks for, never the JWKS itself.
+/// The `{target, kind, issuer, audience, keys}` an audit row records of a JWT requirement, and its
+/// `jwks_uri` when it has one: what it asks for, never the keys themselves.
 fn jwt_audit(target: &Target, policy: &JwtPolicy) -> serde_json::Value {
-    serde_json::json!({
+    let mut audit = serde_json::json!({
         "target": target.as_text(),
         "kind": "jwt",
         "issuer": policy.issuer,
         "audience": policy.audience,
         "keys": usable_keys(&policy.jwks),
-    })
+    });
+    if let Some(uri) = &policy.jwks_uri {
+        audit["jwks_uri"] = serde_json::json!(uri);
+    }
+    audit
 }
 
 /// A stored `jwt` configuration as the policy the compiler reads it as. One that does not fit
@@ -769,6 +773,7 @@ impl Store {
                     keys: usable_keys(&policy.jwks),
                     issuer: policy.issuer,
                     audience: policy.audience,
+                    jwks_uri: policy.jwks_uri,
                 })
             })
             .collect()
@@ -816,6 +821,8 @@ impl Store {
                 issuer: policy.issuer,
                 audience: policy.audience,
                 jwks: policy.jwks,
+                jwks_uri: policy.jwks_uri,
+                jwks_ca_pem: policy.jwks_ca_pem,
                 updated_at: row.get("updated_at"),
             })
         })

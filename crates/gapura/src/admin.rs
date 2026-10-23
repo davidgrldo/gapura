@@ -171,6 +171,7 @@ mod tests {
                     issuer: Some("https://id.example".into()),
                     audience: Some("orders".into()),
                     jwks: format!(r#"{{"keys":[{{"kty":"oct","alg":"HS256","k":"{HMAC}"}}]}}"#),
+                    ..Default::default()
                 }),
                 Plugin::KeyAuth(KeyAuthPolicy::default()),
             ],
