@@ -575,6 +575,20 @@ async fn bad_input_is_named_and_writes_nothing() {
         before,
         "the refusals wrote nothing"
     );
+
+    // The cap is set so that a full list of the longest networks still fits the body limit.
+    let longest: Vec<String> = (0..gapura_control::policies::MAX_NETWORKS)
+        .map(|i| format!("ffff:ffff:ffff:ffff:ffff:ffff:ffff:{i:04x}/128"))
+        .collect();
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        IP,
+        Some(s.ed),
+        &put("workspace", json!({"deny": longest}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
 }
 
 #[tokio::test]

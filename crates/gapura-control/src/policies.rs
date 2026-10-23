@@ -146,6 +146,21 @@ mod tests {
         assert_eq!(parse("ip_restriction", config(&plugin)).unwrap(), plugin);
     }
 
+    /// The store writes a row under `plugin.kind()` and reads it back under the path's kind, so
+    /// the two must be one name for every kind this endpoint keeps.
+    #[test]
+    fn each_kind_parses_to_a_plugin_of_that_kind() {
+        let minimal = |kind: &str| match kind {
+            "ip_restriction" => json!({"deny": ["10.0.0.0/8"]}),
+            other => panic!("no minimal configuration for {other}: add one here"),
+        };
+        for kind in KINDS {
+            let plugin = parse(kind, minimal(kind)).unwrap();
+            assert_eq!(plugin.kind(), *kind);
+            assert_eq!(parse(kind, config(&plugin)).unwrap(), plugin);
+        }
+    }
+
     #[test]
     fn a_bad_ip_restriction_names_its_field() {
         let refused = |config: serde_json::Value| parse("ip_restriction", config).unwrap_err();
