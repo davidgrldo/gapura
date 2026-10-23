@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- A JWT requirement can take its keys from the URL its issuer publishes them at (#PR).
+- A JWT requirement can take its keys from the URL its issuer publishes them at (#271).
   `PUT /api/workspaces/{ws}/jwt` takes `jwks_uri` (https, no user name, password or fragment, at
   most 2048 characters) instead of `jwks`, never beside it, and optionally `jwks_ca_pem`: CA
   certificates that verify that URL in place of the public roots, for an in-cluster IdP. The
