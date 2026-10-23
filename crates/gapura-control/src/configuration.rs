@@ -450,15 +450,14 @@ fn upstream_host(value: &str) -> Result<String, FieldError> {
 /// PEM CA certificates, and nothing else: at least one `CERTIFICATE` block, each of which
 /// parses as a certificate, and no other kind of block -- a private key pasted with them would be
 /// served to every data plane.
-fn ca_pem(value: Option<String>) -> Result<Option<String>, FieldError> {
-    const AT: &str = "tls.ca_pem";
+pub(crate) fn ca_pem(value: Option<String>, at: &str) -> Result<Option<String>, FieldError> {
     const NOT_PEM: &str =
         "Paste PEM certificates, each between BEGIN CERTIFICATE and END CERTIFICATE lines.";
     let Some(pem) = value else {
         return Ok(None);
     };
     if pem.len() > MAX_CA_PEM_BYTES {
-        return Err(field(AT, "Paste at most 64 KiB of certificates."));
+        return Err(field(at, "Paste at most 64 KiB of certificates."));
     }
     let other_block = pem.lines().any(|line| {
         line.trim()
@@ -466,7 +465,7 @@ fn ca_pem(value: Option<String>) -> Result<Option<String>, FieldError> {
             .is_some_and(|label| label.trim_end_matches('-') != "CERTIFICATE")
     });
     if other_block {
-        return Err(field(AT, "Paste CA certificates only."));
+        return Err(field(at, "Paste CA certificates only."));
     }
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::CertificateDer;
@@ -474,11 +473,11 @@ fn ca_pem(value: Option<String>) -> Result<Option<String>, FieldError> {
     // base64 decodes to something else is refused here rather than by every data plane.
     let mut anchors = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
-        let cert = cert.map_err(|_| field(AT, NOT_PEM))?;
-        anchors.add(cert).map_err(|_| field(AT, NOT_PEM))?;
+        let cert = cert.map_err(|_| field(at, NOT_PEM))?;
+        anchors.add(cert).map_err(|_| field(at, NOT_PEM))?;
     }
     if anchors.is_empty() {
-        return Err(field(AT, NOT_PEM));
+        return Err(field(at, NOT_PEM));
     }
     Ok(Some(pem))
 }
@@ -514,7 +513,7 @@ fn tls(protocol: Protocol, input: Option<TlsInput>) -> Result<Tls, FieldError> {
     };
     Ok(Tls {
         verify: input.verify,
-        ca_pem: ca_pem(pem)?,
+        ca_pem: ca_pem(pem, "tls.ca_pem")?,
         sni,
     })
 }

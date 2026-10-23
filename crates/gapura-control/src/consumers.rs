@@ -16,9 +16,10 @@ pub const DEFAULT_HEADER: &str = "x-api-key";
 pub const MAX_HEADER_CHARS: usize = 64;
 /// The longest issuer or audience a JWT requirement may name.
 pub const MAX_CLAIM_CHARS: usize = 512;
-/// The largest JWKS document a JWT requirement may carry: room for dozens of keys, and a bound on
-/// what every configuration served to every data plane repeats, as a service's CA bundle has.
-pub const MAX_JWKS_BYTES: usize = 64 * 1024;
+/// The largest JWKS document a JWT requirement may carry, shared with the data plane's fetch.
+pub use gapura_core::jwt::MAX_JWKS_BYTES;
+/// The longest `jwks_uri` a JWT requirement may name.
+pub const MAX_JWKS_URI_CHARS: usize = 2048;
 
 fn field(field: &str, sentence: impl Into<String>) -> FieldError {
     FieldError {
@@ -172,6 +173,13 @@ pub struct JwtInput {
     pub audience: Option<String>,
     #[serde(default)]
     pub jwks: Option<String>,
+    /// Where the issuer publishes its JWKS, for each data plane to fetch: instead of `jwks`,
+    /// never beside it.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// PEM CA certificates that verify `jwks_uri` in place of the public roots.
+    #[serde(default)]
+    pub jwks_ca_pem: Option<String>,
     /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
     /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
     /// does one sent when there is no requirement to replace.
@@ -192,9 +200,12 @@ fn claim(value: Option<&str>, at: &str, sentence: &str) -> Result<Option<String>
 }
 
 /// A JWT requirement: an issuer, which is required, since a policy without one accepts tokens
-/// from any issuer whose key it lists; an audience, which is not; and a JWKS document that
-/// `gapura_core::jwt` finds at least one usable key in, the reading the data plane gives it, so
-/// a document the data plane would verify nothing with is refused here rather than there. The
+/// from any issuer whose key it lists; an audience, which is not; and its keys, either a JWKS
+/// document that `gapura_core::jwt` finds at least one usable key in -- the reading the data plane
+/// gives it, so a document the data plane would verify nothing with is refused here rather than
+/// there -- or the https URL the issuer publishes them at, which each data plane fetches. Never
+/// both. The control plane does not fetch the URL: it may sit in another network from the IdP,
+/// and a fetch here would make the console a probe whose errors say what is reachable. A pasted
 /// document holds public keys only: viewers read it back, so it must hold no secret.
 pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
     let issuer_rule = format!(
@@ -209,7 +220,53 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
             "Leave the audience empty, or use 1 to {MAX_CLAIM_CHARS} characters with no control characters."
         ),
     )?;
-    let jwks = input.jwks.as_deref().unwrap_or_default();
+    let jwks = input.jwks.as_deref().filter(|d| !d.trim().is_empty());
+    let jwks_uri = input
+        .jwks_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    let jwks_ca_pem = input
+        .jwks_ca_pem
+        .clone()
+        .filter(|pem| !pem.trim().is_empty());
+    match (jwks, jwks_uri) {
+        (Some(_), Some(_)) => Err(field(
+            "jwks",
+            "Give the keys or the URL they are published at, not both.",
+        )),
+        (None, None) => Err(field(
+            "jwks",
+            "Paste a JWKS document, or give the URL the issuer publishes its keys at.",
+        )),
+        (Some(document), None) => {
+            if jwks_ca_pem.is_some() {
+                return Err(field(
+                    "jwks_ca_pem",
+                    "A CA verifies the URL keys are fetched from; pasted keys need none.",
+                ));
+            }
+            pasted(document)?;
+            Ok(JwtPolicy {
+                issuer: Some(issuer),
+                audience,
+                jwks: document.to_string(),
+                ..JwtPolicy::default()
+            })
+        }
+        (None, Some(uri)) => Ok(JwtPolicy {
+            issuer: Some(issuer),
+            audience,
+            jwks: String::new(),
+            jwks_uri: Some(key_url(uri)?),
+            jwks_ca_pem: configuration::ca_pem(jwks_ca_pem, "jwks_ca_pem")?,
+        }),
+    }
+}
+
+/// A pasted JWKS document the data plane can verify with: at most `MAX_JWKS_BYTES`, readable,
+/// no secret, at least one usable key.
+fn pasted(jwks: &str) -> Result<(), FieldError> {
     if jwks.len() > MAX_JWKS_BYTES {
         return Err(field("jwks", "Paste at most 64 KiB of keys."));
     }
@@ -218,7 +275,7 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
             Some("Paste a JWKS document: a JSON object with a keys array.")
         }
         // Before whether any key is usable: an oct key is refused even beside public ones.
-        _ if holds_a_shared_secret(jwks) => Some(
+        _ if gapura_core::jwt::holds_a_secret(jwks) => Some(
             "Use public keys only: an oct key is a shared secret, and anyone who can read this workspace could read it.",
         ),
         Err(JwksError::NoUsableKey { .. }) => Some(
@@ -226,38 +283,35 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
         ),
         Ok(_) => None,
     };
-    if let Some(sentence) = refused {
-        return Err(field("jwks", sentence));
+    match refused {
+        Some(sentence) => Err(field("jwks", sentence)),
+        None => Ok(()),
     }
-    Ok(JwtPolicy {
-        issuer: Some(issuer),
-        audience,
-        jwks: jwks.to_string(),
-        ..JwtPolicy::default()
-    })
 }
 
-/// Whether a JWKS document holds a key the console must refuse to store: an HMAC secret (`kty:
-/// "oct"`), which a viewer of the workspace could read back, or a private key (`kty: "RSA"` or
-/// `"EC"` or `"OKP"` with `d`, `p`, `q`, or `dp`/`dq`/`qi` present), which is worse — it can
-/// *sign* tokens for every audience this gateway verifies. The data plane verifies with public
-/// keys, from SQL or Kubernetes; the console stores verification keys, never signing ones.
-fn holds_a_shared_secret(jwks: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(jwks).is_ok_and(|document| {
-        document["keys"].as_array().is_some_and(|keys| {
-            keys.iter().any(|key| {
-                if key["kty"] == "oct" {
-                    return true;
-                }
-                // JWK private parameters, per RFC 7517 section 4: `d` is the private key for
-                // EC and OKP, `p` and `q` the RSA primes, and dp/dq/qi the CRT exponents.
-                // Their presence means the document holds a signing key, not a verification one.
-                ["d", "p", "q", "dp", "dq", "qi"]
-                    .iter()
-                    .any(|field| key.get(*field).is_some_and(|v| !v.is_null()))
-            })
-        })
-    })
+/// An https URL with a host and no credentials, fragment or control character: where an issuer
+/// publishes its keys. Kept as written; the data plane parses it again.
+fn key_url(uri: &str) -> Result<String, FieldError> {
+    let readable = uri.chars().count() <= MAX_JWKS_URI_CHARS
+        // `Url::parse` drops tabs and newlines silently, so they are refused before it sees them.
+        && !uri.chars().any(char::is_control)
+        && reqwest::Url::parse(uri).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str().is_some_and(|host| !host.is_empty())
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+        });
+    if readable {
+        Ok(uri.to_string())
+    } else {
+        Err(field(
+            "jwks_uri",
+            format!(
+                "Use the https URL the issuer publishes its keys at, with no user name, password or #fragment, in at most {MAX_JWKS_URI_CHARS} characters."
+            ),
+        ))
+    }
 }
 
 /// How many keys a stored JWKS holds that a token can be verified with; none for a document
@@ -628,6 +682,8 @@ mod tests {
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
             jwks: Some(jwks.into()),
+            jwks_uri: None,
+            jwks_ca_pem: None,
             seen_updated_at: None,
         }
     }
@@ -688,6 +744,80 @@ mod tests {
         }
         // Exactly at the limit is a length, not a refusal.
         assert!(jwt(&jwt_input(Some(&"a".repeat(MAX_CLAIM_CHARS)), None, JWKS)).is_ok());
+    }
+
+    fn uri_input(uri: &str, ca: Option<&str>) -> JwtInput {
+        JwtInput {
+            jwks: None,
+            jwks_uri: Some(uri.into()),
+            jwks_ca_pem: ca.map(str::to_string),
+            ..jwt_input(Some("i"), None, "")
+        }
+    }
+
+    #[test]
+    fn a_jwt_requirement_can_take_its_keys_from_a_url_instead() {
+        let ok = jwt(&uri_input(
+            " https://idp.example/.well-known/jwks.json ",
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            ok.jwks_uri.as_deref(),
+            Some("https://idp.example/.well-known/jwks.json")
+        );
+        assert_eq!(
+            (ok.jwks.as_str(), ok.jwks_ca_pem),
+            ("", None),
+            "fetched by the data plane"
+        );
+
+        let long = format!("https://idp.example/{}", "a".repeat(MAX_JWKS_URI_CHARS));
+        for bad in [
+            "http://idp.example/jwks",
+            "https://user:pw@idp.example/jwks",
+            "https://idp.example/jwks#k",
+            "idp.example/jwks",
+            "https://idp.exa\nmple/jwks",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                jwt(&uri_input(bad, None)).unwrap_err().field,
+                "jwks_uri",
+                "{bad:?}"
+            );
+        }
+
+        let both = JwtInput {
+            jwks: Some(JWKS.into()),
+            ..uri_input("https://idp.example/jwks", None)
+        };
+        assert_eq!(jwt(&both).unwrap_err().field, "jwks");
+
+        let ca = rcgen::generate_simple_self_signed(vec!["idp.internal".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let pasted_with_ca = JwtInput {
+            jwks_ca_pem: Some(ca.clone()),
+            ..jwt_input(Some("i"), None, JWKS)
+        };
+        assert_eq!(jwt(&pasted_with_ca).unwrap_err().field, "jwks_ca_pem");
+        assert_eq!(
+            jwt(&uri_input("https://idp.example/jwks", Some("not pem")))
+                .unwrap_err()
+                .field,
+            "jwks_ca_pem"
+        );
+        let pinned = jwt(&uri_input("https://idp.internal/jwks", Some(&ca))).unwrap();
+        assert_eq!(pinned.jwks_ca_pem.as_deref(), Some(ca.as_str()));
+        assert_eq!(
+            jwt(&uri_input("https://idp.example/jwks", Some("  ")))
+                .unwrap()
+                .jwks_ca_pem,
+            None,
+            "an empty CA is none"
+        );
     }
 
     fn limit_input(limit: serde_json::Value, per: serde_json::Value) -> RateLimitInput {
