@@ -183,7 +183,6 @@ async fn read(app: &axum::Router, path: &str, as_: Uuid) -> serde_json::Value {
 }
 
 /// The row the list shows for `name`.
-#[allow(dead_code)] // a later test in this file uses it
 async fn row(app: &axum::Router, list: &str, name: &str, as_: Uuid) -> serde_json::Value {
     read(app, list, as_)
         .await
@@ -328,5 +327,86 @@ async fn an_ip_restriction_reaches_the_compiled_rule() {
     assert_eq!(
         list[0]["config"],
         json!({"deny": ["203.0.113.7/32", "10.0.0.0/8"]})
+    );
+}
+
+/// The most specific policy applies, route over service over workspace, and each route and
+/// service row says where its policy comes from. A row with none has no `policies` at all, so
+/// rows read as they did before the field existed.
+#[tokio::test]
+async fn the_most_specific_applies_and_the_rows_say_where_from() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    assert!(row(&app, ROUTES, "orders-api", s.vi)
+        .await
+        .get("policies")
+        .is_none());
+    assert!(row(&app, SERVICES, "orders", s.vi)
+        .await
+        .get("policies")
+        .is_none());
+
+    apply(&app, s.ed, "workspace", json!({"deny": ["192.0.2.0/24"]})).await;
+    let from = |row: serde_json::Value| row["policies"]["ip_restriction"]["from"].clone();
+    assert_eq!(
+        from(row(&app, ROUTES, "orders-api", s.vi).await),
+        "workspace"
+    );
+    assert_eq!(from(row(&app, SERVICES, "orders", s.vi).await), "workspace");
+
+    apply(
+        &app,
+        s.ed,
+        "service:orders",
+        json!({"deny": ["198.51.100.0/24"]}),
+    )
+    .await;
+    assert_eq!(from(row(&app, ROUTES, "orders-api", s.vi).await), "service");
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [deny(&["198.51.100.0/24"])]
+    );
+
+    apply(
+        &app,
+        s.ed,
+        "route:orders-api",
+        json!({"allow": ["10.0.0.0/8"]}),
+    )
+    .await;
+    let route = row(&app, ROUTES, "orders-api", s.vi).await;
+    assert_eq!(from(route.clone()), "route");
+    assert_eq!(
+        route["policies"]["ip_restriction"]["updated_at"],
+        json!(stamp(&app, "route:orders-api", s.vi).await)
+    );
+    assert_eq!(from(row(&app, SERVICES, "orders", s.vi).await), "service");
+
+    ok(
+        &app,
+        "DELETE",
+        &format!("{IP}?target=service:orders"),
+        s.ed,
+        "",
+    )
+    .await;
+    ok(
+        &app,
+        "DELETE",
+        &format!("{IP}?target=route:orders-api"),
+        s.ed,
+        "",
+    )
+    .await;
+    assert_eq!(
+        from(row(&app, ROUTES, "orders-api", s.vi).await),
+        "workspace"
+    );
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [deny(&["192.0.2.0/24"])]
     );
 }
