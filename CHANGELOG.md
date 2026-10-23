@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- An `ip_restriction` policy refuses requests by client address (#PR).
+- An `ip_restriction` policy refuses requests by client address (#273).
   `PUT /api/workspaces/{ws}/policies/ip_restriction` takes `{"target", "config": {"allow",
   "deny"}}`.
   - **Lists:** addresses and CIDR networks, IPv4 or IPv6, at most 1000 in the two lists together.
