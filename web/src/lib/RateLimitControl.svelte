@@ -4,7 +4,7 @@
   import { Input } from '$lib/components/ui/input/index.js'
   import NativeSelect from './NativeSelect.svelte'
   import { get, write } from './api.js'
-  import { base, MAX_RATE_LIMIT, PER } from './configuration.js'
+  import { base, BY, BY_LABEL, byParts, byText, countedBy, listed, MAX_RATE_LIMIT, PER } from './configuration.js'
   import { can } from './workspace.js'
 
   // One request limit, applied on its own as KeyAuthControl's key requirement is, and for the
@@ -16,9 +16,14 @@
   //   is changed where it is set, not here.
   //   `updated_at` is the policy row's stamp, which an apply sends back; when it is left out, it
   //   is read here;
+  // - `consumer` names the consumer whose own limit this is, and is sent with every write; absent
+  //   for the limit on everyone. A consumer's own limit is never inherited, so its `applies.from`
+  //   is the target's own kind;
+  // - `legend` is what the fieldset is called: a consumer's sheet heads each of its limits by
+  //   where it sits;
   // - `onchanged` fetches the list again, which brings the new `applies`, and settles once it is
   //   drawn or has failed without rejecting. It must not close the sheet this sits in.
-  let { workspace, target, applies = null, role, onchanged } = $props()
+  let { workspace, target, consumer = undefined, legend = 'Request limit', applies = null, role, onchanged } = $props()
 
   const id = $props.id()
   const DEFAULT_PER = 'minute'
@@ -31,9 +36,17 @@
   // A number, or null while the input is empty: what a number input binds to.
   let limit = $state(null)
   let per = $state(DEFAULT_PER)
+  // What the limit counts by, as the form shows it: one of BY, and the header's name when it is
+  // `header`.
+  let mode = $state('ip')
+  let header = $state('')
+  // The consumers whose own limit on this target replaces this one for them, read from the limits
+  // list. Only the limit on everyone has any; empty until read, and when the read fails, which
+  // costs nothing but the note.
+  let others = $state([])
   let saving = $state(false)
-  // `{ sentence, field }` from a refused apply; a `limit` or `per` field puts the sentence beside
-  // that input.
+  // `{ sentence, field }` from a refused apply; a `limit`, `per` or `by` field puts the sentence
+  // beside that input.
   let error = $state(undefined)
   let box = $state(null)
   let input = $state(null)
@@ -55,23 +68,34 @@
     on = own !== null
     limit = own?.limit ?? null
     per = own?.per ?? DEFAULT_PER
+    const parts = byParts(own?.by)
+    mode = parts.mode
+    header = parts.header
     error = undefined
   })
 
   // A list that leaves the stamp out has it read from the limits list. One that no longer says
   // what `applies` does is not this read's, so an empty stamp is kept, which the server refuses
-  // as stale.
+  // as stale. The limit on everyone reads the list whatever the stamp, for the consumers whose own
+  // limit replaces it here. What is decided is kept in locals, and `seen` and `reading` are only
+  // ever written in here, never read back: an effect that reads what it writes depends on it, and
+  // the list's answer writing them would start the effect over and fetch again, for ever.
   $effect(() => {
     applies
     const mine = ++latest
-    seen = applies?.updated_at
-    reading = own !== null && seen === undefined
-    if (!reading) return
+    const stamp = applies?.updated_at
+    const needsStamp = own !== null && stamp === undefined
+    const naming = consumer === undefined
+    seen = stamp
+    reading = needsStamp
+    if (!needsStamp && !naming) return
     get(base(workspace, 'rate-limit')).then(
       (list) => {
         if (mine !== latest) return
-        // Consumers' own limits share this list, and a stamp of theirs is not this limit's.
-        const row = list.find((r) => r.target === target && !r.consumer)
+        if (naming) others = list.filter((r) => r.target === target && r.consumer).map((r) => r.consumer)
+        if (!needsStamp) return
+        // The row of this very limit: the one on everyone names no consumer, a consumer's names it.
+        const row = list.find((r) => r.target === target && r.consumer === consumer)
         // `by` is compared too: a limit changed to count by something else since the list was
         // read is not the one this form shows, and its stamp would let an apply replace it unseen.
         seen = row && row.limit === own.limit && row.per === own.per && row.by === own.by ? row.updated_at : ''
@@ -79,35 +103,50 @@
       },
       () => {
         if (mine !== latest) return
+        if (naming) others = []
+        if (!needsStamp) return
         seen = ''
         reading = false
       },
     )
   })
 
-  const changed = $derived(on !== (own !== null) || (on && (limit !== own.limit || per !== own.per)))
-  const placed = $derived(['limit', 'per'].includes(error?.field) ? error.field : undefined)
+  // What the limit counts by, as the server reads it, and as the limit set here has it.
+  const chosen = $derived(byText(mode, header))
+  const changed = $derived(
+    on !== (own !== null) ||
+      (on && (limit !== own.limit || per !== own.per || chosen !== (own.by ?? 'ip'))),
+  )
+  const placed = $derived(['limit', 'per', 'by'].includes(error?.field) ? error.field : undefined)
 
   async function apply(event) {
     event.preventDefault()
     if (saving || reading || !changed) return
     saving = true
     error = undefined
+    if (on && mode === 'header' && header.trim() === '') {
+      saving = false
+      error = { sentence: 'Name the header to count by.', field: 'by' }
+      await tick()
+      document.getElementById(`${id}-header`)?.focus()
+      return
+    }
     try {
       if (on) {
         await write('PUT', base(workspace, 'rate-limit'), {
           target,
+          // The consumer whose own limit this is; left out of the body for the limit on everyone.
+          consumer,
           limit,
           per,
-          // What the limit counts by is not edited here, so the edit keeps it: the server reads a
-          // missing `by` as the address, and editing 10 a minute to 20 on a limit that counts by
-          // `header:x-tenant` would otherwise quietly make it per address. Absent when it
-          // counts by address, as the lists show it.
-          by: own?.by,
+          by: chosen,
           // None when nothing is set here: the server then refuses to replace one set since.
           seen_updated_at: own === null ? undefined : seen,
         })
-      } else await write('DELETE', `${base(workspace, 'rate-limit')}?target=${encodeURIComponent(target)}`)
+      } else {
+        const whose = consumer === undefined ? '' : `&consumer=${encodeURIComponent(consumer)}`
+        await write('DELETE', `${base(workspace, 'rate-limit')}?target=${encodeURIComponent(target)}${whose}`)
+      }
     } catch (failure) {
       // `Refused` names the field it is about; `Forbidden` and a connection that failed do not,
       // and their sentence goes in the box below.
@@ -120,7 +159,14 @@
         stale: failure.status === 409 && failure.message.includes('Reload'),
       }
       await tick()
-      const named = placed === 'limit' ? input : placed === 'per' ? document.getElementById(`${id}-per`) : null
+      const named =
+        placed === 'limit'
+          ? input
+          : placed === 'per'
+            ? document.getElementById(`${id}-per`)
+            : placed === 'by'
+              ? document.getElementById(mode === 'header' ? `${id}-header` : `${id}-by`)
+              : null
       ;(named ?? button)?.focus()
       return
     }
@@ -141,6 +187,34 @@
 
   const described = (field, help) =>
     [placed === field ? `${id}-${field}-error` : null, help].filter(Boolean).join(' ') || undefined
+
+  // What the help line under the inputs says first, by what the limit counts. It has no full stop
+  // of its own: the template ends it with one, before the clause about replicas that every mode
+  // shares.
+  const counted = $derived(
+    mode === 'consumer'
+      ? consumer === undefined
+        ? 'Per consumer an API key names; a request with no key counts by its address'
+        : `All of ${consumer}'s requests together, on each route apart`
+      : mode === 'header'
+        ? 'Per value of this header; a request without it, with it empty, or with it sent twice counts by its address. Only as honest as whoever sets the header: count by one only behind a proxy that overwrites it'
+        : consumer === undefined
+          ? 'Per client address'
+          : `Per client address ${consumer} calls from`,
+  )
+
+  // What is said under the control about the consumers whose own limit is on this target. When a
+  // limit applies here it is theirs that replaces it for them; when nothing does, they simply
+  // have one. The Consumers page is where they are changed, so it is only pointed at from a
+  // control that is not already on it: the limit on everyone is drawn there.
+  const note = $derived.by(() => {
+    if (others.length === 0) return ''
+    const one = others.length === 1
+    const has = `${listed(others)} ${one ? 'has its' : 'have their'} own limit here`
+    const replaces = applies ? `, which replaces this one for ${one ? 'it' : 'them'}` : ''
+    const where = target === 'workspace' ? '' : ` Change ${one ? 'it' : 'those'} on the Consumers page.`
+    return `${has}${replaces}.${where}`
+  })
 </script>
 
 {#snippet problem(field)}
@@ -151,9 +225,9 @@
 
 <form onsubmit={apply}>
   <fieldset bind:this={group} tabindex="-1" class="grid gap-2 rounded-lg border p-3 outline-none" disabled={saving}>
-    <legend class="px-1 font-medium">Request limit</legend>
+    <legend class="px-1 font-medium">{legend}</legend>
     {#if inherited}
-      <p>Limited by the {applies.from}: {applies.limit} per {applies.per}.</p>
+      <p>Limited by the {applies.from}: {applies.limit} per {applies.per}, {countedBy(applies.by)}.</p>
     {:else if can.write(role)}
       <label class="flex items-center gap-2">
         <input bind:this={box} type="checkbox" bind:checked={on} onchange={() => (error = undefined)} />
@@ -189,8 +263,37 @@
         </div>
         {@render problem('limit')}
         {@render problem('per')}
+        <div class="grid grid-cols-2 gap-2">
+          <div class="grid gap-1.5">
+            <label for="{id}-by" class="font-medium">Count per</label>
+            <NativeSelect
+              id="{id}-by"
+              bind:value={mode}
+              aria-invalid={placed === 'by' && mode !== 'header'}
+              aria-describedby={described('by', `${id}-help`)}
+            >
+              {#each BY as m (m)}<option value={m}>{BY_LABEL[m]}</option>{/each}
+            </NativeSelect>
+          </div>
+          {#if mode === 'header'}
+            <div class="grid gap-1.5">
+              <label for="{id}-header" class="font-medium">Header</label>
+              <Input
+                id="{id}-header"
+                class="font-mono"
+                bind:value={header}
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-invalid={placed === 'by'}
+                aria-describedby={described('by', `${id}-help`)}
+              />
+            </div>
+          {/if}
+        </div>
+        {@render problem('by')}
         <p id="{id}-help" class="text-xs text-muted-foreground">
-          Per client address, counted by each gateway replica separately: with 3 replicas a client can make up to 3 × this.
+          {counted}. Counted by each gateway replica separately: with 3 replicas a client can make up to 3 × this.
         </p>
       {/if}
       {#if error && !placed}
@@ -205,9 +308,12 @@
         {saving ? 'Applying…' : 'Apply'}
       </Button>
     {:else if own !== null}
-      <p>Limited: {own.limit} per {own.per}.</p>
+      <p>Limited: {own.limit} per {own.per}, {countedBy(own.by)}.</p>
     {:else}
       <p>Not limited.</p>
+    {/if}
+    {#if note}
+      <p class="text-xs text-muted-foreground">{note}</p>
     {/if}
   </fieldset>
 </form>

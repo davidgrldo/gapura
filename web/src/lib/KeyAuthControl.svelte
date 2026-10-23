@@ -56,13 +56,17 @@
 
   // A list that leaves the stamp out has it read from the requirements list. One that no longer
   // says what `applies` does is not this read's, so an empty stamp is kept, which the server
-  // refuses as stale.
+  // refuses as stale. What is decided is kept in locals, and `seen` and `reading` are only ever
+  // written in here, never read back: an effect that reads what it writes depends on it, and the
+  // list's answer writing them would start the effect over and fetch again, for ever.
   $effect(() => {
     applies
     const mine = ++latest
-    seen = applies?.updated_at
-    reading = own !== null && seen === undefined
-    if (!reading) return
+    const stamp = applies?.updated_at
+    const needsStamp = own !== null && stamp === undefined
+    seen = stamp
+    reading = needsStamp
+    if (!needsStamp) return
     get(base(workspace, 'key-auth')).then(
       (list) => {
         if (mine !== latest) return

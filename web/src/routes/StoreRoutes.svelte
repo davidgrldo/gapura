@@ -5,7 +5,7 @@
   import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
-  import { PER_SHORT, anyOf, base } from '../lib/configuration.js'
+  import { PER_SHORT, anyOf, base, countedBy } from '../lib/configuration.js'
   import { can, remembered } from '../lib/workspace.js'
   import Lock from 'phosphor-svelte/lib/Lock'
 
@@ -63,9 +63,11 @@
   // The JWT tag beside it says the same of a token, and whose. An issuer is missing only from a
   // requirement written by hand in SQL, which accepts any.
   const tokened = (row) => `Requires a JWT from ${row.jwt.issuer ?? 'any issuer'} (from the ${row.jwt.from})`
-  // The limit tag after it says how many requests a client may make there, and where that is set.
+  // The limit tag after it says how many requests may be made there and what they are counted
+  // by (a client address, a consumer or a header's value), and where that is set. It is the limit
+  // on everyone only: a consumer's own limit is on the Consumers page.
   const limited = (row) =>
-    `At most ${row.rate_limit.limit} requests per ${row.rate_limit.per} per client (from the ${row.rate_limit.from})`
+    `At most ${row.rate_limit.limit} requests per ${row.rate_limit.per} ${countedBy(row.rate_limit.by)} (from the ${row.rate_limit.from})`
 </script>
 
 <h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Routes</h1>
@@ -137,7 +139,7 @@
                   {#if r.rate_limit}
                     <span class="inline-flex font-sans" title={limited(r)}>
                       <Tag tone="idle"><span aria-hidden="true">{r.rate_limit.limit}/{PER_SHORT[r.rate_limit.per]}</span></Tag>
-                      <span class="sr-only">, at most {r.rate_limit.limit} requests per {r.rate_limit.per} per client (from the {r.rate_limit.from})</span>
+                      <span class="sr-only">, at most {r.rate_limit.limit} requests per {r.rate_limit.per} {countedBy(r.rate_limit.by)} (from the {r.rate_limit.from})</span>
                     </span>
                   {/if}
                 </span>

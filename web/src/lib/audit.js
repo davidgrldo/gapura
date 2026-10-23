@@ -37,14 +37,18 @@ export const NO_WORKSPACE = '-'
 
 // The name a person reads for what an entry is about, from whichever side recorded one. Each
 // kind records a different field (a service its `name`, a new account its `username`, a change
-// to an account or to its direct grants the `account`, a key requirement its `target`, a key its
-// `prefix`, a mapping its `group`), so the first one there is used; an entry that recorded none
-// shows its kind alone.
+// to an account or to its direct grants the `account`, a key requirement its `target`, a consumer's
+// own request limit its target and the consumer, a key its `prefix`, a mapping its `group`), so the
+// first one there is used; an entry that recorded none shows its kind alone.
 const NAMED_BY = ['name', 'username', 'account', 'target', 'prefix', 'group']
 export function nameOf(entry) {
   for (const field of NAMED_BY) {
     const value = entry.after?.[field] ?? entry.before?.[field]
-    if (value != null) return String(value)
+    if (value != null) {
+      // A consumer's own request limit is named by where it sits and whose it is.
+      const consumer = field === 'target' ? (entry.after?.consumer ?? entry.before?.consumer) : undefined
+      return consumer == null ? String(value) : `${value} for ${consumer}`
+    }
   }
   return undefined
 }

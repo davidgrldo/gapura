@@ -57,7 +57,8 @@
     "rate_limit": {
       "limit": 120,
       "per": "minute",
-      "from": "service"
+      "from": "service",
+      "updated_at": "2026-10-20T08:00:00.000000Z"
     }
   }
 ]
