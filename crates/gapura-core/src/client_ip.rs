@@ -3,7 +3,8 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 
-/// A network we accept `X-Forwarded-For` from.
+/// A network of addresses: one we accept `X-Forwarded-For` from (`--trusted-proxy`), or an entry
+/// in an ip_restriction policy's allow or deny list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
     addr: IpAddr,
@@ -61,15 +62,26 @@ impl<'de> serde::Deserialize<'de> for Cidr {
 impl Cidr {
     /// Whether `ip` is in this network, in either of the forms an IPv4 address takes (#216): an
     /// IPv4-mapped IPv6 address (`::ffff:10.0.0.5`, how a dual-stack `[::]` listener sees an
-    /// IPv4 peer) is in a v4 network that holds the address it stands for, and an IPv4 address
+    /// IPv4 peer) is the IPv4 address it stands for, so a v4 network holds it, and an IPv4 address
     /// is in a v6 network that holds its mapped form. So trust does not depend on which socket
     /// the proxy arrived on, or on whether the address was canonicalised first.
+    ///
+    /// An IPv6 network reaches an IPv4 address only when it lies inside the mapped range
+    /// `::ffff:0:0/96`, which is a prefix of at least 96 bits on a mapped address
+    /// (`::ffff:0:0/96`, `::ffff:10.0.0.0/104`). A shorter prefix such as `::/0` or
+    /// `2001:db8::/32` means "these IPv6 addresses": reading `::/0` as every IPv4 address too would
+    /// let an `allow` of `::/0` admit every IPv4 client, and a `deny` of it turn away all of them.
+    /// The same rule applies to `--trusted-proxy`, where it trusts less than the mapped reading
+    /// did, never more.
     pub fn contains(&self, ip: IpAddr) -> bool {
-        let other_form = match ip {
-            IpAddr::V4(v4) => Some(IpAddr::V6(v4.to_ipv6_mapped())),
-            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4),
-        };
-        self.contains_exactly(ip) || other_form.is_some_and(|ip| self.contains_exactly(ip))
+        match (self.addr, ip.to_canonical()) {
+            (IpAddr::V6(net), IpAddr::V4(v4)) => {
+                self.bits >= 96
+                    && net.to_ipv4_mapped().is_some()
+                    && self.contains_exactly(IpAddr::V6(v4.to_ipv6_mapped()))
+            }
+            (_, ip) => self.contains_exactly(ip),
+        }
     }
 
     fn contains_exactly(&self, ip: IpAddr) -> bool {
@@ -333,6 +345,40 @@ mod tests {
         assert!(mapped.contains(ip("10.1.2.3")));
         let got = client_ip(ip("::ffff:10.0.0.5"), Some("198.51.100.5"), &[mapped], None);
         assert_eq!(got, ip("198.51.100.5"));
+    }
+
+    #[test]
+    fn an_ipv6_network_shorter_than_the_mapped_range_holds_no_ipv4_address() {
+        for net in ["::/0", "2001:db8::/32"] {
+            let net: Cidr = net.parse().unwrap();
+            assert!(net.contains(ip("2001:db8::1")), "{net}");
+            assert!(!net.contains(ip("192.0.2.1")), "{net}");
+            assert!(!net.contains(ip("::ffff:192.0.2.1")), "{net}");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_network_inside_the_mapped_range_holds_the_ipv4_addresses_it_names() {
+        // Past the 96 mapped bits each further bit is a bit of the IPv4 address, so /104 is the
+        // IPv4 /8 and /112 the IPv4 /16.
+        let net: Cidr = "::ffff:10.0.0.0/104".parse().unwrap();
+        assert!(net.contains(ip("10.0.0.5")));
+        assert!(net.contains(ip("::ffff:10.0.0.5")));
+        assert!(net.contains(ip("10.1.0.0")));
+        assert!(!net.contains(ip("11.0.0.0")));
+        assert!(!net.contains(ip("::ffff:11.0.0.0")));
+        let narrower: Cidr = "::ffff:10.0.0.0/112".parse().unwrap();
+        assert!(narrower.contains(ip("10.0.0.5")));
+        assert!(narrower.contains(ip("::ffff:10.0.0.5")));
+        assert!(!narrower.contains(ip("10.1.0.0")));
+        assert!(!narrower.contains(ip("::ffff:10.1.0.0")));
+    }
+
+    #[test]
+    fn an_ipv4_network_holds_the_mapped_form_of_its_addresses() {
+        let net: Cidr = "10.0.0.0/8".parse().unwrap();
+        assert!(net.contains(ip("::ffff:10.0.0.5")));
+        assert!(!net.contains(ip("::ffff:11.0.0.5")));
     }
 
     #[test]

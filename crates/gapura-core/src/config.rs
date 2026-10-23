@@ -839,6 +839,26 @@ mod tests {
         assert_eq!(deny_only.refusal(ip("192.0.2.7")), Some("denied"));
     }
 
+    /// An IPv6 network wider than the mapped range means IPv6 addresses only, so `allow ::/0`
+    /// does not admit every IPv4 client and `deny ::/0` ("block IPv6") does not refuse them.
+    #[test]
+    fn an_ipv6_catch_all_does_not_cover_ipv4() {
+        let ip = |s: &str| Some(s.parse().unwrap());
+        let allow = IpRestrictionPolicy {
+            allow: nets(&["10.0.0.0/8", "::/0"]),
+            deny: vec![],
+        };
+        assert_eq!(allow.refusal(ip("192.0.2.1")), Some("not_allowed"));
+        assert_eq!(allow.refusal(ip("2001:db8::1")), None);
+        assert_eq!(allow.refusal(ip("10.1.2.3")), None);
+        let deny = IpRestrictionPolicy {
+            allow: vec![],
+            deny: nets(&["::/0"]),
+        };
+        assert_eq!(deny.refusal(ip("192.0.2.1")), None);
+        assert_eq!(deny.refusal(ip("2001:db8::1")), Some("denied"));
+    }
+
     #[test]
     fn an_ip_restriction_is_its_networks_on_the_wire() {
         let p = IpRestrictionPolicy {
