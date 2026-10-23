@@ -170,6 +170,14 @@ pub fn router_with(state: AppState) -> Router {
                 .delete(crate::consumers_api::delete_rate_limit)
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
         )
+        // Every other policy kind through one endpoint: its configuration is the policy itself.
+        .route(
+            "/api/workspaces/{ws}/policies/{kind}",
+            get(crate::policies_api::list_policy)
+                .put(crate::policies_api::put_policy)
+                .delete(crate::policies_api::delete_policy)
+                .layer(DefaultBodyLimit::max(MAX_BODY)),
+        )
         // Data planes and their tokens, across every workspace. Only registering reads a body.
         .route(
             "/api/data-planes",

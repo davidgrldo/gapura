@@ -22,6 +22,7 @@ mod consumers;
 mod data_planes;
 mod grants;
 mod identity;
+mod policies;
 mod settings;
 mod tls;
 mod workspaces;

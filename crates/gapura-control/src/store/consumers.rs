@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 /// The service or route `target` names in `workspace`, read `FOR SHARE`, as the `plugins` column
 /// that points at it and its id; `None` for the whole workspace.
-async fn target_row(
+pub(super) async fn target_row(
     tx: &Transaction<'_>,
     workspace: Uuid,
     target: &Target,
@@ -59,7 +59,7 @@ async fn target_row(
 /// and its `updated_at` as the API shows it. A consumer's own row and the row on everyone are two
 /// rows on one target, and each write reads only its own -- `is not distinct from` matches a
 /// null consumer to the row with none.
-async fn plugin_row(
+pub(super) async fn plugin_row(
     tx: &Transaction<'_>,
     workspace: Uuid,
     resolved: Option<(&str, Uuid)>,
@@ -138,7 +138,7 @@ async fn consumer_row(
 /// one whose configuration does not fit, which fails every read. Such a row can only be replaced
 /// with no stamp, so a write can still put right what SQL by hand broke, and nothing a reader saw
 /// is lost by it.
-fn fresh(shown: Option<&str>, seen: Option<&str>) -> Result<(), WriteError> {
+pub(super) fn fresh(shown: Option<&str>, seen: Option<&str>) -> Result<(), WriteError> {
     if shown == seen {
         Ok(())
     } else {
@@ -1204,7 +1204,7 @@ impl Store {
 }
 
 /// The target a policy row is attached to, from the names of its service and route.
-fn target_of(service: Option<String>, route: Option<String>) -> Target {
+pub(super) fn target_of(service: Option<String>, route: Option<String>) -> Target {
     match (service, route) {
         (Some(service), _) => Target::Service(service),
         (None, Some(route)) => Target::Route(route),
