@@ -359,6 +359,7 @@ async fn the_compiled_policy_accepts_tokens_from_its_own_keys_only() {
             issuer: Some(ISSUER.into()),
             audience: Some("orders".into()),
             jwks: document,
+            ..JwtPolicy::default()
         }
     );
     let keys = gapura_core::jwt::keys(&policy.jwks).expect("the stored JWKS reads");

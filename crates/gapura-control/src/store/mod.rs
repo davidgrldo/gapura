@@ -550,9 +550,17 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// replica does not know during a rolling upgrade.
 fn parse_plugin(name: &str, config: serde_json::Value) -> Result<Plugin> {
     match name {
-        "jwt" => serde_json::from_value::<JwtPolicy>(config)
-            .map(Plugin::Jwt)
-            .context("the configuration does not fit a jwt policy"),
+        "jwt" => {
+            let policy = serde_json::from_value::<JwtPolicy>(config)
+                .context("the configuration does not fit a jwt policy")?;
+            // Exactly one place the keys come from. Neither verifies nothing, and both leave the
+            // data plane to guess which one is meant.
+            anyhow::ensure!(
+                policy.jwks.is_empty() != policy.jwks_uri.is_none(),
+                "a jwt policy names exactly one of jwks and jwks_uri"
+            );
+            Ok(Plugin::Jwt(policy))
+        }
         "key_auth" => serde_json::from_value::<KeyAuthPolicy>(config)
             .map(Plugin::KeyAuth)
             .context("the configuration does not fit a key_auth policy"),
@@ -751,6 +759,14 @@ mod tests {
             parse_plugin("jwt", json!({"issuer": "x"})).is_err(),
             "no jwks"
         );
+        assert!(
+            parse_plugin(
+                "jwt",
+                json!({"issuer": "x", "jwks": "{}", "jwks_uri": "https://idp.example/jwks"})
+            )
+            .is_err(),
+            "both"
+        );
         assert!(parse_plugin("key_auth", json!({"header": 7})).is_err());
         assert!(parse_plugin("oauth2", json!({})).is_err(), "unknown name");
     }
@@ -794,6 +810,10 @@ mod tests {
     fn readable_policies_are_read() {
         assert!(matches!(
             parse_plugin("jwt", json!({"jwks": "{\"keys\":[]}"})),
+            Ok(Plugin::Jwt(_))
+        ));
+        assert!(matches!(
+            parse_plugin("jwt", json!({"jwks_uri": "https://idp.example/jwks"})),
             Ok(Plugin::Jwt(_))
         ));
         assert!(matches!(

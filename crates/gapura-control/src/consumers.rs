@@ -233,6 +233,7 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
         issuer: Some(issuer),
         audience,
         jwks: jwks.to_string(),
+        ..JwtPolicy::default()
     })
 }
 

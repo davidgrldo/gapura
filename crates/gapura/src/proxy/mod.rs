@@ -1386,6 +1386,7 @@ mod tests {
                 issuer: None,
                 audience: None,
                 jwks,
+                ..JwtPolicy::default()
             };
             (policy, keys)
         }
