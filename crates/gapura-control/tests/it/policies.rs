@@ -109,7 +109,6 @@ const COMPILED_ROUTE: &str = "default/orders-api";
 ///
 /// And in default, a service `orders` and a route `orders-api` for `api.example.com`.
 struct Seed {
-    #[allow(dead_code)] // a later test in this file uses it
     ada: Uuid,
     ed: Uuid,
     vi: Uuid,
@@ -167,7 +166,6 @@ async fn ok(app: &axum::Router, method: &str, path: &str, as_: Uuid, body: &str)
 }
 
 /// The sentence a refusal carries.
-#[allow(dead_code)] // a later test in this file uses it
 fn sentence(body: &str) -> String {
     parse(body)["error"]
         .as_str()
@@ -196,7 +194,6 @@ async fn row(app: &axum::Router, list: &str, name: &str, as_: Uuid) -> serde_jso
 
 /// Every row a policy write could change, the number of audit entries, and the version the data
 /// planes poll. Equal before and after a refusal means the refusal wrote nothing.
-#[allow(dead_code)] // a later test in this file uses it
 async fn everything(store: &Store) -> serde_json::Value {
     store
         .client()
@@ -240,7 +237,6 @@ fn plugins_on(config: &Config, route: &str) -> Vec<Plugin> {
 }
 
 /// The policy writes in the audit log, oldest first: action, before, after.
-#[allow(dead_code)] // a later test in this file uses it
 async fn policy_audits(store: &Store) -> Vec<(String, serde_json::Value, serde_json::Value)> {
     store
         .client()
@@ -409,4 +405,305 @@ async fn the_most_specific_applies_and_the_rows_say_where_from() {
         plugins_on(&compiled(&store).await, COMPILED_ROUTE),
         [deny(&["192.0.2.0/24"])]
     );
+}
+
+/// A create, an update and a delete each write one audit entry naming the target, the kind and
+/// the policy; saving the same policy again writes nothing at all. A replace needs the stamp of
+/// the policy it replaces, and a create sends none.
+#[tokio::test]
+async fn the_audit_records_each_change_and_a_replace_needs_a_fresh_read() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let first = json!({"deny": ["192.0.2.0/24"]});
+    let second = json!({"deny": ["198.51.100.0/24"]});
+
+    ok(
+        &app,
+        "PUT",
+        IP,
+        s.ed,
+        &put("route:orders-api", first.clone(), None),
+    )
+    .await;
+    let read_at = stamp(&app, "route:orders-api", s.ed).await;
+    let before = everything(&store).await;
+    ok(
+        &app,
+        "PUT",
+        IP,
+        s.ed,
+        &put("route:orders-api", first.clone(), read_at.as_deref()),
+    )
+    .await;
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the same policy wrote nothing"
+    );
+
+    for stale in [None, Some("2001-01-01T00:00:00.000000Z")] {
+        let (status, body) = send(
+            &app,
+            "PUT",
+            IP,
+            Some(s.ed),
+            &put("route:orders-api", second.clone(), stale),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale:?}: {body}");
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "a stale write wrote nothing"
+    );
+
+    apply(&app, s.ed, "route:orders-api", second.clone()).await;
+    ok(
+        &app,
+        "DELETE",
+        &format!("{IP}?target=route:orders-api"),
+        s.ed,
+        "",
+    )
+    .await;
+    let entry = |config: &serde_json::Value| json!({"target": "route:orders-api", "kind": "ip_restriction", "config": config});
+    assert_eq!(
+        policy_audits(&store).await,
+        [
+            ("create".to_string(), json!(null), entry(&first)),
+            ("update".to_string(), entry(&first), entry(&second)),
+            ("delete".to_string(), entry(&second), json!(null)),
+        ]
+    );
+}
+
+/// Each refusal names what is wrong, beside the field the console shows it at, and writes
+/// nothing.
+#[tokio::test]
+async fn bad_input_is_named_and_writes_nothing() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let before = everything(&store).await;
+
+    for (body, status, field) in [
+        (
+            put("workspace", json!({}), None),
+            StatusCode::BAD_REQUEST,
+            "allow",
+        ),
+        (
+            put("workspace", json!({"allow": ["10.0.0.0/33"]}), None),
+            StatusCode::BAD_REQUEST,
+            "allow",
+        ),
+        (
+            put("workspace", json!({"deny": ["nope"]}), None),
+            StatusCode::BAD_REQUEST,
+            "deny",
+        ),
+        (
+            put("workspace", json!({"deny": "10.0.0.0/8"}), None),
+            StatusCode::BAD_REQUEST,
+            "config",
+        ),
+        (
+            put("everywhere", json!({"deny": ["10.0.0.0/8"]}), None),
+            StatusCode::BAD_REQUEST,
+            "target",
+        ),
+    ] {
+        let (got, answer) = send(&app, "PUT", IP, Some(s.ed), &body).await;
+        assert_eq!(got, status, "{body}: {answer}");
+        assert_eq!(parse(&answer)["field"], field, "{body}: {answer}");
+    }
+    let many: Vec<String> = (0..=gapura_control::policies::MAX_NETWORKS)
+        .map(|i| format!("10.0.{}.{}", i / 256, i % 256))
+        .collect();
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        IP,
+        Some(s.ed),
+        &put("workspace", json!({"deny": many}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+
+    // Not a policy at all, a target that does not exist, a kind that does not exist.
+    let (status, _) = send(&app, "PUT", IP, Some(s.ed), "not json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        IP,
+        Some(s.ed),
+        &put("route:nowhere", json!({"deny": ["10.0.0.0/8"]}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+    for method in ["GET", "PUT", "DELETE"] {
+        let (status, answer) = send(
+            &app,
+            method,
+            "/api/workspaces/default/policies/oauth2?target=workspace",
+            Some(s.ed),
+            &put("workspace", json!({}), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {answer}");
+        assert_eq!(sentence(&answer), "There is no such policy kind.");
+    }
+    let (status, answer) = send(
+        &app,
+        "DELETE",
+        &format!("{IP}?target=workspace"),
+        Some(s.ed),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+    assert_eq!(sentence(&answer), "workspace has no ip_restriction policy.");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_reads_an_editor_writes_and_no_role_is_refused() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let body = put("workspace", json!({"deny": ["192.0.2.0/24"]}), None);
+    ok(&app, "PUT", IP, s.ed, &body).await;
+    let off = format!("{IP}?target=workspace");
+
+    assert_eq!(read(&app, IP, s.vi).await[0]["target"], "workspace");
+    let before = everything(&store).await;
+    for (method, path, body) in [
+        (
+            "PUT",
+            IP,
+            put("route:orders-api", json!({"deny": ["10.0.0.0/8"]}), None),
+        ),
+        ("DELETE", off.as_str(), String::new()),
+    ] {
+        let (status, answer) = send(&app, method, path, Some(s.vi), &body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {answer}");
+        assert_eq!(
+            sentence(&answer),
+            "Making changes in this workspace needs the editor role."
+        );
+    }
+    // Someone whose roles are all in default is refused alike in a workspace that exists and in
+    // one that does not.
+    for who in [s.ed, s.ada] {
+        for (method, tail, body) in [
+            ("GET", "/policies/ip_restriction", String::new()),
+            ("PUT", "/policies/ip_restriction", body.clone()),
+            (
+                "DELETE",
+                "/policies/ip_restriction?target=workspace",
+                String::new(),
+            ),
+        ] {
+            let mut answers = vec![];
+            for ws in ["payments", "nowhere"] {
+                let path = format!("/api/workspaces/{ws}{tail}");
+                let (status, answer) = send(&app, method, &path, Some(who), &body).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {answer}");
+                answers.push(answer);
+            }
+            assert_eq!(answers[0], answers[1], "{method} {tail}");
+        }
+    }
+    let (status, _) = send(&app, "GET", IP, None, "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+
+    // A route with a policy of its own is not deleted from under it.
+    ok(
+        &app,
+        "PUT",
+        IP,
+        s.ed,
+        &put("route:orders-api", json!({"deny": ["10.0.0.0/8"]}), None),
+    )
+    .await;
+    let (status, answer) = send(
+        &app,
+        "DELETE",
+        &format!("{ROUTES}/orders-api"),
+        Some(s.ada),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    ok(&app, "DELETE", &off, s.ed, "").await;
+}
+
+/// A row only SQL written by hand could store fails the snapshot, so the data planes keep the
+/// configuration they have rather than lose the restriction, and the lists say they cannot read
+/// it. The API then takes the row over, sending no stamp, since no read could show one.
+#[tokio::test]
+async fn a_stored_policy_in_another_shape_fails_the_snapshot() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let db = store.client().await.unwrap();
+    for config in [
+        json!({}),
+        json!({"deny": ["nope"]}),
+        json!({"deny": ["10.0.0.0/8"], "mode": "strict"}),
+    ] {
+        db.execute("delete from plugins", &[]).await.unwrap();
+        db.execute(
+            "insert into plugins (workspace_id, name, config, service_id)
+             select workspace_id, 'ip_restriction', $1, id from services where name = 'orders'",
+            &[&config],
+        )
+        .await
+        .unwrap();
+        assert!(store.snapshot().await.is_err(), "{config}");
+        for path in [IP, ROUTES, SERVICES] {
+            let (status, _) = send(&app, "GET", path, Some(s.vi), "").await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path} {config}");
+        }
+    }
+    ok(
+        &app,
+        "PUT",
+        IP,
+        s.ed,
+        &put("service:orders", json!({"deny": ["10.0.0.0/8"]}), None),
+    )
+    .await;
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [deny(&["10.0.0.0/8"])]
+    );
+}
+
+#[tokio::test]
+async fn kubernetes_mode_has_none_of_it() {
+    let app = console(None);
+    let (status, body) = send(&app, "GET", IP, None, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(sentence(&body).contains("keeps no configuration"), "{body}");
 }
