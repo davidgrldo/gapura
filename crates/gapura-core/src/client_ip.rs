@@ -35,6 +35,29 @@ impl FromStr for Cidr {
     }
 }
 
+/// `addr/bits`, the form `from_str` reads, a bare address included: what a policy's networks
+/// look like on the wire, in the disk cache and in the console.
+impl std::fmt::Display for Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.addr, self.bits)
+    }
+}
+
+impl serde::Serialize for Cidr {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+/// From the text `from_str` reads, so a network that does not parse fails the whole
+/// configuration rather than being left out of a list: a deny list missing an entry admits it.
+impl<'de> serde::Deserialize<'de> for Cidr {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 impl Cidr {
     /// Whether `ip` is in this network, in either of the forms an IPv4 address takes (#216): an
     /// IPv4-mapped IPv6 address (`::ffff:10.0.0.5`, how a dual-stack `[::]` listener sees an
@@ -316,5 +339,29 @@ mod tests {
     fn a_prefix_wider_than_the_address_is_refused() {
         assert!("10.0.0.0/33".parse::<Cidr>().is_err());
         assert!("nonsense".parse::<Cidr>().is_err());
+    }
+
+    /// A policy carries its networks on the wire and in the disk cache as the text an operator
+    /// wrote, a bare address as the network of one it stands for.
+    #[test]
+    fn a_network_is_written_and_read_as_text() {
+        let written =
+            serde_json::to_value(nets(&["10.0.0.0/8", "2001:db8::1", "::ffff:10.0.0.5/128"]))
+                .unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!(["10.0.0.0/8", "2001:db8::1/128", "::ffff:10.0.0.5/128"])
+        );
+        let back: Vec<Cidr> = serde_json::from_value(written).unwrap();
+        assert_eq!(
+            back,
+            nets(&["10.0.0.0/8", "2001:db8::1", "::ffff:10.0.0.5/128"])
+        );
+        for bad in ["10.0.0.0/33", "nope", "10.0.0.0/"] {
+            assert!(
+                serde_json::from_value::<Cidr>(serde_json::json!(bad)).is_err(),
+                "{bad}"
+            );
+        }
     }
 }
