@@ -13,6 +13,7 @@ pub use gapura_core::client_ip as client;
 pub mod failure;
 pub mod jwt;
 pub mod outlier;
+pub mod plugin;
 pub mod rate_limit;
 pub mod select;
 pub mod tls;

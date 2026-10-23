@@ -12,6 +12,7 @@ use pingora::tls::pkey::{PKey, Private};
 use pingora::tls::x509::X509;
 
 use crate::proxy::outlier;
+use crate::proxy::plugin::{Chain, Misplaced};
 use crate::telemetry::{now_secs, METRICS};
 
 /// A parsed TLS bundle: leaf certificate, optional chain, private key.
@@ -39,6 +40,9 @@ pub struct Runtime {
     /// Decoding keys per JWKS document, for the same reason: a policy's keys cannot change
     /// between swaps, so parsing them per request would be work nothing asked for.
     jwt_keys: HashMap<String, crate::proxy::jwt::Keys>,
+    /// Each rule's plugins compiled into a list per phase, `[listener][rule]`, for the same
+    /// reason; `Err` for a rule whose plugins cannot all run, which refuses every request.
+    chains: Vec<Vec<Result<Chain, Misplaced>>>,
     /// Outlier records for each cluster's endpoints, shared with every other generation built
     /// from the same `Registry`.
     health: outlier::ClusterHealth,
@@ -110,6 +114,30 @@ impl Runtime {
                 "JWKS keys that could not be used; policies relying on them will refuse every request"
             );
         }
+        let chains = config
+            .listeners
+            .iter()
+            .map(|listener| {
+                listener
+                    .rules
+                    .iter()
+                    .map(|rule| {
+                        let chain = Chain::compile(rule);
+                        if let Err(m) = &chain {
+                            // Once per swap. Refusing is the safe direction: a policy that cannot
+                            // run must not let the rule's traffic through unchecked.
+                            tracing::warn!(
+                                route = %rule.route,
+                                plugin = m.plugin,
+                                why = m.why,
+                                "a policy cannot run on this rule, which refuses every request"
+                            );
+                        }
+                        chain
+                    })
+                    .collect()
+            })
+            .collect();
         let (regexes, skipped) = compile_regexes(&config);
         for pattern in &skipped {
             tracing::warn!(
@@ -126,6 +154,7 @@ impl Runtime {
             upstream_cas,
             regexes,
             jwt_keys,
+            chains,
             health,
         }
     }
@@ -133,6 +162,11 @@ impl Runtime {
     /// Decoding keys for a policy's JWKS document, compiled with this generation.
     pub fn jwt_keys(&self, jwks: &str) -> Option<&crate::proxy::jwt::Keys> {
         self.jwt_keys.get(jwks)
+    }
+
+    /// The compiled plugins of `listener`'s `rule`, indices into this generation's config.
+    pub fn chain(&self, listener: usize, rule: usize) -> Option<&Result<Chain, Misplaced>> {
+        self.chains.get(listener)?.get(rule)
     }
 
     /// Compiled regex path match patterns of this generation, for `match_port_with`.
