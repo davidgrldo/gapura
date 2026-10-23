@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// The kinds this endpoint keeps, as [`Plugin::kind`] names them.
 pub const KINDS: &[&str] = &["ip_restriction"];
 
-/// The most addresses and networks an ip_restriction policy lists, allow and deny together: as
-/// many IPv6 networks as fit the 64 KiB a request body may carry.
+/// The most addresses and networks an ip_restriction policy lists, allow and deny together:
+/// 1000 of the longest IPv6 networks still fit in the 64 KiB a request body may carry.
 pub const MAX_NETWORKS: usize = 1000;
 
 fn field(field: &str, sentence: impl Into<String>) -> FieldError {

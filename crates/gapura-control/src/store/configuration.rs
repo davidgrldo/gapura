@@ -264,8 +264,8 @@ impl<T: Clone> Attached<T> {
     }
 }
 
-/// The key and JWT requirements and the request limits of a workspace, as its service and route
-/// lists show them.
+/// The key and JWT requirements and the request limits of a workspace, and where each other
+/// policy comes from, as its service and route lists show them.
 struct Requirements {
     key_auth: Attached<(String, String)>,
     jwt: Attached<(Option<String>, String)>,
@@ -359,8 +359,8 @@ impl Requirements {
 }
 
 impl Store {
-    /// A workspace's services, by name, each with how many routes use it and the key and JWT
-    /// requirements and the request limit it carries.
+    /// A workspace's services, by name, each with how many routes use it, the key and JWT
+    /// requirements and the request limit it carries, and where each other policy comes from.
     pub async fn services(&self, workspace: Uuid) -> Result<Vec<ServiceView>> {
         let client = self.pool.get().await?;
         let rows = client
@@ -398,9 +398,9 @@ impl Store {
     }
 
     /// A workspace's routes, in the order the data plane matches them: priority, then name, each
-    /// with the key and JWT requirements and the request limit that apply to it. A
-    /// route with no service, which only SQL written by hand can make, is not listed, just as
-    /// the compiler does not serve it.
+    /// with the key and JWT requirements and the request limit that apply to it, and where each
+    /// other policy comes from. A route with no service, which only SQL written by hand can
+    /// make, is not listed, just as the compiler does not serve it.
     pub async fn routes(&self, workspace: Uuid) -> Result<Vec<RouteView>> {
         let client = self.pool.get().await?;
         let rows = client

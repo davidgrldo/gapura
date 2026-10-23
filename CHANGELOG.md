@@ -17,7 +17,7 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Order:** deny is checked first, so a denied network inside an allowed one stays denied.
     Then an address outside a non-empty allow list is refused.
   - **Refusal:** a refused request is answered 403 `IP_FORBIDDEN` and counted in
-    `gapura_policy_refused_total{kind="ip_restriction"}`. It is judged on the address the access
+    `gapura_policy_refused_total{policy="ip_restriction"}`. It is judged on the address the access
     log names, which behind `--trusted-proxy` is the forwarded one.
   - **Before credentials:** the policy runs before any API key or JWT is read. Kong's
     ip-restriction runs after authentication, so it tells a denied caller whether its key is good.
@@ -25,7 +25,12 @@ means what it usually does, moving from one version below to a later one. Releas
     `DELETE ?target=` removes one. The route and service lists gain `policies`, which says where
     each kind applies from. `/policies/{kind}` is the endpoint later policy kinds share.
   - **Upgrade order:** a data plane older than this release cannot read a configuration that has
-    such a policy, and keeps serving its last one, so upgrade data planes first.
+    such a policy, and keeps serving its last one, so upgrade data planes first. Until an old data
+    plane is upgraded it serves its last configuration for every workspace, so it also misses key
+    revocations and route removals made meanwhile.
+  - **Trusted proxies:** an IPv6 network shorter than `::ffff:0:0/96`, such as `::/0`, no longer
+    contains IPv4 addresses. That holds in these lists and in `--trusted-proxy`, where it means
+    trusting less, never more.
   - The console's form for it follows.
 - The console sets a JWT requirement's keys from the issuer's URL (#272). The JWT control on the
   workspace, a service or a route chooses where the keys come from: the issuer's URL, with

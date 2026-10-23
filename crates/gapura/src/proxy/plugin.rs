@@ -198,7 +198,8 @@ impl Chain {
     }
 
     /// Run the Access steps in order, up to the first that does not continue. `peer` is the
-    /// connection's address, from which the client's is worked out only if a limit needs it.
+    /// connection's address, from which the client's is worked out only if a limit or an
+    /// ip_restriction step needs it.
     pub fn access(
         &self,
         proxy: &GapuraProxy,
