@@ -8,6 +8,11 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console sets a JWT requirement's keys from the issuer's URL (#272). The JWT control on the
+  workspace, a service or a route chooses where the keys come from: the issuer's URL, with
+  optional CA certificates for an issuer a private CA signed, or a pasted JWKS. A new requirement
+  starts from the URL; one already set opens on the source it was saved with, and a reader sees
+  the URL its keys come from.
 - A JWT requirement can take its keys from the URL its issuer publishes them at (#271).
   `PUT /api/workspaces/{ws}/jwt` takes `jwks_uri` (https, no user name, password or fragment, at
   most 2048 characters) instead of `jwks`, never beside it, and optionally `jwks_ca_pem`: CA
