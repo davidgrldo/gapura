@@ -928,3 +928,64 @@ async fn kubernetes_mode_has_none_of_it() {
         assert!(sentence(&body).contains("keeps no configuration"), "{body}");
     }
 }
+
+/// A requirement whose keys each data plane fetches: compiled with an empty document beside the
+/// URL and its CA, listed with the URL where a pasted one shows its key count, read back whole,
+/// and refused with both a document and a URL, with neither, or with a URL that is not https.
+#[tokio::test]
+async fn a_requirement_can_name_the_url_its_keys_are_published_at() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let ca = rcgen::generate_simple_self_signed(vec!["idp.internal".into()])
+        .unwrap()
+        .cert
+        .pem();
+    let uri = "https://idp.internal/realms/shop/protocol/openid-connect/certs";
+    let body = json!({"target": "route:orders-api", "issuer": ISSUER, "jwks_uri": uri, "jwks_ca_pem": ca});
+    ok(&app, "PUT", JWT, s.ed, &body.to_string()).await;
+
+    let policy = jwt_on(&compiled(&store).await, COMPILED_ROUTE).expect("the route requires a JWT");
+    assert_eq!(
+        policy,
+        JwtPolicy {
+            issuer: Some(ISSUER.into()),
+            jwks_uri: Some(uri.into()),
+            jwks_ca_pem: Some(ca.clone()),
+            ..JwtPolicy::default()
+        }
+    );
+
+    let listed = read(&app, JWT, s.vi).await;
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["target"] == "route:orders-api")
+        .expect("listed")
+        .clone();
+    assert_eq!((&row["jwks_uri"], &row["keys"]), (&json!(uri), &json!(0)));
+    let one = read(&app, &format!("{JWT}?target=route:orders-api"), s.vi).await;
+    assert_eq!(
+        (&one["jwks_uri"], &one["jwks_ca_pem"], &one["jwks"]),
+        (&json!(uri), &json!(ca), &json!(""))
+    );
+
+    for (body, at) in [
+        (
+            json!({"target": "workspace", "issuer": ISSUER, "jwks_uri": uri, "jwks": jwks(&[&ec_key("k")])}),
+            "jwks",
+        ),
+        (json!({"target": "workspace", "issuer": ISSUER}), "jwks"),
+        (
+            json!({"target": "workspace", "issuer": ISSUER, "jwks_uri": "http://idp.internal/certs"}),
+            "jwks_uri",
+        ),
+    ] {
+        let (status, answer) = send(&app, "PUT", JWT, Some(s.ed), &body.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(parse(&answer)["field"], at, "{body}");
+    }
+}

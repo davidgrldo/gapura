@@ -326,16 +326,25 @@ pub struct JwtView {
     pub target: String,
     pub issuer: Option<String>,
     pub audience: Option<String>,
+    /// Usable keys in a pasted JWKS; 0 for keys fetched from `jwks_uri`, which the control plane
+    /// never reads.
     pub keys: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
 }
 
-/// One target's JWT requirement with its JWKS, which the console edits.
+/// One target's JWT requirement with its JWKS or the URL it is fetched from, which the console
+/// edits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct JwtDocument {
     pub target: String,
     pub issuer: Option<String>,
     pub audience: Option<String>,
     pub jwks: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks_ca_pem: Option<String>,
     /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
     pub updated_at: String,
 }

@@ -19,7 +19,8 @@ use axum::{
 const MAX_SERVICE_BODY: usize = MAX_BODY + 2 * crate::configuration::MAX_CA_PEM_BYTES;
 
 /// The most a JWT requirement may hold, the same way: a JWKS at its limit
-/// (`consumers::MAX_JWKS_BYTES`) written as a JSON string, whose escaped quotes at most double it.
+/// (`consumers::MAX_JWKS_BYTES`), or a `jwks_uri` CA bundle at its own, the same 64 KiB -- one or
+/// the other, never both -- written as a JSON string, whose escaped quotes at most double it.
 const MAX_JWT_BODY: usize = MAX_BODY + 2 * crate::consumers::MAX_JWKS_BYTES;
 
 pub fn router_with(state: AppState) -> Router {
