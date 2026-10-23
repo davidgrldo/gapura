@@ -44,9 +44,10 @@ import tailwindcss from '@tailwindcss/vite'
 // the key), and key-auth.json, the `[{ target, header }]` of the API-key requirements set on the
 // workspace, a service or a route. Each service and route row carries the `key_auth` the server
 // would have worked out for it, so keep those rows and key-auth.json telling the same story.
-// jwt.json holds the JWT requirements set there, `[{ target, issuer, audience, jwks }]` with each
-// JWKS as the text it was pasted as: `GET /api/workspaces/<name>/jwt` answers it without the JWKS
-// and with how many keys it lists, and `?target=` answers one of them whole, or 404 when that
+// jwt.json holds the JWT requirements set there, `[{ target, issuer, audience, jwks, jwks_uri?,
+// jwks_ca_pem? }]` with each JWKS as the text it was pasted as, or "" beside the URL its keys are
+// fetched from: `GET /api/workspaces/<name>/jwt` answers it without the JWKS or the CA and with how
+// many keys a pasted JWKS lists, and `?target=` answers one of them whole, or 404 when that
 // target has none. The rows' `jwt` tells the same story, as their `key_auth` does.
 // rate-limit.json holds the request limits set there, `[{ target, consumer?, limit, per, by?, updated_at }]`,
 // as `GET /api/workspaces/<name>/rate-limit` answers it: the limits on everyone first, then each
@@ -237,7 +238,10 @@ function stubApi() {
           const target = new URLSearchParams(req.url.split('?')[1] ?? '').get('target')
           let answer
           if (target === null) {
-            answer = documents.map(({ jwks, ...rest }) => ({ ...rest, keys: JSON.parse(jwks).keys.length }))
+            answer = documents.map(({ jwks, jwks_ca_pem, ...rest }) => ({
+              ...rest,
+              keys: jwks ? JSON.parse(jwks).keys.length : 0,
+            }))
           } else {
             answer = documents.find((d) => d.target === target)
             if (!answer) {

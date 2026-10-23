@@ -16,7 +16,8 @@
   // - `onchanged` fetches the list again, which brings the new `applies`, and settles once it is
   //   drawn or has failed without rejecting. It must not close the sheet this sits in.
   // The list carries no audience and no keys, so a target with its own requirement reads them
-  // with `?target=`, and editing starts from what is stored.
+  // with `?target=`, and editing starts from what is stored. The keys are either a JWKS pasted
+  // here or the URL the issuer publishes them at, which every gateway fetches itself.
   let { workspace, target, applies = null, role, onchanged } = $props()
 
   const id = $props.id()
@@ -30,21 +31,27 @@
   let issuer = $state('')
   let audience = $state('')
   let jwks = $state('')
-  // This target's own requirement as `?target=` answered it, `{ issuer, audience, jwks,
-  // updated_at }`: what the form starts from and is compared with, and the stamp an apply sends
-  // back so that a requirement changed since is refused rather than overwritten (#223).
+  // Where the keys come from: 'url', the issuer's published JWKS, or 'paste'. A new requirement
+  // starts from the URL, which is how an IdP hands its keys out and stays current as it rotates.
+  let source = $state('url')
+  let jwksUri = $state('')
+  let jwksCaPem = $state('')
+  // This target's own requirement as `?target=` answered it, `{ issuer, audience, jwks, jwks_uri,
+  // jwks_ca_pem, updated_at }`, the last two '' when unset: what the form starts from and is
+  // compared with, and the stamp an apply sends back so that a requirement changed since is
+  // refused rather than overwritten (#223).
   // Undefined while it is being read, and null when there is none or it could not be read.
   let stored = $state(undefined)
   // Why the stored requirement could not be read, when it could not.
   let unread = $state(undefined)
   let saving = $state(false)
-  // `{ sentence, field }` from a refused apply; an `issuer`, `audience` or `jwks` field puts the
-  // sentence beside that input.
+  // `{ sentence, field }` from a refused apply; an `issuer`, `audience`, `jwks`, `jwks_uri` or
+  // `jwks_ca_pem` field puts the sentence beside that input.
   let error = $state(undefined)
   let box = $state(null)
   let button = $state(null)
   let group = $state(null)
-  const inputs = $state({ issuer: null, audience: null, jwks: null })
+  const inputs = $state({ issuer: null, audience: null, jwks: null, jwks_uri: null, jwks_ca_pem: null })
   // The newest read's number, so a slow answer for a row the sheet has left cannot fill the form.
   let latest = 0
 
@@ -58,6 +65,9 @@
     issuer = own?.issuer ?? ''
     audience = ''
     jwks = ''
+    source = 'url'
+    jwksUri = ''
+    jwksCaPem = ''
     stored = own ? undefined : null
     unread = undefined
     error = undefined
@@ -74,12 +84,17 @@
         stored = {
           issuer: document.issuer ?? '',
           audience: document.audience ?? '',
-          jwks: document.jwks,
+          jwks: document.jwks ?? '',
+          jwks_uri: document.jwks_uri ?? '',
+          jwks_ca_pem: document.jwks_ca_pem ?? '',
           updated_at: document.updated_at,
         }
         issuer = stored.issuer
         audience = stored.audience
         jwks = stored.jwks
+        source = stored.jwks_uri ? 'url' : 'paste'
+        jwksUri = stored.jwks_uri
+        jwksCaPem = stored.jwks_ca_pem
       },
       (failure) => {
         if (mine !== latest) return
@@ -90,16 +105,24 @@
   })
 
   const reading = $derived(own !== null && stored === undefined)
+  // Whether the keys the form holds differ from the stored ones: another source, or the same
+  // source with other contents.
+  const rekeyed = $derived(
+    Boolean(stored) &&
+      ((source === 'url') !== (stored.jwks_uri !== '') ||
+        (source === 'url'
+          ? jwksUri.trim() !== stored.jwks_uri || jwksCaPem.trim() !== stored.jwks_ca_pem.trim()
+          : jwks !== stored.jwks)),
+  )
   const changed = $derived(
     on !== (own !== null) ||
-      (on &&
-        (!stored ||
-          issuer.trim() !== stored.issuer ||
-          audience.trim() !== stored.audience ||
-          jwks !== stored.jwks)),
+      (on && (!stored || issuer.trim() !== stored.issuer || audience.trim() !== stored.audience || rekeyed)),
   )
-  const FIELDS = ['issuer', 'audience', 'jwks']
-  const placed = $derived(FIELDS.includes(error?.field) ? error.field : undefined)
+  const FIELDS = ['issuer', 'audience', 'jwks', 'jwks_uri', 'jwks_ca_pem']
+  // With no keys at all the server names `jwks`; from the URL form that sentence belongs beside
+  // the URL, the input there is.
+  const field = $derived(error?.field === 'jwks' && source === 'url' ? 'jwks_uri' : error?.field)
+  const placed = $derived(FIELDS.includes(field) ? field : undefined)
   const anyIssuer = (requirement) => requirement.issuer ?? 'any issuer'
 
   async function apply(event) {
@@ -113,7 +136,9 @@
           target,
           issuer: issuer.trim(),
           audience: audience.trim() || null,
-          jwks,
+          ...(source === 'url'
+            ? { jwks_uri: jwksUri.trim(), jwks_ca_pem: jwksCaPem.trim() || null }
+            : { jwks }),
           // None when nothing is set here, or when what is set could not be read: the server then
           // replaces only a requirement no read could show, such as one SQL by hand broke.
           seen_updated_at: stored?.updated_at,
@@ -173,7 +198,7 @@
       </label>
       {#if unread}
         <p role="alert" class="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-danger wrap-anywhere">
-          The keys set here could not be read ({unread}). Paste them again to change this requirement, or switch it off.
+          The keys set here could not be read ({unread}). Give them again to change this requirement, or switch it off.
         </p>
       {/if}
       {#if on}
@@ -214,26 +239,81 @@
             {/if}
             {@render problem('audience')}
           </div>
-          <div class="grid gap-1.5">
-            <label for="{id}-jwks" class="font-medium">Keys (JWKS)</label>
-            <!-- No textarea in the kit: Input's look, grown to several lines, as the service
-                 sheet's CA certificates. -->
-            <textarea
-              bind:this={inputs.jwks}
-              id="{id}-jwks"
-              rows="6"
-              class="dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 disabled:bg-input/50 dark:disabled:bg-input/80 w-full min-w-0 rounded-lg border bg-transparent px-2.5 py-1.5 font-mono text-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:ring-3 aria-invalid:ring-3 disabled:cursor-not-allowed disabled:opacity-50"
-              bind:value={jwks}
-              placeholder={'{"keys": [ … ]}'}
-              autocomplete="off"
-              autocapitalize="off"
-              spellcheck="false"
-              aria-invalid={placed === 'jwks'}
-              aria-describedby={described('jwks', `${id}-jwks-help`)}
-            ></textarea>
-            <p id="{id}-jwks-help" class="text-xs text-muted-foreground">Public keys only. Paste the issuer's JWKS document.</p>
-            {@render problem('jwks')}
-          </div>
+          <fieldset class="grid gap-1.5">
+            <legend class="mb-1.5 font-medium">Keys</legend>
+            <label class="flex items-center gap-2">
+              <input type="radio" name="{id}-source" value="url" bind:group={source} onchange={() => (error = undefined)} />
+              From the issuer's URL
+            </label>
+            <label class="flex items-center gap-2">
+              <input type="radio" name="{id}-source" value="paste" bind:group={source} onchange={() => (error = undefined)} />
+              Pasted JWKS
+            </label>
+          </fieldset>
+          {#if source === 'url'}
+            <div class="grid gap-1.5">
+              <label for="{id}-jwks_uri" class="font-medium">JWKS URL</label>
+              <Input
+                bind:ref={inputs.jwks_uri}
+                id="{id}-jwks_uri"
+                class="font-mono"
+                inputmode="url"
+                bind:value={jwksUri}
+                placeholder="https://issuer.example/.well-known/jwks.json"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-invalid={placed === 'jwks_uri'}
+                aria-describedby={described('jwks_uri', `${id}-jwks_uri-help`)}
+              />
+              <p id="{id}-jwks_uri-help" class="text-xs text-muted-foreground">
+                Every gateway fetches it, every 10 minutes or as the issuer's max-age says, and keeps the last keys it got while the
+                issuer cannot be reached.
+              </p>
+              {@render problem('jwks_uri')}
+            </div>
+            <div class="grid gap-1.5">
+              <label for="{id}-jwks_ca_pem" class="font-medium">CA certificates (optional)</label>
+              <textarea
+                bind:this={inputs.jwks_ca_pem}
+                id="{id}-jwks_ca_pem"
+                rows="4"
+                class="dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 disabled:bg-input/50 dark:disabled:bg-input/80 w-full min-w-0 rounded-lg border bg-transparent px-2.5 py-1.5 font-mono text-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:ring-3 aria-invalid:ring-3 disabled:cursor-not-allowed disabled:opacity-50"
+                bind:value={jwksCaPem}
+                placeholder="-----BEGIN CERTIFICATE-----"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-invalid={placed === 'jwks_ca_pem'}
+                aria-describedby={described('jwks_ca_pem', `${id}-jwks_ca_pem-help`)}
+              ></textarea>
+              <p id="{id}-jwks_ca_pem-help" class="text-xs text-muted-foreground">
+                Only for an issuer whose certificate a private CA signed: these replace the public roots for this URL.
+              </p>
+              {@render problem('jwks_ca_pem')}
+            </div>
+          {:else}
+            <div class="grid gap-1.5">
+              <label for="{id}-jwks" class="font-medium">JWKS</label>
+              <!-- No textarea in the kit: Input's look, grown to several lines, as the service
+                   sheet's CA certificates. -->
+              <textarea
+                bind:this={inputs.jwks}
+                id="{id}-jwks"
+                rows="6"
+                class="dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 disabled:bg-input/50 dark:disabled:bg-input/80 w-full min-w-0 rounded-lg border bg-transparent px-2.5 py-1.5 font-mono text-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:ring-3 aria-invalid:ring-3 disabled:cursor-not-allowed disabled:opacity-50"
+                bind:value={jwks}
+                placeholder={'{"keys": [ … ]}'}
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-invalid={placed === 'jwks'}
+                aria-describedby={described('jwks', `${id}-jwks-help`)}
+              ></textarea>
+              <p id="{id}-jwks-help" class="text-xs text-muted-foreground">Public keys only. Paste the issuer's JWKS document.</p>
+              {@render problem('jwks')}
+            </div>
+          {/if}
         {/if}
       {/if}
       {#if error && !placed}
@@ -252,6 +332,9 @@
         Required: tokens from <span class="font-mono wrap-anywhere">{anyIssuer(own)}</span>{#if stored}, {#if stored.audience}for
             <span class="font-mono wrap-anywhere">{stored.audience}</span>{:else}for any audience{/if}{/if}.
       </p>
+      {#if stored?.jwks_uri}
+        <p>Keys from <span class="font-mono wrap-anywhere">{stored.jwks_uri}</span>.</p>
+      {/if}
     {:else}
       <p>Not required.</p>
     {/if}
