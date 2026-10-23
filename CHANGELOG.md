@@ -8,6 +8,25 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An `ip_restriction` policy refuses requests by client address (#PR).
+  `PUT /api/workspaces/{ws}/policies/ip_restriction` takes `{"target", "config": {"allow",
+  "deny"}}`.
+  - **Lists:** addresses and CIDR networks, IPv4 or IPv6, at most 1000 in the two lists together.
+    An IPv4-mapped address matches its IPv4 network.
+  - **Targets:** the workspace, a service or a route. The most specific one applies.
+  - **Order:** deny is checked first, so a denied network inside an allowed one stays denied.
+    Then an address outside a non-empty allow list is refused.
+  - **Refusal:** a refused request is answered 403 `IP_FORBIDDEN` and counted in
+    `gapura_policy_refused_total{kind="ip_restriction"}`. It is judged on the address the access
+    log names, which behind `--trusted-proxy` is the forwarded one.
+  - **Before credentials:** the policy runs before any API key or JWT is read. Kong's
+    ip-restriction runs after authentication, so it tells a denied caller whether its key is good.
+  - **Rest of the API:** `GET` lists the workspace's policies of the kind, and
+    `DELETE ?target=` removes one. The route and service lists gain `policies`, which says where
+    each kind applies from. `/policies/{kind}` is the endpoint later policy kinds share.
+  - **Upgrade order:** a data plane older than this release cannot read a configuration that has
+    such a policy, and keeps serving its last one, so upgrade data planes first.
+  - The console's form for it follows.
 - The console sets a JWT requirement's keys from the issuer's URL (#272). The JWT control on the
   workspace, a service or a route chooses where the keys come from: the issuer's URL, with
   optional CA certificates for an issuer a private CA signed, or a pasted JWKS. A new requirement
