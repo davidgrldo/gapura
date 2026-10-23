@@ -183,8 +183,8 @@ impl KeySources {
             }
         }
 
-        let outcomes = futures::future::join_all(self.states.iter_mut().filter_map(
-            |(source, state)| {
+        let outcomes =
+            futures::future::join_all(self.states.iter_mut().filter_map(|(source, state)| {
                 let task = state.task.as_mut()?;
                 Some(async move {
                     let outcome = match tokio::time::timeout(wait, task).await {
@@ -194,9 +194,8 @@ impl KeySources {
                     };
                     (source.clone(), outcome)
                 })
-            },
-        ))
-        .await;
+            }))
+            .await;
 
         let mut fetched = false;
         for (source, outcome) in outcomes {
@@ -360,11 +359,13 @@ pub async fn fetch(source: Source) -> Result<Answer, String> {
     while let Some(chunk) = res.chunk().await.map_err(|e| chain(&e))? {
         body.extend_from_slice(&chunk);
         if body.len() > MAX_JWKS_BYTES {
-            return Err(format!("the document is over {} KiB", MAX_JWKS_BYTES / 1024));
+            return Err(format!(
+                "the document is over {} KiB",
+                MAX_JWKS_BYTES / 1024
+            ));
         }
     }
-    let document =
-        String::from_utf8(body).map_err(|_| "the document is not UTF-8".to_string())?;
+    let document = String::from_utf8(body).map_err(|_| "the document is not UTF-8".to_string())?;
     Ok(Answer { document, max_age })
 }
 

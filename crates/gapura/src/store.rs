@@ -238,6 +238,10 @@ pub struct Store {
     generation: AtomicU64,
     /// Endpoint outlier records, kept across swaps; each generation holds handles into it.
     outliers: outlier::Registry,
+    /// Set by a request whose token named a key a `jwks_uri` policy does not hold; read and
+    /// cleared by the control source on its next tick. A flag rather than a channel: a burst of
+    /// such tokens asks for one refetch, never one each, and the request path never waits.
+    jwks_kid_miss: AtomicBool,
 }
 
 impl Store {
@@ -247,6 +251,7 @@ impl Store {
             ready: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             outliers: outlier::Registry::default(),
+            jwks_kid_miss: AtomicBool::new(false),
         }
     }
 
@@ -296,6 +301,16 @@ impl Store {
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
+
+    /// A token named a key a `jwks_uri` policy does not hold: ask for a refetch.
+    pub fn want_jwks_refresh(&self) {
+        self.jwks_kid_miss.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a refetch was asked for since the last call.
+    pub fn take_jwks_refresh(&self) -> bool {
+        self.jwks_kid_miss.swap(false, Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +331,19 @@ mod tests {
             tls,
             rules: vec![],
         }
+    }
+
+    #[test]
+    fn a_kid_miss_is_taken_once_however_many_asked() {
+        let store = Store::empty();
+        assert!(!store.take_jwks_refresh());
+        store.want_jwks_refresh();
+        store.want_jwks_refresh();
+        assert!(store.take_jwks_refresh());
+        assert!(
+            !store.take_jwks_refresh(),
+            "one refetch for a burst, not one each"
+        );
     }
 
     #[test]

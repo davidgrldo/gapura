@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gapura_core::config::{Config, Endpoint};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 
+use crate::source::jwks::{self, KeySources};
 use crate::store::Store;
 
 /// What the cache file holds. The version and the configuration together in one file, because
@@ -25,6 +26,11 @@ use crate::store::Store;
 struct Cached {
     version: String,
     config: Config,
+    /// The last good document of each `jwks_uri` the configuration names, so a restart with the
+    /// IdP down still verifies. Beside `config` rather than in it: `config` stays what the
+    /// control plane sent. Absent from a cache written before `jwks_uri`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    jwks: Vec<jwks::Fetched>,
 }
 
 pub struct ControlSource {
@@ -56,7 +62,14 @@ impl ControlSource {
     ///
     /// `in_flight` is the set `run` carries across its ticks, so a lookup that outlives this
     /// first resolution is waited for by the next one rather than started a second time.
-    pub async fn prime(&self, in_flight: &mut InFlight) -> Option<(String, Config)> {
+    ///
+    /// Each `jwks_uri` policy is filled with the document the cache kept for it, and `keys` is
+    /// seeded with them, so the first tick refetches them rather than starting from nothing.
+    pub async fn prime(
+        &self,
+        in_flight: &mut InFlight,
+        keys: &mut KeySources,
+    ) -> Option<(String, Config)> {
         let path = self.cache_path.as_ref()?;
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -68,8 +81,9 @@ impl ControlSource {
         };
         match serde_json::from_slice::<Cached>(&bytes) {
             Ok(cached) => {
+                keys.seed(cached.jwks, Instant::now());
                 let served = self.store.load().config.clone();
-                let config = resolve(
+                let mut config = resolve(
                     cached.config.clone(),
                     &served,
                     lookup,
@@ -77,6 +91,7 @@ impl ControlSource {
                     in_flight,
                 )
                 .await;
+                keys.fill(&mut config);
                 self.store.swap_from_cache(config);
                 tracing::info!(
                     version = %cached.version,
@@ -94,13 +109,14 @@ impl ControlSource {
     /// Written only after a configuration has been swapped in, never before. A cache written
     /// first is a cache that can hold something this binary could not actually use -- and the
     /// next start would load it, fail the same way, and have nothing older to fall back to.
-    fn write_cache(&self, version: &str, config: &Config) {
+    fn write_cache(&self, version: &str, config: &Config, jwks: Vec<jwks::Fetched>) {
         let Some(path) = &self.cache_path else { return };
         if let Err(e) = write_atomic(
             path,
             &Cached {
                 version: version.to_string(),
                 config: config.clone(),
+                jwks,
             },
         ) {
             // A cache that cannot be written costs resilience at the next start, not traffic now.
@@ -152,22 +168,20 @@ impl ControlSource {
         }
         let client = builder.build().expect("a reqwest client");
         let mut in_flight = InFlight::new();
-        let (mut held, mut latest) = match self.prime(&mut in_flight).await {
+        let mut keys = KeySources::default();
+        let (mut held, mut latest) = match self.prime(&mut in_flight, &mut keys).await {
             Some((version, config)) => (Some(version), Some(config)),
             None => (None, None),
         };
 
         loop {
+            let mut changed = false;
             match self.poll(&client, held.as_deref()).await {
                 Ok(Some((version, config))) => {
                     tracing::info!(version = %version, "new configuration");
-                    held = Some(version.clone());
+                    held = Some(version);
                     latest = Some(config);
-                    // Cached before resolution, so the file holds what the control plane sent
-                    // rather than one data plane's view of DNS at one moment.
-                    if let Some(c) = &latest {
-                        self.write_cache(&version, c);
-                    }
+                    changed = true;
                 }
                 // The control plane just confirmed the version we hold: whatever we serve is no
                 // longer an unconfirmed cache, and the gauge that says "running blind" must stop
@@ -184,8 +198,23 @@ impl ControlSource {
             // when pods do, which has nothing to do with the version. Swapped only when the
             // result differs, so a quiet cluster does not churn the runtime.
             if let Some(config) = &latest {
+                let fetched = keys
+                    .refresh(
+                        config,
+                        Instant::now(),
+                        self.store.take_jwks_refresh(),
+                        jwks::fetch,
+                        LOOKUP_TIMEOUT,
+                    )
+                    .await;
+                // Cached before resolution, so the file holds what the control plane sent rather
+                // than one data plane's view of DNS at one moment; after the keys, so it holds the
+                // documents this configuration's URIs last gave.
+                if changed || fetched {
+                    self.write_cache(held.as_deref().unwrap_or_default(), config, keys.held());
+                }
                 let served = self.store.load().config.clone();
-                let resolved = resolve(
+                let mut resolved = resolve(
                     config.clone(),
                     &served,
                     lookup,
@@ -193,6 +222,7 @@ impl ControlSource {
                     &mut in_flight,
                 )
                 .await;
+                keys.fill(&mut resolved);
                 if served != resolved {
                     self.store.swap(resolved, Vec::new());
                 }
@@ -396,9 +426,9 @@ mod tests {
         let s = source(&dir);
         assert!(!s.store.is_ready(), "nothing to serve yet");
 
-        s.write_cache("\"7\"", &Config::default());
+        s.write_cache("\"7\"", &Config::default(), Vec::new());
         assert_eq!(
-            s.prime(&mut InFlight::new())
+            s.prime(&mut InFlight::new(), &mut KeySources::default())
                 .await
                 .map(|(v, _)| v)
                 .as_deref(),
@@ -415,12 +445,16 @@ mod tests {
     async fn a_truncated_cache_is_ignored_rather_than_fatal() {
         let dir = tempdir();
         let s = source(&dir);
-        s.write_cache("\"7\"", &Config::default());
+        s.write_cache("\"7\"", &Config::default(), Vec::new());
         let path = s.cache_path.clone().unwrap();
         let half = std::fs::read(&path).unwrap();
         std::fs::write(&path, &half[..half.len() / 2]).unwrap();
 
-        assert_eq!(s.prime(&mut InFlight::new()).await, None);
+        assert_eq!(
+            s.prime(&mut InFlight::new(), &mut KeySources::default())
+                .await,
+            None
+        );
         assert!(
             !s.store.is_ready(),
             "and it starts unready, not serving nothing as if it were something"
@@ -430,7 +464,12 @@ mod tests {
     #[tokio::test]
     async fn a_missing_cache_is_not_an_error() {
         let dir = tempdir();
-        assert_eq!(source(&dir).prime(&mut InFlight::new()).await, None);
+        assert_eq!(
+            source(&dir)
+                .prime(&mut InFlight::new(), &mut KeySources::default())
+                .await,
+            None
+        );
     }
 
     /// The file holds a private key for every certificate the gateway serves.
@@ -440,7 +479,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
         let s = source(&dir);
-        s.write_cache("\"1\"", &Config::default());
+        s.write_cache("\"1\"", &Config::default(), Vec::new());
         let mode = std::fs::metadata(s.cache_path.as_ref().unwrap())
             .unwrap()
             .permissions()
@@ -458,15 +497,55 @@ mod tests {
     async fn a_leftover_temp_file_does_not_disturb_the_good_one() {
         let dir = tempdir();
         let s = source(&dir);
-        s.write_cache("\"7\"", &Config::default());
+        s.write_cache("\"7\"", &Config::default(), Vec::new());
         std::fs::write(dir.join("cache.tmp"), b"{ half a docum").unwrap();
         assert_eq!(
-            s.prime(&mut InFlight::new())
+            s.prime(&mut InFlight::new(), &mut KeySources::default())
                 .await
                 .map(|(v, _)| v)
                 .as_deref(),
             Some("\"7\"")
         );
+    }
+
+    #[tokio::test]
+    async fn the_cache_keeps_fetched_keys_and_a_restart_verifies_with_them() {
+        use crate::source::jwks::tests::{config_naming, documents, TEST_JWKS};
+        let dir = tempdir();
+        let s = source(&dir);
+        let uri = "https://idp.test/cached";
+        let fetched = jwks::Fetched {
+            uri: uri.into(),
+            ca_pem: None,
+            document: TEST_JWKS.into(),
+            fetched_at: 7,
+        };
+        s.write_cache("\"7\"", &config_naming(&[uri]), vec![fetched.clone()]);
+        let mut keys = KeySources::default();
+        assert!(s.prime(&mut InFlight::new(), &mut keys).await.is_some());
+        assert_eq!(
+            documents(&s.store.load().config),
+            [TEST_JWKS],
+            "verifying with the cached keys before the IdP has been asked"
+        );
+        assert_eq!(keys.held(), [fetched]);
+    }
+
+    #[tokio::test]
+    async fn a_cache_written_before_jwks_uri_still_serves() {
+        let dir = tempdir();
+        let s = source(&dir);
+        let old = serde_json::json!({"version": "\"7\"", "config": Config::default()});
+        std::fs::write(dir.join("cache.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut keys = KeySources::default();
+        assert_eq!(
+            s.prime(&mut InFlight::new(), &mut keys)
+                .await
+                .map(|(v, _)| v)
+                .as_deref(),
+            Some("\"7\"")
+        );
+        assert!(keys.held().is_empty());
     }
 
     fn resolve_config(host: &str, endpoints: Vec<Endpoint>) -> Config {
@@ -634,8 +713,11 @@ mod tests {
         let dir = tempdir();
         let s = source(&dir);
         let cached = resolve_config("orders.apps", vec![]);
-        s.write_cache("\"3\"", &cached);
-        let (version, config) = s.prime(&mut InFlight::new()).await.expect("primed");
+        s.write_cache("\"3\"", &cached, Vec::new());
+        let (version, config) = s
+            .prime(&mut InFlight::new(), &mut KeySources::default())
+            .await
+            .expect("primed");
         assert_eq!(version, "\"3\"");
         assert_eq!(
             config, cached,
