@@ -35,7 +35,10 @@ anyhow = "1"
 kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls", "ring"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
 futures = "0.3"
-tokio = { version = "1", features = ["full"] }
+# Below 1.54: tokio 1.54 panics on a zero-capacity BufStream, which pingora-core 0.8.1 builds for
+# every accepted connection ("capacity must be greater than zero"). 1.53.3 is the lowest release
+# with RUSTSEC-2026-0386 fixed. Lift the cap together with the move to pingora 0.9.
+tokio = { version = ">=1.53.3, <1.54", features = ["full"] }
 # Postgres for the control plane's store. tokio-postgres rather than sqlx: the
 # compile-time query checking sqlx buys costs a committed .sqlx directory that has to be
 # regenerated in step with every migration, and this workspace would rather carry the checking
