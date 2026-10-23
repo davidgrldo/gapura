@@ -1,8 +1,11 @@
 //! Output of translation: exactly what the data plane needs to route a request. Plain data, serializable.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
+
+use crate::client_ip::Cidr;
 
 // `serde(default)` here and deliberately not on the types below. The data plane keeps a
 // disk cache, so after an upgrade a new binary reads a configuration an older one wrote, and any
@@ -295,6 +298,7 @@ pub struct KvMatch {
 pub enum Plugin {
     Jwt(JwtPolicy),
     KeyAuth(KeyAuthPolicy),
+    IpRestriction(IpRestrictionPolicy),
 }
 
 /// Where in a request a plugin runs. Each plugin declares its own ([`Plugin::phases`]) and runs
@@ -338,13 +342,14 @@ impl Plugin {
         match self {
             Plugin::Jwt(_) => "jwt",
             Plugin::KeyAuth(_) => "key_auth",
+            Plugin::IpRestriction(_) => "ip_restriction",
         }
     }
 
     /// The phases this plugin runs in; see [`Phase`].
     pub fn phases(&self) -> &'static [Phase] {
         match self {
-            Plugin::Jwt(_) => &[Phase::Access],
+            Plugin::Jwt(_) | Plugin::IpRestriction(_) => &[Phase::Access],
             // Access identifies the caller. On the way upstream the key is removed: it is the
             // gateway's to check, not the upstream's to see.
             Plugin::KeyAuth(_) => &[Phase::Access, Phase::UpstreamRequest],
@@ -354,7 +359,7 @@ impl Plugin {
     /// How this plugin reads a body; see [`Body`].
     pub fn body(&self) -> Body {
         match self {
-            Plugin::Jwt(_) | Plugin::KeyAuth(_) => Body::None,
+            Plugin::Jwt(_) | Plugin::KeyAuth(_) | Plugin::IpRestriction(_) => Body::None,
         }
     }
 }
@@ -412,6 +417,40 @@ pub struct JwtPolicy {
     /// certificate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_ca_pem: Option<String>,
+}
+
+/// Refuse a request by the address it came from: the client address the access log names,
+/// which behind `--trusted-proxy` is the forwarded one.
+///
+/// Kong's order, deny first: an address in `deny` is refused even inside an `allow` network,
+/// then an address outside a non-empty `allow` is refused. The data plane runs it before any
+/// credential is read, unlike Kong, whose ip-restriction runs after authentication: there a
+/// denied address with a bad key is told 401 and with a good one 403, which tells it which keys
+/// are good.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpRestrictionPolicy {
+    /// Empty admits every address `deny` does not refuse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<Cidr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<Cidr>,
+}
+
+impl IpRestrictionPolicy {
+    /// Why a request from `ip` is refused, as the refusal metric's reason; `None` admits it. No
+    /// address at all is refused: a policy that cannot tell who is calling must not admit them.
+    pub fn refusal(&self, ip: Option<IpAddr>) -> Option<&'static str> {
+        let Some(ip) = ip else {
+            return Some("no_address");
+        };
+        if self.deny.iter().any(|net| net.contains(ip)) {
+            return Some("denied");
+        }
+        if !self.allow.is_empty() && !self.allow.iter().any(|net| net.contains(ip)) {
+            return Some("not_allowed");
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -765,12 +804,60 @@ mod tests {
         for plugin in [
             Plugin::Jwt(JwtPolicy::default()),
             Plugin::KeyAuth(KeyAuthPolicy::default()),
+            Plugin::IpRestriction(IpRestrictionPolicy::default()),
         ] {
             assert_eq!(
                 serde_json::to_value(&plugin).unwrap()["kind"],
                 plugin.kind()
             );
         }
+    }
+
+    fn nets(list: &[&str]) -> Vec<crate::client_ip::Cidr> {
+        list.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    /// Kong's order: deny first, so a denied network inside an allowed one stays denied; then
+    /// allow, when it lists anything. An IPv4-mapped address is its IPv4 self (#216).
+    #[test]
+    fn deny_is_checked_before_allow_and_no_address_is_refused() {
+        let p = IpRestrictionPolicy {
+            allow: nets(&["10.0.0.0/8"]),
+            deny: nets(&["10.1.0.0/16"]),
+        };
+        let ip = |s: &str| Some(s.parse().unwrap());
+        assert_eq!(p.refusal(ip("10.2.3.4")), None);
+        assert_eq!(p.refusal(ip("10.1.2.3")), Some("denied"));
+        assert_eq!(p.refusal(ip("192.0.2.1")), Some("not_allowed"));
+        assert_eq!(p.refusal(ip("::ffff:10.2.3.4")), None);
+        assert_eq!(p.refusal(None), Some("no_address"));
+        let deny_only = IpRestrictionPolicy {
+            allow: vec![],
+            deny: nets(&["192.0.2.0/24"]),
+        };
+        assert_eq!(deny_only.refusal(ip("198.51.100.1")), None);
+        assert_eq!(deny_only.refusal(ip("192.0.2.7")), Some("denied"));
+    }
+
+    #[test]
+    fn an_ip_restriction_is_its_networks_on_the_wire() {
+        let p = IpRestrictionPolicy {
+            allow: nets(&["10.0.0.0/8", "2001:db8::1"]),
+            deny: vec![],
+        };
+        let wire = serde_json::to_value(Plugin::IpRestriction(p.clone())).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"kind": "ip_restriction", "allow": ["10.0.0.0/8", "2001:db8::1/128"]})
+        );
+        assert_eq!(
+            serde_json::from_value::<Plugin>(wire).unwrap(),
+            Plugin::IpRestriction(p)
+        );
+        assert!(serde_json::from_value::<Plugin>(
+            serde_json::json!({"kind": "ip_restriction", "deny": ["10.0.0.0/33"]})
+        )
+        .is_err());
     }
 
     fn per_ip(limit: u32) -> RateLimit {
