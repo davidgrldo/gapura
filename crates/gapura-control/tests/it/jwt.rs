@@ -944,7 +944,8 @@ async fn a_requirement_can_name_the_url_its_keys_are_published_at() {
         .cert
         .pem();
     let uri = "https://idp.internal/realms/shop/protocol/openid-connect/certs";
-    let body = json!({"target": "route:orders-api", "issuer": ISSUER, "jwks_uri": uri, "jwks_ca_pem": ca});
+    let body =
+        json!({"target": "route:orders-api", "issuer": ISSUER, "jwks_uri": uri, "jwks_ca_pem": ca});
     ok(&app, "PUT", JWT, s.ed, &body.to_string()).await;
 
     let policy = jwt_on(&compiled(&store).await, COMPILED_ROUTE).expect("the route requires a JWT");

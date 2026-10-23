@@ -520,10 +520,9 @@ mod tests {
 
     #[test]
     fn a_jwks_uri_policy_reads_and_writes_beside_an_empty_document() {
-        let policy: JwtPolicy = serde_json::from_value(
-            json!({"issuer": "i", "jwks_uri": "https://idp.example/jwks"}),
-        )
-        .unwrap();
+        let policy: JwtPolicy =
+            serde_json::from_value(json!({"issuer": "i", "jwks_uri": "https://idp.example/jwks"}))
+                .unwrap();
         assert_eq!(
             policy.jwks, "",
             "no document until the data plane fetches one"
