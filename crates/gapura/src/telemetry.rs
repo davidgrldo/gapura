@@ -34,6 +34,11 @@ pub struct Metrics {
     /// "bad_signature" are different operator problems, and so are a JWT policy and a key_auth
     /// one on the same route. A single counter would hide all of it.
     pub policy_refused_total: IntCounterVec,
+    /// labels: uri. Failed fetches of a JWT policy's `jwks_uri`; the last good keys keep verifying.
+    pub jwks_fetch_errors_total: IntCounterVec,
+    /// labels: uri. Unix time of the last good fetch, 0 while a URI has never loaded and the
+    /// policies naming it refuse every token. `time() - this` is how stale the served keys are.
+    pub jwks_last_success_timestamp_seconds: IntGaugeVec,
     /// labels: secret (`ns/name`)
     pub tls_cert_parse_errors_total: IntCounterVec,
     /// labels: port
@@ -104,6 +109,18 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
         "gapura_policy_refused_total",
         "Requests refused by a policy, by route, policy and reason",
         &["route", "policy", "reason"]
+    )
+    .expect("metric registered once"),
+    jwks_fetch_errors_total: register_int_counter_vec!(
+        "gapura_jwks_fetch_errors_total",
+        "Failed fetches of a JWT policy's jwks_uri, by URI",
+        &["uri"]
+    )
+    .expect("metric registered once"),
+    jwks_last_success_timestamp_seconds: register_int_gauge_vec!(
+        "gapura_jwks_last_success_timestamp_seconds",
+        "Unix time of the last good fetch of a jwks_uri, 0 while it has never loaded",
+        &["uri"]
     )
     .expect("metric registered once"),
     tls_cert_parse_errors_total: register_int_counter_vec!(
