@@ -300,6 +300,8 @@ pub enum Plugin {
     KeyAuth(KeyAuthPolicy),
     IpRestriction(IpRestrictionPolicy),
     RequestSizeLimit(RequestSizeLimitPolicy),
+    RequestTransformer(RequestTransformerPolicy),
+    ResponseTransformer(ResponseTransformerPolicy),
 }
 
 /// Where in a request a plugin runs. Each plugin declares its own ([`Plugin::phases`]) and runs
@@ -319,6 +321,9 @@ pub enum Phase {
     /// On each chunk of the request body as it passes to the upstream, holding none of it. Not
     /// reached once the connection is upgraded: what follows a 101 is not a request body.
     RequestBody,
+    /// On every response head the rule answers with, the upstream's or the gateway's own, once;
+    /// never on an interim 1xx.
+    Response,
     /// Once, after the answer was written, whatever it was: a refusal too.
     Terminate,
 }
@@ -350,6 +355,8 @@ impl Plugin {
             Plugin::KeyAuth(_) => "key_auth",
             Plugin::IpRestriction(_) => "ip_restriction",
             Plugin::RequestSizeLimit(_) => "request_size_limit",
+            Plugin::RequestTransformer(_) => "request_transformer",
+            Plugin::ResponseTransformer(_) => "response_transformer",
         }
     }
 
@@ -363,13 +370,19 @@ impl Plugin {
             // Access judges the declared length before anything upstream is touched; the body
             // phase counts what actually arrives, which a chunked or HTTP/2 body may not declare.
             Plugin::RequestSizeLimit(_) => &[Phase::Access, Phase::RequestBody],
+            Plugin::RequestTransformer(_) => &[Phase::UpstreamRequest],
+            Plugin::ResponseTransformer(_) => &[Phase::Response],
         }
     }
 
     /// How this plugin reads a body; see [`Body`].
     pub fn body(&self) -> Body {
         match self {
-            Plugin::Jwt(_) | Plugin::KeyAuth(_) | Plugin::IpRestriction(_) => Body::None,
+            Plugin::Jwt(_)
+            | Plugin::KeyAuth(_)
+            | Plugin::IpRestriction(_)
+            | Plugin::RequestTransformer(_)
+            | Plugin::ResponseTransformer(_) => Body::None,
             Plugin::RequestSizeLimit(_) => Body::Stream,
         }
     }
@@ -477,6 +490,78 @@ impl IpRestrictionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestSizeLimitPolicy {
     pub max_bytes: u64,
+}
+
+/// Edits to a set of name/value pairs -- headers, or a query string's parameters -- in Kong's
+/// request-transformer order: remove, then rename, then replace, then add, then append. A name
+/// is matched without regard to case for headers and exactly for query parameters.
+///
+/// One order for every list, rather than the order an operator wrote them in, so that what a
+/// policy does can be read off the policy: an `add` never sees a header a `remove` in the same
+/// policy has not yet taken away.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderEdits {
+    /// Every value of each name goes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+    /// `(from, to)`: every value moves to the new name, only when the old one is present, and
+    /// replaces any the new name already had, as Kong's rename sets the new name rather than
+    /// adding to it. Once it has run, the new name holds exactly the old name's values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rename: Vec<(String, String)>,
+    /// The value replaces every value of the name, only when the name is present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replace: Vec<(String, String)>,
+    /// The value is set only when the name is absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<(String, String)>,
+    /// One more value, beside any already there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub append: Vec<(String, String)>,
+}
+
+impl HeaderEdits {
+    /// Whether there is nothing to edit: such a list is left off the wire.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many edits there are, over all five lists: what the control plane bounds.
+    pub fn len(&self) -> usize {
+        self.remove.len()
+            + self.rename.len()
+            + self.replace.len()
+            + self.add.len()
+            + self.append.len()
+    }
+}
+
+/// Edit the request sent upstream: its headers and its query string.
+///
+/// The edits run on the request as the gateway was about to send it -- its path normalised and
+/// rewritten, the consumer named, the rule's Gateway API header filters applied, a key_auth
+/// policy's key removed -- so a query edit sees the final URI. The gateway sets
+/// `X-Forwarded-Proto`, `X-Request-Id` and `traceparent` after them, sets `X-Forwarded-Host` when
+/// the request named a host, and appends the peer to whatever `X-Forwarded-For` the edits left: a
+/// policy cannot change those values or that last hop, though it can edit the hops before it, as
+/// a client can.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestTransformerPolicy {
+    #[serde(default, skip_serializing_if = "HeaderEdits::is_empty")]
+    pub headers: HeaderEdits,
+    #[serde(default, skip_serializing_if = "HeaderEdits::is_empty")]
+    pub query: HeaderEdits,
+}
+
+/// Edit the response head sent to the client.
+///
+/// Every final head the rule answers with: the upstream's, after the gateway has set its own
+/// headers, so the policy has the last word; and the gateway's own, a refusal included, so a
+/// client reads the same headers whoever answered it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseTransformerPolicy {
+    #[serde(default, skip_serializing_if = "HeaderEdits::is_empty")]
+    pub headers: HeaderEdits,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -832,12 +917,68 @@ mod tests {
             Plugin::KeyAuth(KeyAuthPolicy::default()),
             Plugin::IpRestriction(IpRestrictionPolicy::default()),
             Plugin::RequestSizeLimit(RequestSizeLimitPolicy { max_bytes: 1 }),
+            Plugin::RequestTransformer(RequestTransformerPolicy::default()),
+            Plugin::ResponseTransformer(ResponseTransformerPolicy::default()),
         ] {
             assert_eq!(
                 serde_json::to_value(&plugin).unwrap()["kind"],
                 plugin.kind()
             );
         }
+    }
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    /// Each op is a list of names or of `[name, value]` pairs, and a list with nothing in it is
+    /// left off the wire, so a policy reads as what it edits. The request kind runs on the way
+    /// upstream and the response kind on the way back, and neither reads a body.
+    #[test]
+    fn a_transformer_is_its_edits_on_the_wire() {
+        let wire = serde_json::json!({
+            "kind": "request_transformer",
+            "headers": {"remove": ["x-debug"], "rename": [["x-old", "x-new"]], "add": [["x-team", "core"]]},
+            "query": {"append": [["v", "2"]]}
+        });
+        let p: Plugin = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            p,
+            Plugin::RequestTransformer(RequestTransformerPolicy {
+                headers: HeaderEdits {
+                    remove: vec!["x-debug".into()],
+                    rename: vec![pair("x-old", "x-new")],
+                    add: vec![pair("x-team", "core")],
+                    ..HeaderEdits::default()
+                },
+                query: HeaderEdits {
+                    append: vec![pair("v", "2")],
+                    ..HeaderEdits::default()
+                },
+            })
+        );
+        assert_eq!(serde_json::to_value(&p).unwrap(), wire);
+        assert_eq!(p.phases(), [Phase::UpstreamRequest]);
+        assert_eq!(p.body(), Body::None);
+
+        let wire = serde_json::json!({
+            "kind": "response_transformer",
+            "headers": {"replace": [["server", "gapura"]], "append": [["x-tag", "a"], ["x-tag", "b"]]}
+        });
+        let p: Plugin = serde_json::from_value(wire.clone()).unwrap();
+        let Plugin::ResponseTransformer(policy) = &p else {
+            panic!("{p:?}");
+        };
+        assert_eq!(policy.headers.len(), 3);
+        assert_eq!(serde_json::to_value(&p).unwrap(), wire);
+        assert_eq!(p.phases(), [Phase::Response]);
+        assert_eq!(p.body(), Body::None);
+
+        let empty = Plugin::ResponseTransformer(ResponseTransformerPolicy::default());
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            serde_json::json!({"kind": "response_transformer"})
+        );
     }
 
     #[test]

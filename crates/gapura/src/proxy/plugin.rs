@@ -13,13 +13,15 @@
 use std::net::IpAddr;
 
 use gapura_core::config::{
-    Body, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase, Plugin, RouteRule,
+    Body, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase, Plugin,
+    RequestTransformerPolicy, RouteRule,
 };
 use gapura_core::credentials;
 use pingora::http::{RequestHeader, ResponseHeader};
 
 use crate::proxy::failure::ErrorKey;
-use crate::proxy::{client_ip_of, jwt, jwt_refusal, rate_limit, GapuraProxy};
+use crate::proxy::transform::{edit_headers, edit_query, writable};
+use crate::proxy::{client_ip_of, is_final, jwt, jwt_refusal, rate_limit, GapuraProxy};
 use crate::store::Runtime;
 use crate::telemetry::METRICS;
 
@@ -121,6 +123,7 @@ pub struct Chain {
     access: Vec<Access>,
     upstream_request: Vec<UpstreamRequest>,
     request_body: Vec<RequestBody>,
+    response: Vec<Response>,
     terminate: Vec<Terminate>,
 }
 
@@ -141,12 +144,21 @@ enum UpstreamRequest {
     /// A key_auth policy's key header: the key is the gateway's to check, not the upstream's to
     /// see, so it is removed before forwarding.
     RemoveHeader(String),
+    /// A request_transformer policy's edits: the headers, then the query string. Boxed, as ten
+    /// lists would make every step of this phase that size.
+    Transform(Box<RequestTransformerPolicy>),
 }
 
 /// A step of [`Phase::RequestBody`].
 enum RequestBody {
     /// A request_size_limit policy's cap, counted over every chunk.
     SizeLimit(u64),
+}
+
+/// A step of [`Phase::Response`].
+enum Response {
+    /// A response_transformer policy's header edits.
+    Transform(HeaderEdits),
 }
 
 /// A step of [`Phase::Terminate`]. There is none yet; quota reconciliation is the first.
@@ -170,6 +182,7 @@ fn reachable(rule: &RouteRule) -> &'static [Phase] {
             Phase::Access,
             Phase::UpstreamRequest,
             Phase::RequestBody,
+            Phase::Response,
             Phase::Terminate,
         ]
     }
@@ -192,11 +205,28 @@ fn misplaced(phases: &[Phase], body: Body, reachable: &[Phase]) -> Option<&'stat
     }
 }
 
+/// `Err` when a `plugin`'s header `edits` cannot all be made: a name or a value the header map
+/// would refuse. Such a rule refuses every request, as one whose plugin cannot run does. The
+/// edits are what the operator asked the upstream or the client to be told, and an answer
+/// without some of them is not that.
+fn writable_edits(plugin: &Plugin, edits: &HeaderEdits) -> Result<(), Misplaced> {
+    if writable(edits) {
+        Ok(())
+    } else {
+        Err(Misplaced {
+            plugin: plugin.kind(),
+            why: "it writes a header name or value HTTP does not allow",
+        })
+    }
+}
+
 impl Chain {
     /// Compile `rule`'s plugins into the list of each phase they run in, with the request limit
-    /// after them. The Access steps run in [`Access::rank`] order, not the order the policies
-    /// arrive in. `Err` when a plugin cannot run on this rule: a rule whose policies cannot all
-    /// run must not serve, or an auth policy that never runs would let every request through.
+    /// after them. The Access steps run in [`Access::rank`] order, and the UpstreamRequest steps
+    /// in [`UpstreamRequest::rank`] order -- a key_auth policy's key removed before any
+    /// request_transformer edits -- not the order the policies arrive in. `Err` when a plugin
+    /// cannot run on this rule: a rule whose policies cannot all run must not serve, or an auth
+    /// policy that never runs would let every request through.
     ///
     /// The limit is not checked. It is not a plugin, and a Kubernetes redirect rule can carry one
     /// from its backend's annotation and has to keep redirecting.
@@ -227,10 +257,23 @@ impl Chain {
                         .request_body
                         .push(RequestBody::SizeLimit(policy.max_bytes));
                 }
+                Plugin::RequestTransformer(policy) => {
+                    writable_edits(plugin, &policy.headers)?;
+                    chain
+                        .upstream_request
+                        .push(UpstreamRequest::Transform(Box::new(policy.clone())));
+                }
+                Plugin::ResponseTransformer(policy) => {
+                    writable_edits(plugin, &policy.headers)?;
+                    chain
+                        .response
+                        .push(Response::Transform(policy.headers.clone()));
+                }
             }
         }
         // Stable, so policies of one rank keep the order they arrived in.
         chain.access.sort_by_key(Access::rank);
+        chain.upstream_request.sort_by_key(UpstreamRequest::rank);
         // Last, because the limit may be the consumer's own and may count per consumer, and the
         // consumer is not known until a policy has checked its credential.
         chain.access.push(Access::RateLimit);
@@ -265,6 +308,27 @@ impl Chain {
                 UpstreamRequest::RemoveHeader(name) => {
                     upstream.remove_header(name.as_str());
                 }
+                UpstreamRequest::Transform(policy) => {
+                    edit_headers(upstream, &policy.headers);
+                    if let Some(uri) = edit_query(&upstream.uri, &policy.query) {
+                        upstream.set_uri(uri);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run the Response steps on a head about to be written to the client: the upstream's, or
+    /// the gateway's own. An interim head is not the answer and is left alone: a relayed `100
+    /// Continue` is followed by the final head, which the steps edit, and they run once per
+    /// answer. A 101 is final, and edited like any other.
+    pub fn response(&self, resp: &mut ResponseHeader) {
+        if !is_final(resp.status) {
+            return;
+        }
+        for step in &self.response {
+            match step {
+                Response::Transform(edits) => edit_headers(resp, edits),
             }
         }
     }
@@ -295,6 +359,21 @@ impl Chain {
             }
         }
         None
+    }
+}
+
+impl UpstreamRequest {
+    /// Where the step runs among the UpstreamRequest steps, lowest first, whatever order the
+    /// policies arrive in. The client's key goes first, as Kong's `hide_credentials` removes it
+    /// before its request-transformer runs: a transform that renamed the key's header would
+    /// otherwise move the key out of the removal's reach, and hand the upstream, under the new
+    /// name, the key the gateway checks so that the upstream never sees it. The order the
+    /// policies arrive in, by name, happens to agree today; nothing holds it there.
+    fn rank(&self) -> u8 {
+        match self {
+            UpstreamRequest::RemoveHeader(_) => 1,
+            UpstreamRequest::Transform(_) => 2,
+        }
     }
 }
 
@@ -520,16 +599,18 @@ mod tests {
     use std::sync::Arc;
 
     use gapura_core::config::{
-        Config, ConsumerRateLimits, Filters, LimitBy, RateLimit, Redirect, Timeouts,
+        Config, ConsumerRateLimits, Filters, LimitBy, RateLimit, Redirect,
+        ResponseTransformerPolicy, Timeouts,
     };
     use sha2::{Digest, Sha256};
 
     use crate::store::Store;
 
-    const ALL: [Phase; 4] = [
+    const ALL: [Phase; 5] = [
         Phase::Access,
         Phase::UpstreamRequest,
         Phase::RequestBody,
+        Phase::Response,
         Phase::Terminate,
     ];
 
@@ -566,6 +647,8 @@ mod tests {
             Plugin::KeyAuth(KeyAuthPolicy::default()),
             ip_restriction(&["10.0.0.0/8"], &[]),
             size_limit(10),
+            Plugin::RequestTransformer(RequestTransformerPolicy::default()),
+            Plugin::ResponseTransformer(ResponseTransformerPolicy::default()),
         ] {
             let chain = Chain::compile(&rule(vec![plugin.clone()])).unwrap();
             // The request limit closes every chain and is not the plugin's.
@@ -578,6 +661,7 @@ mod tests {
                 (Phase::Access, access),
                 (Phase::UpstreamRequest, chain.upstream_request.len()),
                 (Phase::RequestBody, chain.request_body.len()),
+                (Phase::Response, chain.response.len()),
                 (Phase::Terminate, chain.terminate.len()),
             ]
             .into_iter()
@@ -914,5 +998,113 @@ mod tests {
             "allowance unspent"
         );
         assert_eq!(refused(run(&with_length(10))).key, ErrorKey::RateLimited);
+    }
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    /// The request's edits run as one step: its headers, then its query string, on the URI the
+    /// step is given.
+    #[test]
+    fn a_request_transform_edits_the_headers_and_the_query() {
+        let r = rule(vec![Plugin::RequestTransformer(RequestTransformerPolicy {
+            headers: HeaderEdits {
+                remove: vec!["x-debug".into()],
+                add: vec![pair("x-team", "core")],
+                ..HeaderEdits::default()
+            },
+            query: HeaderEdits {
+                remove: vec!["secret".into()],
+                add: vec![pair("v", "2")],
+                ..HeaderEdits::default()
+            },
+        })]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut req = RequestHeader::build("GET", b"/t?secret=s&keep=1", None).unwrap();
+        req.insert_header("x-debug", "1").unwrap();
+        chain.upstream_request(&mut req);
+        assert!(req.headers.get("x-debug").is_none());
+        assert_eq!(req.headers.get("x-team").unwrap(), "core");
+        assert_eq!(req.uri.to_string(), "/t?keep=1&v=2");
+    }
+
+    /// The key comes off before any transform runs, whatever order the policies arrive in: a
+    /// transform listed first that renames the key's header finds nothing to move, so the key
+    /// reaches the upstream under neither name.
+    #[test]
+    fn the_key_is_removed_before_a_transform_can_move_it() {
+        let r = rule(vec![
+            Plugin::RequestTransformer(RequestTransformerPolicy {
+                headers: HeaderEdits {
+                    rename: vec![pair("apikey", "x-key")],
+                    ..HeaderEdits::default()
+                },
+                query: HeaderEdits::default(),
+            }),
+            Plugin::KeyAuth(KeyAuthPolicy {
+                header: "apikey".into(),
+                workspace: None,
+            }),
+        ]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("apikey", "k").unwrap();
+        chain.upstream_request(&mut req);
+        assert!(req.headers.get("apikey").is_none(), "{:?}", req.headers);
+        assert!(req.headers.get("x-key").is_none(), "{:?}", req.headers);
+    }
+
+    fn served_by() -> Plugin {
+        Plugin::ResponseTransformer(ResponseTransformerPolicy {
+            headers: HeaderEdits {
+                append: vec![pair("x-served-by", "gapura")],
+                ..HeaderEdits::default()
+            },
+        })
+    }
+
+    /// An interim head is not the answer, so it is not edited: the final head that follows it
+    /// is, once. A 101 is final.
+    #[test]
+    fn the_response_steps_skip_an_interim_head() {
+        let chain = Chain::compile(&rule(vec![served_by()])).unwrap();
+        for (status, edited) in [
+            (100, false),
+            (103, false),
+            (101, true),
+            (200, true),
+            (401, true),
+        ] {
+            let mut resp = ResponseHeader::build(status, None).unwrap();
+            chain.response(&mut resp);
+            let got = resp.headers.get_all("x-served-by").iter().count();
+            assert_eq!(got, usize::from(edited), "{status}");
+        }
+    }
+
+    /// A transform that would write what the header map refuses cannot run as written, so the
+    /// rule refuses every request, as one whose plugin never runs does.
+    #[test]
+    fn a_transform_the_header_map_would_refuse_refuses_the_rule() {
+        let bad = Plugin::ResponseTransformer(ResponseTransformerPolicy {
+            headers: HeaderEdits {
+                add: vec![pair("x-a", "one\r\nx-injected: 1")],
+                ..HeaderEdits::default()
+            },
+        });
+        assert_eq!(
+            Chain::compile(&rule(vec![bad])).err(),
+            Some(Misplaced {
+                plugin: "response_transformer",
+                why: "it writes a header name or value HTTP does not allow",
+            })
+        );
+        let mut on_redirect = rule(vec![served_by()]);
+        on_redirect.filters.redirect = redirect();
+        assert!(
+            Chain::compile(&on_redirect).is_err(),
+            "a redirect reaches no Response step"
+        );
     }
 }

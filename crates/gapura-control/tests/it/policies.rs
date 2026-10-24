@@ -18,7 +18,10 @@ use axum::http::{Request, StatusCode};
 use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::Store;
-use gapura_core::config::{Config, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy};
+use gapura_core::config::{
+    Config, HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy,
+    RequestTransformerPolicy,
+};
 use gapura_core::store::StoreSettings;
 use serde_json::json;
 use tower::ServiceExt;
@@ -102,6 +105,7 @@ const SERVICES: &str = "/api/workspaces/default/services";
 const ROUTES: &str = "/api/workspaces/default/routes";
 const IP: &str = "/api/workspaces/default/policies/ip_restriction";
 const SIZE: &str = "/api/workspaces/default/policies/request_size_limit";
+const TRANSFORM: &str = "/api/workspaces/default/policies/request_transformer";
 /// The compiled name of the seeded route.
 const COMPILED_ROUTE: &str = "default/orders-api";
 
@@ -756,6 +760,126 @@ async fn a_request_size_limit_reaches_the_compiled_rule() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
     assert_eq!(parse(&answer)["field"], "max_bytes", "{answer}");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusal wrote nothing"
+    );
+}
+
+/// A request_transformer goes through the same endpoint: it compiles onto the rule and the route
+/// row says where it comes from. A credential it adds for the upstream is in the list an editor
+/// reads, which the console edits from, and never in a viewer's list or the audit log, whose
+/// entries name the header and not its value, for a create, an update and a delete alike. A
+/// header the gateway sets from the key it checked is refused at the list that names it, writing
+/// nothing.
+#[tokio::test]
+async fn a_request_transformer_reaches_the_rule_and_its_audit_names_no_values() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let first = json!({"headers": {"add": [["authorization", "Bearer s3cret"]]}});
+
+    ok(
+        &app,
+        "PUT",
+        TRANSFORM,
+        s.ed,
+        &put("route:orders-api", first.clone(), None),
+    )
+    .await;
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [Plugin::RequestTransformer(RequestTransformerPolicy {
+            headers: HeaderEdits {
+                add: vec![("authorization".into(), "Bearer s3cret".into())],
+                ..HeaderEdits::default()
+            },
+            query: HeaderEdits::default(),
+        })]
+    );
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["policies"]["request_transformer"]["from"],
+        "route"
+    );
+    // A caller who may change the workspace reads the whole policy, which the console edits
+    // from; a viewer reads it as the audit log records it, by its names alone.
+    let list = read(&app, TRANSFORM, s.ed).await;
+    assert_eq!(list[0]["target"], "route:orders-api");
+    assert_eq!(list[0]["config"], first);
+    assert!(list.to_string().contains("s3cret"), "{list}");
+    let viewed = read(&app, TRANSFORM, s.vi).await;
+    assert!(!viewed.to_string().contains("s3cret"), "{viewed}");
+    assert_eq!(viewed[0]["target"], "route:orders-api");
+    assert_eq!(
+        viewed[0]["config"],
+        json!({"headers": {"add": ["authorization"]}})
+    );
+    assert_eq!(viewed[0]["updated_at"], list[0]["updated_at"]);
+
+    let (_, _, after) = &policy_audits(&store).await[0];
+    assert!(!after.to_string().contains("s3cret"), "{after}");
+    assert_eq!(
+        after,
+        &json!({
+            "target": "route:orders-api",
+            "kind": "request_transformer",
+            "config": {"headers": {"add": ["authorization"]}},
+        })
+    );
+
+    // An update and a delete record the replaced policy by its names too.
+    let second = json!({
+        "headers": {"replace": [["authorization", "Bearer t0ken"]]},
+        "query": {"add": [["api_key", "k3y"]]},
+    });
+    let read_at = list[0]["updated_at"].as_str().unwrap().to_string();
+    ok(
+        &app,
+        "PUT",
+        TRANSFORM,
+        s.ed,
+        &put("route:orders-api", second, Some(&read_at)),
+    )
+    .await;
+    ok(
+        &app,
+        "DELETE",
+        &format!("{TRANSFORM}?target=route:orders-api"),
+        s.ed,
+        "",
+    )
+    .await;
+    let audits = policy_audits(&store).await;
+    let entry = |config: serde_json::Value| json!({"target": "route:orders-api", "kind": "request_transformer", "config": config});
+    let first_names = entry(json!({"headers": {"add": ["authorization"]}}));
+    let second_names = entry(json!({
+        "headers": {"replace": ["authorization"]},
+        "query": {"add": ["api_key"]},
+    }));
+    assert_eq!(
+        audits,
+        [
+            ("create".to_string(), json!(null), first_names.clone()),
+            ("update".to_string(), first_names, second_names.clone()),
+            ("delete".to_string(), second_names, json!(null)),
+        ]
+    );
+
+    let before = everything(&store).await;
+    let consumer = json!({"headers": {"add": [["x-consumer-username", "alice"]]}});
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        TRANSFORM,
+        Some(s.ed),
+        &put("route:orders-api", consumer, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(parse(&answer)["field"], "headers.add", "{answer}");
     assert_eq!(
         everything(&store).await,
         before,

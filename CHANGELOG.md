@@ -8,6 +8,52 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- `request_transformer` and `response_transformer` policies edit the request sent upstream and
+  the response sent back (#281). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
+  `{"target", "config": {"headers", "query"}}` and `response_transformer` takes
+  `{"target", "config": {"headers"}}`, on the workspace, a service or a route. The most specific
+  one applies.
+  - **Shape:** each section takes any of `remove`, a list of names; `rename`, a list of
+    `[old, new]` pairs; and `replace`, `add` and `append`, lists of `[name, value]` pairs. They
+    run in Kong's order, whatever order they are written in: remove, rename, replace, add, then
+    append. `replace` changes a name only when it is there, `add` sets one only when it is not,
+    and `append` adds a value beside any already there. A rename moves every value and replaces
+    whatever the new name had, as Kong's does, so a client's own value under the new name does
+    not reach the upstream beside the moved one.
+  - **Request edits:** they run after the gateway's own changes to the request -- the path
+    normalised and rewritten, the consumer named, the rule's Gateway API header filters applied
+    -- and after a key_auth policy has removed the client's API key, whatever order the policies
+    are in, so no transform can pass the key upstream. The gateway sets `X-Forwarded-Proto`,
+    `X-Request-Id` and `traceparent` after them, sets `X-Forwarded-Host` when the request named
+    a host, and appends the peer to whatever `X-Forwarded-For` the edits left, so a policy cannot
+    change those values or that last hop.
+  - **Query edits:** a parameter's name is matched exactly, once decoded. Every parameter no edit
+    touches keeps the bytes the client sent and its place; what an edit writes is
+    percent-encoded, with a space as `%20`, as Kong writes it.
+  - **Response edits:** they run on the upstream's answer, after the gateway's own
+    `X-Request-Id`, so a transform that removes it removes it; on every answer the gateway
+    writes itself for the route -- a 401, 403, 413 or 429 refusal, and the 5xx answered when
+    the upstream fails; and on a 101. Not on an interim 1xx, a redirect, a 404 for no route, a
+    400 for a bad request target, or the 500 or 503 for a rule with no backend or no endpoint to
+    send to, none of which is the route's answer. A transform can remove or replace
+    `X-Gapura-Error` like any other header.
+  - **Refused:** in both kinds, the names that frame, route or carry a message: `host`,
+    `content-length`, `transfer-encoding`, `connection`, `keep-alive`, `te`, `trailer`, `upgrade`
+    and `proxy-connection`; and in a request transform's headers `x-consumer-username`, which
+    the gateway sets from the key it checked. A policy lists 1 to 64 edits, headers and query
+    together. A header name is an RFC 9110 token and a query name any text, each of 1 to 256
+    characters; a header value is visible ASCII, spaces and tabs, and every value is at most
+    4096 characters. A refusal names its field, such as `headers.add`.
+  - **Audit and list:** the audit log records a transformer by the names it edits, never the
+    values it writes, since a value may be a credential for the upstream. The list shows a
+    viewer the same form. A caller who may change the workspace reads the values, which the
+    console edits from.
+  - **Not from Kong:** no body edits; no `replace.uri` or `http_method`; no templates such as
+    `$(headers.x)`; header names are stored and written lowercase; and a transformer cannot be
+    a consumer's own.
+  - **Upgrade order:** a data plane older than this release cannot read a configuration that has
+    either policy, and keeps serving its last one, so upgrade data planes first.
+  - The console's form for them follows.
 - An endpoint that sends `100 Continue` before a 502, 503 or 504 is ejected like any other
   (#276). Pingora relays an upstream's interim 1xx head, and passive outlier detection counted it
   as a success that reset the endpoint's consecutive failures, so one that answered every request

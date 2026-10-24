@@ -4,11 +4,12 @@
 //! or pick a cluster), `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite,
 //! headers, the UpstreamRequest steps), `request_body_filter` (the RequestBody steps, on each
 //! chunk), `upstream_response_filter` (the endpoint's outcome), `response_filter` (response
-//! headers), `fail_to_connect` (retry once), `fail_to_proxy` (the error key and its status: a
-//! refused body's own, else from `failure::classify`), `suppress_error_log` (a refused body is
-//! no failure), `logging` (access log + metrics, the Terminate steps). The steps are each rule's
-//! plugins, compiled per generation (`plugin`). Outcomes feed passive outlier detection
-//! (`outlier`).
+//! headers, the Response steps), `fail_to_connect` (retry once), `fail_to_proxy` (the error key
+//! and its status: a refused body's own, else from `failure::classify`), `suppress_error_log` (a
+//! refused body is no failure), `logging` (access log + metrics, the Terminate steps). The
+//! Response steps also run on every answer the gateway writes itself for a request attributed to
+//! a rule (`Ctx::response_steps`). The steps are each rule's plugins, compiled per generation
+//! (`plugin`). Outcomes feed passive outlier detection (`outlier`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -20,6 +21,7 @@ pub mod plugin;
 pub mod rate_limit;
 pub mod select;
 pub mod tls;
+mod transform;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -108,6 +110,21 @@ impl Ctx {
         let rt = self.runtime.as_ref()?;
         let (listener, rule) = self.req.route?;
         rt.config.listeners.get(listener)?.rules.get(rule)
+    }
+
+    /// Run the Response steps of the rule this request is attributed to on `resp`, a head about
+    /// to be written to the client, whoever answered: one place for every head, so that no
+    /// answer the rule gives skips its steps. A request attributed to no rule -- a redirect, one
+    /// that matched none, one with no backend to send it to -- has none to run, and a rule whose
+    /// plugins cannot all run has none either.
+    fn response_steps(&self, resp: &mut ResponseHeader) {
+        let chain = self
+            .req
+            .route
+            .and_then(|(l, r)| self.runtime.as_ref()?.chain(l, r)?.as_ref().ok());
+        if let Some(chain) = chain {
+            chain.response(resp);
+        }
     }
 
     /// Count this attempt's outcome against the endpoint it went to.
@@ -237,11 +254,17 @@ fn idempotent(method: &http::Method) -> bool {
     .contains(method)
 }
 
-/// Small header-op adapter so the same `HeaderOps` apply to requests and responses.
+/// Small header-op adapter so the same edits apply to requests and responses: the Gateway API's
+/// `HeaderOps` and a transformer's `HeaderEdits` (`transform`).
 trait HeaderTarget {
     fn set(&mut self, name: &str, value: &str) -> Result<()>;
     fn add(&mut self, name: &str, value: &str) -> Result<()>;
     fn del(&mut self, name: &str);
+    /// Every value of `name`, in order; empty when it is absent.
+    fn get_all(&self, name: &str) -> Vec<http::HeaderValue>;
+    /// One more value of `name`, as it is: a value moved from another header may hold bytes a
+    /// `&str` cannot.
+    fn append(&mut self, name: &str, value: http::HeaderValue) -> Result<()>;
 }
 
 impl HeaderTarget for RequestHeader {
@@ -254,6 +277,12 @@ impl HeaderTarget for RequestHeader {
     fn del(&mut self, name: &str) {
         self.remove_header(name);
     }
+    fn get_all(&self, name: &str) -> Vec<http::HeaderValue> {
+        self.headers.get_all(name).iter().cloned().collect()
+    }
+    fn append(&mut self, name: &str, value: http::HeaderValue) -> Result<()> {
+        self.append_header(name.to_string(), value).map(|_| ())
+    }
 }
 
 impl HeaderTarget for ResponseHeader {
@@ -265,6 +294,12 @@ impl HeaderTarget for ResponseHeader {
     }
     fn del(&mut self, name: &str) {
         self.remove_header(name);
+    }
+    fn get_all(&self, name: &str) -> Vec<http::HeaderValue> {
+        self.headers.get_all(name).iter().cloned().collect()
+    }
+    fn append(&mut self, name: &str, value: http::HeaderValue) -> Result<()> {
+        self.append_header(name.to_string(), value).map(|_| ())
     }
 }
 
@@ -325,7 +360,9 @@ async fn write_error(
         .filter_map(|v| v.to_str().ok())
         .collect();
     let json = failure::wants_json(&accept.join(","));
-    let (resp, body) = error_response(key, &ctx.request_id, json, extra)?;
+    let (mut resp, body) = error_response(key, &ctx.request_id, json, extra)?;
+    // A refusal is the rule's answer as much as the upstream's would have been.
+    ctx.response_steps(&mut resp);
     session.write_response_header(Box::new(resp), false).await?;
     session.write_response_body(Some(body), true).await
 }
@@ -342,8 +379,9 @@ fn final_response(session: &Session) -> Option<&ResponseHeader> {
 async fn answer(session: &mut Session, ctx: &mut Ctx, flow: Flow) -> Result<bool> {
     match flow {
         Flow::Continue => Ok(false),
-        Flow::Respond(resp) => {
+        Flow::Respond(mut resp) => {
             let status = resp.status.as_u16();
+            ctx.response_steps(&mut resp);
             session.write_response_header(resp, true).await?;
             ctx.local_status = Some(status);
             ctx.req.invoke = Invoke::Serve;
@@ -849,9 +887,6 @@ impl ProxyHttp for GapuraProxy {
                 consumer.name.as_str(),
             )?;
         }
-        if let Some(Ok(chain)) = rt.chain(li, ri) {
-            chain.upstream_request(upstream);
-        }
 
         // Forward the path that was matched. Without this a normalised request would match one
         // string and reach the backend as another, which is exactly the disagreement
@@ -891,6 +926,20 @@ impl ProxyHttp for GapuraProxy {
         }
 
         apply_header_ops(upstream, &rule.filters.request_headers)?;
+
+        // The UpstreamRequest steps -- a key_auth policy's key removal, then a
+        // request_transformer's edits -- run on the request as the gateway would otherwise send
+        // it: normalised, rewritten, the consumer named, the rule's Gateway API header filters
+        // applied. The key removal always runs before the edits, whatever order the policies
+        // arrive in (`Chain::compile`), so no transform can move the client's key under a name
+        // the removal does not take. A query edit then sees the final URI, and a header edit has
+        // the last word over every header above. Not over those below: `X-Forwarded-*`,
+        // `X-Request-Id` and `traceparent` are the gateway's own account of the request, set
+        // after the steps, so that no policy can misreport the peer the last `X-Forwarded-For`
+        // hop names or the id the access log records.
+        if let Some(Ok(chain)) = rt.chain(li, ri) {
+            chain.upstream_request(upstream);
+        }
 
         if let Some(ex) = &ctx.extracted {
             if !ex.host.is_empty() {
@@ -992,6 +1041,9 @@ impl ProxyHttp for GapuraProxy {
         if upstream_response.headers.get("x-request-id").is_none() {
             upstream_response.insert_header("X-Request-Id", ctx.request_id.clone())?;
         }
+        // Last, after the gateway's own `X-Request-Id`, so that the operator's transform has the
+        // last word on what the client is told: one that removes the id removes it.
+        ctx.response_steps(upstream_response);
         Ok(())
     }
 
