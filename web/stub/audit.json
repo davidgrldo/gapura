@@ -1,6 +1,17 @@
 {
   "entries": [
     {
+      "id": 217,
+      "at": "2026-10-24T08:00:00.000000Z",
+      "actor": "nadia.putri",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "policy",
+      "workspace": "default",
+      "before": null,
+      "after": { "target": "service:docs", "kind": "ip_restriction", "config": { "deny": ["203.0.113.0/24"] } }
+    },
+    {
       "id": 216,
       "at": "2026-10-10T08:15:30.481209Z",
       "actor": "nadia.putri",
