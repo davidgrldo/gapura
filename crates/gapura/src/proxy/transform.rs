@@ -10,7 +10,9 @@ use gapura_core::config::HeaderEdits;
 use super::HeaderTarget;
 
 /// Apply `edits` to `target`'s headers, a name matched without regard to case as the header
-/// map matches it. A rename moves every value as it is, bytes a `&str` cannot hold included.
+/// map matches it. A rename moves every value as it is, bytes a `&str` cannot hold included, and
+/// the new name keeps none it had before: Kong's rename sets the new name, so an operator moving
+/// a header onto one the client also sent gets the moved value and not both.
 ///
 /// No write here can fail, and none is reported: `Chain::compile` refuses a rule whose edits
 /// fail [`writable`], so every name and value left is one the header map takes. An error carried
@@ -24,7 +26,10 @@ pub(super) fn edit_headers(target: &mut impl HeaderTarget, edits: &HeaderEdits) 
         if values.is_empty() {
             continue;
         }
+        // Both go before the values are written back, so a rename onto the same name, in another
+        // case, keeps its values rather than removing them after writing them.
         target.del(from);
+        target.del(to);
         for value in values {
             let _ = target.append(to, value);
         }
@@ -63,11 +68,12 @@ pub(super) fn writable(edits: &HeaderEdits) -> bool {
 /// `None` when nothing changed, so a request the edits do not touch goes upstream as it came.
 ///
 /// A parameter's name is matched exactly once it is decoded: `a%62=1` is named `ab`. What an
-/// edit writes is encoded as a form encodes it (`a b&c` is `a+b%26c`), and a renamed parameter
-/// keeps its value as it was written; every parameter no edit touches keeps the bytes the
-/// client sent. Decoding the whole query and encoding it again would rewrite parameters the
-/// policy never named -- `%20` would become `+`, which an upstream that does not read its query
-/// as a form takes for a plus sign, and a value that is not UTF-8 would be lost to U+FFFD.
+/// edit writes is encoded as a form encodes it (`a b&c` is `a+b%26c`). A renamed parameter keeps
+/// its value as it was written, and every parameter already under the new name goes, as Kong's
+/// rename sets the new name rather than adding to it. Every parameter no edit touches keeps the
+/// bytes the client sent. Decoding the whole query and encoding it again would rewrite parameters
+/// the policy never named -- `%20` would become `+`, which an upstream that does not read its
+/// query as a form takes for a plus sign, and a value that is not UTF-8 would be lost to U+FFFD.
 pub(super) fn edit_query(uri: &http::Uri, edits: &HeaderEdits) -> Option<http::Uri> {
     if edits.is_empty() {
         return None;
@@ -83,8 +89,11 @@ pub(super) fn edit_query(uri: &http::Uri, edits: &HeaderEdits) -> Option<http::U
         if !params.iter().any(|p| p.name == from.as_str()) {
             continue;
         }
-        let (moved, kept): (Vec<Param>, Vec<Param>) =
+        // The old name's pieces are taken out first, so a rename onto the same decoded name
+        // moves them rather than dropping them with what the new name already had.
+        let (moved, mut kept): (Vec<Param>, Vec<Param>) =
             params.into_iter().partition(|p| p.name == from.as_str());
+        kept.retain(|p| p.name != to.as_str());
         params = kept;
         params.extend(moved.into_iter().map(|p| p.renamed(to)));
     }
@@ -227,11 +236,11 @@ mod tests {
         assert_eq!(values(&req, "x-r"), ["2"]);
     }
 
-    /// Every value moves, in order, beside any the new name already had, and bytes that are not
-    /// UTF-8 move as they are. Nothing happens for a name that is not there.
+    /// Every value moves, in order, and bytes that are not UTF-8 move as they are. Nothing happens
+    /// for a name that is not there.
     #[test]
     fn a_rename_moves_every_value() {
-        let mut req = with(&[("x-old", "a"), ("x-old", "b"), ("x-new", "c")]);
+        let mut req = with(&[("x-old", "a"), ("x-old", "b")]);
         req.append_header("x-old", http::HeaderValue::from_bytes(b"caf\xe9").unwrap())
             .unwrap();
         let edits = HeaderEdits {
@@ -246,8 +255,37 @@ mod tests {
             .iter()
             .map(|v| v.as_bytes())
             .collect();
-        assert_eq!(moved, [&b"c"[..], b"a", b"b", b"caf\xe9"]);
+        assert_eq!(moved, [&b"a"[..], b"b", b"caf\xe9"]);
         assert!(req.headers.get("x-other").is_none());
+    }
+
+    /// A rename onto a name the head already has replaces what it had, as Kong's sets the new
+    /// name: the client's own `x-new` does not reach the upstream beside the moved one. A name the
+    /// old one is not there for keeps its values; a rename onto the same name in another case
+    /// keeps its values too.
+    #[test]
+    fn a_renamed_header_replaces_what_the_new_name_had() {
+        let mut req = with(&[
+            ("x-new", "client"),
+            ("x-old", "a"),
+            ("x-new", "client-2"),
+            ("x-old", "b"),
+            ("x-kept", "k"),
+            ("x-same", "s"),
+        ]);
+        let edits = HeaderEdits {
+            rename: vec![
+                pair("x-old", "x-new"),
+                pair("x-absent", "x-kept"),
+                pair("x-same", "X-Same"),
+            ],
+            ..HeaderEdits::default()
+        };
+        edit_headers(&mut req, &edits);
+        assert!(values(&req, "x-old").is_empty());
+        assert_eq!(values(&req, "x-new"), ["a", "b"]);
+        assert_eq!(values(&req, "x-kept"), ["k"]);
+        assert_eq!(values(&req, "x-same"), ["s"]);
     }
 
     /// A replace only rewrites a header that is there, an add only sets one that is not, and an
@@ -349,6 +387,21 @@ mod tests {
         assert_eq!(
             query("/p?v=1&old=a%20b&k=2&old&v=3", &edits).as_deref(),
             Some("/p?v=9&k=2&new+name=a%20b&new+name")
+        );
+    }
+
+    /// A rename onto a name the query already has replaces every parameter under it, matched
+    /// once decoded, as Kong's sets the new name; one whose old name is absent leaves the new
+    /// name's parameters alone, and one onto its own name keeps its values.
+    #[test]
+    fn a_renamed_parameter_replaces_what_the_new_name_had() {
+        let edits = HeaderEdits {
+            rename: vec![pair("old", "new"), pair("absent", "k"), pair("s", "s")],
+            ..HeaderEdits::default()
+        };
+        assert_eq!(
+            query("/p?new=x&old=a&k=1&n%65w=y&old=b&s=1", &edits).as_deref(),
+            Some("/p?k=1&new=a&new=b&s=1")
         );
     }
 

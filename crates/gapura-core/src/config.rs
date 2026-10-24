@@ -504,8 +504,9 @@ pub struct HeaderEdits {
     /// Every value of each name goes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
-    /// `(from, to)`: every value moves to the new name, beside any it already has, only when the
-    /// old one is present.
+    /// `(from, to)`: every value moves to the new name, only when the old one is present, and
+    /// replaces any the new name already had, as Kong's rename sets the new name rather than
+    /// adding to it. Once it has run, the new name holds exactly the old name's values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rename: Vec<(String, String)>,
     /// The value replaces every value of the name, only when the name is present.
