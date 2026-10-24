@@ -8,6 +8,31 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A `request_size_limit` policy refuses request bodies over a size (#PR).
+  `PUT /api/workspaces/{ws}/policies/request_size_limit` takes `{"target", "config":
+  {"max_bytes"}}`, a whole number of bytes from 1 to 1 GiB, on the workspace, a service or a
+  route. The most specific one applies.
+  - **Declared length:** a request whose `Content-Length` is over the limit is answered 413
+    `REQUEST_TOO_LARGE` before any upstream work. That includes one sent with
+    `Expect: 100-continue`: it is refused on its headers, so the client never sends the body.
+  - **Streamed:** otherwise every chunk of the body is counted as it passes to the upstream, and
+    none of it is held. The request is cut, and answered 413, on the chunk that crosses the
+    limit. A retry counts the replayed body once.
+  - **Known ceiling:** an oversize chunked body opens an upstream request and reaches the upstream
+    up to the limit before the request is cut. An upstream that answers before it has read the
+    body may have its answer under way by then; the refusal then closes the connection instead
+    of answering 413.
+  - **Upgrades:** nothing is counted after a protocol upgrade, so a WebSocket is not cut after so
+    many bytes.
+  - **Order:** the length is judged after ip_restriction and the credentials, as Kong does, and
+    before the request limit, so a refused body spends none of the caller's allowance.
+  - **Refusal metric:** `gapura_policy_refused_total{policy="request_size_limit"}`, with
+    `reason="content_length"` for a declared length and `reason="streamed"` for a counted one.
+  - **Logs:** a refused body is not logged as an error-level "Fail to proxy" line, which any
+    caller could otherwise write at will. The access log line and the metric record it.
+  - **Upgrade order:** as with ip_restriction, a data plane older than this release cannot read a
+    configuration that has such a policy, and keeps serving its last one, so upgrade data planes
+    first.
 - An `ip_restriction` policy refuses requests by client address (#273).
   `PUT /api/workspaces/{ws}/policies/ip_restriction` takes `{"target", "config": {"allow",
   "deny"}}`.
