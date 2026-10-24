@@ -323,6 +323,16 @@ async fn write_error(
     session.write_response_body(Some(body), true).await
 }
 
+/// The final response head written to the client, if one has been. An interim 1xx other than
+/// 101, such as a relayed `100 Continue`, is not one: a final head may still follow it, and
+/// Pingora's HTTP/1 writer accepts one after it. A 101 is final, since what follows it is a
+/// tunnel and not a response.
+fn final_response(session: &Session) -> Option<&ResponseHeader> {
+    session.response_written().filter(|r| {
+        !r.status.is_informational() || r.status == http::StatusCode::SWITCHING_PROTOCOLS
+    })
+}
+
 /// Answer the request as a step, or the router, decided; `Continue` answers nothing. Whether
 /// the request was answered is what `request_filter` returns.
 async fn answer(session: &mut Session, ctx: &mut Ctx, flow: Flow) -> Result<bool> {
@@ -1066,10 +1076,16 @@ impl ProxyHttp for GapuraProxy {
                     .inc();
             }
         }
-        // Only answer when nothing has been sent yet: a failure mid-body must not append an error
-        // text to the streamed response. Pingora drops the downstream connection after this, so
+        // Only answer when no final answer has been sent yet: a failure mid-body must not append
+        // an error text to the streamed response. An interim 1xx other than 101 is not one: an
+        // upstream's `100 Continue`, relayed to a client that sent `Expect: 100-continue` (as
+        // curl does on every chunked upload), may be followed by a final head, which HTTP allows
+        // and Pingora's writer takes. So a body refused after the 100 is still answered 413
+        // rather than with a closed connection, and so is every other failure after one: an
+        // upstream that goes quiet after its 100 is answered 504, not dropped. A 101 is final:
+        // what follows it is a tunnel. Pingora drops the downstream connection after this, so
         // say so in the header instead of advertising keep-alive.
-        if let Some(key) = key.filter(|_| session.response_written().is_none()) {
+        if let Some(key) = key.filter(|_| final_response(session).is_none()) {
             session.set_keepalive(None);
             if let Err(write_err) = write_error(session, ctx, key, &[]).await {
                 tracing::debug!(error = %write_err, "could not write error response, client likely gone");
@@ -1093,8 +1109,10 @@ impl ProxyHttp for GapuraProxy {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Ctx) {
-        let status = session
-            .response_written()
+        // The final answer's status: a relayed `100 Continue` that no answer followed, because
+        // the client went away or the error answer could not be written, is not what the request
+        // got. The answer the gateway meant to give, if any, is then the truer record.
+        let status = final_response(session)
             .map(|r| r.status.as_u16())
             .or(ctx.local_status)
             .unwrap_or(0);

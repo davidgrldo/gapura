@@ -1365,16 +1365,13 @@ async fn status_line(gw: &Gateway, request: &[u8]) -> std::io::Result<String> {
         .unwrap_or_else(|_| panic!("no status line within 10s"))
 }
 
-/// `/sized` takes bodies of at most 1024 bytes. A longer one is refused 413 `REQUEST_TOO_LARGE`
-/// whether its length is declared, checked before anything upstream, or only known as it streams,
-/// counted chunk by chunk. A declared length is refused before the client is asked for the body,
-/// so a client waiting on `100 Continue` gets the 413 instead; a body at the limit goes through.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_request_too_large_is_413_declared_or_streamed() {
+/// A store-mode gateway whose route `/sized` takes bodies of at most 1024 bytes, in front of the
+/// counting upstream, which reads every body whole.
+async fn start_sized_gateway() -> Gateway {
     use gapura_core::config::{PathMatch, Plugin, Protocol, RequestSizeLimitPolicy};
     use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
     let upstream = spawn_counting_upstream().await;
-    let gw = start_store_gateway(StoreSnapshot {
+    start_store_gateway(StoreSnapshot {
         services: vec![StoreService {
             workspace: String::new(),
             name: "counter".into(),
@@ -1406,7 +1403,16 @@ async fn a_request_too_large_is_413_declared_or_streamed() {
         }],
         ..StoreSnapshot::default()
     })
-    .await;
+    .await
+}
+
+/// `/sized` takes bodies of at most 1024 bytes. A longer one is refused 413 `REQUEST_TOO_LARGE`
+/// whether its length is declared, checked before anything upstream, or only known as it streams,
+/// counted chunk by chunk. A declared length is refused before the client is asked for the body,
+/// so a client waiting on `100 Continue` gets the 413 instead; a body at the limit goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_too_large_is_413_declared_or_streamed() {
+    let gw = start_sized_gateway().await;
     let c = client(&gw);
 
     // Declared: refused from Content-Length alone, in the Access phase.
@@ -1480,6 +1486,86 @@ async fn a_request_too_large_is_413_declared_or_streamed() {
             "{reason}: {metrics}"
         );
     }
+}
+
+/// Reads one response head off `sock`, through its blank line, and returns it whole, keeping in
+/// `pending` whatever arrived past it: an interim head and the final one can come in one read.
+async fn read_head(
+    sock: &mut tokio::net::TcpStream,
+    pending: &mut Vec<u8>,
+) -> std::io::Result<String> {
+    loop {
+        if let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head: Vec<u8> = pending.drain(..end + 4).collect();
+            return Ok(String::from_utf8_lossy(&head).into_owned());
+        }
+        let mut buf = [0u8; 1024];
+        let n = sock.read(&mut buf).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        pending.extend_from_slice(&buf[..n]);
+    }
+}
+
+/// A chunked upload that waits on `100 Continue`, as curl sends every chunked upload, to an
+/// upstream that sends the 100 once it starts reading the body, as hyper (the counting upstream
+/// here), Go, Node and nginx do. The gateway relays the 100, the client sends three 512-byte
+/// chunks, and the count refuses the one that crosses 1024. The client is then answered 413 after
+/// the 100, not left with a closed connection, and the access log records the 413 and its key,
+/// not the 100.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_refused_after_100_continue_is_still_answered_413() {
+    let gw = start_sized_gateway().await;
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+        .await
+        .unwrap();
+    sock.write_all(
+        b"POST /sized HTTP/1.1\r\nHost: echo.test\r\nTransfer-Encoding: chunked\r\n\
+          Expect: 100-continue\r\nx-request-id: continued\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let mut pending = Vec::new();
+    let first = tokio::time::timeout(Duration::from_secs(10), read_head(&mut sock, &mut pending))
+        .await
+        .expect("neither 100 Continue nor an answer to the headers within 10s")
+        .unwrap();
+    eprintln!("first head on the wire: {first:?}");
+    if first.starts_with("HTTP/1.1 100 ") {
+        let mut body = Vec::new();
+        for _ in 0..3 {
+            body.extend_from_slice(b"200\r\n");
+            body.extend_from_slice(&[b'a'; 512]);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        // The refusal closes the connection with the rest of the body unread, which can reset it
+        // before the client reads the 413, as in the streamed case without a 100: the status is
+        // asserted when it arrived, and the access log line either way.
+        let answer = async {
+            sock.write_all(&body).await?;
+            read_head(&mut sock, &mut pending).await
+        };
+        match tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .expect("no answer to the body within 10s")
+        {
+            Ok(head) => {
+                eprintln!("final head on the wire: {head:?}");
+                assert!(head.starts_with("HTTP/1.1 413 "), "{head}");
+            }
+            Err(e) => eprintln!("the refusal after the 100 reached the client as {e}"),
+        }
+    } else {
+        // The upstream did not send 100 Continue, so the gateway had none to relay and answered
+        // the headers with a final status. Whatever the reason, that answer must still be the
+        // refusal.
+        assert!(first.starts_with("HTTP/1.1 413 "), "{first}");
+    }
+    let line = gw.access_log("continued").await;
+    assert_eq!(line["status"], 413, "{line}");
+    assert_eq!(line["error_key"], "REQUEST_TOO_LARGE", "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
