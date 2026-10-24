@@ -475,6 +475,24 @@ fn header_str<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
     req.headers.get(name).and_then(|v| v.to_str().ok())
 }
 
+/// Drops an `Upgrade` offer unless it is exactly `websocket`, and the `HTTP2-Settings` that comes
+/// with `h2c`. Pingora relays whatever follows a 101 untouched, so an upgrade the upstream takes
+/// hides the rest of the connection from the matcher and every policy: after `Upgrade: h2c` that
+/// is any number of HTTP/2 requests on any path. WebSocket is one conversation whose handshake
+/// the route's policies already judged, so it alone is kept, as Kong keeps it. Without the offer
+/// the request is plain HTTP/1.1, which a client offering an upgrade must accept as an answer.
+fn drop_tunnelling_upgrade(req: &mut RequestHeader) {
+    let mut offers = req.headers.get_all(http::header::UPGRADE).iter();
+    let websocket = matches!(
+        (offers.next(), offers.next()),
+        (Some(v), None) if v.as_bytes().eq_ignore_ascii_case(b"websocket")
+    );
+    if !websocket {
+        req.remove_header(&http::header::UPGRADE);
+    }
+    req.remove_header("http2-settings");
+}
+
 /// URL and headers for a headers-only mirror of the outbound request: the rewritten path and
 /// query with the final header set, minus the framing headers that would promise a body we do
 /// not send. Pure, so the shape is unit-tested without a network.
@@ -592,6 +610,8 @@ impl ProxyHttp for GapuraProxy {
             .and_then(|a| a.as_inet())
             .map(|a| a.port())
             .unwrap_or(0);
+        // First, so that neither the upstream nor Pingora's own upgrade handling ever sees it.
+        drop_tunnelling_upgrade(session.req_header_mut());
         {
             let req = session.req_header();
             ctx.request_id = header_str(req, "x-request-id")
@@ -1378,6 +1398,39 @@ mod tests {
         );
         assert!(headers.get("transfer-encoding").is_none());
         assert_eq!(headers.get("x-keep").unwrap(), "yes");
+    }
+
+    #[test]
+    fn only_a_lone_websocket_offer_is_kept() {
+        let offered = |lines: &[&str]| {
+            let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+            for line in lines {
+                req.append_header("Upgrade", *line).unwrap();
+            }
+            req.insert_header("HTTP2-Settings", "AAMAAABkAARAAAAAAAIAAAAA")
+                .unwrap();
+            drop_tunnelling_upgrade(&mut req);
+            assert!(req.headers.get("http2-settings").is_none(), "{lines:?}");
+            req.headers
+                .get_all("upgrade")
+                .iter()
+                .map(|v| v.to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offered(&["websocket"]), ["websocket"]);
+        assert_eq!(offered(&["WebSocket"]), ["WebSocket"]);
+        for tunnel in [
+            &["h2c"][..],
+            &["H2C"],
+            &["TLS/1.0"],
+            &["websocket, h2c"],
+            &["h2c, websocket"],
+            &["websocket", "h2c"],
+            &["websocket", "websocket"],
+        ] {
+            assert!(offered(tunnel).is_empty(), "{tunnel:?} was kept");
+        }
+        assert!(offered(&[]).is_empty());
     }
 
     #[test]
