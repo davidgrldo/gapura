@@ -299,6 +299,7 @@ pub enum Plugin {
     Jwt(JwtPolicy),
     KeyAuth(KeyAuthPolicy),
     IpRestriction(IpRestrictionPolicy),
+    RequestSizeLimit(RequestSizeLimitPolicy),
 }
 
 /// Where in a request a plugin runs. Each plugin declares its own ([`Plugin::phases`]) and runs
@@ -315,23 +316,28 @@ pub enum Phase {
     Access,
     /// On the request sent upstream, once per attempt.
     UpstreamRequest,
+    /// On each chunk of the request body as it passes to the upstream, holding none of it. Not
+    /// reached once the connection is upgraded: what follows a 101 is not a request body.
+    RequestBody,
     /// Once, after the answer was written, whatever it was: a refusal too.
     Terminate,
 }
 
 /// How a plugin reads a body ([`Plugin::body`]).
 ///
-/// No plugin reads one yet and the data plane feeds none, so a rule with a plugin declaring
-/// anything but `None` refuses every request rather than run the plugin without what it needs.
-/// Declared now so the first such plugin has to say which it is: Gravitee's `onChunks` reads like
-/// streaming, holds the whole body, and has no bound.
+/// The data plane feeds a body only as it streams, in [`Phase::RequestBody`], so a rule with a
+/// plugin that reads one any other way refuses every request rather than run the plugin without
+/// what it needs. Declared so that every plugin has to say which it is: Gravitee's `onChunks`
+/// reads like streaming, holds the whole body, and has no bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Body {
     /// Never reads a body.
     None,
-    /// Reads it chunk by chunk as it passes, holding none of it.
+    /// Reads it chunk by chunk as it passes, holding none of it: fed in [`Phase::RequestBody`],
+    /// which such a plugin has to declare.
     Stream,
-    /// Reads it whole, holding up to `max` bytes; a longer body is refused.
+    /// Reads it whole, holding up to `max` bytes; a longer body is refused. No phase feeds one
+    /// yet.
     Buffered { max: usize },
 }
 
@@ -343,6 +349,7 @@ impl Plugin {
             Plugin::Jwt(_) => "jwt",
             Plugin::KeyAuth(_) => "key_auth",
             Plugin::IpRestriction(_) => "ip_restriction",
+            Plugin::RequestSizeLimit(_) => "request_size_limit",
         }
     }
 
@@ -353,6 +360,9 @@ impl Plugin {
             // Access identifies the caller. On the way upstream the key is removed: it is the
             // gateway's to check, not the upstream's to see.
             Plugin::KeyAuth(_) => &[Phase::Access, Phase::UpstreamRequest],
+            // Access judges the declared length before anything upstream is touched; the body
+            // phase counts what actually arrives, which a chunked or HTTP/2 body never declares.
+            Plugin::RequestSizeLimit(_) => &[Phase::Access, Phase::RequestBody],
         }
     }
 
@@ -360,6 +370,7 @@ impl Plugin {
     pub fn body(&self) -> Body {
         match self {
             Plugin::Jwt(_) | Plugin::KeyAuth(_) | Plugin::IpRestriction(_) => Body::None,
+            Plugin::RequestSizeLimit(_) => Body::Stream,
         }
     }
 }
@@ -451,6 +462,15 @@ impl IpRestrictionPolicy {
         }
         None
     }
+}
+
+/// Refuse a request whose body is larger than `max_bytes`: by its `Content-Length` before
+/// anything upstream is touched, else by counting the body as it streams, holding none of it.
+/// Kong reads a body without a `Content-Length` whole to measure it; a gateway that buffers what
+/// it was told to limit has already spent the memory the limit was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestSizeLimitPolicy {
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -805,12 +825,28 @@ mod tests {
             Plugin::Jwt(JwtPolicy::default()),
             Plugin::KeyAuth(KeyAuthPolicy::default()),
             Plugin::IpRestriction(IpRestrictionPolicy::default()),
+            Plugin::RequestSizeLimit(RequestSizeLimitPolicy { max_bytes: 1 }),
         ] {
             assert_eq!(
                 serde_json::to_value(&plugin).unwrap()["kind"],
                 plugin.kind()
             );
         }
+    }
+
+    #[test]
+    fn a_request_size_limit_is_its_byte_count_on_the_wire() {
+        let p = Plugin::RequestSizeLimit(RequestSizeLimitPolicy {
+            max_bytes: 1_048_576,
+        });
+        let wire = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"kind": "request_size_limit", "max_bytes": 1048576})
+        );
+        assert_eq!(serde_json::from_value::<Plugin>(wire).unwrap(), p);
+        assert_eq!(p.phases(), [Phase::Access, Phase::RequestBody]);
+        assert_eq!(p.body(), Body::Stream);
     }
 
     fn nets(list: &[&str]) -> Vec<crate::client_ip::Cidr> {
