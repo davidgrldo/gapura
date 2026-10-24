@@ -202,7 +202,7 @@
         {/if}
         <p id="{id}-help" class="text-xs text-muted-foreground">
           A request whose Content-Length is over the limit is answered 413 REQUEST_TOO_LARGE before anything reaches the
-          upstream. A body sent without one is counted as it streams and cut at the limit. At most {sizeText(MAX_BODY_BYTES)}.
+          upstream. Every body is also counted as it streams and cut at the limit. At most {sizeText(MAX_BODY_BYTES)}.
         </p>
       {/if}
       {#if error && !placed}

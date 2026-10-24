@@ -30,7 +30,11 @@
   function load() {
     const mine = ++latest
     if (!workspace) return Promise.resolve()
-    return Promise.all([get(base(workspace, 'services')), get(policyBase(workspace, 'request_size_limit'))]).then(
+    return Promise.all([
+      get(base(workspace, 'services')),
+      // A tag is not worth failing the list over: unread, every limit's tag says only that there is one.
+      get(policyBase(workspace, 'request_size_limit')).catch(() => []),
+    ]).then(
       ([list, limits]) => {
         if (mine !== latest) return
         answer = list
@@ -62,7 +66,7 @@
     `At most ${row.rate_limit.limit} requests per ${row.rate_limit.per} ${countedBy(row.rate_limit.by)} (from the ${row.rate_limit.from})`
   // The size tag after the IP one says how large a body may be, and where that is set. The size
   // is looked up in the limits read beside the rows; read a moment apart, those may not have it
-  // yet, and the tag then says only that there is one.
+  // yet, or they may not have been read at all, and the tag then says only that there is one.
   const sizeOf = (row) => sizes.get(fromTarget(row.policies.request_size_limit.from, 'service', row))
   const sized = (row, max) =>
     `${max ? `Bodies over ${sizeText(max)} are refused` : 'Request bodies are limited'} (from the ${row.policies.request_size_limit.from})`
