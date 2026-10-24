@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- The console sets a body size limit (#PR) on the workspace (on the Services page), on a service
+- The console sets a body size limit (#278) on the workspace (on the Services page), on a service
   or on a route.
   - **Form:** a whole number and a unit, bytes, KiB, MiB or GiB, applied on its own like the IP
     restriction. A number that is not whole, or is over 1 GiB, is refused beside it before it is
