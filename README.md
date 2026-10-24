@@ -88,6 +88,9 @@ and a key never changes meaning, so a client can match on it:
 | `UPSTREAM_ERROR` | 502 | the exchange with the upstream failed after it connected |
 | `INTERNAL_ERROR` | 500 | the gateway failed on its own account |
 
+A `response_transformer` on a route can remove or replace `X-Gapura-Error` like any other
+response header, so a route with such a transform answers as its operator configured.
+
 The 401 keys say whether a credential was presented, never why it was refused: that stays with
 the operator, in the `reason` label of `gapura_policy_refused_total`.
 
