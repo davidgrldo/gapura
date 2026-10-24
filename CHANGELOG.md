@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- A `request_size_limit` policy refuses request bodies over a size (#PR).
+- A `request_size_limit` policy refuses request bodies over a size (#275).
   `PUT /api/workspaces/{ws}/policies/request_size_limit` takes `{"target", "config":
   {"max_bytes"}}`, a whole number of bytes from 1 to 1 GiB, on the workspace, a service or a
   route. The most specific one applies.
