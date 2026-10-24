@@ -21,23 +21,32 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// Echo upstream: JSON with method, path, query, headers. Paths containing `slow` sleep 600 ms.
+/// Echo upstream: JSON with method, path, query, headers, and `values`, every value of each header
+/// in the order it arrived. `headers` keeps one value a name, the last, so it cannot show a header
+/// sent twice; `values` can. Paths containing `slow` sleep 600 ms.
 async fn echo(req: Request) -> Json<Value> {
     if req.uri().path().contains("slow") {
         tokio::time::sleep(Duration::from_millis(600)).await;
     }
+    let text = |v: &axum::http::HeaderValue| {
+        Value::String(String::from_utf8_lossy(v.as_bytes()).into_owned())
+    };
     let headers: serde_json::Map<String, Value> = req
         .headers()
         .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                Value::String(String::from_utf8_lossy(v.as_bytes()).into_owned()),
-            )
-        })
+        .map(|(k, v)| (k.as_str().to_string(), text(v)))
         .collect();
+    let mut values = serde_json::Map::new();
+    for (k, v) in req.headers() {
+        if let Value::Array(list) = values
+            .entry(k.as_str())
+            .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            list.push(text(v));
+        }
+    }
     Json(
-        json!({ "method": req.method().as_str(), "path": req.uri().path(), "query": req.uri().query(), "headers": headers }),
+        json!({ "method": req.method().as_str(), "path": req.uri().path(), "query": req.uri().query(), "headers": headers, "values": values }),
     )
 }
 
@@ -1486,6 +1495,138 @@ async fn a_request_too_large_is_413_declared_or_streamed() {
             "{reason}: {metrics}"
         );
     }
+}
+
+/// `/t` edits the request on its way upstream and the response on its way back; `/k` wants a key
+/// and edits the response alike. The request edits run before the gateway sets its own account of
+/// the request, so `X-Forwarded-For` and `X-Request-Id` still reach the upstream; the response
+/// edits run after it, so a transform that removes `X-Request-Id` removes it. A refusal the
+/// gateway writes itself is the rule's answer too, and gets the same response edits.
+#[tokio::test(flavor = "multi_thread")]
+async fn transformers_edit_the_request_upstream_and_the_response_downstream() {
+    use gapura_core::config::{
+        HeaderEdits, KeyAuthPolicy, PathMatch, Plugin, Protocol, RequestTransformerPolicy,
+        ResponseTransformerPolicy,
+    };
+    use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let route = |name: &str| StoreRoute {
+        workspace: String::new(),
+        name: name.into(),
+        service: "echo".into(),
+        hosts: vec![],
+        paths: vec![PathMatch::Prefix(format!("/{name}"))],
+        methods: vec![],
+        headers: vec![],
+        strip_path: false,
+        priority: 0,
+    };
+    let on = |route: &str, plugin: Plugin| StorePlugin {
+        workspace: String::new(),
+        route: Some(route.into()),
+        service: None,
+        plugin,
+    };
+    let pair = |name: &str, value: &str| (name.to_string(), value.to_string());
+    let response = || {
+        Plugin::ResponseTransformer(ResponseTransformerPolicy {
+            headers: HeaderEdits {
+                remove: vec!["x-request-id".into()],
+                add: vec![pair("x-served-by", "gapura")],
+                ..HeaderEdits::default()
+            },
+        })
+    };
+    let gw = start_store_gateway(StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![route("t"), route("k")],
+        plugins: vec![
+            on(
+                "t",
+                Plugin::RequestTransformer(RequestTransformerPolicy {
+                    headers: HeaderEdits {
+                        remove: vec!["x-debug".into()],
+                        rename: vec![pair("x-old", "x-new")],
+                        add: vec![pair("x-team", "core")],
+                        append: vec![pair("x-tag", "gw")],
+                        ..HeaderEdits::default()
+                    },
+                    query: HeaderEdits {
+                        remove: vec!["secret".into()],
+                        add: vec![pair("v", "2")],
+                        ..HeaderEdits::default()
+                    },
+                }),
+            ),
+            on("t", response()),
+            on("k", Plugin::KeyAuth(KeyAuthPolicy::default())),
+            on("k", response()),
+        ],
+        ..StoreSnapshot::default()
+    })
+    .await;
+    let c = client(&gw);
+
+    let r = c
+        .get(url(&gw, "echo.test", "/t?secret=s&keep=1"))
+        .header("x-request-id", "transformed")
+        .header("x-debug", "1")
+        .header("x-old", "a")
+        // A rename sets the new name, as Kong's does: the client's own goes.
+        .header("x-new", "client")
+        .header("x-tag", "client")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-served-by"], "gapura");
+    assert!(
+        r.headers().get("x-request-id").is_none(),
+        "the transform has the last word over the gateway's own id: {:?}",
+        r.headers()
+    );
+    let body: Value = r.json().await.unwrap();
+    let h = &body["headers"];
+    assert!(h.get("x-debug").is_none(), "{body}");
+    assert!(h.get("x-old").is_none(), "{body}");
+    assert_eq!(body["values"]["x-new"], json!(["a"]), "{body}");
+    assert_eq!(h["x-team"], "core", "{body}");
+    assert_eq!(body["values"]["x-tag"], json!(["client", "gw"]), "{body}");
+    assert_eq!(body["query"], "keep=1&v=2", "{body}");
+    assert_eq!(body["path"], "/t", "{body}");
+    // Set after the transform, so still the gateway's.
+    assert_eq!(h["x-forwarded-for"], "127.0.0.1", "{body}");
+    assert_eq!(h["x-request-id"], "transformed", "{body}");
+    // The access log keeps the id the response no longer carries.
+    let line = gw.access_log("transformed").await;
+    assert_eq!(line["status"], 200, "{line}");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/k"))
+        .header("x-request-id", "refused")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_KEY_MISSING");
+    assert_eq!(r.headers()["x-served-by"], "gapura");
+    assert!(
+        r.headers().get("x-request-id").is_none(),
+        "{:?}",
+        r.headers()
+    );
+    assert_eq!(r.text().await.unwrap(), "401 unauthorized\n");
 }
 
 /// Reads one response head off `sock`, through its blank line, and returns it whole, keeping in
