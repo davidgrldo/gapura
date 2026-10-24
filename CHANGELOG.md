@@ -8,7 +8,8 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- **Security:** an `Upgrade` offer other than `websocket` no longer reaches the upstream.
+- **Security:** an `Upgrade` offer other than `websocket` no longer reaches the upstream
+  (#277).
   - **The hole:** `Upgrade: h2c` sent to an upstream that speaks h2c got a 101, and the rest of
     the connection became a tunnel. Every HTTP/2 request on it reached the upstream on any path,
     past the route match and every policy: API keys, JWTs, IP restrictions, body size limits and
