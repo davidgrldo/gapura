@@ -54,14 +54,17 @@ import tailwindcss from '@tailwindcss/vite'
 // consumer's own, by username and for one consumer the workspace's first, then its services', then
 // its routes', `by` absent for the address. The rows' `rate_limit` tells the same story for the
 // limits on everyone.
+// ip_restriction.json holds `GET /api/workspaces/<name>/policies/ip_restriction`'s answer, `[{ target,
+// config: { allow?, deny? }, updated_at }]` in the order workspace, services, routes, and the rows'
+// `policies` tell the same story.
 //
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
 // service or route created on its list, replaced or deleted by name, a consumer created or
-// deleted, a key revoked, an API-key or JWT requirement or a request limit put or removed — answer
-// 204 and store nothing, for every persona, so the lists read back as they were. Issuing a key is
-// the one write that answers with a body, as the server does: a made-up key, shown once like the
-// real one, and the expiry the request asked for. That is enough to look at the forms and at what
-// follows a save.
+// deleted, a key revoked, an API-key or JWT requirement, a request limit or an IP restriction put or
+// removed — answer 204 and store nothing, for every persona, so the lists read back as they were.
+// Issuing a key is the one write that answers with a body, as the server does: a made-up key, shown
+// once like the real one, and the expiry the request asked for. That is enough to look at the forms
+// and at what follows a save.
 // Data planes are the same for every persona too: web/stub/data-planes.json is `GET /api/data-planes`,
 // sorted by name, one row per data plane with its status, whether it holds the configuration served
 // now, the address it called from and its tokens (a prefix and times, never the token). Registering
@@ -112,6 +115,8 @@ function stubApi() {
   const keyAuth = /^\/api\/workspaces\/[^/]+\/key-auth$/
   const jwt = /^\/api\/workspaces\/([^/]+)\/jwt$/
   const rateLimit = /^\/api\/workspaces\/[^/]+\/rate-limit$/
+  // `/policies/<kind>`, one file for each kind: the kind is only ever letters and underscores.
+  const policies = /^\/api\/workspaces\/([^/]+)\/policies\/([a-z_]+)$/
   // Registering a data plane and issuing it another token both answer with a token.
   const issued = /^\/api\/data-planes(\/[^/]+\/tokens)?$/
   const dataPlaneWrites = /^\/api\/data-planes\/[^/]+(\/tokens\/[^/]+)?$/
@@ -135,6 +140,8 @@ function stubApi() {
     ['DELETE', jwt],
     ['PUT', rateLimit],
     ['DELETE', rateLimit],
+    ['PUT', policies],
+    ['DELETE', policies],
     ['DELETE', dataPlaneWrites],
     ['POST', /^\/api\/workspaces$/],
     ['PUT', /^\/api\/workspaces\/[^/]+$/],
@@ -252,6 +259,25 @@ function stubApi() {
           }
           res.setHeader('content-type', 'application/json')
           return res.end(JSON.stringify(answer))
+        }
+        const policy = req.method === 'GET' ? policies.exec(url) : null
+        if (policy) {
+          // Only a plain name and kind are looked up, so a request cannot walk out of
+          // web/stub/workspaces/.
+          let name
+          try {
+            name = decodeURIComponent(policy[1])
+          } catch {
+            name = ''
+          }
+          const known = /^[\w-]+$/.test(name) && existsSync(path.join(stub, 'workspaces', name))
+          const file = path.join(stub, 'workspaces', name, `${policy[2]}.json`)
+          if (!known || !/^[a-z_]+$/.test(policy[2]) || !existsSync(file)) {
+            res.statusCode = 404
+            return res.end()
+          }
+          res.setHeader('content-type', 'application/json')
+          return res.end(readFileSync(file))
         }
         const list = req.method === 'GET' ? lists.exec(url) : null
         if (list) {
