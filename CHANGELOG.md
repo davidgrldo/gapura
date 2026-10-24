@@ -9,7 +9,7 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - `request_transformer` and `response_transformer` policies edit the request sent upstream and
-  the response sent back (#PR). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
+  the response sent back (#281). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
   `{"target", "config": {"headers", "query"}}` and `response_transformer` takes
   `{"target", "config": {"headers"}}`, on the workspace, a service or a route. The most specific
   one applies.
