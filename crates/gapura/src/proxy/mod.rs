@@ -2,9 +2,10 @@
 //!
 //! One request, top to bottom: `request_filter` (match, the rule's Access steps, answer locally
 //! or pick a cluster), `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite,
-//! headers, the UpstreamRequest steps), `upstream_response_filter` (the endpoint's outcome),
-//! `response_filter` (response headers), `fail_to_connect` (retry once), `fail_to_proxy` (the
-//! error key and its status, from `failure::classify`), `logging` (access log + metrics, the
+//! headers, the UpstreamRequest steps), `request_body_filter` (the RequestBody steps, on each
+//! chunk), `upstream_response_filter` (the endpoint's outcome), `response_filter` (response
+//! headers), `fail_to_connect` (retry once), `fail_to_proxy` (the error key and its status: a
+//! refused body's own, else from `failure::classify`), `logging` (access log + metrics, the
 //! Terminate steps). The steps are each rule's plugins, compiled per generation (`plugin`).
 //! Outcomes feed passive outlier detection (`outlier`).
 
@@ -90,6 +91,9 @@ pub struct Ctx {
     local_status: Option<u16>,
     /// Why the gateway answered this request itself, when it did; the access log's `error_key`.
     error_key: Option<ErrorKey>,
+    /// A key a filter refused the request with after the Access phase, which `fail_to_proxy`
+    /// answers.
+    refused: Option<ErrorKey>,
     /// Whether the one retry after a failure on a reused upstream connection has been spent.
     reuse_retried: bool,
     started: Instant,
@@ -557,6 +561,7 @@ impl ProxyHttp for GapuraProxy {
             port: 0,
             local_status: None,
             error_key: None,
+            refused: None,
             reuse_retried: false,
             started: Instant::now(),
             upstream_started: None,
@@ -807,6 +812,9 @@ impl ProxyHttp for GapuraProxy {
         upstream: &mut RequestHeader,
         ctx: &mut Ctx,
     ) -> Result<()> {
+        // Once per attempt, and before the body: a retry replays the body read so far through
+        // `request_body_filter`, which must count it once.
+        ctx.req.new_attempt();
         let Some(rt) = ctx.runtime.clone() else {
             return Ok(());
         };
@@ -895,6 +903,41 @@ impl ProxyHttp for GapuraProxy {
         Ok(())
     }
 
+    /// The rule's RequestBody steps on each chunk as it passes upstream. A refused body records
+    /// its key here and fails the request: `fail_to_proxy` answers that key rather than one it
+    /// works out from the error, and the bytes already sent upstream are abandoned with the
+    /// connection. That rests on Pingora's HTTP/1 upstream path, the only one Gapura dials,
+    /// which fails the request on this error; its HTTP/2 upstream path logs a body error and
+    /// waits on the upstream's answer instead.
+    async fn request_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
+        // Borrowed, not cloned: this runs on every chunk.
+        let (Some(rt), Some((li, ri))) = (ctx.runtime.as_ref(), ctx.req.route) else {
+            return Ok(());
+        };
+        let Some(Ok(chain)) = rt.chain(li, ri) else {
+            return Ok(());
+        };
+        let len = body.as_ref().map_or(0, Bytes::len);
+        let Some(key) = chain.request_body(&mut ctx.req, len, session.was_upgraded()) else {
+            return Ok(());
+        };
+        METRICS
+            .policy_refused_total
+            .with_label_values(&[ctx.route_label(), "request_size_limit", "streamed"])
+            .inc();
+        ctx.refused = Some(key);
+        Error::e_explain(
+            ErrorType::HTTPStatus(key.status()),
+            "the request body is over its limit",
+        )
+    }
+
     async fn upstream_response_filter(
         &self,
         _session: &mut Session,
@@ -980,15 +1023,19 @@ impl ProxyHttp for GapuraProxy {
 
     async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
         let upstream = matches!(e.esource(), ErrorSource::Upstream);
+        // A filter that refused the request after Access said why: that key is the answer, not
+        // whatever the error it failed the request with classifies as (any `HTTPStatus` but 503
+        // and 504 is a 500), and the client did not abort, whichever side Pingora blames.
+        let refused = ctx.refused.take();
         // Mark it above the status mapping so that every path through this function reaches it: a
         // downstream failure yields no key and an abort mid-body has already written a response,
         // so neither reaches the error-response branch below. What the flag means then rests on
         // `failure::classify` returning `None` for a downstream failure -- no key is what keeps
         // an abort from being answered and logged as an error of ours.
-        if matches!(e.esource(), ErrorSource::Downstream) {
+        if refused.is_none() && matches!(e.esource(), ErrorSource::Downstream) {
             ctx.client_abort = true;
         }
-        let key = failure::classify(e);
+        let key = refused.or_else(|| failure::classify(e));
         let code = key.map_or(0, ErrorKey::status);
         if upstream {
             let kind = match e.etype() {
