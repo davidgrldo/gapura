@@ -1221,6 +1221,109 @@ async fn a_refused_api_key_is_401_and_says_missing_or_invalid() {
     );
 }
 
+/// Behind a trusted proxy the policy judges the address the access log names, the forwarded
+/// one: `/walled` denies 198.51.100.0/24 and also wants a key, `/inside` allows only 127.0.0.1.
+/// A denied address gets 403 `IP_FORBIDDEN` without a challenge, before its key is read; an
+/// admitted one goes on to the key check, or upstream.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_denied_address_is_403_before_its_key_is_read() {
+    use gapura_core::config::{IpRestrictionPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
+    use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let route = |name: &str| StoreRoute {
+        workspace: String::new(),
+        name: name.into(),
+        service: "echo".into(),
+        hosts: vec![],
+        paths: vec![PathMatch::Prefix(format!("/{name}"))],
+        methods: vec![],
+        headers: vec![],
+        strip_path: false,
+        priority: 0,
+    };
+    let on = |route: &str, plugin: Plugin| StorePlugin {
+        workspace: String::new(),
+        route: Some(route.into()),
+        service: None,
+        plugin,
+    };
+    let nets = |list: &[&str]| list.iter().map(|n| n.parse().unwrap()).collect();
+    let gw = start_store_gateway_with(
+        StoreSnapshot {
+            services: vec![StoreService {
+                workspace: String::new(),
+                name: "echo".into(),
+                protocol: Protocol::Http,
+                host: upstream.ip().to_string(),
+                port: upstream.port(),
+                connect_timeout_ms: None,
+                read_timeout_ms: None,
+                tls_verify: true,
+                tls_ca_pem: None,
+                tls_sni: None,
+            }],
+            routes: vec![route("walled"), route("inside")],
+            plugins: vec![
+                on("walled", Plugin::KeyAuth(KeyAuthPolicy::default())),
+                on(
+                    "walled",
+                    Plugin::IpRestriction(IpRestrictionPolicy {
+                        allow: vec![],
+                        deny: nets(&["198.51.100.0/24"]),
+                    }),
+                ),
+                on(
+                    "inside",
+                    Plugin::IpRestriction(IpRestrictionPolicy {
+                        allow: nets(&["127.0.0.1"]),
+                        deny: vec![],
+                    }),
+                ),
+            ],
+            ..StoreSnapshot::default()
+        },
+        &["--trusted-proxy", "127.0.0.0/8"],
+    )
+    .await;
+    let c = client(&gw);
+    let get = |path: &str, forwarded: Option<&str>, rid: &str| {
+        let mut req = c
+            .get(url(&gw, "echo.test", path))
+            .header("x-request-id", rid);
+        if let Some(addr) = forwarded {
+            req = req.header("x-forwarded-for", addr);
+        }
+        req.send()
+    };
+
+    let r = get("/walled", Some("198.51.100.5"), "denied")
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.headers()["x-gapura-error"], "IP_FORBIDDEN");
+    assert!(
+        r.headers().get("www-authenticate").is_none(),
+        "no challenge"
+    );
+    assert_eq!(r.text().await.unwrap(), "403 forbidden\n");
+    let line = gw.access_log("denied").await;
+    assert_eq!(line["status"], 403, "{line}");
+    assert_eq!(line["error_key"], "IP_FORBIDDEN", "{line}");
+    assert_eq!(line["client_ip"], "198.51.100.5", "{line}");
+
+    let r = get("/walled", None, "admitted").await.unwrap();
+    assert_eq!(r.status(), 401, "admitted by address, refused by key");
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_KEY_MISSING");
+
+    let r = get("/inside", None, "local").await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = get("/inside", Some("198.51.100.5"), "outside")
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.headers()["x-gapura-error"], "IP_FORBIDDEN");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unlimited_route_is_untouched_by_a_neighbors_limit() {
     let (gw, c) = setup().await;

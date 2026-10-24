@@ -264,12 +264,14 @@ impl<T: Clone> Attached<T> {
     }
 }
 
-/// The key and JWT requirements and the request limits of a workspace, as its service and route
-/// lists show them.
+/// The key and JWT requirements and the request limits of a workspace, and where each other
+/// policy comes from, as its service and route lists show them.
 struct Requirements {
     key_auth: Attached<(String, String)>,
     jwt: Attached<(Option<String>, String)>,
     rate_limit: Attached<(Limit, String)>,
+    /// Each kind `/policies/{kind}` keeps, with where it is attached.
+    others: Vec<(&'static str, Attached<((), String)>)>,
 }
 
 impl Requirements {
@@ -297,11 +299,38 @@ impl Requirements {
                 .ok_or_else(|| anyhow::anyhow!("a rate_limit policy does not fit its shape"))
         })
         .await?;
+        let mut others = Vec::new();
+        for &kind in crate::policies::KINDS {
+            let found = Attached::read(client, workspace, kind, |config| {
+                // Likewise a configuration this kind does not read.
+                crate::policies::parse(kind, config)
+                    .map(|_| ())
+                    .map_err(|_| anyhow::anyhow!("a {kind} policy does not fit its shape"))
+            })
+            .await?;
+            others.push((kind, found));
+        }
         Ok(Requirements {
             key_auth,
             jwt,
             rate_limit,
+            others,
         })
+    }
+
+    /// The policies of the kinds `/policies/{kind}` keeps that `at` finds, by kind.
+    fn others(
+        &self,
+        at: impl Fn(&Attached<((), String)>) -> Option<(((), String), &'static str)>,
+    ) -> std::collections::BTreeMap<&'static str, crate::policies::PolicyFromView> {
+        self.others
+            .iter()
+            .filter_map(|(kind, found)| {
+                at(found).map(|(((), updated_at), from)| {
+                    (*kind, crate::policies::PolicyFromView { from, updated_at })
+                })
+            })
+            .collect()
     }
 
     fn key_auth(((header, updated_at), from): ((String, String), &'static str)) -> KeyAuthView {
@@ -330,8 +359,8 @@ impl Requirements {
 }
 
 impl Store {
-    /// A workspace's services, by name, each with how many routes use it and the key and JWT
-    /// requirements and the request limit it carries.
+    /// A workspace's services, by name, each with how many routes use it, the key and JWT
+    /// requirements and the request limit it carries, and where each other policy comes from.
     pub async fn services(&self, workspace: Uuid) -> Result<Vec<ServiceView>> {
         let client = self.pool.get().await?;
         let rows = client
@@ -363,14 +392,15 @@ impl Store {
                     .rate_limit
                     .service(r.get("id"))
                     .map(Requirements::rate_limit),
+                policies: found.others(|a| a.service(r.get("id"))),
             })
             .collect())
     }
 
     /// A workspace's routes, in the order the data plane matches them: priority, then name, each
-    /// with the key and JWT requirements and the request limit that apply to it. A
-    /// route with no service, which only SQL written by hand can make, is not listed, just as
-    /// the compiler does not serve it.
+    /// with the key and JWT requirements and the request limit that apply to it, and where each
+    /// other policy comes from. A route with no service, which only SQL written by hand can
+    /// make, is not listed, just as the compiler does not serve it.
     pub async fn routes(&self, workspace: Uuid) -> Result<Vec<RouteView>> {
         let client = self.pool.get().await?;
         let rows = client
@@ -404,6 +434,7 @@ impl Store {
                         .rate_limit
                         .route(id, service)
                         .map(Requirements::rate_limit),
+                    policies: found.others(|a| a.route(id, service)),
                 })
             })
             .collect()

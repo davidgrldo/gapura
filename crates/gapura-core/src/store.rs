@@ -583,10 +583,7 @@ fn rank(
 
 /// Two policies of the same kind compete; two of different kinds both run.
 fn same_kind(a: &Plugin, b: &Plugin) -> bool {
-    matches!(
-        (a, b),
-        (Plugin::Jwt(_), Plugin::Jwt(_)) | (Plugin::KeyAuth(_), Plugin::KeyAuth(_))
-    )
+    a.kind() == b.kind()
 }
 
 /// The cluster a service's traffic goes to. Plain HTTP keeps the `host:port` key it always had;
@@ -1720,7 +1717,7 @@ mod tests {
             .iter()
             .filter_map(|p| match p {
                 Plugin::Jwt(j) => Some(j.issuer.clone().unwrap_or_default()),
-                Plugin::KeyAuth(_) => None,
+                _ => None,
             })
             .collect()
     }
@@ -1786,6 +1783,50 @@ mod tests {
         assert_eq!(
             issuers(&compile(&snap, &StoreSettings::default())),
             ["service"]
+        );
+    }
+
+    fn ip_policy(deny: &str) -> Plugin {
+        Plugin::IpRestriction(crate::config::IpRestrictionPolicy {
+            allow: vec![],
+            deny: vec![deny.parse().unwrap()],
+        })
+    }
+
+    /// Precedence is per kind for every kind: a route's ip_restriction replaces the
+    /// workspace's and leaves the workspace's JWT policy where it was.
+    #[test]
+    fn an_ip_restriction_on_the_route_replaces_the_workspace_s_and_nothing_else() {
+        let snap = StoreSnapshot {
+            credentials: Vec::new(),
+            rate_limits: Vec::new(),
+            services: vec![svc("orders", "orders.internal", 80)],
+            routes: vec![route("api", "orders", "/", 0)],
+            plugins: vec![
+                StorePlugin {
+                    workspace: String::new(),
+                    route: None,
+                    service: None,
+                    plugin: ip_policy("10.0.0.0/8"),
+                },
+                StorePlugin {
+                    workspace: String::new(),
+                    route: None,
+                    service: None,
+                    plugin: jwt("global"),
+                },
+                StorePlugin {
+                    workspace: String::new(),
+                    route: Some("api".into()),
+                    service: None,
+                    plugin: ip_policy("192.0.2.0/24"),
+                },
+            ],
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(
+            cfg.listeners[0].rules[0].plugins,
+            [ip_policy("192.0.2.0/24"), jwt("global")]
         );
     }
 

@@ -9,6 +9,7 @@
 use crate::access::{Role, Rows, User};
 use crate::grants::Refusal;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub const MAX_NAME_CHARS: usize = 63;
@@ -352,6 +353,10 @@ pub struct ServiceView {
     pub key_auth: Option<KeyAuthView>,
     pub jwt: Option<JwtRequirementView>,
     pub rate_limit: Option<RateLimitRequirementView>,
+    /// Where each policy kept through `/policies/{kind}` comes from, by kind; absent when none
+    /// applies, so a row with none reads as it did before this existed.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub policies: BTreeMap<&'static str, crate::policies::PolicyFromView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -365,6 +370,10 @@ pub struct RouteView {
     pub key_auth: Option<KeyAuthView>,
     pub jwt: Option<JwtRequirementView>,
     pub rate_limit: Option<RateLimitRequirementView>,
+    /// Where each policy kept through `/policies/{kind}` comes from, by kind; absent when none
+    /// applies, so a row with none reads as it did before this existed.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub policies: BTreeMap<&'static str, crate::policies::PolicyFromView>,
 }
 
 /// Whether this is a create or a replace, which decides what `updated_at` must be.

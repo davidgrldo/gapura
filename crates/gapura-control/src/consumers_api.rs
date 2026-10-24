@@ -244,7 +244,9 @@ pub struct TargetQuery {
 }
 
 /// The target a query names. One that names none is refused as an empty one, beside `target`.
-fn target_in(query: Result<Query<TargetQuery>, QueryRejection>) -> Result<Target, FieldError> {
+pub(crate) fn target_in(
+    query: Result<Query<TargetQuery>, QueryRejection>,
+) -> Result<Target, FieldError> {
     match query {
         Ok(Query(q)) => Target::parse(&q.target),
         Err(_) => Target::parse(""),

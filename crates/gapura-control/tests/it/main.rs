@@ -21,6 +21,7 @@ mod data_planes;
 mod grants;
 mod identity;
 mod jwt;
+mod policies;
 mod rate_limit;
 mod signup;
 mod store_tls;

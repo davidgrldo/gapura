@@ -26,6 +26,8 @@ pub mod grants_api;
 pub mod kube_source;
 pub mod login;
 pub mod password;
+pub mod policies;
+pub mod policies_api;
 pub mod rows;
 pub mod same_origin;
 pub mod scope;
