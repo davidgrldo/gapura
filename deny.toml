@@ -32,6 +32,14 @@ ignore = [
     # never called with an RSA key (the tests sign with P-256). Revisit if anything here ever signs
     # with RSA, or if rsa ships a constant-time release.
     { id = "RUSTSEC-2023-0071", reason = "we verify with public keys and hold no RSA private key" },
+    # crypto-bigint 0.5 can branch on secret values in arithmetic meant to be constant-time. It
+    # reaches us through elliptic-curve 0.13, under p256 and p384, which jsonwebtoken 11.1 (the
+    # latest) and openidconnect 4 pin; the fix is only in 0.7.6, so no update reaches it. The same
+    # two crates only verify ES256/ES384 signatures here, as for RSA above, and verifying computes
+    # on the signature, the public key and the message, none of them secret. Nothing outside the
+    # tests signs with a P-256 or P-384 key. Revisit when jsonwebtoken moves to p256 0.14, or if
+    # anything here ever signs with an EC key.
+    { id = "RUSTSEC-2026-0387", reason = "we verify ECDSA with public keys and hold no EC private key" },
 ]
 
 [licenses]
