@@ -267,11 +267,14 @@ impl Chain {
         }
     }
 
-    /// Run the RequestBody steps on a chunk of `len` bytes, and the key to refuse with when one
-    /// refuses. Nothing is counted once the connection is `upgraded`: what follows a 101 is a
+    /// Run `rule`'s RequestBody steps on a chunk of `len` bytes, and the key to refuse with when
+    /// one refuses. The step that refuses counts its refusal in `policy_refused_total`, by its
+    /// own kind and reason, as an Access step does through [`refuse`]: the caller only answers
+    /// the key. Nothing is counted once the connection is `upgraded`: what follows a 101 is a
     /// tunnel, not a request body, and a cap on it would cut a WebSocket after so many bytes.
     pub fn request_body(
         &self,
+        rule: &RouteRule,
         cx: &mut RequestCtx,
         len: usize,
         upgraded: bool,
@@ -283,7 +286,8 @@ impl Chain {
         for step in &self.request_body {
             match step {
                 RequestBody::SizeLimit(max) if cx.body_bytes > *max => {
-                    return Some(ErrorKey::RequestTooLarge)
+                    count_refusal(rule, "request_size_limit", "streamed");
+                    return Some(ErrorKey::RequestTooLarge);
                 }
                 RequestBody::SizeLimit(_) => {}
             }
@@ -421,11 +425,17 @@ fn refuse(
     key: ErrorKey,
     headers: Vec<(&'static str, String)>,
 ) -> Flow {
+    count_refusal(rule, kind, reason);
+    Flow::Fail(Failure { key, headers })
+}
+
+/// Count one refusal by a `kind` policy on `rule` in `policy_refused_total`, with why. Each step
+/// counts its own, whatever phase it runs in, since only the step knows its kind and reason.
+fn count_refusal(rule: &RouteRule, kind: &str, reason: &str) {
     METRICS
         .policy_refused_total
         .with_label_values(&[rule.route.as_str(), kind, reason])
         .inc();
-    Flow::Fail(Failure { key, headers })
 }
 
 /// The client address the access log names: the connection's, or behind a trusted proxy the one
@@ -799,37 +809,55 @@ mod tests {
     }
 
     /// The count runs over every chunk, holds none of them, refuses the chunk that crosses the
-    /// limit, and stops once the connection is upgraded.
+    /// limit, counts that refusal itself, and stops once the connection is upgraded.
     #[test]
     fn streamed_bytes_are_counted_up_to_the_limit() {
-        let chain = Chain::compile(&rule(vec![size_limit(10)])).unwrap();
+        // A route of its own, so the metric is this test's alone: the registry is shared.
+        let r = RouteRule {
+            route: "shop/streamed".into(),
+            ..rule(vec![size_limit(10)])
+        };
+        let refusals = || {
+            METRICS
+                .policy_refused_total
+                .with_label_values(&["shop/streamed", "request_size_limit", "streamed"])
+                .get()
+        };
+        let chain = Chain::compile(&r).unwrap();
         let mut cx = RequestCtx::default();
-        assert_eq!(chain.request_body(&mut cx, 6, false), None);
+        assert_eq!(chain.request_body(&r, &mut cx, 6, false), None);
         assert_eq!(
-            chain.request_body(&mut cx, 4, false),
+            chain.request_body(&r, &mut cx, 4, false),
             None,
             "10 is at the limit"
         );
+        assert_eq!(refusals(), 0);
         assert_eq!(
-            chain.request_body(&mut cx, 1, false),
+            chain.request_body(&r, &mut cx, 1, false),
             Some(ErrorKey::RequestTooLarge)
         );
+        assert_eq!(refusals(), 1);
         let mut upgraded = RequestCtx::default();
-        assert_eq!(chain.request_body(&mut upgraded, 1 << 30, true), None);
+        assert_eq!(chain.request_body(&r, &mut upgraded, 1 << 30, true), None);
     }
 
     /// A retry replays the body read so far before it reads on, so each attempt counts from
     /// nothing: the replayed bytes are counted once, and the limit still holds after them.
     #[test]
     fn a_retry_counts_the_replayed_body_once() {
-        let chain = Chain::compile(&rule(vec![size_limit(10)])).unwrap();
+        let r = rule(vec![size_limit(10)]);
+        let chain = Chain::compile(&r).unwrap();
         let mut cx = RequestCtx::default();
         cx.new_attempt();
-        assert_eq!(chain.request_body(&mut cx, 8, false), None);
+        assert_eq!(chain.request_body(&r, &mut cx, 8, false), None);
         cx.new_attempt();
-        assert_eq!(chain.request_body(&mut cx, 8, false), None, "the replay");
         assert_eq!(
-            chain.request_body(&mut cx, 3, false),
+            chain.request_body(&r, &mut cx, 8, false),
+            None,
+            "the replay"
+        );
+        assert_eq!(
+            chain.request_body(&r, &mut cx, 3, false),
             Some(ErrorKey::RequestTooLarge)
         );
     }

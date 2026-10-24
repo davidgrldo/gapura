@@ -914,12 +914,13 @@ impl ProxyHttp for GapuraProxy {
         Ok(())
     }
 
-    /// The rule's RequestBody steps on each chunk as it passes upstream. A refused body records
-    /// its key here and fails the request: `fail_to_proxy` answers that key rather than one it
-    /// works out from the error, and the bytes already sent upstream are abandoned with the
-    /// connection. That rests on Pingora's HTTP/1 upstream path, the only one Gapura dials,
-    /// which fails the request on this error; its HTTP/2 upstream path logs a body error and
-    /// waits on the upstream's answer instead.
+    /// The rule's RequestBody steps on each chunk as it passes upstream. A step that refuses the
+    /// body counts its own refusal; the key it refused with is recorded here and the request
+    /// failed: `fail_to_proxy` answers that key rather than one it works out from the error, and
+    /// the bytes already sent upstream are abandoned with the connection. That rests on
+    /// Pingora's HTTP/1 upstream path, the only one Gapura dials, which fails the request on this
+    /// error; its HTTP/2 upstream path logs a body error and waits on the upstream's answer
+    /// instead.
     async fn request_body_filter(
         &self,
         session: &mut Session,
@@ -931,21 +932,18 @@ impl ProxyHttp for GapuraProxy {
         let (Some(rt), Some((li, ri))) = (ctx.runtime.as_ref(), ctx.req.route) else {
             return Ok(());
         };
-        let Some(Ok(chain)) = rt.chain(li, ri) else {
+        let rule = rt.config.listeners.get(li).and_then(|l| l.rules.get(ri));
+        let (Some(rule), Some(Ok(chain))) = (rule, rt.chain(li, ri)) else {
             return Ok(());
         };
         let len = body.as_ref().map_or(0, Bytes::len);
-        let Some(key) = chain.request_body(&mut ctx.req, len, session.was_upgraded()) else {
+        let Some(key) = chain.request_body(rule, &mut ctx.req, len, session.was_upgraded()) else {
             return Ok(());
         };
-        METRICS
-            .policy_refused_total
-            .with_label_values(&[ctx.route_label(), "request_size_limit", "streamed"])
-            .inc();
         ctx.refused = Some(key);
         Error::e_explain(
             ErrorType::HTTPStatus(key.status()),
-            "the request body is over its limit",
+            "a RequestBody step refused the body as it streamed",
         )
     }
 
