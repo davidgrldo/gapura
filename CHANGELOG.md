@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- An endpoint that sends `100 Continue` before a 502, 503 or 504 is ejected like any other.
+  Pingora relays an upstream's interim 1xx head, and passive outlier detection counted it as a
+  success that reset the endpoint's consecutive failures, so one that answered every request with
+  a 100 and then a 503 was never taken out of rotation. Only the final head counts now. The
+  route's response header changes and `X-Request-Id` also go on that final head only, not on an
+  interim one before it, as in Envoy. A 101 is final.
 - The console sets an IP restriction (#274) on the workspace (on the Services page), on a service
   or on a route.
   - **Form:** separate deny and allow lists, one address or network per line, applied on their own

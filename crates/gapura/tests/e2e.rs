@@ -63,11 +63,12 @@ async fn spawn_dead_and_upstream() -> (SocketAddr, SocketAddr) {
     )
 }
 
-/// An upstream that answers each connection once, then closes the socket a moment later without
-/// saying so. Pingora finishes the response and pools the connection before the FIN arrives, so
-/// the next request is handed a connection the backend has already closed -- the common case
-/// `error_while_proxy` grants one retry for.
-async fn spawn_closing_upstream() -> SocketAddr {
+/// An upstream that answers each connection once with `answer`, then closes the socket a moment
+/// later. Unless `answer` says `connection: close`, it closes without saying so: Pingora finishes
+/// the response and pools the connection before the FIN arrives, so the next request is handed a
+/// connection the backend has already closed -- the common case `error_while_proxy` grants one
+/// retry for.
+async fn spawn_closing_upstream(answer: &'static [u8]) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -87,9 +88,7 @@ async fn spawn_closing_upstream() -> SocketAddr {
                         Ok(_) => continue,
                     }
                 }
-                let _ = sock
-                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
-                    .await;
+                let _ = sock.write_all(answer).await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 let _ = sock.shutdown().await;
             });
@@ -761,7 +760,7 @@ async fn a_retry_on_a_reused_connection_mirrors_only_once() {
     // #145: pingora runs upstream_request_filter on every attempt, and error_while_proxy grants
     // one retry when a reused upstream connection fails. The first attempt had already run the
     // filter, so the retry fired the mirror a second time for the same request.
-    let reuse = spawn_closing_upstream().await;
+    let reuse = spawn_closing_upstream(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
     let dead = SocketAddr::from(([127, 0, 0, 1], 1));
     // A live echo for the mirror to land on; the primary uses the closing upstream.
     let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
@@ -944,6 +943,67 @@ async fn a_dead_endpoint_is_ejected_and_stops_receiving_traffic() {
             "{needle} missing from:\n{metrics}"
         );
     }
+}
+
+/// An endpoint that sends `100 Continue` before each 503 has failed once per request: only the
+/// final head is its answer. Counted as a success, the 100 reset the endpoint's failures every
+/// time, so five such requests never ejected it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_503_after_an_interim_100_counts_toward_ejection() {
+    use gapura_core::config::{PathMatch, Protocol};
+    use gapura_core::store::{StoreRoute, StoreService, StoreSnapshot};
+    let upstream = spawn_closing_upstream(
+        b"HTTP/1.1 100 Continue\r\n\r\n\
+          HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+    )
+    .await;
+    let gw = start_store_gateway(StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "continued".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: String::new(),
+            name: "continued".into(),
+            service: "continued".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix("/continued".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        ..StoreSnapshot::default()
+    })
+    .await;
+    let c = client(&gw);
+    for i in 0..5 {
+        let r = c
+            .get(url(&gw, "echo.test", "/continued"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 503, "request {i}");
+    }
+    let metrics = reqwest::get(format!("http://127.0.0.1:{}/metrics", gw.admin))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let needle = format!(r#"gapura_upstream_ejections_total{{cluster="{upstream}"}} 1"#);
+    assert!(
+        metrics.contains(&needle),
+        "{needle} missing from:\n{metrics}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
