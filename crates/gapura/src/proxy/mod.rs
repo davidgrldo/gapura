@@ -216,6 +216,13 @@ pub fn connect_timeout(t: &Timeouts) -> Duration {
         .unwrap_or(DEFAULT_CONNECT_TIMEOUT)
 }
 
+/// Whether a response head with `status` is the answer to the request. An interim 1xx other than
+/// 101, such as a `100 Continue` Pingora relays from the upstream, is not: a final head follows
+/// it. A 101 is final, since what follows it is a tunnel and not a response.
+fn is_final(status: http::StatusCode) -> bool {
+    !status.is_informational() || status == http::StatusCode::SWITCHING_PROTOCOLS
+}
+
 /// RFC 9110 section 9.2.2: sending these twice has the effect of sending them once.
 fn idempotent(method: &http::Method) -> bool {
     use http::Method;
@@ -323,14 +330,11 @@ async fn write_error(
     session.write_response_body(Some(body), true).await
 }
 
-/// The final response head written to the client, if one has been. An interim 1xx other than
-/// 101, such as a relayed `100 Continue`, is not one: a final head may still follow it, and
-/// Pingora's HTTP/1 writer accepts one after it. A 101 is final, since what follows it is a
-/// tunnel and not a response.
+/// The final response head written to the client, if one has been. A relayed `100 Continue` is
+/// not one (see [`is_final`]): a final head may still follow it, and Pingora's HTTP/1 writer
+/// accepts one after it.
 fn final_response(session: &Session) -> Option<&ResponseHeader> {
-    session.response_written().filter(|r| {
-        !r.status.is_informational() || r.status == http::StatusCode::SWITCHING_PROTOCOLS
-    })
+    session.response_written().filter(|r| is_final(r.status))
 }
 
 /// Answer the request as a step, or the router, decided; `Continue` answers nothing. Whether
@@ -956,6 +960,12 @@ impl ProxyHttp for GapuraProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> Result<()> {
+        // Pingora runs this on an interim 1xx too. Only the final head is the endpoint's answer: a
+        // 100 Continue counted as a success would reset the failures of an endpoint that sends
+        // one before every 503, and it would never be ejected.
+        if !is_final(upstream_response.status) {
+            return Ok(());
+        }
         // The gateway failures, as Envoy counts them: the endpoint answered, but the way a broken
         // proxy or an overloaded instance does. A 500 is the application's, usually the request's.
         ctx.record(match upstream_response.status.as_u16() {
@@ -971,6 +981,11 @@ impl ProxyHttp for GapuraProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> Result<()> {
+        // The route's response headers and the request id go on the answer, not on an interim
+        // head before it, as Envoy leaves a 1xx alone.
+        if !is_final(upstream_response.status) {
+            return Ok(());
+        }
         if let Some(rule) = ctx.rule() {
             apply_header_ops(upstream_response, &rule.filters.response_headers)?;
         }
@@ -1196,6 +1211,16 @@ mod tests {
         }
         for m in [Method::POST, Method::PATCH, Method::CONNECT] {
             assert!(!idempotent(&m), "{m}");
+        }
+    }
+
+    #[test]
+    fn an_interim_head_is_not_the_answer_but_a_101_is() {
+        for s in [100, 102, 103] {
+            assert!(!is_final(http::StatusCode::from_u16(s).unwrap()), "{s}");
+        }
+        for s in [101, 200, 204, 404, 503] {
+            assert!(is_final(http::StatusCode::from_u16(s).unwrap()), "{s}");
         }
     }
 
