@@ -40,6 +40,8 @@ pub enum ErrorKey {
     RateLimited,
     /// An ip_restriction policy refused the client address.
     IpForbidden,
+    /// A request_size_limit policy refused the body, by its length or as it streamed.
+    RequestTooLarge,
     /// Connecting to the upstream timed out.
     UpstreamConnectTimeout,
     /// The upstream went quiet past the rule's timeout, or the request's budget ran out.
@@ -68,6 +70,7 @@ impl ErrorKey {
             Self::Unauthorized => "UNAUTHORIZED",
             Self::RateLimited => "RATE_LIMITED",
             Self::IpForbidden => "IP_FORBIDDEN",
+            Self::RequestTooLarge => "REQUEST_TOO_LARGE",
             Self::UpstreamConnectTimeout => "UPSTREAM_CONNECT_TIMEOUT",
             Self::UpstreamTimeout => "UPSTREAM_TIMEOUT",
             Self::UpstreamConnectError => "UPSTREAM_CONNECT_ERROR",
@@ -87,6 +90,7 @@ impl ErrorKey {
             | Self::Unauthorized => 401,
             Self::IpForbidden => 403,
             Self::NoRoute => 404,
+            Self::RequestTooLarge => 413,
             Self::RateLimited => 429,
             Self::NoBackend | Self::InternalError => 500,
             Self::UpstreamConnectError | Self::UpstreamTlsError | Self::UpstreamError => 502,
@@ -110,6 +114,7 @@ impl ErrorKey {
             | Self::Unauthorized => "unauthorized",
             Self::RateLimited => "too many requests",
             Self::IpForbidden => "forbidden",
+            Self::RequestTooLarge => "request too large",
             Self::UpstreamConnectTimeout | Self::UpstreamTimeout => "gateway timeout",
             Self::UpstreamConnectError | Self::UpstreamTlsError | Self::UpstreamError => {
                 "bad gateway"
@@ -143,6 +148,7 @@ impl ErrorKey {
             | Self::Unauthorized
             | Self::RateLimited
             | Self::IpForbidden
+            | Self::RequestTooLarge
             | Self::UpstreamTimeout
             | Self::UpstreamError
             | Self::InternalError => None,
@@ -178,7 +184,9 @@ impl From<&credentials::Refusal> for ErrorKey {
 ///
 /// The statuses are the ones Gapura answered before keys existed: a timeout is 504 only when the
 /// upstream is the side that timed out, and the `HTTPStatus` errors this crate raises, 503 and
-/// 504, keep their code. Any other `HTTPStatus` (none is raised today) is a 500.
+/// 504, keep their code. Any other `HTTPStatus` is a 500: the one other this crate raises, a
+/// request body refused as it streamed, records its key for `fail_to_proxy` to answer instead,
+/// and never reaches here.
 pub fn classify(e: &Error) -> Option<ErrorKey> {
     let upstream = matches!(e.esource(), ErrorSource::Upstream);
     Some(match e.etype() {
@@ -260,7 +268,7 @@ pub fn render(key: ErrorKey, request_id: &str, json: bool) -> (&'static str, Str
 mod tests {
     use super::*;
 
-    const ALL: [ErrorKey; 17] = [
+    const ALL: [ErrorKey; 18] = [
         ErrorKey::InvalidRequestTarget,
         ErrorKey::NoRoute,
         ErrorKey::NoBackend,
@@ -272,6 +280,7 @@ mod tests {
         ErrorKey::Unauthorized,
         ErrorKey::RateLimited,
         ErrorKey::IpForbidden,
+        ErrorKey::RequestTooLarge,
         ErrorKey::UpstreamConnectTimeout,
         ErrorKey::UpstreamTimeout,
         ErrorKey::UpstreamConnectError,
@@ -493,5 +502,13 @@ mod tests {
         assert_eq!(ErrorKey::IpForbidden.status(), 403);
         assert_eq!(ErrorKey::IpForbidden.message(), "forbidden");
         assert_eq!(ErrorKey::IpForbidden.parent(), None);
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_413() {
+        assert_eq!(ErrorKey::RequestTooLarge.as_str(), "REQUEST_TOO_LARGE");
+        assert_eq!(ErrorKey::RequestTooLarge.status(), 413);
+        assert_eq!(ErrorKey::RequestTooLarge.message(), "request too large");
+        assert_eq!(ErrorKey::RequestTooLarge.parent(), None);
     }
 }

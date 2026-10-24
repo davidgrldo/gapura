@@ -7,15 +7,18 @@
 
 use crate::configuration::FieldError;
 use gapura_core::client_ip::Cidr;
-use gapura_core::config::{IpRestrictionPolicy, Plugin};
+use gapura_core::config::{IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy};
 use serde::{Deserialize, Serialize};
 
 /// The kinds this endpoint keeps, as [`Plugin::kind`] names them.
-pub const KINDS: &[&str] = &["ip_restriction"];
+pub const KINDS: &[&str] = &["ip_restriction", "request_size_limit"];
 
 /// The most addresses and networks an ip_restriction policy lists, allow and deny together:
 /// 1000 of the longest IPv6 networks still fit in the 64 KiB a request body may carry.
 pub const MAX_NETWORKS: usize = 1000;
+
+/// The largest body limit a policy may set, 1 GiB: past it a limit is no limit.
+pub const MAX_BODY_BYTES: u64 = 1 << 30;
 
 fn field(field: &str, sentence: impl Into<String>) -> FieldError {
     FieldError {
@@ -42,6 +45,7 @@ pub struct PolicyInput {
 pub fn parse(kind: &str, config: serde_json::Value) -> Result<Plugin, FieldError> {
     match kind {
         "ip_restriction" => ip_restriction(config).map(Plugin::IpRestriction),
+        "request_size_limit" => request_size_limit(config).map(Plugin::RequestSizeLimit),
         _ => Err(field("kind", "There is no such policy kind.")),
     }
 }
@@ -95,6 +99,32 @@ fn ip_restriction(config: serde_json::Value) -> Result<IpRestrictionPolicy, Fiel
         allow: networks("allow", &input.allow)?,
         deny: networks("deny", &input.deny)?,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestSizeLimitInput {
+    /// Read as any JSON value and judged below, so that a string, a negative number or a
+    /// fraction is named as `max_bytes` rather than as the whole configuration.
+    max_bytes: serde_json::Value,
+}
+
+fn request_size_limit(config: serde_json::Value) -> Result<RequestSizeLimitPolicy, FieldError> {
+    let input: RequestSizeLimitInput = serde_json::from_value(config)
+        .map_err(|_| field("config", "Send max_bytes, the largest body in bytes."))?;
+    // Zero refuses every request with a body, a route switched off in the guise of a limit; past
+    // MAX_BODY_BYTES a limit no longer limits anything a gateway should pass.
+    input
+        .max_bytes
+        .as_u64()
+        .filter(|n| (1..=MAX_BODY_BYTES).contains(n))
+        .map(|max_bytes| RequestSizeLimitPolicy { max_bytes })
+        .ok_or_else(|| {
+            field(
+                "max_bytes",
+                format!("Use a whole number of bytes from 1 to {MAX_BODY_BYTES}."),
+            )
+        })
 }
 
 /// What a stored row holds of `plugin`: the policy without its `kind` tag, which the row's name
@@ -152,6 +182,7 @@ mod tests {
     fn each_kind_parses_to_a_plugin_of_that_kind() {
         let minimal = |kind: &str| match kind {
             "ip_restriction" => json!({"deny": ["10.0.0.0/8"]}),
+            "request_size_limit" => json!({"max_bytes": 1024}),
             other => panic!("no minimal configuration for {other}: add one here"),
         };
         for kind in KINDS {
@@ -178,5 +209,38 @@ mod tests {
             .collect();
         assert_eq!(refused(json!({"deny": many})).field, "allow");
         assert_eq!(parse("oauth2", json!({})).unwrap_err().field, "kind");
+    }
+
+    #[test]
+    fn a_request_size_limit_is_stored_as_its_byte_count() {
+        let plugin = parse("request_size_limit", json!({"max_bytes": 1024})).unwrap();
+        assert_eq!(
+            plugin,
+            Plugin::RequestSizeLimit(RequestSizeLimitPolicy { max_bytes: 1024 })
+        );
+        assert_eq!(config(&plugin), json!({"max_bytes": 1024}));
+        let largest = json!({ "max_bytes": MAX_BODY_BYTES });
+        assert!(parse("request_size_limit", largest).is_ok());
+    }
+
+    /// A missing or misspelt field names the configuration; a count out of range or not a whole
+    /// number names `max_bytes`.
+    #[test]
+    fn a_bad_request_size_limit_names_its_field() {
+        let refused = |config: serde_json::Value| parse("request_size_limit", config).unwrap_err();
+        assert_eq!(refused(json!({})).field, "config");
+        assert_eq!(
+            refused(json!({"max_bytes": 1, "unit": "kb"})).field,
+            "config"
+        );
+        assert_eq!(refused(json!({"max_bytes": 0})).field, "max_bytes");
+        assert_eq!(
+            refused(json!({ "max_bytes": MAX_BODY_BYTES + 1 })).field,
+            "max_bytes"
+        );
+        assert_eq!(refused(json!({"max_bytes": -1})).field, "max_bytes");
+        assert_eq!(refused(json!({"max_bytes": 1.5})).field, "max_bytes");
+        assert_eq!(refused(json!({"max_bytes": "1k"})).field, "max_bytes");
+        assert_eq!(refused(json!({"max_bytes": null})).field, "max_bytes");
     }
 }
