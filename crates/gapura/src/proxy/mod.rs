@@ -926,14 +926,16 @@ impl ProxyHttp for GapuraProxy {
 
         apply_header_ops(upstream, &rule.filters.request_headers)?;
 
-        // The UpstreamRequest steps -- a key_auth policy's key removal, a request_transformer's
-        // edits -- run on the request as the gateway would otherwise send it: normalised,
-        // rewritten, the consumer named, the rule's Gateway API header filters applied. A query
-        // edit then sees the final URI, and a header edit has the last word over every header
-        // above. Not over those below: `X-Forwarded-*`, `X-Request-Id` and `traceparent` are the
-        // gateway's own account of the request, set after the steps, so that no policy can
-        // misreport the peer the last `X-Forwarded-For` hop names or the id the access log
-        // records.
+        // The UpstreamRequest steps -- a key_auth policy's key removal, then a
+        // request_transformer's edits -- run on the request as the gateway would otherwise send
+        // it: normalised, rewritten, the consumer named, the rule's Gateway API header filters
+        // applied. The key removal always runs before the edits, whatever order the policies
+        // arrive in (`Chain::compile`), so no transform can move the client's key under a name
+        // the removal does not take. A query edit then sees the final URI, and a header edit has
+        // the last word over every header above. Not over those below: `X-Forwarded-*`,
+        // `X-Request-Id` and `traceparent` are the gateway's own account of the request, set
+        // after the steps, so that no policy can misreport the peer the last `X-Forwarded-For`
+        // hop names or the id the access log records.
         if let Some(Ok(chain)) = rt.chain(li, ri) {
             chain.upstream_request(upstream);
         }

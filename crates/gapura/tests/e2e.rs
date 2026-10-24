@@ -1499,8 +1499,9 @@ async fn a_request_too_large_is_413_declared_or_streamed() {
 
 /// `/t` edits the request on its way upstream and the response on its way back; `/k` wants a key
 /// and edits the response alike. The request edits run before the gateway sets its own account of
-/// the request, so `X-Forwarded-For` and `X-Request-Id` still reach the upstream; the response
-/// edits run after it, so a transform that removes `X-Request-Id` removes it. A refusal the
+/// the request, so a transform that replaces `X-Request-Id` and adds an `X-Forwarded-For` hop
+/// still has the upstream see the client's id and the peer as the last hop; the response edits
+/// run after it, so a transform that removes `X-Request-Id` removes it. A refusal the
 /// gateway writes itself is the rule's answer too, and gets the same response edits.
 #[tokio::test(flavor = "multi_thread")]
 async fn transformers_edit_the_request_upstream_and_the_response_downstream() {
@@ -1558,9 +1559,16 @@ async fn transformers_edit_the_request_upstream_and_the_response_downstream() {
                     headers: HeaderEdits {
                         remove: vec!["x-debug".into()],
                         rename: vec![pair("x-old", "x-new")],
-                        add: vec![pair("x-team", "core")],
+                        // The gateway sets both after the transform: its id wins over the
+                        // replace, and the peer it appends goes after the hop the add writes.
+                        // Were the transform run after the gateway, the replace would forge the
+                        // id and the add would find the header already set.
+                        replace: vec![pair("x-request-id", "forged")],
+                        add: vec![
+                            pair("x-team", "core"),
+                            pair("x-forwarded-for", "203.0.113.9"),
+                        ],
                         append: vec![pair("x-tag", "gw")],
-                        ..HeaderEdits::default()
                     },
                     query: HeaderEdits {
                         remove: vec!["secret".into()],
@@ -1605,9 +1613,18 @@ async fn transformers_edit_the_request_upstream_and_the_response_downstream() {
     assert_eq!(body["values"]["x-tag"], json!(["client", "gw"]), "{body}");
     assert_eq!(body["query"], "keep=1&v=2", "{body}");
     assert_eq!(body["path"], "/t", "{body}");
-    // Set after the transform, so still the gateway's.
-    assert_eq!(h["x-forwarded-for"], "127.0.0.1", "{body}");
-    assert_eq!(h["x-request-id"], "transformed", "{body}");
+    // Set after the transform, so still the gateway's: the client's id and not the forged one,
+    // and the peer appended after the hop the transform wrote.
+    assert_eq!(
+        body["values"]["x-request-id"],
+        json!(["transformed"]),
+        "{body}"
+    );
+    assert_eq!(
+        body["values"]["x-forwarded-for"],
+        json!(["203.0.113.9, 127.0.0.1"]),
+        "{body}"
+    );
     // The access log keeps the id the response no longer carries.
     let line = gw.access_log("transformed").await;
     assert_eq!(line["status"], 200, "{line}");

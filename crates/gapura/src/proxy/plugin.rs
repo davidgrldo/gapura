@@ -222,9 +222,11 @@ fn writable_edits(plugin: &Plugin, edits: &HeaderEdits) -> Result<(), Misplaced>
 
 impl Chain {
     /// Compile `rule`'s plugins into the list of each phase they run in, with the request limit
-    /// after them. The Access steps run in [`Access::rank`] order, not the order the policies
-    /// arrive in. `Err` when a plugin cannot run on this rule: a rule whose policies cannot all
-    /// run must not serve, or an auth policy that never runs would let every request through.
+    /// after them. The Access steps run in [`Access::rank`] order, and the UpstreamRequest steps
+    /// in [`UpstreamRequest::rank`] order -- a key_auth policy's key removed before any
+    /// request_transformer edits -- not the order the policies arrive in. `Err` when a plugin
+    /// cannot run on this rule: a rule whose policies cannot all run must not serve, or an auth
+    /// policy that never runs would let every request through.
     ///
     /// The limit is not checked. It is not a plugin, and a Kubernetes redirect rule can carry one
     /// from its backend's annotation and has to keep redirecting.
@@ -271,6 +273,7 @@ impl Chain {
         }
         // Stable, so policies of one rank keep the order they arrived in.
         chain.access.sort_by_key(Access::rank);
+        chain.upstream_request.sort_by_key(UpstreamRequest::rank);
         // Last, because the limit may be the consumer's own and may count per consumer, and the
         // consumer is not known until a policy has checked its credential.
         chain.access.push(Access::RateLimit);
@@ -356,6 +359,21 @@ impl Chain {
             }
         }
         None
+    }
+}
+
+impl UpstreamRequest {
+    /// Where the step runs among the UpstreamRequest steps, lowest first, whatever order the
+    /// policies arrive in. The client's key goes first, as Kong's `hide_credentials` removes it
+    /// before its request-transformer runs: a transform that renamed the key's header would
+    /// otherwise move the key out of the removal's reach, and hand the upstream, under the new
+    /// name, the key the gateway checks so that the upstream never sees it. The order the
+    /// policies arrive in, by name, happens to agree today; nothing holds it there.
+    fn rank(&self) -> u8 {
+        match self {
+            UpstreamRequest::RemoveHeader(_) => 1,
+            UpstreamRequest::Transform(_) => 2,
+        }
     }
 }
 
@@ -1009,6 +1027,32 @@ mod tests {
         assert!(req.headers.get("x-debug").is_none());
         assert_eq!(req.headers.get("x-team").unwrap(), "core");
         assert_eq!(req.uri.to_string(), "/t?keep=1&v=2");
+    }
+
+    /// The key comes off before any transform runs, whatever order the policies arrive in: a
+    /// transform listed first that renames the key's header finds nothing to move, so the key
+    /// reaches the upstream under neither name.
+    #[test]
+    fn the_key_is_removed_before_a_transform_can_move_it() {
+        let r = rule(vec![
+            Plugin::RequestTransformer(RequestTransformerPolicy {
+                headers: HeaderEdits {
+                    rename: vec![pair("apikey", "x-key")],
+                    ..HeaderEdits::default()
+                },
+                query: HeaderEdits::default(),
+            }),
+            Plugin::KeyAuth(KeyAuthPolicy {
+                header: "apikey".into(),
+                workspace: None,
+            }),
+        ]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("apikey", "k").unwrap();
+        chain.upstream_request(&mut req);
+        assert!(req.headers.get("apikey").is_none(), "{:?}", req.headers);
+        assert!(req.headers.get("x-key").is_none(), "{:?}", req.headers);
     }
 
     fn served_by() -> Plugin {

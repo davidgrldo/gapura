@@ -539,9 +539,12 @@ impl HeaderEdits {
 /// Edit the request sent upstream: its headers and its query string.
 ///
 /// The edits run on the request as the gateway was about to send it -- its path normalised and
-/// rewritten, the consumer named, the rule's Gateway API header filters applied -- so a query edit
-/// sees the final URI. The gateway's `X-Forwarded-*`, `X-Request-Id` and `traceparent` are set
-/// after them, so the upstream can still trust those whatever a policy says.
+/// rewritten, the consumer named, the rule's Gateway API header filters applied, a key_auth
+/// policy's key removed -- so a query edit sees the final URI. The gateway sets
+/// `X-Forwarded-Proto`, `X-Request-Id` and `traceparent` after them, sets `X-Forwarded-Host` when
+/// the request named a host, and appends the peer to whatever `X-Forwarded-For` the edits left: a
+/// policy cannot change those values or that last hop, though it can edit the hops before it, as
+/// a client can.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestTransformerPolicy {
     #[serde(default, skip_serializing_if = "HeaderEdits::is_empty")]
