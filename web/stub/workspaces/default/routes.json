@@ -57,6 +57,10 @@
       "ip_restriction": {
         "from": "route",
         "updated_at": "2026-10-24T08:01:00.000000Z"
+      },
+      "request_size_limit": {
+        "from": "service",
+        "updated_at": "2026-10-24T09:00:00.000000Z"
       }
     }
   }

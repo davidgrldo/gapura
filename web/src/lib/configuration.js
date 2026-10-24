@@ -36,6 +36,29 @@ export function countedBy(by) {
 // An IP restriction's bound, as policies.rs's MAX_NETWORKS: addresses and networks, allow and
 // deny together. web/check.mjs fails the build when it drifts.
 export const MAX_NETWORKS = 1000
+// A body size limit's bound, as policies.rs's MAX_BODY_BYTES, which writes it `1 << 30`;
+// web/check.mjs fails the build when they drift.
+export const MAX_BODY_BYTES = 1024 ** 3
+// The units the body size form offers, smallest first. Binary, since the server counts bytes and
+// a MiB is a whole number of them. GiB is offered although only 1 GiB fits under the bound, so the
+// bound itself reads as "1 GiB" in a list rather than "1024 MiB".
+export const SIZE_UNITS = [
+  ['bytes', 1],
+  ['KiB', 1024],
+  ['MiB', 1024 ** 2],
+  ['GiB', 1024 ** 3],
+]
+// A size in bytes as the form shows it: in the largest unit that divides it exactly, so 1048576
+// is 1 MiB and 1500 stays 1500 bytes.
+export function sizeParts(maxBytes) {
+  const [unit, factor] = SIZE_UNITS.findLast(([, factor]) => maxBytes % factor === 0) ?? SIZE_UNITS[0]
+  return { amount: maxBytes / factor, unit }
+}
+// The same as a list's tag or a sentence writes it: "1 MiB", "1500 bytes", "1 byte".
+export function sizeText(maxBytes) {
+  const { amount, unit } = sizeParts(maxBytes)
+  return amount === 1 && unit === 'bytes' ? '1 byte' : `${amount} ${unit}`
+}
 // Names as a sentence lists them: "a", "a and b", "a, b and c".
 export const listed = (names) =>
   names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
@@ -45,6 +68,14 @@ export function targetWords(target, workspace) {
   if (target === 'workspace') return `Everywhere in ${workspace}`
   const [kind, name] = [target.slice(0, target.indexOf(':')), target.slice(target.indexOf(':') + 1)]
   return `On the ${kind} ${name}`
+}
+// The target a row's policy is set on, from the `from` the row gives for it: the row itself, the
+// service a route sends to, or the workspace. `kind` is the row's own, `service` or `route`. The
+// rows carry only where a policy comes from, so this is how its configuration is found in the
+// kind's list.
+export function fromTarget(from, kind, row) {
+  if (from === 'workspace') return 'workspace'
+  return from === kind ? `${kind}:${row.name}` : `service:${row.service}`
 }
 
 export const upstream = (s) => `${s.protocol}://${s.host}:${s.port}`
@@ -77,8 +108,9 @@ const OWN_POLICIES = [
   [(row) => row?.rate_limit, 'request limit'],
   // Kept in the row's `policies` map, as every kind written through `/policies/{kind}` is.
   [(row) => row?.policies?.ip_restriction, 'IP restriction'],
+  [(row) => row?.policies?.request_size_limit, 'body size limit'],
 ]
-const HOW_MANY = ['', 'one', 'two', 'three', 'four']
+const HOW_MANY = ['', 'one', 'two', 'three', 'four', 'five']
 export function ownPolicies(row, kind) {
   const names = OWN_POLICIES.filter(([of]) => of(row)?.from === kind).map(([, name]) => `the ${name}`)
   if (names.length === 0) return ''

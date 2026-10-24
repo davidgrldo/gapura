@@ -65,6 +65,12 @@
       "per": "minute",
       "from": "service",
       "updated_at": "2026-10-20T08:00:00.000000Z"
+    },
+    "policies": {
+      "request_size_limit": {
+        "from": "service",
+        "updated_at": "2026-10-24T09:00:00.000000Z"
+      }
     }
   }
 ]
