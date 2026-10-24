@@ -7,6 +7,7 @@
   import KeyAuthControl from './KeyAuthControl.svelte'
   import JwtControl from './JwtControl.svelte'
   import RateLimitControl from './RateLimitControl.svelte'
+  import IpRestrictionControl from './IpRestrictionControl.svelte'
   import { write } from './api.js'
   import { base, ownPolicies } from './configuration.js'
   import { can } from './workspace.js'
@@ -358,8 +359,9 @@
         <KeyAuthControl {workspace} target="service:{service.name}" applies={service.key_auth} {role} onchanged={onsaved} />
         <JwtControl {workspace} target="service:{service.name}" applies={service.jwt} {role} onchanged={onsaved} />
         <RateLimitControl {workspace} target="service:{service.name}" applies={service.rate_limit} {role} onchanged={onsaved} />
+        <IpRestrictionControl {workspace} target="service:{service.name}" applies={service.policies?.ip_restriction ?? null} {role} onchanged={onsaved} />
       {:else}
-        <p class="text-xs text-muted-foreground"><span class="font-medium">API key, JWT and request limit.</span> Save it first, then require a key or a token, or limit requests.</p>
+        <p class="text-xs text-muted-foreground"><span class="font-medium">API key, JWT, request limit and IP restriction.</span> Save it first, then require a key or a token, limit requests or restrict addresses.</p>
       {/if}
     </div>
     <Sheet.Footer>

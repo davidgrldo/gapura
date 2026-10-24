@@ -1,6 +1,7 @@
 <script>
   import { get } from '../lib/api.js'
   import Failure from '../lib/Failure.svelte'
+  import IpRestrictionControl from '../lib/IpRestrictionControl.svelte'
   import ServiceSheet from '../lib/ServiceSheet.svelte'
   import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
@@ -70,6 +71,10 @@
       <p class="text-sm text-muted-foreground">The services below are as they were last read.</p>
     </div>
   {/if}
+  <section class="mb-6 grid max-w-md gap-2" aria-labelledby="workspace-ip-restriction">
+    <h2 id="workspace-ip-restriction" class="text-sm font-medium">Restrict client addresses on every route in {workspace}</h2>
+    <IpRestrictionControl {workspace} target="workspace" {role} onchanged={load} />
+  </section>
   <div class="mb-3 flex items-center justify-between gap-4">
     <p class="text-sm text-muted-foreground">The upstreams routes in {workspace} send traffic to.</p>
     {#if can.write(role)}<ServiceSheet mode="create" {workspace} {role} onsaved={load} onremoved={focusHeading} />{/if}
@@ -107,6 +112,12 @@
                     <span class="inline-flex font-sans" title={limited(s)}>
                       <Tag tone="idle"><span aria-hidden="true">{s.rate_limit.limit}/{PER_SHORT[s.rate_limit.per]}</span></Tag>
                       <span class="sr-only">, at most {s.rate_limit.limit} requests per {s.rate_limit.per} {countedBy(s.rate_limit.by)} (from the {s.rate_limit.from})</span>
+                    </span>
+                  {/if}
+                  {#if s.policies?.ip_restriction}
+                    <span class="inline-flex font-sans" title="Restricted by client address (from the {s.policies.ip_restriction.from})">
+                      <Tag tone="idle"><span aria-hidden="true">IP</span></Tag>
+                      <span class="sr-only">, restricted by client address (from the {s.policies.ip_restriction.from})</span>
                     </span>
                   {/if}
                 </span>
