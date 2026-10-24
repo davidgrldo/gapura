@@ -19,7 +19,7 @@ export const KINDS = Object.keys(KIND_LABEL)
 // What a policy entry is, by the `kind` its before and after bodies record: every policy but a
 // key requirement records one. web/check.mjs fails the build when a kind the store writes has no
 // label here, since it would read as a key requirement.
-export const POLICY_LABEL = { jwt: 'JWT requirement', rate_limit: 'Request limit', ip_restriction: 'IP restriction', request_size_limit: 'Body size limit' }
+export const POLICY_LABEL = { jwt: 'JWT requirement', rate_limit: 'Request limit', ip_restriction: 'IP restriction', request_size_limit: 'Body size limit', request_transformer: 'Request transform', response_transformer: 'Response transform' }
 const KEY_REQUIREMENT = 'Key requirement'
 
 // What a row says it is: the kind's own word, except for a policy, which is worded by what it
