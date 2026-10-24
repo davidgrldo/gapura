@@ -2,11 +2,13 @@
 //!
 //! One request, top to bottom: `request_filter` (match, the rule's Access steps, answer locally
 //! or pick a cluster), `upstream_peer` (pick an endpoint), `upstream_request_filter` (rewrite,
-//! headers, the UpstreamRequest steps), `upstream_response_filter` (the endpoint's outcome),
-//! `response_filter` (response headers), `fail_to_connect` (retry once), `fail_to_proxy` (the
-//! error key and its status, from `failure::classify`), `logging` (access log + metrics, the
-//! Terminate steps). The steps are each rule's plugins, compiled per generation (`plugin`).
-//! Outcomes feed passive outlier detection (`outlier`).
+//! headers, the UpstreamRequest steps), `request_body_filter` (the RequestBody steps, on each
+//! chunk), `upstream_response_filter` (the endpoint's outcome), `response_filter` (response
+//! headers), `fail_to_connect` (retry once), `fail_to_proxy` (the error key and its status: a
+//! refused body's own, else from `failure::classify`), `suppress_error_log` (a refused body is
+//! no failure), `logging` (access log + metrics, the Terminate steps). The steps are each rule's
+//! plugins, compiled per generation (`plugin`). Outcomes feed passive outlier detection
+//! (`outlier`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -90,6 +92,9 @@ pub struct Ctx {
     local_status: Option<u16>,
     /// Why the gateway answered this request itself, when it did; the access log's `error_key`.
     error_key: Option<ErrorKey>,
+    /// A key a filter refused the request with after the Access phase, which `fail_to_proxy`
+    /// answers.
+    refused: Option<ErrorKey>,
     /// Whether the one retry after a failure on a reused upstream connection has been spent.
     reuse_retried: bool,
     started: Instant,
@@ -316,6 +321,16 @@ async fn write_error(
     let (resp, body) = error_response(key, &ctx.request_id, json, extra)?;
     session.write_response_header(Box::new(resp), false).await?;
     session.write_response_body(Some(body), true).await
+}
+
+/// The final response head written to the client, if one has been. An interim 1xx other than
+/// 101, such as a relayed `100 Continue`, is not one: a final head may still follow it, and
+/// Pingora's HTTP/1 writer accepts one after it. A 101 is final, since what follows it is a
+/// tunnel and not a response.
+fn final_response(session: &Session) -> Option<&ResponseHeader> {
+    session.response_written().filter(|r| {
+        !r.status.is_informational() || r.status == http::StatusCode::SWITCHING_PROTOCOLS
+    })
 }
 
 /// Answer the request as a step, or the router, decided; `Continue` answers nothing. Whether
@@ -557,6 +572,7 @@ impl ProxyHttp for GapuraProxy {
             port: 0,
             local_status: None,
             error_key: None,
+            refused: None,
             reuse_retried: false,
             started: Instant::now(),
             upstream_started: None,
@@ -807,6 +823,9 @@ impl ProxyHttp for GapuraProxy {
         upstream: &mut RequestHeader,
         ctx: &mut Ctx,
     ) -> Result<()> {
+        // Once per attempt, and before the body: a retry replays the body read so far through
+        // `request_body_filter`, which must count it once.
+        ctx.req.new_attempt();
         let Some(rt) = ctx.runtime.clone() else {
             return Ok(());
         };
@@ -895,6 +914,42 @@ impl ProxyHttp for GapuraProxy {
         Ok(())
     }
 
+    /// The rule's RequestBody steps on each chunk as it passes upstream. A step that refuses the
+    /// body counts its own refusal; the key it refused with is recorded here and the request
+    /// failed: `fail_to_proxy` answers that key rather than one it works out from the error, and
+    /// the bytes already sent upstream are abandoned with the connection. That rests on
+    /// Pingora's HTTP/1 upstream path (`proxy_h1.rs`), the only one Gapura dials, which fails the
+    /// request on this error. Its other two swallow it: the HTTP/2 path (`proxy_h2.rs`) and the
+    /// custom one (`proxy_custom.rs`) log a body error, stop reading the body, and wait on the
+    /// upstream's answer. Gapura dials neither today. If it ever does, `ctx.refused` can be left
+    /// set while that answer is relayed, and a later failure of the request would then be
+    /// answered with the refusal's key rather than its own.
+    async fn request_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
+        // Borrowed, not cloned: this runs on every chunk.
+        let (Some(rt), Some((li, ri))) = (ctx.runtime.as_ref(), ctx.req.route) else {
+            return Ok(());
+        };
+        let rule = rt.config.listeners.get(li).and_then(|l| l.rules.get(ri));
+        let (Some(rule), Some(Ok(chain))) = (rule, rt.chain(li, ri)) else {
+            return Ok(());
+        };
+        let len = body.as_ref().map_or(0, Bytes::len);
+        let Some(key) = chain.request_body(rule, &mut ctx.req, len, session.was_upgraded()) else {
+            return Ok(());
+        };
+        ctx.refused = Some(key);
+        Error::e_explain(
+            ErrorType::HTTPStatus(key.status()),
+            "a RequestBody step refused the body as it streamed",
+        )
+    }
+
     async fn upstream_response_filter(
         &self,
         _session: &mut Session,
@@ -980,15 +1035,19 @@ impl ProxyHttp for GapuraProxy {
 
     async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
         let upstream = matches!(e.esource(), ErrorSource::Upstream);
+        // A filter that refused the request after Access said why: that key is the answer, not
+        // whatever the error it failed the request with classifies as (any `HTTPStatus` but 503
+        // and 504 is a 500), and the client did not abort, whichever side Pingora blames.
+        let refused = ctx.refused.take();
         // Mark it above the status mapping so that every path through this function reaches it: a
         // downstream failure yields no key and an abort mid-body has already written a response,
         // so neither reaches the error-response branch below. What the flag means then rests on
         // `failure::classify` returning `None` for a downstream failure -- no key is what keeps
         // an abort from being answered and logged as an error of ours.
-        if matches!(e.esource(), ErrorSource::Downstream) {
+        if refused.is_none() && matches!(e.esource(), ErrorSource::Downstream) {
             ctx.client_abort = true;
         }
-        let key = failure::classify(e);
+        let key = refused.or_else(|| failure::classify(e));
         let code = key.map_or(0, ErrorKey::status);
         if upstream {
             let kind = match e.etype() {
@@ -1018,10 +1077,16 @@ impl ProxyHttp for GapuraProxy {
                     .inc();
             }
         }
-        // Only answer when nothing has been sent yet: a failure mid-body must not append an error
-        // text to the streamed response. Pingora drops the downstream connection after this, so
+        // Only answer when no final answer has been sent yet: a failure mid-body must not append
+        // an error text to the streamed response. An interim 1xx other than 101 is not one: an
+        // upstream's `100 Continue`, relayed to a client that sent `Expect: 100-continue` (as
+        // curl does on every chunked upload), may be followed by a final head, which HTTP allows
+        // and Pingora's writer takes. So a body refused after the 100 is still answered 413
+        // rather than with a closed connection, and so is every other failure after one: an
+        // upstream that goes quiet after its 100 is answered 504, not dropped. A 101 is final:
+        // what follows it is a tunnel. Pingora drops the downstream connection after this, so
         // say so in the header instead of advertising keep-alive.
-        if let Some(key) = key.filter(|_| session.response_written().is_none()) {
+        if let Some(key) = key.filter(|_| final_response(session).is_none()) {
             session.set_keepalive(None);
             if let Err(write_err) = write_error(session, ctx, key, &[]).await {
                 tracing::debug!(error = %write_err, "could not write error response, client likely gone");
@@ -1033,9 +1098,22 @@ impl ProxyHttp for GapuraProxy {
         }
     }
 
+    /// Whether Pingora leaves out the error-level "Fail to proxy" line it writes after
+    /// `fail_to_proxy`: only for a body refused for its size. A refusal is the policy working,
+    /// not the gateway failing, and the access log line and `policy_refused_total` already record
+    /// it; logged at error level, it would let any caller write error lines at will by sending
+    /// bodies over a limit. It is told by its error alone, `HTTPStatus(413)`, which only
+    /// `request_body_filter` raises, because `fail_to_proxy` has taken `ctx.refused` by now. The
+    /// 503 and 504 this crate raises are failures to proxy and keep their line.
+    fn suppress_error_log(&self, _session: &Session, _ctx: &Ctx, e: &Error) -> bool {
+        matches!(e.etype(), ErrorType::HTTPStatus(413))
+    }
+
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Ctx) {
-        let status = session
-            .response_written()
+        // The final answer's status: a relayed `100 Continue` that no answer followed, because
+        // the client went away or the error answer could not be written, is not what the request
+        // got. The answer the gateway meant to give, if any, is then the truer record.
+        let status = final_response(session)
             .map(|r| r.status.as_u16())
             .or(ctx.local_status)
             .unwrap_or(0);
@@ -1623,5 +1701,27 @@ spec:
                 "{path} must be refused"
             );
         }
+    }
+
+    /// A body refused for its size leaves no "Fail to proxy" line; the failures Gapura raises
+    /// itself, and one from the upstream, keep theirs.
+    #[test]
+    fn a_refused_body_is_not_logged_as_a_failure_to_proxy() {
+        let proxy = GapuraProxy {
+            store: Arc::new(Store::empty()),
+            trusted_proxies: vec![],
+            trusted_client_headers: vec![],
+            limiter: Default::default(),
+            access_log_query: false,
+        };
+        let session = Session::new_h1(Box::new(tokio::io::duplex(64).0));
+        let ctx = proxy.new_ctx();
+        let suppressed = |etype: ErrorType| {
+            proxy.suppress_error_log(&session, &ctx, &Error::explain(etype, "x"))
+        };
+        assert!(suppressed(ErrorType::HTTPStatus(413)));
+        assert!(!suppressed(ErrorType::HTTPStatus(503)));
+        assert!(!suppressed(ErrorType::HTTPStatus(504)));
+        assert!(!suppressed(ErrorType::ConnectRefused));
     }
 }
