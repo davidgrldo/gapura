@@ -33,7 +33,8 @@ futures = { workspace = true }
 reqwest = { workspace = true }
 sha2.workspace = true
 # A request_transformer's query edits: parsing a parameter's name, and encoding what it writes.
-# Pinned to the version `url` already locks, so it adds nothing to the build.
+# A caret range (>= 1.2.2, < 2) starting at the version `url` already brings in, so the lock
+# resolves both to one copy and it adds nothing to the build.
 form_urlencoded = "1.2.2"
 
 [dev-dependencies]
