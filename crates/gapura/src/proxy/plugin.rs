@@ -72,6 +72,8 @@ pub struct RequestCtx {
     /// be set after the inbound one is removed, and that happens later.
     pub consumer: Option<Consumer>,
     pub invoke: Invoke,
+    /// The request body's bytes so far, as the RequestBody steps count them.
+    body_bytes: u64,
     terminated: bool,
 }
 
@@ -82,6 +84,15 @@ impl RequestCtx {
             Invoke::Upstream(cluster) => Some(cluster),
             Invoke::Serve | Invoke::Skip => None,
         }
+    }
+
+    /// Start the body count again for a new upstream attempt. A retry replays what was read of
+    /// the body so far, from Pingora's retry buffer, through the RequestBody steps before it reads
+    /// on; a count carried over from the failed attempt would count those bytes twice and refuse
+    /// a body within its limit. A retry is only made while that buffer holds the whole body read
+    /// so far, so the count after the replay is exact.
+    pub fn new_attempt(&mut self) {
+        self.body_bytes = 0;
     }
 
     /// Run `chain`'s Terminate steps -- the rule's, for a request attributed to one -- once,
@@ -107,6 +118,7 @@ impl RequestCtx {
 pub struct Chain {
     access: Vec<Access>,
     upstream_request: Vec<UpstreamRequest>,
+    request_body: Vec<RequestBody>,
     terminate: Vec<Terminate>,
 }
 
@@ -115,6 +127,8 @@ enum Access {
     Jwt(JwtPolicy),
     KeyAuth(KeyAuthPolicy),
     IpRestriction(IpRestrictionPolicy),
+    /// A request_size_limit policy's cap, judged against the declared `Content-Length`.
+    SizeLimit(u64),
     /// The rule's request limit, or the consumer's own. Not a plugin on the wire, but the last
     /// step of every chain; see [`Chain::compile`].
     RateLimit,
@@ -125,6 +139,12 @@ enum UpstreamRequest {
     /// A key_auth policy's key header: the key is the gateway's to check, not the upstream's to
     /// see, so it is removed before forwarding.
     RemoveHeader(String),
+}
+
+/// A step of [`Phase::RequestBody`].
+enum RequestBody {
+    /// A request_size_limit policy's cap, counted over every chunk.
+    SizeLimit(u64),
 }
 
 /// A step of [`Phase::Terminate`]. There is none yet; quota reconciliation is the first.
@@ -144,7 +164,12 @@ fn reachable(rule: &RouteRule) -> &'static [Phase] {
     if rule.filters.redirect.is_some() {
         &[]
     } else {
-        &[Phase::Access, Phase::UpstreamRequest, Phase::Terminate]
+        &[
+            Phase::Access,
+            Phase::UpstreamRequest,
+            Phase::RequestBody,
+            Phase::Terminate,
+        ]
     }
 }
 
@@ -154,8 +179,15 @@ fn misplaced(phases: &[Phase], body: Body, reachable: &[Phase]) -> Option<&'stat
     if phases.iter().any(|p| !reachable.contains(p)) {
         return Some("the rule never reaches a phase it runs in");
     }
-    // No phase feeds a plugin a body yet: one that needs it would run without it.
-    (body != Body::None).then_some("it reads a body, and no phase feeds one yet")
+    // A streamed body is fed in RequestBody, which the check above found reachable if the plugin
+    // runs there; one that does not would wait for a stream that never comes. A buffered one has
+    // no phase that feeds it yet.
+    match body {
+        Body::None => None,
+        Body::Stream if phases.contains(&Phase::RequestBody) => None,
+        Body::Stream => Some("it reads a body as it streams, and does not run where one is fed"),
+        Body::Buffered { .. } => Some("it reads a body whole, and no phase feeds one yet"),
+    }
 }
 
 impl Chain {
@@ -186,6 +218,12 @@ impl Chain {
                 }
                 Plugin::IpRestriction(policy) => {
                     chain.access.push(Access::IpRestriction(policy.clone()))
+                }
+                Plugin::RequestSizeLimit(policy) => {
+                    chain.access.push(Access::SizeLimit(policy.max_bytes));
+                    chain
+                        .request_body
+                        .push(RequestBody::SizeLimit(policy.max_bytes));
                 }
             }
         }
@@ -228,19 +266,47 @@ impl Chain {
             }
         }
     }
+
+    /// Run the RequestBody steps on a chunk of `len` bytes, and the key to refuse with when one
+    /// refuses. Nothing is counted once the connection is `upgraded`: what follows a 101 is a
+    /// tunnel, not a request body, and a cap on it would cut a WebSocket after so many bytes.
+    pub fn request_body(
+        &self,
+        cx: &mut RequestCtx,
+        len: usize,
+        upgraded: bool,
+    ) -> Option<ErrorKey> {
+        if upgraded || self.request_body.is_empty() {
+            return None;
+        }
+        cx.body_bytes = cx.body_bytes.saturating_add(len as u64);
+        for step in &self.request_body {
+            match step {
+                RequestBody::SizeLimit(max) if cx.body_bytes > *max => {
+                    return Some(ErrorKey::RequestTooLarge)
+                }
+                RequestBody::SizeLimit(_) => {}
+            }
+        }
+        None
+    }
 }
 
 impl Access {
     /// Where the step runs among the Access steps, lowest first, whatever order the policies
     /// arrive in. The address is judged before any credential is read, so a denied address
     /// cannot tell a good key from a bad one by its answer. The credential checks keep the
-    /// order they arrive in among themselves. The limit is last: it may be the consumer's own
-    /// and may count per consumer, and the consumer is not known until a credential is checked.
+    /// order they arrive in among themselves. The declared length is judged after them, as Kong
+    /// judges it after authentication, so a caller without a credential is told 401 whatever it
+    /// sends; and before the limit, so a body refused for its size does not spend a caller's
+    /// allowance. The limit is last: it may be the consumer's own and may count per consumer,
+    /// and the consumer is not known until a credential is checked.
     fn rank(&self) -> u8 {
         match self {
             Access::IpRestriction(_) => 1,
             Access::Jwt(_) | Access::KeyAuth(_) => 2,
-            Access::RateLimit => 3,
+            Access::SizeLimit(_) => 3,
+            Access::RateLimit => 4,
         }
     }
 
@@ -319,6 +385,26 @@ impl Access {
                     Vec::new(),
                 ),
             },
+            // Pingora refuses a request whose `Content-Length` is not a number before any filter
+            // runs, so one that does not parse here is absent, and left to the count. A body
+            // within its declared length cannot outgrow it: Pingora reads no further.
+            Access::SizeLimit(max) => {
+                let declared = req
+                    .headers
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok());
+                match declared {
+                    Some(len) if len > *max => refuse(
+                        rule,
+                        "request_size_limit",
+                        "content_length",
+                        ErrorKey::RequestTooLarge,
+                        Vec::new(),
+                    ),
+                    _ => Flow::Continue,
+                }
+            }
             Access::RateLimit => limit(proxy, rt, rule, req, peer, cx),
         }
     }
@@ -423,7 +509,12 @@ mod tests {
 
     use crate::store::Store;
 
-    const ALL: [Phase; 3] = [Phase::Access, Phase::UpstreamRequest, Phase::Terminate];
+    const ALL: [Phase; 4] = [
+        Phase::Access,
+        Phase::UpstreamRequest,
+        Phase::RequestBody,
+        Phase::Terminate,
+    ];
 
     fn rule(plugins: Vec<Plugin>) -> RouteRule {
         RouteRule {
@@ -457,6 +548,7 @@ mod tests {
             Plugin::Jwt(JwtPolicy::default()),
             Plugin::KeyAuth(KeyAuthPolicy::default()),
             ip_restriction(&["10.0.0.0/8"], &[]),
+            size_limit(10),
         ] {
             let chain = Chain::compile(&rule(vec![plugin.clone()])).unwrap();
             // The request limit closes every chain and is not the plugin's.
@@ -468,6 +560,7 @@ mod tests {
             let found: Vec<Phase> = [
                 (Phase::Access, access),
                 (Phase::UpstreamRequest, chain.upstream_request.len()),
+                (Phase::RequestBody, chain.request_body.len()),
                 (Phase::Terminate, chain.terminate.len()),
             ]
             .into_iter()
@@ -526,8 +619,19 @@ mod tests {
         })
     }
 
+    fn size_limit(max_bytes: u64) -> Plugin {
+        Plugin::RequestSizeLimit(gapura_core::config::RequestSizeLimitPolicy { max_bytes })
+    }
+
     fn get() -> RequestHeader {
         RequestHeader::build("GET", b"/", None).unwrap()
+    }
+
+    fn with_length(len: u64) -> RequestHeader {
+        let mut req = RequestHeader::build("POST", b"/", None).unwrap();
+        req.insert_header("content-length", len.to_string())
+            .unwrap();
+        req
     }
 
     /// A configuration holding the key `k-1`, issued to `shop/mobile`.
@@ -665,15 +769,110 @@ mod tests {
         assert!(cx.terminated);
     }
 
+    /// A streaming plugin runs where the body phase is reached and it declares that phase; one
+    /// that does not declare it would never be fed. A buffering one runs nowhere yet.
     #[test]
-    fn a_plugin_that_reads_a_body_cannot_run_anywhere_yet() {
+    fn a_streaming_plugin_runs_where_the_body_phase_is_reached_and_a_buffering_one_nowhere_yet() {
+        let streams = [Phase::Access, Phase::RequestBody];
         assert_eq!(misplaced(&[Phase::Access], Body::None, &ALL), None);
-        for body in [Body::Stream, Body::Buffered { max: 1 << 20 }] {
-            assert!(
-                misplaced(&[Phase::Access], body, &ALL).is_some(),
-                "{body:?}"
+        assert_eq!(misplaced(&streams, Body::Stream, &ALL), None);
+        assert!(misplaced(&streams, Body::Stream, &[]).is_some());
+        assert!(misplaced(&[Phase::Access], Body::Stream, &ALL).is_some());
+        assert!(misplaced(&[Phase::Access], Body::Buffered { max: 1 << 20 }, &ALL).is_some());
+    }
+
+    /// A declared length over the limit is refused before anything upstream; one at the limit,
+    /// and a request with no length at all, are left to the count.
+    #[test]
+    fn a_declared_length_over_the_limit_is_413_up_front() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![size_limit(10)]);
+        let chain = Chain::compile(&r).unwrap();
+        let run = |req: &RequestHeader| {
+            chain.access(&proxy(), &rt, &r, req, None, &mut RequestCtx::default())
+        };
+        let failure = refused(run(&with_length(11)));
+        assert_eq!(failure.key, ErrorKey::RequestTooLarge);
+        assert!(failure.headers.is_empty());
+        assert!(matches!(run(&with_length(10)), Flow::Continue));
+        assert!(matches!(run(&get()), Flow::Continue));
+    }
+
+    /// The count runs over every chunk, holds none of them, refuses the chunk that crosses the
+    /// limit, and stops once the connection is upgraded.
+    #[test]
+    fn streamed_bytes_are_counted_up_to_the_limit() {
+        let chain = Chain::compile(&rule(vec![size_limit(10)])).unwrap();
+        let mut cx = RequestCtx::default();
+        assert_eq!(chain.request_body(&mut cx, 6, false), None);
+        assert_eq!(
+            chain.request_body(&mut cx, 4, false),
+            None,
+            "10 is at the limit"
+        );
+        assert_eq!(
+            chain.request_body(&mut cx, 1, false),
+            Some(ErrorKey::RequestTooLarge)
+        );
+        let mut upgraded = RequestCtx::default();
+        assert_eq!(chain.request_body(&mut upgraded, 1 << 30, true), None);
+    }
+
+    /// A retry replays the body read so far before it reads on, so each attempt counts from
+    /// nothing: the replayed bytes are counted once, and the limit still holds after them.
+    #[test]
+    fn a_retry_counts_the_replayed_body_once() {
+        let chain = Chain::compile(&rule(vec![size_limit(10)])).unwrap();
+        let mut cx = RequestCtx::default();
+        cx.new_attempt();
+        assert_eq!(chain.request_body(&mut cx, 8, false), None);
+        cx.new_attempt();
+        assert_eq!(chain.request_body(&mut cx, 8, false), None, "the replay");
+        assert_eq!(
+            chain.request_body(&mut cx, 3, false),
+            Some(ErrorKey::RequestTooLarge)
+        );
+    }
+
+    /// The length is judged after the credentials, as Kong does, and before the request limit,
+    /// so a refused body does not spend a caller's allowance.
+    #[test]
+    fn the_length_is_judged_after_the_credentials() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![size_limit(10), key_auth(None)]);
+        let chain = Chain::compile(&r).unwrap();
+        let flow = chain.access(
+            &proxy(),
+            &rt,
+            &r,
+            &with_length(11),
+            None,
+            &mut RequestCtx::default(),
+        );
+        assert_eq!(refused(flow).key, ErrorKey::AuthKeyMissing);
+
+        let mut limited = rule(vec![size_limit(10)]);
+        limited.rate_limit = Some(RateLimit {
+            limit: 1,
+            window_ms: 60_000,
+            by: LimitBy::Ip,
+        });
+        let chain = Chain::compile(&limited).unwrap();
+        let proxy = proxy();
+        let run = |req: &RequestHeader| {
+            let peer = Some("192.0.2.1".parse().unwrap());
+            chain.access(&proxy, &rt, &limited, req, peer, &mut RequestCtx::default())
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                refused(run(&with_length(11))).key,
+                ErrorKey::RequestTooLarge
             );
         }
-        assert!(misplaced(&[Phase::Access], Body::None, &[]).is_some());
+        assert!(
+            matches!(run(&with_length(10)), Flow::Continue),
+            "allowance unspent"
+        );
+        assert_eq!(refused(run(&with_length(10))).key, ErrorKey::RateLimited);
     }
 }
