@@ -5,9 +5,10 @@
 //! headers, the UpstreamRequest steps), `request_body_filter` (the RequestBody steps, on each
 //! chunk), `upstream_response_filter` (the endpoint's outcome), `response_filter` (response
 //! headers), `fail_to_connect` (retry once), `fail_to_proxy` (the error key and its status: a
-//! refused body's own, else from `failure::classify`), `logging` (access log + metrics, the
-//! Terminate steps). The steps are each rule's plugins, compiled per generation (`plugin`).
-//! Outcomes feed passive outlier detection (`outlier`).
+//! refused body's own, else from `failure::classify`), `suppress_error_log` (a refused body is
+//! no failure), `logging` (access log + metrics, the Terminate steps). The steps are each rule's
+//! plugins, compiled per generation (`plugin`). Outcomes feed passive outlier detection
+//! (`outlier`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -1080,6 +1081,17 @@ impl ProxyHttp for GapuraProxy {
         }
     }
 
+    /// Whether Pingora leaves out the error-level "Fail to proxy" line it writes after
+    /// `fail_to_proxy`: only for a body refused for its size. A refusal is the policy working,
+    /// not the gateway failing, and the access log line and `policy_refused_total` already record
+    /// it; logged at error level, it would let any caller write error lines at will by sending
+    /// bodies over a limit. It is told by its error alone, `HTTPStatus(413)`, which only
+    /// `request_body_filter` raises, because `fail_to_proxy` has taken `ctx.refused` by now. The
+    /// 503 and 504 this crate raises are failures to proxy and keep their line.
+    fn suppress_error_log(&self, _session: &Session, _ctx: &Ctx, e: &Error) -> bool {
+        matches!(e.etype(), ErrorType::HTTPStatus(413))
+    }
+
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Ctx) {
         let status = session
             .response_written()
@@ -1670,5 +1682,27 @@ spec:
                 "{path} must be refused"
             );
         }
+    }
+
+    /// A body refused for its size leaves no "Fail to proxy" line; the failures Gapura raises
+    /// itself, and one from the upstream, keep theirs.
+    #[test]
+    fn a_refused_body_is_not_logged_as_a_failure_to_proxy() {
+        let proxy = GapuraProxy {
+            store: Arc::new(Store::empty()),
+            trusted_proxies: vec![],
+            trusted_client_headers: vec![],
+            limiter: Default::default(),
+            access_log_query: false,
+        };
+        let session = Session::new_h1(Box::new(tokio::io::duplex(64).0));
+        let ctx = proxy.new_ctx();
+        let suppressed = |etype: ErrorType| {
+            proxy.suppress_error_log(&session, &ctx, &Error::explain(etype, "x"))
+        };
+        assert!(suppressed(ErrorType::HTTPStatus(413)));
+        assert!(!suppressed(ErrorType::HTTPStatus(503)));
+        assert!(!suppressed(ErrorType::HTTPStatus(504)));
+        assert!(!suppressed(ErrorType::ConnectRefused));
     }
 }
