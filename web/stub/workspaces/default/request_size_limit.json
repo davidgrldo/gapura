@@ -1,0 +1,3 @@
+[
+  { "target": "service:whoami", "config": { "max_bytes": 1048576 }, "updated_at": "2026-10-24T09:00:00.000000Z" }
+]

@@ -1,6 +1,17 @@
 {
   "entries": [
     {
+      "id": 218,
+      "at": "2026-10-24T09:00:00.000000Z",
+      "actor": "nadia.putri",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "policy",
+      "workspace": "default",
+      "before": null,
+      "after": { "target": "service:whoami", "kind": "request_size_limit", "config": { "max_bytes": 1048576 } }
+    },
+    {
       "id": 217,
       "at": "2026-10-24T08:00:00.000000Z",
       "actor": "nadia.putri",
