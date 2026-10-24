@@ -20,6 +20,7 @@ pub mod plugin;
 pub mod rate_limit;
 pub mod select;
 pub mod tls;
+mod transform;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -230,11 +231,17 @@ fn idempotent(method: &http::Method) -> bool {
     .contains(method)
 }
 
-/// Small header-op adapter so the same `HeaderOps` apply to requests and responses.
+/// Small header-op adapter so the same edits apply to requests and responses: the Gateway API's
+/// `HeaderOps` and a transformer's `HeaderEdits` (`transform`).
 trait HeaderTarget {
     fn set(&mut self, name: &str, value: &str) -> Result<()>;
     fn add(&mut self, name: &str, value: &str) -> Result<()>;
     fn del(&mut self, name: &str);
+    /// Every value of `name`, in order; empty when it is absent.
+    fn get_all(&self, name: &str) -> Vec<http::HeaderValue>;
+    /// One more value of `name`, as it is: a value moved from another header may hold bytes a
+    /// `&str` cannot.
+    fn append(&mut self, name: &str, value: http::HeaderValue) -> Result<()>;
 }
 
 impl HeaderTarget for RequestHeader {
@@ -247,6 +254,12 @@ impl HeaderTarget for RequestHeader {
     fn del(&mut self, name: &str) {
         self.remove_header(name);
     }
+    fn get_all(&self, name: &str) -> Vec<http::HeaderValue> {
+        self.headers.get_all(name).iter().cloned().collect()
+    }
+    fn append(&mut self, name: &str, value: http::HeaderValue) -> Result<()> {
+        self.append_header(name.to_string(), value).map(|_| ())
+    }
 }
 
 impl HeaderTarget for ResponseHeader {
@@ -258,6 +271,12 @@ impl HeaderTarget for ResponseHeader {
     }
     fn del(&mut self, name: &str) {
         self.remove_header(name);
+    }
+    fn get_all(&self, name: &str) -> Vec<http::HeaderValue> {
+        self.headers.get_all(name).iter().cloned().collect()
+    }
+    fn append(&mut self, name: &str, value: http::HeaderValue) -> Result<()> {
+        self.append_header(name.to_string(), value).map(|_| ())
     }
 }
 
@@ -323,14 +342,17 @@ async fn write_error(
     session.write_response_body(Some(body), true).await
 }
 
-/// The final response head written to the client, if one has been. An interim 1xx other than
-/// 101, such as a relayed `100 Continue`, is not one: a final head may still follow it, and
-/// Pingora's HTTP/1 writer accepts one after it. A 101 is final, since what follows it is a
-/// tunnel and not a response.
+/// Whether a head with `status` is interim: a 1xx other than 101, such as a relayed `100
+/// Continue`. A final head may still follow one, and Pingora's HTTP/1 writer accepts one after
+/// it. A 101 is final, since what follows it is a tunnel and not a response.
+fn interim(status: http::StatusCode) -> bool {
+    status.is_informational() && status != http::StatusCode::SWITCHING_PROTOCOLS
+}
+
+/// The final response head written to the client, if one has been: an [`interim`] head is not
+/// one.
 fn final_response(session: &Session) -> Option<&ResponseHeader> {
-    session.response_written().filter(|r| {
-        !r.status.is_informational() || r.status == http::StatusCode::SWITCHING_PROTOCOLS
-    })
+    session.response_written().filter(|r| !interim(r.status))
 }
 
 /// Answer the request as a step, or the router, decided; `Continue` answers nothing. Whether

@@ -32,6 +32,9 @@ futures = { workspace = true }
 # ponytail: the mirror client is HTTP-only; TLS mirrors and body tee-ing are a follow-up.
 reqwest = { workspace = true }
 sha2.workspace = true
+# A request_transformer's query edits: parsing a parameter's name, and encoding what it writes.
+# Pinned to the version `url` already locks, so it adds nothing to the build.
+form_urlencoded = "1.2.2"
 
 [dev-dependencies]
 # Only the tests, to sign tokens; verifying is `gapura_core::jwt`'s.
