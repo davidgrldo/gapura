@@ -18,7 +18,7 @@ use axum::http::{Request, StatusCode};
 use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::Store;
-use gapura_core::config::{Config, IpRestrictionPolicy, Plugin};
+use gapura_core::config::{Config, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy};
 use gapura_core::store::StoreSettings;
 use serde_json::json;
 use tower::ServiceExt;
@@ -101,6 +101,7 @@ const ROUTE: &str = r#"{"name":"orders-api","service":"orders","hosts":["api.exa
 const SERVICES: &str = "/api/workspaces/default/services";
 const ROUTES: &str = "/api/workspaces/default/routes";
 const IP: &str = "/api/workspaces/default/policies/ip_restriction";
+const SIZE: &str = "/api/workspaces/default/policies/request_size_limit";
 /// The compiled name of the seeded route.
 const COMPILED_ROUTE: &str = "default/orders-api";
 
@@ -711,6 +712,54 @@ async fn a_stored_policy_in_another_shape_fails_the_snapshot() {
     assert_eq!(
         plugins_on(&compiled(&store).await, COMPILED_ROUTE),
         [deny(&["10.0.0.0/8"])]
+    );
+}
+
+/// A request_size_limit goes through the same endpoint as every kind it keeps: it compiles onto
+/// the rule, the route row says where it comes from, and a limit of nothing is refused at
+/// `max_bytes`, writing nothing.
+#[tokio::test]
+async fn a_request_size_limit_reaches_the_compiled_rule() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+
+    ok(
+        &app,
+        "PUT",
+        SIZE,
+        s.ed,
+        &put("route:orders-api", json!({"max_bytes": 1024}), None),
+    )
+    .await;
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [Plugin::RequestSizeLimit(RequestSizeLimitPolicy {
+            max_bytes: 1024
+        })]
+    );
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["policies"]["request_size_limit"]["from"],
+        "route"
+    );
+
+    let before = everything(&store).await;
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        SIZE,
+        Some(s.ed),
+        &put("workspace", json!({"max_bytes": 0}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(parse(&answer)["field"], "max_bytes", "{answer}");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusal wrote nothing"
     );
 }
 
