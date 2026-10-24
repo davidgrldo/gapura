@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- The console sets an IP restriction (#PR) on the workspace (on the Services page), on a service
+- The console sets an IP restriction (#274) on the workspace (on the Services page), on a service
   or on a route.
   - **Form:** separate deny and allow lists, one address or network per line, applied on their own
     like the key requirement. A refusal is shown beside the list it is about.
