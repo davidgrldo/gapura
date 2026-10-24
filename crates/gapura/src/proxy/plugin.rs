@@ -21,7 +21,7 @@ use pingora::http::{RequestHeader, ResponseHeader};
 
 use crate::proxy::failure::ErrorKey;
 use crate::proxy::transform::{edit_headers, edit_query, writable};
-use crate::proxy::{client_ip_of, interim, jwt, jwt_refusal, rate_limit, GapuraProxy};
+use crate::proxy::{client_ip_of, is_final, jwt, jwt_refusal, rate_limit, GapuraProxy};
 use crate::store::Runtime;
 use crate::telemetry::METRICS;
 
@@ -323,7 +323,7 @@ impl Chain {
     /// Continue` is followed by the final head, which the steps edit, and they run once per
     /// answer. A 101 is final, and edited like any other.
     pub fn response(&self, resp: &mut ResponseHeader) {
-        if interim(resp.status) {
+        if !is_final(resp.status) {
             return;
         }
         for step in &self.response {
