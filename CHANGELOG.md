@@ -40,6 +40,14 @@ means what it usually does, moving from one version below to a later one. Releas
     configuration that has such a policy, and keeps serving its last one, so upgrade data planes
     first.
   - The console's form for it follows.
+- The console sets an IP restriction (#274) on the workspace (on the Services page), on a service
+  or on a route.
+  - **Form:** separate deny and allow lists, one address or network per line, applied on their own
+    like the key requirement. A refusal is shown beside the list it is about.
+  - **Inherited restrictions:** a route or service that inherits one says where from.
+  - **Lists:** the service and route lists tag it `IP`.
+  - **Audit log:** entries for it are named "IP restriction". Until now they read as "Key
+    requirement".
 - An `ip_restriction` policy refuses requests by client address (#273).
   `PUT /api/workspaces/{ws}/policies/ip_restriction` takes `{"target", "config": {"allow",
   "deny"}}`.

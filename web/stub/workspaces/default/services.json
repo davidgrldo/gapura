@@ -18,7 +18,13 @@
       "from": "service"
     },
     "jwt": null,
-    "rate_limit": null
+    "rate_limit": null,
+    "policies": {
+      "ip_restriction": {
+        "from": "service",
+        "updated_at": "2026-10-24T08:00:00.000000Z"
+      }
+    }
   },
   {
     "name": "unused-demo",

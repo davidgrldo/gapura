@@ -24,7 +24,13 @@
       "from": "service"
     },
     "jwt": null,
-    "rate_limit": null
+    "rate_limit": null,
+    "policies": {
+      "ip_restriction": {
+        "from": "service",
+        "updated_at": "2026-10-24T08:00:00.000000Z"
+      }
+    }
   },
   {
     "name": "catch-all",
@@ -46,6 +52,12 @@
       "per": "minute",
       "from": "service",
       "updated_at": "2026-10-20T08:00:00.000000Z"
+    },
+    "policies": {
+      "ip_restriction": {
+        "from": "route",
+        "updated_at": "2026-10-24T08:01:00.000000Z"
+      }
     }
   }
 ]

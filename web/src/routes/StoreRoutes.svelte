@@ -142,6 +142,12 @@
                       <span class="sr-only">, at most {r.rate_limit.limit} requests per {r.rate_limit.per} {countedBy(r.rate_limit.by)} (from the {r.rate_limit.from})</span>
                     </span>
                   {/if}
+                  {#if r.policies?.ip_restriction}
+                    <span class="inline-flex font-sans" title="Restricted by client address (from the {r.policies.ip_restriction.from})">
+                      <Tag tone="idle"><span aria-hidden="true">IP</span></Tag>
+                      <span class="sr-only">, restricted by client address (from the {r.policies.ip_restriction.from})</span>
+                    </span>
+                  {/if}
                 </span>
               </Table.Cell>
               <Table.Cell class="font-mono">{r.service}</Table.Cell>
