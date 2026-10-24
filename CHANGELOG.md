@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console sets a body size limit (#PR) on the workspace (on the Services page), on a service
+  or on a route.
+  - **Form:** a whole number and a unit, bytes, KiB, MiB or GiB, applied on its own like the IP
+    restriction. A number that is not whole, or is over 1 GiB, is refused beside it before it is
+    sent, in the words the server would use.
+  - **Inherited limits:** a route or service that inherits one says its size and where it is set.
+  - **Lists:** the service and route lists tag it with its size, such as `≤1 MiB`.
+  - **Audit log:** entries for it are named "Body size limit", as they have been since #275.
 - A `request_size_limit` policy refuses request bodies over a size (#275).
   `PUT /api/workspaces/{ws}/policies/request_size_limit` takes `{"target", "config":
   {"max_bytes"}}`, a whole number of bytes from 1 to 1 GiB, on the workspace, a service or a
