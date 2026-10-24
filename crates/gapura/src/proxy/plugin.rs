@@ -89,8 +89,10 @@ impl RequestCtx {
     /// Start the body count again for a new upstream attempt. A retry replays what was read of
     /// the body so far, from Pingora's retry buffer, through the RequestBody steps before it reads
     /// on; a count carried over from the failed attempt would count those bytes twice and refuse
-    /// a body within its limit. A retry is only made while that buffer holds the whole body read
-    /// so far, so the count after the replay is exact.
+    /// a body within its limit. The count after the replay is exact only because a retry is made
+    /// while that buffer still holds the whole body read so far: `error_while_proxy` in
+    /// `proxy/mod.rs` refuses one once `retry_buffer_truncated()`. Without that guard a replay
+    /// would resend part of the body and the count would start short of what had been read.
     pub fn new_attempt(&mut self) {
         self.body_bytes = 0;
     }
@@ -302,9 +304,10 @@ impl Access {
     /// cannot tell a good key from a bad one by its answer. The credential checks keep the
     /// order they arrive in among themselves. The declared length is judged after them, as Kong
     /// judges it after authentication, so a caller without a credential is told 401 whatever it
-    /// sends; and before the limit, so a body refused for its size does not spend a caller's
-    /// allowance. The limit is last: it may be the consumer's own and may count per consumer,
-    /// and the consumer is not known until a credential is checked.
+    /// sends; and before the limit, so a body refused for its declared length does not spend a
+    /// caller's allowance. One refused as it streams does: the count runs in RequestBody, after
+    /// the limit has counted the request. The limit is last: it may be the consumer's own and may
+    /// count per consumer, and the consumer is not known until a credential is checked.
     fn rank(&self) -> u8 {
         match self {
             Access::IpRestriction(_) => 1,
@@ -390,8 +393,12 @@ impl Access {
                 ),
             },
             // Pingora refuses a request whose `Content-Length` is not a number before any filter
-            // runs, so one that does not parse here is absent, and left to the count. A body
-            // within its declared length cannot outgrow it: Pingora reads no further.
+            // runs, so one that does not parse here is absent, and left to the count. The parse
+            // agrees with Pingora's, which reads the value as a signed number and so takes a
+            // leading `+`. A declared length is not always what frames the body: when
+            // `Transfer-Encoding` is also present Pingora frames it by its chunks (and on HTTP/1
+            // drops the length before any filter runs), so a body may outgrow a length it
+            // declared. The RequestBody count runs on every body, and covers that.
             Access::SizeLimit(max) => {
                 let declared = req
                     .headers
@@ -791,8 +798,8 @@ mod tests {
         assert!(misplaced(&[Phase::Access], Body::Buffered { max: 1 << 20 }, &ALL).is_some());
     }
 
-    /// A declared length over the limit is refused before anything upstream; one at the limit,
-    /// and a request with no length at all, are left to the count.
+    /// A declared length over the limit is refused before anything upstream, read as Pingora
+    /// reads it; one at the limit, and a request with no length at all, are left to the count.
     #[test]
     fn a_declared_length_over_the_limit_is_413_up_front() {
         let rt = Runtime::new(Config::default(), 1, Vec::new());
@@ -806,6 +813,10 @@ mod tests {
         assert!(failure.headers.is_empty());
         assert!(matches!(run(&with_length(10)), Flow::Continue));
         assert!(matches!(run(&get()), Flow::Continue));
+        // Pingora reads `+11` as 11 and frames the body by it, so the limit must read it so too.
+        let mut plus = RequestHeader::build("POST", b"/", None).unwrap();
+        plus.insert_header("content-length", "+11").unwrap();
+        assert_eq!(refused(run(&plus)).key, ErrorKey::RequestTooLarge);
     }
 
     /// The count runs over every chunk, holds none of them, refuses the chunk that crosses the
@@ -863,7 +874,8 @@ mod tests {
     }
 
     /// The length is judged after the credentials, as Kong does, and before the request limit,
-    /// so a refused body does not spend a caller's allowance.
+    /// so a body refused for its declared length does not spend a caller's allowance. One
+    /// refused as it streams does, since the limit has counted the request by then.
     #[test]
     fn the_length_is_judged_after_the_credentials() {
         let rt = Runtime::new(Config::default(), 1, Vec::new());

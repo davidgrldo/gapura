@@ -918,9 +918,12 @@ impl ProxyHttp for GapuraProxy {
     /// body counts its own refusal; the key it refused with is recorded here and the request
     /// failed: `fail_to_proxy` answers that key rather than one it works out from the error, and
     /// the bytes already sent upstream are abandoned with the connection. That rests on
-    /// Pingora's HTTP/1 upstream path, the only one Gapura dials, which fails the request on this
-    /// error; its HTTP/2 upstream path logs a body error and waits on the upstream's answer
-    /// instead.
+    /// Pingora's HTTP/1 upstream path (`proxy_h1.rs`), the only one Gapura dials, which fails the
+    /// request on this error. Its other two swallow it: the HTTP/2 path (`proxy_h2.rs`) and the
+    /// custom one (`proxy_custom.rs`) log a body error, stop reading the body, and wait on the
+    /// upstream's answer. Gapura dials neither today. If it ever does, `ctx.refused` can be left
+    /// set while that answer is relayed, and a later failure of the request would then be
+    /// answered with the refusal's key rather than its own.
     async fn request_body_filter(
         &self,
         session: &mut Session,

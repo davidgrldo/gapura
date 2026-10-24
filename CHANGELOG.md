@@ -15,9 +15,13 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Declared length:** a request whose `Content-Length` is over the limit is answered 413
     `REQUEST_TOO_LARGE` before any upstream work. That includes one sent with
     `Expect: 100-continue`: it is refused on its headers, so the client never sends the body.
-  - **Streamed:** otherwise every chunk of the body is counted as it passes to the upstream, and
-    none of it is held. The request is cut, and answered 413, on the chunk that crosses the
-    limit. A retry counts the replayed body once.
+  - **Streamed:** every chunk of every body, with a declared length or without, is counted as it
+    passes to the upstream, and none of it is held. The request is cut, and answered 413, on the
+    chunk that crosses the limit. A retry counts the replayed body once.
+  - **After 100 Continue:** a refused body is answered 413 even after an upstream's
+    `100 Continue` was relayed to the client, as it is for the chunked uploads curl sends with
+    `Expect: 100-continue`. Any error after such an interim answer is now answered rather than
+    dropped: an upstream that goes quiet after its 100 is answered 504.
   - **Known ceiling:** an oversize chunked body opens an upstream request and reaches the upstream
     up to the limit before the request is cut. An upstream that answers before it has read the
     body may have its answer under way by then; the refusal then closes the connection instead
@@ -25,7 +29,9 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Upgrades:** nothing is counted after a protocol upgrade, so a WebSocket is not cut after so
     many bytes.
   - **Order:** the length is judged after ip_restriction and the credentials, as Kong does, and
-    before the request limit, so a refused body spends none of the caller's allowance.
+    before the request limit, so a body refused for its declared length spends none of the
+    caller's allowance. One refused as it streams has spent it: the limit counted the request
+    before the body was read.
   - **Refusal metric:** `gapura_policy_refused_total{policy="request_size_limit"}`, with
     `reason="content_length"` for a declared length and `reason="streamed"` for a counted one.
   - **Logs:** a refused body is not logged as an error-level "Fail to proxy" line, which any
@@ -33,6 +39,7 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Upgrade order:** as with ip_restriction, a data plane older than this release cannot read a
     configuration that has such a policy, and keeps serving its last one, so upgrade data planes
     first.
+  - The console's form for it follows.
 - An `ip_restriction` policy refuses requests by client address (#273).
   `PUT /api/workspaces/{ws}/policies/ip_restriction` takes `{"target", "config": {"allow",
   "deny"}}`.

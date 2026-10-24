@@ -361,7 +361,7 @@ impl Plugin {
             // gateway's to check, not the upstream's to see.
             Plugin::KeyAuth(_) => &[Phase::Access, Phase::UpstreamRequest],
             // Access judges the declared length before anything upstream is touched; the body
-            // phase counts what actually arrives, which a chunked or HTTP/2 body never declares.
+            // phase counts what actually arrives, which a chunked or HTTP/2 body may not declare.
             Plugin::RequestSizeLimit(_) => &[Phase::Access, Phase::RequestBody],
         }
     }
@@ -464,8 +464,14 @@ impl IpRestrictionPolicy {
     }
 }
 
-/// Refuse a request whose body is larger than `max_bytes`: by its `Content-Length` before
-/// anything upstream is touched, else by counting the body as it streams, holding none of it.
+/// Refuse a request whose body is larger than `max_bytes`. A declared `Content-Length` over it
+/// is refused before anything upstream is touched. Every body, whether it declared a length or
+/// not, is also counted as it streams, holding none of it, and the request is cut on the chunk
+/// that crosses the limit: the count is what limits a body that declares no length, and one whose
+/// declared length is not what frames it. A body cut that way has already sent the upstream its
+/// head and up to `max_bytes` of itself. What follows a 101, once the upstream accepted an
+/// upgrade, is a tunnel and not a body, and is not limited.
+///
 /// Kong reads a body without a `Content-Length` whole to measure it; a gateway that buffers what
 /// it was told to limit has already spent the memory the limit was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
