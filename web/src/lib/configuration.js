@@ -33,6 +33,9 @@ export function countedBy(by) {
   if (mode === 'header') return `per value of the ${header} header`
   return 'per client address'
 }
+// An IP restriction's bound, as policies.rs's MAX_NETWORKS: addresses and networks, allow and
+// deny together. web/check.mjs fails the build when it drifts.
+export const MAX_NETWORKS = 1000
 // Names as a sentence lists them: "a", "a and b", "a, b and c".
 export const listed = (names) =>
   names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
@@ -49,6 +52,9 @@ export const ms = (value) => (value == null ? 'default' : `${value} ms`)
 export const anyOf = (list) => (list.length === 0 ? 'any' : list.join(', '))
 export const base = (workspace, kind) =>
   `/api/workspaces/${encodeURIComponent(workspace)}/${kind}`
+// A policy kept through `/policies/{kind}`: one endpoint for each kind whose configuration is the
+// policy itself.
+export const policyBase = (workspace, kind) => base(workspace, `policies/${kind}`)
 // A time the server gave, in the reader's own locale and zone with the zone named, as the Users
 // page shows a sign-in: two admins in different zones then quote the same key's expiry
 // differently, with something on screen to say why.
@@ -66,13 +72,15 @@ export const when = (iso) => WHEN.format(new Date(iso))
 // above the footer switch off. `kind` is `service` or `route`, the `from` a row's own carries.
 // Empty when none of these is the row's own: the policy is of another kind, written by hand.
 const OWN_POLICIES = [
-  ['key_auth', 'API key requirement'],
-  ['jwt', 'JWT requirement'],
-  ['rate_limit', 'request limit'],
+  [(row) => row?.key_auth, 'API key requirement'],
+  [(row) => row?.jwt, 'JWT requirement'],
+  [(row) => row?.rate_limit, 'request limit'],
+  // Kept in the row's `policies` map, as every kind written through `/policies/{kind}` is.
+  [(row) => row?.policies?.ip_restriction, 'IP restriction'],
 ]
-const HOW_MANY = ['', 'one', 'two', 'three']
+const HOW_MANY = ['', 'one', 'two', 'three', 'four']
 export function ownPolicies(row, kind) {
-  const names = OWN_POLICIES.filter(([field]) => row?.[field]?.from === kind).map(([, name]) => `the ${name}`)
+  const names = OWN_POLICIES.filter(([of]) => of(row)?.from === kind).map(([, name]) => `the ${name}`)
   if (names.length === 0) return ''
   const joined = listed(names)
   const subject = `T${joined.slice(1)} above`

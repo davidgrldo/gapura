@@ -371,3 +371,25 @@ for (const [file, row, sent] of [
   }
 }
 console.log('ok: the service and route sheets save with the stamp they opened with')
+
+// The IP restriction control's bound is policies.rs's, and every kind kept through
+// `/policies/{kind}` needs a label on the audit page, read from it for the same reasons as the
+// request-limit bounds: a bound that drifts refuses what the form allows, and a kind with no label
+// reads in the audit log as a key requirement.
+const POLICIES = '../crates/gapura-control/src/policies.rs'
+const policiesSource = readFileSync(POLICIES, 'utf8')
+const { MAX_NETWORKS } = await import('./src/lib/configuration.js')
+const maxNetworks = policiesSource.match(/pub const MAX_NETWORKS: usize = ([\d_]+);/)
+if (!maxNetworks) throw new Error(`${POLICIES} has no MAX_NETWORKS`)
+if (Number(maxNetworks[1].replaceAll('_', '')) !== MAX_NETWORKS) {
+  throw new Error(`MAX_NETWORKS in src/lib/configuration.js is ${MAX_NETWORKS}, the server's is ${maxNetworks[1]}`)
+}
+const policyKinds = policiesSource.match(/pub const KINDS: &\[&str\] = &\[([\s\S]*?)\];/)
+if (!policyKinds) throw new Error(`${POLICIES} has no KINDS`)
+const serverPolicyKinds = [...policyKinds[1].replace(/\/\/.*$/gm, '').matchAll(/"([^"]+)"/g)].map((m) => m[1])
+if (serverPolicyKinds.length === 0) throw new Error(`${POLICIES}: KINDS is declared but nothing could be read from it`)
+const { POLICY_LABEL } = await import('./src/lib/audit.js')
+for (const kind of serverPolicyKinds) {
+  if (!POLICY_LABEL[kind]) throw new Error(`POLICY_LABEL in src/lib/audit.js has no label for ${kind}, which ${POLICIES} keeps`)
+}
+console.log("ok: the IP restriction bound and every policy kind's audit label match the server")
