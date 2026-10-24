@@ -29,7 +29,17 @@ impl Store {
     /// A workspace's policies of `kind`: the one on the whole workspace first, then those on
     /// services, then those on routes, each by name. A row whose configuration this kind does not
     /// read is an error, as it is to the compiler, never a policy listed as none.
-    pub async fn policies_of(&self, workspace: Uuid, kind: &str) -> Result<Vec<KindPolicyView>> {
+    ///
+    /// With `values`, for a caller who may change the workspace, each configuration is the
+    /// stored one ([`policies::config`]), which the console edits from; without, for one who may
+    /// only read it, the form the audit log records ([`policies::audited`]), so a credential a
+    /// transformer writes for the upstream reaches no reader by either.
+    pub async fn policies_of(
+        &self,
+        workspace: Uuid,
+        kind: &str,
+        values: bool,
+    ) -> Result<Vec<KindPolicyView>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
@@ -61,7 +71,11 @@ impl Store {
                 })?;
                 Ok(KindPolicyView {
                     target: target.as_text(),
-                    config: policies::config(&plugin),
+                    config: if values {
+                        policies::config(&plugin)
+                    } else {
+                        policies::audited(&plugin)
+                    },
                     updated_at: row.get("updated_at"),
                 })
             })

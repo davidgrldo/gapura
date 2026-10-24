@@ -40,8 +40,9 @@ pub const MAX_EDITS: usize = 64;
 /// before it met anything else.
 pub const MAX_VALUE_CHARS: usize = 4096;
 
-/// The longest query parameter name a request_transformer names, in characters.
-const MAX_QUERY_NAME_CHARS: usize = 256;
+/// The longest header name or query parameter name a transformer names, in characters: far past
+/// any name in use, so it refuses only a mistake, and bounds what one edit adds to a head.
+const MAX_NAME_CHARS: usize = 256;
 
 /// The header names no transformer writes, removes or renames: what says how HTTP frames a
 /// message, where it goes, and what the connection carrying it does. A transform that removed
@@ -204,7 +205,7 @@ fn request_transformer(config: serde_json::Value) -> Result<RequestTransformerPo
         headers: edits("headers", &input.headers, true, &refused)?,
         query: edits("query", &input.query, false, &[])?,
     };
-    counted(policy.headers.len() + policy.query.len())?;
+    counted(&[("headers", &policy.headers), ("query", &policy.query)])?;
     Ok(policy)
 }
 
@@ -219,7 +220,7 @@ fn response_transformer(
     let policy = ResponseTransformerPolicy {
         headers: edits("headers", &input.headers, true, FRAMING)?,
     };
-    counted(policy.headers.len())?;
+    counted(&[("headers", &policy.headers)])?;
     Ok(policy)
 }
 
@@ -237,17 +238,26 @@ fn object<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|_| field(at, sentence))
 }
 
-/// A transformer's edits, counted over every list it has. One with none edits nothing, a policy
-/// that looks like it changes a route and changes nothing; past [`MAX_EDITS`] it costs every
-/// request more than any route's transform should.
-fn counted(edits: usize) -> Result<(), FieldError> {
-    if edits == 0 {
+/// A transformer's edits, counted over every list of each of its `sections`. One with none edits
+/// nothing, a policy that looks like it changes a route and changes nothing; past [`MAX_EDITS`]
+/// it costs every request more than any route's transform should. A section over the bound on
+/// its own is named; one where only the sections together are over names `config`, since
+/// shortening either would do and naming one would send the console to the wrong list.
+fn counted(sections: &[(&str, &HeaderEdits)]) -> Result<(), FieldError> {
+    let total: usize = sections.iter().map(|(_, edits)| edits.len()).sum();
+    if total == 0 {
         return Err(field("headers", "List at least one edit."));
     }
-    if edits > MAX_EDITS {
+    if let Some((section, _)) = sections.iter().find(|(_, edits)| edits.len() > MAX_EDITS) {
         return Err(field(
-            "headers",
+            section,
             format!("List at most {MAX_EDITS} edits in one policy."),
+        ));
+    }
+    if total > MAX_EDITS {
+        return Err(field(
+            "config",
+            format!("List at most {MAX_EDITS} edits in one policy, headers and query together."),
         ));
     }
     Ok(())
@@ -272,11 +282,11 @@ struct EditsInput {
 /// `config` as the edits of `section`, `headers` or `query`, or the dotted field that is wrong
 /// with them: `headers.add`, `query.remove`. Absent, the section edits nothing.
 ///
-/// A header name is an RFC 9110 token, stored lowercase so that what the list shows is what the
-/// header map matches; none of `refused` may be named. A header value is visible ASCII, spaces
-/// and tabs, so no edit can end a header line and begin another. A query name is any text of 1 to
-/// 256 characters and a value any text, matched exactly once decoded and encoded on the way out,
-/// so neither can break the query apart.
+/// A header name is an RFC 9110 token of 1 to 256 characters, stored lowercase so that what the
+/// list shows is what the header map matches; none of `refused` may be named. A header value is
+/// visible ASCII, spaces and tabs, so no edit can end a header line and begin another. A query
+/// name is any text of 1 to 256 characters and a value any text, matched exactly once decoded and
+/// encoded on the way out, so neither can break the query apart.
 fn edits(
     section: &str,
     config: &serde_json::Value,
@@ -326,7 +336,13 @@ fn edits(
     };
     let name = |op: &str, name: String| -> Result<String, FieldError> {
         let name = if header {
-            if name.is_empty() || !name.bytes().all(is_token) {
+            if !(1..=MAX_NAME_CHARS).contains(&name.chars().count()) {
+                return Err(field(
+                    &at(op),
+                    format!("Use header names of 1 to {MAX_NAME_CHARS} characters."),
+                ));
+            }
+            if !name.bytes().all(is_token) {
                 return Err(field(
                     &at(op),
                     "Use header names made of letters, digits and !#$%&'*+-.^_`|~.",
@@ -334,10 +350,10 @@ fn edits(
             }
             name.to_ascii_lowercase()
         } else {
-            if !(1..=MAX_QUERY_NAME_CHARS).contains(&name.chars().count()) {
+            if !(1..=MAX_NAME_CHARS).contains(&name.chars().count()) {
                 return Err(field(
                     &at(op),
-                    format!("Use parameter names of 1 to {MAX_QUERY_NAME_CHARS} characters."),
+                    format!("Use parameter names of 1 to {MAX_NAME_CHARS} characters."),
                 ));
             }
             name
@@ -421,15 +437,19 @@ pub fn config(plugin: &Plugin) -> serde_json::Value {
     value
 }
 
-/// What the audit log records of `plugin`: [`config`], except that a transformer keeps the names
-/// it edits and none of the values it writes.
+/// What the audit log records of `plugin`, and what the list shows a caller who may only read the
+/// workspace: [`config`], except that a transformer keeps the names it edits and none of the
+/// values it writes.
 ///
 /// A transformer may carry a credential for the upstream -- an `authorization` it adds, an API
-/// key in the query -- and the audit log is read by every viewer of the workspace and kept long
-/// after the policy has changed, while the names alone still say what each change did; the JWT
-/// audit records how many keys there are and not the keys for the same reason. `remove` stays as
-/// it is, `rename` as its `[from, to]` pairs, and `replace`, `add` and `append` as the names they
-/// write. The list keeps the full [`config`], because the console edits a policy from it.
+/// key in the query -- and the audit log is kept long after the policy has changed, and read by
+/// everyone with a role in the workspace, those who join later included, while the names alone
+/// still say what each change did. (The JWT audit also leaves its keys out, recording how many
+/// there are, but not for secrecy: a JWKS holds public keys only, as
+/// [`jwt::holds_a_secret`](gapura_core::jwt::holds_a_secret) refuses any other.) The list shows a
+/// reader this form too, for the same reason; a caller who may change the workspace reads the
+/// whole [`config`] there, because the console edits a policy from it. `remove` stays as it is,
+/// `rename` as its `[from, to]` pairs, and `replace`, `add` and `append` as the names they write.
 pub fn audited(plugin: &Plugin) -> serde_json::Value {
     fn names(edits: &HeaderEdits) -> serde_json::Value {
         let mut out = serde_json::Map::new();
@@ -629,6 +649,18 @@ mod tests {
             (json!({"headers": {"remove": [1]}}), "headers.remove"),
             (json!({"headers": {"remove": ["x a"]}}), "headers.remove"),
             (json!({"headers": {"remove": [""]}}), "headers.remove"),
+            (
+                json!({"headers": {"remove": [long_name]}}),
+                "headers.remove",
+            ),
+            (
+                json!({"headers": {"rename": [[long_name, "x-a"]]}}),
+                "headers.rename",
+            ),
+            (
+                json!({"headers": {"add": [[long_name, "v"]]}}),
+                "headers.add",
+            ),
             (json!({"headers": {"rename": [["x-a"]]}}), "headers.rename"),
             (
                 json!({"headers": {"rename": [["x-a", "x:b"]]}}),
@@ -685,10 +717,19 @@ mod tests {
         );
         // The longest of each is taken.
         let longest = json!({
-            "headers": {"add": [["x-a", "v".repeat(MAX_VALUE_CHARS)]]},
-            "query": {"add": [["n".repeat(256), "é".repeat(MAX_VALUE_CHARS)]]},
+            "headers": {
+                "add": [["x-a", "v".repeat(MAX_VALUE_CHARS)]],
+                "remove": ["h".repeat(MAX_NAME_CHARS)],
+            },
+            "query": {"add": [["n".repeat(MAX_NAME_CHARS), "é".repeat(MAX_VALUE_CHARS)]]},
         });
         assert!(parse("request_transformer", longest).is_ok());
+        // A header name too long says so, rather than calling its characters wrong.
+        let e = refused(
+            "response_transformer",
+            json!({"headers": {"remove": [long_name]}}),
+        );
+        assert_eq!(e.sentence, "Use header names of 1 to 256 characters.");
     }
 
     /// The names that frame and route a message are refused in every list of both kinds, in any
@@ -721,18 +762,27 @@ mod tests {
             "x-consumer-username is set by the gateway from the consumer a key names, so a \
              transform cannot write it."
         );
-        let renamed = json!({"headers": {"rename": [["x-user", "X-Consumer-Username"]]}});
-        assert_eq!(
-            refused("request_transformer", renamed).field,
-            "headers.rename"
-        );
+        // Every list refuses it, a removal and a rename away from it too: the gateway sets it
+        // just before the transform runs, so either would take the consumer from the upstream.
+        for (op, list) in [
+            ("remove", json!(["X-Consumer-Username"])),
+            ("rename", json!([["x-user", "X-Consumer-Username"]])),
+            ("rename", json!([["x-consumer-username", "x-user"]])),
+            ("replace", json!([[CONSUMER_HEADER, "alice"]])),
+            ("append", json!([[CONSUMER_HEADER, "alice"]])),
+        ] {
+            let e = refused("request_transformer", json!({"headers": {op: list}}));
+            assert_eq!(e.field, format!("headers.{op}"), "{list}");
+            assert!(e.sentence.starts_with(CONSUMER_HEADER), "{}", e.sentence);
+        }
         assert!(parse("response_transformer", consumer).is_ok());
         let parameter = json!({"query": {"add": [[CONSUMER_HEADER, "alice"], ["host", "h"]]}});
         assert!(parse("request_transformer", parameter).is_ok());
     }
 
     /// A transformer with nothing to do is refused, and so is one past [`MAX_EDITS`], headers and
-    /// query counted together.
+    /// query counted together. A section over on its own is named; a policy over only once both
+    /// are counted names `config`.
     #[test]
     fn a_transformer_lists_one_edit_and_at_most_max_edits() {
         for kind in ["request_transformer", "response_transformer"] {
@@ -764,9 +814,33 @@ mod tests {
             "headers": {"remove": headers(half)},
             "query": {"remove": headers(MAX_EDITS - half + 1)},
         });
-        assert_eq!(refused("request_transformer", over).field, "headers");
-        let over = json!({"headers": {"remove": headers(MAX_EDITS + 1)}});
-        assert_eq!(refused("response_transformer", over).field, "headers");
+        let e = refused("request_transformer", over);
+        assert_eq!(
+            (e.field.as_str(), e.sentence.as_str()),
+            (
+                "config",
+                "List at most 64 edits in one policy, headers and query together."
+            )
+        );
+        for (section, kind) in [
+            ("headers", "request_transformer"),
+            ("query", "request_transformer"),
+            ("headers", "response_transformer"),
+        ] {
+            let over = json!({ section: {"remove": headers(MAX_EDITS + 1)} });
+            let e = refused(kind, over);
+            assert_eq!(
+                (e.field.as_str(), e.sentence.as_str()),
+                (section, "List at most 64 edits in one policy."),
+                "{kind}"
+            );
+        }
+        // Over in one section, the other's edits besides: still the section's fault.
+        let over = json!({
+            "headers": {"remove": ["x-a"]},
+            "query": {"remove": headers(MAX_EDITS + 1)},
+        });
+        assert_eq!(refused("request_transformer", over).field, "query");
     }
 
     /// The audit form keeps every name a transformer edits and none of the values it writes, so a

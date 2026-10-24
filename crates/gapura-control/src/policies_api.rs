@@ -6,7 +6,7 @@
 //! again inside its transaction. Every write answers 204. Kubernetes mode keeps no policies in a
 //! store, so there these answer 404.
 
-use crate::configuration::Action;
+use crate::configuration::{self, Action};
 use crate::configuration_api::{
     body, caller_of, early, field_error, unavailable, unnamed, workspace_in, written,
 };
@@ -37,7 +37,9 @@ fn kind_in(kind: &str) -> Result<&'static str, Box<Response>> {
 }
 
 /// `GET /api/workspaces/{ws}/policies/{kind}`: where the workspace has a policy of that kind,
-/// and what it is.
+/// and what it is. A caller who may change the workspace reads every policy whole, since the
+/// console edits a policy from what it read; one who may only read it reads the form the audit
+/// log records ([`policies::audited`]), a transformer's names without the values it writes.
 pub async fn list_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -58,7 +60,8 @@ pub async fn list_policy(
         Ok(k) => k,
         Err(r) => return *r,
     };
-    match store.policies_of(workspace, kind).await {
+    let values = configuration::allowed(&caller.rows, &caller.me, workspace, Action::Write).is_ok();
+    match store.policies_of(workspace, kind, values).await {
         Ok(list) => Json(list).into_response(),
         Err(e) => unavailable(&e),
     }

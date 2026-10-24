@@ -768,10 +768,11 @@ async fn a_request_size_limit_reaches_the_compiled_rule() {
 }
 
 /// A request_transformer goes through the same endpoint: it compiles onto the rule and the route
-/// row says where it comes from. A credential it adds for the upstream is in the list, which the
-/// console edits from, and never in the audit log, whose entries name the header and not its
-/// value, for a create, an update and a delete alike. A header the gateway sets from the key it
-/// checked is refused at the list that names it, writing nothing.
+/// row says where it comes from. A credential it adds for the upstream is in the list an editor
+/// reads, which the console edits from, and never in a viewer's list or the audit log, whose
+/// entries name the header and not its value, for a create, an update and a delete alike. A
+/// header the gateway sets from the key it checked is refused at the list that names it, writing
+/// nothing.
 #[tokio::test]
 async fn a_request_transformer_reaches_the_rule_and_its_audit_names_no_values() {
     let Some((store, _guard)) = fresh_store().await else {
@@ -803,10 +804,20 @@ async fn a_request_transformer_reaches_the_rule_and_its_audit_names_no_values() 
         row(&app, ROUTES, "orders-api", s.vi).await["policies"]["request_transformer"]["from"],
         "route"
     );
-    let list = read(&app, TRANSFORM, s.vi).await;
+    // A caller who may change the workspace reads the whole policy, which the console edits
+    // from; a viewer reads it as the audit log records it, by its names alone.
+    let list = read(&app, TRANSFORM, s.ed).await;
     assert_eq!(list[0]["target"], "route:orders-api");
     assert_eq!(list[0]["config"], first);
     assert!(list.to_string().contains("s3cret"), "{list}");
+    let viewed = read(&app, TRANSFORM, s.vi).await;
+    assert!(!viewed.to_string().contains("s3cret"), "{viewed}");
+    assert_eq!(viewed[0]["target"], "route:orders-api");
+    assert_eq!(
+        viewed[0]["config"],
+        json!({"headers": {"add": ["authorization"]}})
+    );
+    assert_eq!(viewed[0]["updated_at"], list[0]["updated_at"]);
 
     let (_, _, after) = &policy_audits(&store).await[0];
     assert!(!after.to_string().contains("s3cret"), "{after}");
