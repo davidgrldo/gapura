@@ -15,16 +15,31 @@ use anyhow::Result;
 use gapura_core::config::Plugin;
 use uuid::Uuid;
 
-/// The `{target, kind, config}` an audit row records of a policy.
-fn audited(target: &Target, kind: &str, config: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "target": target.as_text(), "kind": kind, "config": config })
+/// The `{target, kind, config}` an audit row records of `plugin`, its `config` in the form
+/// [`policies::audited`] gives: a transformer's names without the values it writes.
+fn recorded(target: &Target, plugin: &Plugin) -> serde_json::Value {
+    serde_json::json!({
+        "target": target.as_text(),
+        "kind": plugin.kind(),
+        "config": policies::audited(plugin),
+    })
 }
 
 impl Store {
     /// A workspace's policies of `kind`: the one on the whole workspace first, then those on
     /// services, then those on routes, each by name. A row whose configuration this kind does not
     /// read is an error, as it is to the compiler, never a policy listed as none.
-    pub async fn policies_of(&self, workspace: Uuid, kind: &str) -> Result<Vec<KindPolicyView>> {
+    ///
+    /// With `values`, for a caller who may change the workspace, each configuration is the
+    /// stored one ([`policies::config`]), which the console edits from; without, for one who may
+    /// only read it, the form the audit log records ([`policies::audited`]), so a credential a
+    /// transformer writes for the upstream reaches no reader by either.
+    pub async fn policies_of(
+        &self,
+        workspace: Uuid,
+        kind: &str,
+        values: bool,
+    ) -> Result<Vec<KindPolicyView>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
@@ -56,7 +71,11 @@ impl Store {
                 })?;
                 Ok(KindPolicyView {
                     target: target.as_text(),
-                    config: policies::config(&plugin),
+                    config: if values {
+                        policies::config(&plugin)
+                    } else {
+                        policies::audited(&plugin)
+                    },
                     updated_at: row.get("updated_at"),
                 })
             })
@@ -116,7 +135,7 @@ impl Store {
                     &[&id, &config],
                 )
                 .await?;
-                let before = current.map(|c| audited(target, kind, policies::config(&c)));
+                let before = current.map(|c| recorded(target, &c));
                 (if enabled { "update" } else { "create" }, id, before)
             }
             // Two writers meet at the unique index, as switching key_auth on does.
@@ -146,7 +165,7 @@ impl Store {
                 object_id: Some(id),
                 workspace: Some(workspace),
                 before,
-                after: Some(audited(target, kind, config)),
+                after: Some(recorded(target, plugin)),
             },
         )
         .await?;
@@ -186,7 +205,7 @@ impl Store {
             .await?;
         // A row the compiler could not read is recorded by its target and kind alone.
         let before = match policies::parse(kind, config) {
-            Ok(plugin) => audited(target, kind, policies::config(&plugin)),
+            Ok(plugin) => recorded(target, &plugin),
             Err(_) => serde_json::json!({ "target": target.as_text(), "kind": kind }),
         };
         audit(
