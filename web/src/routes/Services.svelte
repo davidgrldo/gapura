@@ -3,10 +3,11 @@
   import Failure from '../lib/Failure.svelte'
   import IpRestrictionControl from '../lib/IpRestrictionControl.svelte'
   import ServiceSheet from '../lib/ServiceSheet.svelte'
+  import SizeLimitControl from '../lib/SizeLimitControl.svelte'
   import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
-  import { PER_SHORT, base, countedBy, ms, upstream } from '../lib/configuration.js'
+  import { PER_SHORT, base, countedBy, fromTarget, ms, policyBase, sizeText, upstream } from '../lib/configuration.js'
   import { can, remembered } from '../lib/workspace.js'
   import Lock from 'phosphor-svelte/lib/Lock'
 
@@ -17,6 +18,9 @@
   let workspace = $state(remembered(me.roles))
   const role = $derived(me.roles.find((r) => r.workspace === workspace)?.role)
   let answer = $state(undefined)
+  // The body sizes the workspace's limits set, by target, read with the list: the rows say only
+  // where a limit comes from, and the tag says how large it is.
+  let sizes = $state(new Map())
   let failed = $state(undefined)
   // The newest request's number, so a slow answer for a workspace the reader has left cannot
   // overwrite the one they are looking at.
@@ -26,8 +30,17 @@
   function load() {
     const mine = ++latest
     if (!workspace) return Promise.resolve()
-    return get(base(workspace, 'services')).then(
-      (list) => { if (mine === latest) { answer = list; failed = undefined } },
+    return Promise.all([
+      get(base(workspace, 'services')),
+      // A tag is not worth failing the list over: unread, every limit's tag says only that there is one.
+      get(policyBase(workspace, 'request_size_limit')).catch(() => []),
+    ]).then(
+      ([list, limits]) => {
+        if (mine !== latest) return
+        answer = list
+        sizes = new Map(limits.map((p) => [p.target, p.config.max_bytes]))
+        failed = undefined
+      },
       (error) => { if (mine === latest) failed = error },
     )
   }
@@ -51,6 +64,12 @@
   // on everyone only: a consumer's own limit is on the Consumers page.
   const limited = (row) =>
     `At most ${row.rate_limit.limit} requests per ${row.rate_limit.per} ${countedBy(row.rate_limit.by)} (from the ${row.rate_limit.from})`
+  // The size tag after the IP one says how large a body may be, and where that is set. The size
+  // is looked up in the limits read beside the rows; read a moment apart, those may not have it
+  // yet, or they may not have been read at all, and the tag then says only that there is one.
+  const sizeOf = (row) => sizes.get(fromTarget(row.policies.request_size_limit.from, 'service', row))
+  const sized = (row, max) =>
+    `${max ? `Bodies over ${sizeText(max)} are refused` : 'Request bodies are limited'} (from the ${row.policies.request_size_limit.from})`
 </script>
 
 <h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Services</h1>
@@ -74,6 +93,10 @@
   <section class="mb-6 grid max-w-md gap-2" aria-labelledby="workspace-ip-restriction">
     <h2 id="workspace-ip-restriction" class="text-sm font-medium">Restrict client addresses on every route in {workspace}</h2>
     <IpRestrictionControl {workspace} target="workspace" {role} onchanged={load} />
+  </section>
+  <section class="mb-6 grid max-w-md gap-2" aria-labelledby="workspace-size-limit">
+    <h2 id="workspace-size-limit" class="text-sm font-medium">Limit request bodies on every route in {workspace}</h2>
+    <SizeLimitControl {workspace} target="workspace" {role} onchanged={load} />
   </section>
   <div class="mb-3 flex items-center justify-between gap-4">
     <p class="text-sm text-muted-foreground">The upstreams routes in {workspace} send traffic to.</p>
@@ -118,6 +141,13 @@
                     <span class="inline-flex font-sans" title="Restricted by client address (from the {s.policies.ip_restriction.from})">
                       <Tag tone="idle"><span aria-hidden="true">IP</span></Tag>
                       <span class="sr-only">, restricted by client address (from the {s.policies.ip_restriction.from})</span>
+                    </span>
+                  {/if}
+                  {#if s.policies?.request_size_limit}
+                    {@const max = sizeOf(s)}
+                    <span class="inline-flex font-sans" title={sized(s, max)}>
+                      <Tag tone="idle"><span aria-hidden="true">{max ? `≤${sizeText(max)}` : 'size'}</span></Tag>
+                      <span class="sr-only">, {max ? `bodies over ${sizeText(max)} are refused` : 'request bodies are limited'} (from the {s.policies.request_size_limit.from})</span>
                     </span>
                   {/if}
                 </span>

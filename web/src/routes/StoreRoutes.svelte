@@ -5,7 +5,7 @@
   import Tag from '../lib/Tag.svelte'
   import WorkspacePicker from '../lib/WorkspacePicker.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
-  import { PER_SHORT, anyOf, base, countedBy } from '../lib/configuration.js'
+  import { PER_SHORT, anyOf, base, countedBy, fromTarget, policyBase, sizeText } from '../lib/configuration.js'
   import { can, remembered } from '../lib/workspace.js'
   import Lock from 'phosphor-svelte/lib/Lock'
 
@@ -15,8 +15,10 @@
   // svelte-ignore state_referenced_locally
   let workspace = $state(remembered(me.roles))
   const role = $derived(me.roles.find((r) => r.workspace === workspace)?.role)
-  // `{ routes, services }`, read together: the sheet offers the services, and a workspace without
-  // any gets a pointer instead of a form that could not be saved.
+  // `{ routes, services, sizes }`, read together: the sheet offers the services, and a workspace
+  // without any gets a pointer instead of a form that could not be saved. `sizes` are the body
+  // sizes the workspace's limits set, by target: the rows say only where a limit comes from, and
+  // the tag says how large it is.
   let answer = $state(undefined)
   let failed = $state(undefined)
   // The newest request's number, so a slow answer for a workspace the reader has left cannot
@@ -27,10 +29,19 @@
   function load() {
     const mine = ++latest
     if (!workspace) return Promise.resolve()
-    return Promise.all([get(base(workspace, 'routes')), get(base(workspace, 'services'))]).then(
-      ([routes, services]) => {
+    return Promise.all([
+      get(base(workspace, 'routes')),
+      get(base(workspace, 'services')),
+      // A tag is not worth failing the list over: unread, every limit's tag says only that there is one.
+      get(policyBase(workspace, 'request_size_limit')).catch(() => []),
+    ]).then(
+      ([routes, services, limits]) => {
         if (mine !== latest) return
-        answer = { routes, services: services.map((s) => s.name) }
+        answer = {
+          routes,
+          services: services.map((s) => s.name),
+          sizes: new Map(limits.map((p) => [p.target, p.config.max_bytes])),
+        }
         failed = undefined
       },
       (error) => {
@@ -68,6 +79,13 @@
   // on everyone only: a consumer's own limit is on the Consumers page.
   const limited = (row) =>
     `At most ${row.rate_limit.limit} requests per ${row.rate_limit.per} ${countedBy(row.rate_limit.by)} (from the ${row.rate_limit.from})`
+  // The size tag after the IP one says how large a body may be, and where that is set: the route,
+  // its service or the workspace. The size is looked up in the limits read beside the rows; read
+  // a moment apart, those may not have it yet, or they may not have been read at all, and the tag
+  // then says only that there is one.
+  const sizeOf = (row) => answer.sizes.get(fromTarget(row.policies.request_size_limit.from, 'route', row))
+  const sized = (row, max) =>
+    `${max ? `Bodies over ${sizeText(max)} are refused` : 'Request bodies are limited'} (from the ${row.policies.request_size_limit.from})`
 </script>
 
 <h1 bind:this={heading} tabindex="-1" class="mb-4 text-2xl font-semibold tracking-tight outline-none">Routes</h1>
@@ -146,6 +164,13 @@
                     <span class="inline-flex font-sans" title="Restricted by client address (from the {r.policies.ip_restriction.from})">
                       <Tag tone="idle"><span aria-hidden="true">IP</span></Tag>
                       <span class="sr-only">, restricted by client address (from the {r.policies.ip_restriction.from})</span>
+                    </span>
+                  {/if}
+                  {#if r.policies?.request_size_limit}
+                    {@const max = sizeOf(r)}
+                    <span class="inline-flex font-sans" title={sized(r, max)}>
+                      <Tag tone="idle"><span aria-hidden="true">{max ? `≤${sizeText(max)}` : 'size'}</span></Tag>
+                      <span class="sr-only">, {max ? `bodies over ${sizeText(max)} are refused` : 'request bodies are limited'} (from the {r.policies.request_size_limit.from})</span>
                     </span>
                   {/if}
                 </span>
