@@ -54,6 +54,17 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Upgrade order:** a data plane older than this release cannot read a configuration that has
     either policy, and keeps serving its last one, so upgrade data planes first.
   - The console's form for them follows.
+- **Security:** an `Upgrade` offer other than `websocket` no longer reaches the upstream
+  (#277).
+  - **The hole:** `Upgrade: h2c` sent to an upstream that speaks h2c got a 101, and the rest of
+    the connection became a tunnel. Every HTTP/2 request on it reached the upstream on any path,
+    past the route match and every policy: API keys, JWTs, IP restrictions, body size limits and
+    rate limits. One public route was enough to reach the guarded ones.
+  - **Now:** the data plane drops `Upgrade` unless it is exactly `websocket`, and always drops
+    `HTTP2-Settings`, so the request is served as plain HTTP/1.1. Kong does the same.
+  - **Clients:** WebSocket is unchanged. `curl --http2` on an `http://` URL falls back to
+    HTTP/1.1. Other upgrades, such as `TLS/1.0` or `spdy/3.1`, are no longer passed through
+    either.
 - The console sets a body size limit (#278) on the workspace (on the Services page), on a service
   or on a route.
   - **Form:** a whole number and a unit, bytes, KiB, MiB or GiB, applied on its own like the IP
