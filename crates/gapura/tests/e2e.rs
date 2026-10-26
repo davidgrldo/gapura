@@ -2285,3 +2285,186 @@ async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     )
     .await;
 }
+
+/// An HTTP/1 head read off `sock` a byte at a time, lowercased. Unlike `read_head`, nothing after
+/// it is read: what the other side sends straight after a 101 stays on the socket, for HTTP/2.
+async fn read_head_unbuffered(sock: &mut tokio::net::TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && sock.read(&mut byte).await.unwrap() == 1 {
+        head.push(byte[0]);
+    }
+    String::from_utf8_lossy(&head).to_ascii_lowercase()
+}
+
+/// An upstream that takes every upgrade it is offered: a 101, then HTTP/2 for `h2c`, as an h2c
+/// server does, or an echo of the bytes for `websocket`. Anything else is answered over HTTP/1.1
+/// with the `Upgrade` it arrived with, `-` for none. The list is the path of every request it
+/// served over HTTP/2.
+async fn spawn_upgrading_upstream() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&served);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let served = Arc::clone(&log);
+            tokio::spawn(async move {
+                let head = read_head_unbuffered(&mut sock).await;
+                let upgrade = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("upgrade:"))
+                    .map(|v| v.trim().to_string());
+                let switch = |to: &str| {
+                    format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: {to}\r\n\r\n")
+                };
+                match upgrade.as_deref() {
+                    Some("h2c") => {
+                        sock.write_all(switch("h2c").as_bytes()).await.unwrap();
+                        let mut h2 = h2::server::handshake(sock).await.unwrap();
+                        while let Some(Ok((req, mut respond))) = h2.accept().await {
+                            let path = req.uri().path().to_string();
+                            served.lock().unwrap().push(path.clone());
+                            let mut body = respond
+                                .send_response(http::Response::new(()), false)
+                                .unwrap();
+                            body.send_data(path.into(), true).unwrap();
+                        }
+                    }
+                    Some("websocket") => {
+                        sock.write_all(switch("websocket").as_bytes())
+                            .await
+                            .unwrap();
+                        let (mut from, mut to) = sock.split();
+                        let _ = tokio::io::copy(&mut from, &mut to).await;
+                    }
+                    other => {
+                        let body = format!("upgrade: {}", other.unwrap_or("-"));
+                        let _ = sock
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+    (addr, served)
+}
+
+/// `/open` for anyone, `/private` behind key_auth, both on `upstream`.
+fn open_and_private(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{KeyAuthPolicy, PathMatch, Plugin, Protocol};
+    use gapura_core::store::{StorePlugin, StoreRoute, StoreService, StoreSnapshot};
+    let route = |name: &str| StoreRoute {
+        workspace: String::new(),
+        name: name.into(),
+        service: "upgrading".into(),
+        hosts: vec![],
+        paths: vec![PathMatch::Prefix(format!("/{name}"))],
+        methods: vec![],
+        headers: vec![],
+        strip_path: false,
+        priority: 0,
+    };
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "upgrading".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![route("open"), route("private")],
+        plugins: vec![StorePlugin {
+            workspace: String::new(),
+            route: Some("private".into()),
+            service: None,
+            plugin: Plugin::KeyAuth(KeyAuthPolicy::default()),
+        }],
+        ..StoreSnapshot::default()
+    }
+}
+
+/// `Upgrade: h2c` is not a way past the route policies. An h2c upstream answers it with a 101
+/// and speaks HTTP/2 from then on, and every request on that tunnel reaches it on any path,
+/// matched and checked by nothing: here `/private` without a key, after asking `/open` to
+/// upgrade. So the upstream never hears the offer, and the request is served as HTTP/1.1.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_h2c_upgrade_is_not_a_tunnel_past_the_policies() {
+    let (upstream, tunnelled) = spawn_upgrading_upstream().await;
+    let gw = start_store_gateway(open_and_private(upstream)).await;
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+        .await
+        .unwrap();
+    sock.write_all(
+        b"GET /open HTTP/1.1\r\nHost: echo.test\r\nConnection: Upgrade, HTTP2-Settings\r\n\
+          Upgrade: h2c\r\nHTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let head = read_head_unbuffered(&mut sock).await;
+    if head.starts_with("http/1.1 101") {
+        let (h2, conn) = h2::client::handshake(sock).await.unwrap();
+        tokio::spawn(conn);
+        let mut h2 = h2.ready().await.unwrap();
+        let req = http::Request::get("http://echo.test/private")
+            .body(())
+            .unwrap();
+        let (resp, _) = h2.send_request(req, true).unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), resp)
+            .await
+            .unwrap()
+            .unwrap()
+            .status();
+        panic!(
+            "the 101 made a tunnel: /private answered {status} without a key, and the upstream \
+             served {:?}",
+            tunnelled.lock().unwrap()
+        );
+    }
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    let len: usize = head
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .expect("a content-length")
+        .trim()
+        .parse()
+        .unwrap();
+    let mut body = vec![0; len];
+    sock.read_exact(&mut body).await.unwrap();
+    assert_eq!(body, b"upgrade: -", "the upstream heard the offer");
+}
+
+/// WebSocket is the upgrade the gateway keeps: the route's policies judged the handshake, and
+/// what follows is that one conversation, never another request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_websocket_upgrade_still_tunnels() {
+    let (upstream, _) = spawn_upgrading_upstream().await;
+    let gw = start_store_gateway(open_and_private(upstream)).await;
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+        .await
+        .unwrap();
+    sock.write_all(
+        b"GET /open HTTP/1.1\r\nHost: echo.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+          Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let head = read_head_unbuffered(&mut sock).await;
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+    sock.write_all(b"ping").await.unwrap();
+    let mut echoed = [0u8; 4];
+    sock.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+}
