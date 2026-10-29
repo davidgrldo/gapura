@@ -14,6 +14,7 @@ use crate::config::{Config, Plugin};
 /// data plane predating it would misread rather than refuse. A test fails while a kind is
 /// missing here; a field has no such check, which is why [`Config`] says when one needs a name.
 pub const FEATURES: &[&str] = &[
+    "cors",
     "ip_restriction",
     "jwks_uri",
     "jwt",
@@ -69,9 +70,9 @@ pub fn missing(needs: &BTreeSet<&'static str>, has: Option<&[String]>) -> Vec<St
 mod tests {
     use super::*;
     use crate::config::{
-        Filters, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, ListenerConfig, Protocol,
-        RequestSizeLimitPolicy, RequestTransformerPolicy, ResponseTransformerPolicy, RouteRule,
-        Timeouts,
+        CorsPolicy, Filters, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, ListenerConfig,
+        Protocol, RequestSizeLimitPolicy, RequestTransformerPolicy, ResponseTransformerPolicy,
+        RouteRule, Timeouts,
     };
 
     /// One policy of every kind. The `match` is exhaustive so that a new kind does not compile
@@ -85,6 +86,7 @@ mod tests {
             Plugin::RequestSizeLimit(RequestSizeLimitPolicy { max_bytes: 1 }),
             Plugin::RequestTransformer(RequestTransformerPolicy::default()),
             Plugin::ResponseTransformer(ResponseTransformerPolicy::default()),
+            Plugin::Cors(CorsPolicy::default()),
         ];
         for plugin in &all {
             match plugin {
@@ -93,7 +95,8 @@ mod tests {
                 | Plugin::IpRestriction(_)
                 | Plugin::RequestSizeLimit(_)
                 | Plugin::RequestTransformer(_)
-                | Plugin::ResponseTransformer(_) => {}
+                | Plugin::ResponseTransformer(_)
+                | Plugin::Cors(_) => {}
             }
         }
         all
@@ -170,6 +173,7 @@ mod tests {
         assert_eq!(
             missing(&needs, None),
             [
+                "cors",
                 "ip_restriction",
                 "request_size_limit",
                 "request_transformer",
