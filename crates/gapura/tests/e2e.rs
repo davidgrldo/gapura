@@ -162,6 +162,101 @@ fn url(gw: &Gateway, host: &str, path: &str) -> String {
     format!("http://{host}:{}{path}", gw.http)
 }
 
+/// One POST a stand-in collector received.
+#[derive(Clone)]
+struct Posted {
+    path: String,
+    headers: axum::http::HeaderMap,
+    body: Value,
+    /// Whether the collector answered it 500.
+    refused: bool,
+}
+
+/// A stand-in log and trace collector: it keeps every POST and answers the first `refuse_first`
+/// of them 500, the rest 200.
+async fn spawn_collector(refuse_first: usize) -> (SocketAddr, Arc<Mutex<Vec<Posted>>>) {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let posted: Arc<Mutex<Vec<Posted>>> = Arc::default();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let keep = Arc::clone(&posted);
+    let app = Router::new().fallback(any(move |req: Request| {
+        let (keep, sent) = (Arc::clone(&keep), Arc::clone(&sent));
+        async move {
+            let path = req.uri().path().to_string();
+            let headers = req.headers().clone();
+            let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+            let refused = sent.fetch_add(1, SeqCst) < refuse_first;
+            keep.lock().unwrap().push(Posted {
+                path,
+                headers,
+                body,
+                refused,
+            });
+            if refused {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                axum::http::StatusCode::OK
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, posted)
+}
+
+/// What the collector took at `path`: every record of every POST it answered 200, an access-log
+/// line for `/logs` and an OTLP span for anything else.
+fn delivered(posted: &[Posted], path: &str) -> Vec<Value> {
+    posted
+        .iter()
+        .filter(|p| p.path == path && !p.refused)
+        .flat_map(|p| match path {
+            "/logs" => p.body.as_array().cloned().unwrap_or_default(),
+            _ => p.body["resourceSpans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|rs| rs["scopeSpans"].as_array().into_iter().flatten())
+                .flat_map(|ss| ss["spans"].as_array().cloned().unwrap_or_default())
+                .collect(),
+        })
+        .collect()
+}
+
+/// A span attribute's OTLP value, `{"stringValue": ...}` or `{"intValue": ...}`; null if absent.
+fn span_attr(span: &Value, key: &str) -> Value {
+    span["attributes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["key"] == key)
+        .map(|a| a["value"].clone())
+        .unwrap_or(Value::Null)
+}
+
+/// Wait up to 10 s for `done` to hold over what the collector got: a batch waits up to a second
+/// to fill, and a refused one is sent again after a short delay.
+async fn collected(posted: &Arc<Mutex<Vec<Posted>>>, done: impl Fn(&[Posted]) -> bool) {
+    for _ in 0..200 {
+        if done(&posted.lock().unwrap()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let got: Vec<(String, bool, Value)> = posted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| (p.path.clone(), p.refused, p.body.clone()))
+        .collect();
+    panic!("the collector never got what the test waits for; it got {got:?}");
+}
+
 /// One Gateway on the HTTP port, one HTTPRoute with a rule per scenario, and three Services.
 fn config(http_port: u16, upstream: SocketAddr, dead: SocketAddr, reuse: SocketAddr) -> String {
     format!(
@@ -640,6 +735,180 @@ async fn request_id_and_traceparent_pass_through() {
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["headers"]["x-request-id"], "abc-123");
     assert_eq!(body["headers"]["traceparent"], tp);
+}
+
+/// With both sinks on: every request's access-log line reaches the http_log endpoint with the
+/// headers file's headers, the same line as stdout, and a batch the collector refuses is sent
+/// again; a span keeps the caller's trace, names the caller's span as its parent, and is the
+/// parent the upstream is told of; a trace that starts here has a span with no parent; a caller
+/// that did not sample is logged but has no span; and the caller's credential is in nothing
+/// exported.
+#[tokio::test(flavor = "multi_thread")]
+async fn access_logs_and_spans_reach_their_collectors() {
+    let (collector, posted) = spawn_collector(1).await;
+    let dir = tempfile::tempdir().unwrap();
+    let headers = dir.path().join("headers");
+    std::fs::write(
+        &headers,
+        "# the collector's token\nAuthorization: Bearer sink-token\n",
+    )
+    .unwrap();
+    let logs = format!("http://{collector}/logs");
+    let traces = format!("http://{collector}/v1/traces");
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &[
+            "--http-log-url",
+            logs.as_str(),
+            "--http-log-headers-file",
+            headers.to_str().unwrap(),
+            "--otlp-traces-url",
+            traces.as_str(),
+        ],
+    )
+    .await;
+    let c = client(&gw);
+
+    let r = c
+        .get(url(&gw, "echo.test", "/api/traced"))
+        .header("x-request-id", "traced")
+        .header(
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        )
+        .header("authorization", "Bearer caller-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let echoed: Value = r.json().await.unwrap();
+    let upstream_tp = echoed["headers"]["traceparent"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let upstream_tp: Vec<&str> = upstream_tp.split('-').collect();
+    assert_eq!(
+        upstream_tp[1], "0af7651916cd43dd8448eb211c80319c",
+        "the caller's trace"
+    );
+    assert_ne!(
+        upstream_tp[2], "b7ad6b7169203331",
+        "the upstream's parent is the gateway's span"
+    );
+    assert_eq!(upstream_tp[3], "01");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/api/rooted"))
+        .header("x-request-id", "rooted")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = c
+        .get(url(&gw, "echo.test", "/api/unsampled"))
+        .header("x-request-id", "unsampled")
+        .header(
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-00",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let stdout_traced = gw.access_log("traced").await;
+    let rooted = gw.access_log("rooted").await["trace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    gw.access_log("unsampled").await;
+
+    let traces_wanted = ["0af7651916cd43dd8448eb211c80319c", rooted.as_str()];
+    collected(&posted, |p| {
+        let lines = delivered(p, "/logs");
+        let spans = delivered(p, "/v1/traces");
+        ["traced", "rooted", "unsampled"]
+            .iter()
+            .all(|id| lines.iter().any(|l| l["request_id"] == *id))
+            && traces_wanted
+                .iter()
+                .all(|t| spans.iter().any(|s| s["traceId"] == *t))
+    })
+    .await;
+    let posted = posted.lock().unwrap().clone();
+
+    let refused: Vec<&Posted> = posted.iter().filter(|p| p.refused).collect();
+    assert_eq!(refused.len(), 1);
+    assert!(
+        posted
+            .iter()
+            .any(|p| !p.refused && p.path == refused[0].path && p.body == refused[0].body),
+        "the refused batch was sent again, the same records"
+    );
+    for p in &posted {
+        assert_eq!(p.headers["content-type"], "application/json");
+        if p.path == "/logs" {
+            assert_eq!(p.headers["authorization"], "Bearer sink-token");
+        } else {
+            assert!(
+                p.headers.get("authorization").is_none(),
+                "only the http_log sink's file"
+            );
+        }
+    }
+
+    let lines = delivered(&posted, "/logs");
+    let traced = lines.iter().find(|l| l["request_id"] == "traced").unwrap();
+    assert_eq!(
+        *traced, stdout_traced,
+        "the exported line is the stdout line"
+    );
+    assert!(traced["consumer"].is_null());
+
+    let spans = delivered(&posted, "/v1/traces");
+    let span = spans
+        .iter()
+        .find(|s| s["traceId"] == "0af7651916cd43dd8448eb211c80319c")
+        .unwrap();
+    assert_eq!(span["parentSpanId"], "b7ad6b7169203331");
+    assert_eq!(
+        span["spanId"], upstream_tp[2],
+        "the span the upstream was told is its parent"
+    );
+    assert_eq!(span["name"], "GET apps/echo");
+    assert_eq!(
+        span_attr(span, "http.response.status_code"),
+        json!({"intValue": "200"})
+    );
+    assert_eq!(
+        span_attr(span, "http.route"),
+        json!({"stringValue": "apps/echo"})
+    );
+    assert_eq!(
+        span_attr(span, "gapura.service"),
+        json!({"stringValue": "apps/echo:80"})
+    );
+    let root = spans
+        .iter()
+        .find(|s| s["traceId"] == rooted.as_str())
+        .unwrap();
+    assert!(
+        root.get("parentSpanId").is_none(),
+        "a trace that starts here has no parent"
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|s| s["traceId"] != "11111111111111111111111111111111"),
+        "a caller that did not sample has no span"
+    );
+
+    let everything =
+        serde_json::to_string(&posted.iter().map(|p| &p.body).collect::<Vec<_>>()).unwrap();
+    assert!(
+        !everything.contains("caller-secret"),
+        "a caller credential was exported"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
