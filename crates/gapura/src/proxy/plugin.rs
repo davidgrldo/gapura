@@ -702,6 +702,7 @@ mod tests {
             trusted_client_headers: vec![],
             limiter: Default::default(),
             access_log_query: false,
+            sinks: Default::default(),
         }
     }
 
