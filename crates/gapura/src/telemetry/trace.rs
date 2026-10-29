@@ -31,7 +31,9 @@ impl SpanCtx {
                     trace_id: parts[1].to_ascii_lowercase(),
                     span_id,
                     parent: Some(parts[2].to_ascii_lowercase()),
-                    flags: u8::from_str_radix(parts[3], 16).unwrap_or(0),
+                    // W3C defines only `sampled` (0x01) and `random-trace-id` (0x02); vendors must
+                    // set the other bits to zero.
+                    flags: u8::from_str_radix(parts[3], 16).unwrap_or(0) & 0x03,
                 }
             }
             None => SpanCtx {
@@ -59,9 +61,20 @@ impl SpanCtx {
     pub fn finish(&self, entry: &AccessLog<'_>, service: Option<&str>, elapsed: Duration) -> Span {
         let end_ns = now_nanos();
         let route = Some(entry.route).filter(|r| *r != "-");
+        // OTel's known methods; any other is `_OTHER` and names its span `HTTP`, so that a client
+        // cannot mint span names.
+        const KNOWN: [&str; 9] = [
+            "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
+        ];
+        let method = if KNOWN.contains(&entry.method) {
+            entry.method
+        } else {
+            "_OTHER"
+        };
+        let verb = if method == "_OTHER" { "HTTP" } else { method };
         let text = |value: &str| json!({ "stringValue": value });
         let mut attributes = vec![
-            ("http.request.method", text(entry.method)),
+            ("http.request.method", text(method)),
             ("url.path", text(entry.path)),
         ];
         if entry.status != 0 {
@@ -91,8 +104,8 @@ impl SpanCtx {
             span_id: self.span_id.clone(),
             parent: self.parent.clone(),
             name: match route {
-                Some(route) => format!("{} {route}", entry.method),
-                None => entry.method.to_string(),
+                Some(route) => format!("{verb} {route}"),
+                None => verb.to_string(),
             },
             start_ns: end_ns.saturating_sub(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)),
             end_ns,
@@ -117,6 +130,16 @@ pub struct Span {
 }
 
 impl Span {
+    /// Roughly the bytes this span holds: its strings, which are what can grow.
+    pub fn weight(&self) -> usize {
+        let attributes: usize = self
+            .attributes
+            .iter()
+            .map(|(key, value)| key.len() + value["stringValue"].as_str().map_or(20, str::len))
+            .sum();
+        64 + self.name.len() + attributes
+    }
+
     /// The OTLP JSON encoding: ids in hex, times in nanoseconds as strings, kind 2 (SERVER).
     fn to_otlp(&self) -> Value {
         let attributes: Vec<Value> = self
@@ -201,6 +224,17 @@ mod tests {
             "an unsampled caller stays unsampled at ratio 1"
         );
         assert!(unsampled.traceparent().ends_with("-00"));
+
+        let upper = SpanCtx::start(
+            Some("00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-09"),
+            0.0,
+        );
+        assert_eq!(upper.parent.as_deref(), Some("b7ad6b7169203331"));
+        assert_eq!(
+            upper.traceparent(),
+            format!("00-0af7651916cd43dd8448eb211c80319c-{}-01", upper.span_id),
+            "lowercased, and the reserved flag bits cleared"
+        );
     }
 
     #[test]
@@ -350,5 +384,52 @@ mod tests {
         ] {
             assert!(!keys.contains(&absent), "{absent} in {keys:?}");
         }
+    }
+
+    #[test]
+    fn a_request_with_no_answer_has_no_status_code_and_is_not_an_error() {
+        let e = AccessLog {
+            status: 0,
+            host: "",
+            ..entry()
+        };
+        let s = SpanCtx::start(None, 1.0)
+            .finish(&e, None, Duration::ZERO)
+            .to_otlp();
+        assert_eq!(attr(&s, "http.response.status_code"), None);
+        assert_eq!(attr(&s, "server.address"), None);
+        assert!(s.get("status").is_none());
+    }
+
+    #[test]
+    fn an_unknown_method_is_other_and_mints_no_span_name() {
+        let e = AccessLog {
+            method: "BREW",
+            ..entry()
+        };
+        let s = SpanCtx::start(None, 1.0)
+            .finish(&e, None, Duration::ZERO)
+            .to_otlp();
+        assert_eq!(s["name"], "HTTP apps/echo");
+        assert_eq!(
+            attr(&s, "http.request.method"),
+            Some(json!({"stringValue": "_OTHER"}))
+        );
+    }
+
+    #[test]
+    fn a_span_weighs_about_what_its_strings_hold() {
+        let small = SpanCtx::start(None, 1.0)
+            .finish(&entry(), None, Duration::ZERO)
+            .weight();
+        let long_path = "/".repeat(10_000);
+        let e = AccessLog {
+            path: &long_path,
+            ..entry()
+        };
+        let big = SpanCtx::start(None, 1.0)
+            .finish(&e, None, Duration::ZERO)
+            .weight();
+        assert!(big >= small + 9_000, "{small} then {big}");
     }
 }
