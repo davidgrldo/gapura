@@ -1848,7 +1848,9 @@ async fn every_forwarded_for_line_is_walked_behind_a_trusted_proxy() {
 }
 
 /// #161: matched on the first `Host` line, a backend could serve the second. Two lines are a
-/// malformed request and are refused before any route is consulted.
+/// malformed request and are refused before any route is consulted. Since Pingora 0.9 Pingora
+/// itself refuses them as it reads the request, before any Gapura hook runs, so the 400 is
+/// Pingora's: no `X-Gapura-Error`, no access log line.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_host_lines_are_refused_as_400() {
     let (gw, _c) = setup().await;
@@ -1860,7 +1862,6 @@ async fn two_host_lines_are_refused_as_400() {
             "GET /api/x HTTP/1.1\r\n",
             "Host: echo.test\r\n",
             "Host: other.test\r\n",
-            "X-Request-Id: two-hosts\r\n",
             "Connection: close\r\n",
             "\r\n",
         )
@@ -1873,16 +1874,58 @@ async fn two_host_lines_are_refused_as_400() {
     let response = String::from_utf8_lossy(&response);
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
     assert!(
-        response
-            .to_ascii_lowercase()
-            .contains("x-gapura-error: invalid_request_target"),
-        "{response}"
+        !response.contains("\"path\""),
+        "never forwarded: {response}"
     );
-    let line = gw.access_log("two-hosts").await;
+}
+
+/// RUSTSEC-2026-0390: a header the client names in `Connection` is hop-by-hop and stops here, so
+/// an HTTP/1 hop behind the gateway cannot be told to strip one; naming a header the gateway
+/// sets for the upstream is refused as 400, not taken for a client that went away.
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_nominated_headers_stop_at_the_gateway() {
+    let (gw, _c) = setup().await;
+    let exchange = |request: &'static str| async move {
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+            .await
+            .unwrap();
+        sock.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        sock.read_to_end(&mut response).await.unwrap();
+        String::from_utf8_lossy(&response).to_ascii_lowercase()
+    };
+
+    let forwarded = exchange(concat!(
+        "GET /api/x HTTP/1.1\r\n",
+        "Host: echo.test\r\n",
+        "Connection: close, x-probe\r\n",
+        "X-Probe: 1\r\n",
+        "\r\n",
+    ))
+    .await;
+    assert!(forwarded.starts_with("http/1.1 200"), "{forwarded}");
+    assert!(!forwarded.contains("\"x-probe\""), "{forwarded}");
+    assert!(
+        forwarded.contains("\"x-forwarded-for\":\"127.0.0.1\""),
+        "{forwarded}"
+    );
+
+    let refused = exchange(concat!(
+        "GET /api/x HTTP/1.1\r\n",
+        "Host: echo.test\r\n",
+        "Connection: close, X-Forwarded-For\r\n",
+        "X-Request-Id: nominates-xff\r\n",
+        "\r\n",
+    ))
+    .await;
+    assert!(refused.starts_with("http/1.1 400"), "{refused}");
+    assert!(
+        refused.contains("x-gapura-error: invalid_request_target"),
+        "{refused}"
+    );
+    let line = gw.access_log("nominates-xff").await;
     assert_eq!(line["status"], 400, "{line}");
-    assert_eq!(line["error_key"], "INVALID_REQUEST_TARGET", "{line}");
-    assert_eq!(line["route"], "-", "no route is consulted: {line}");
-    assert!(line["upstream"].is_null(), "{line}");
+    assert_eq!(line["client_abort"], false, "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
