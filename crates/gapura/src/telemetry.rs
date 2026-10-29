@@ -339,6 +339,12 @@ const SECRET_PARAMS: &[&str] = &[
     "signature",
     "sig",
     "code",
+    // Presigned URLs: the signature and credential of a link that grants access by itself.
+    "x-amz-security-token",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-goog-signature",
+    "x-goog-credential",
 ];
 
 /// `query` with the value of every parameter named in [`SECRET_PARAMS`] or `also` written
@@ -584,6 +590,11 @@ mod tests {
             redact_query("X-Api-Key=k", &[]),
             "X-Api-Key=<redacted>",
             "key_auth's default header, even on a request no rule was attributed"
+        );
+        assert_eq!(
+            redact_query("X-Amz-Signature=abc&X-Amz-Expires=60", &[]),
+            "X-Amz-Signature=<redacted>&X-Amz-Expires=60",
+            "a presigned URL's signature is a credential, its expiry is not"
         );
         assert_eq!(
             redact_query("key&sig=&page=2", &[]),

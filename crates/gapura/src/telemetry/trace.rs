@@ -56,9 +56,15 @@ impl SpanCtx {
         format!("00-{}-{}-{:02x}", self.trace_id, self.span_id, self.flags)
     }
 
-    /// The span of the request `entry` records, ending now after `elapsed`. `service` is the
-    /// cluster the request was proxied to, if it was.
-    pub fn finish(&self, entry: &AccessLog<'_>, service: Option<&str>, elapsed: Duration) -> Span {
+    /// The span of the request `entry` records, ending now after `elapsed`. `scheme` is the one
+    /// the request arrived on, and `service` the cluster it was proxied to, if it was.
+    pub fn finish(
+        &self,
+        entry: &AccessLog<'_>,
+        scheme: &str,
+        service: Option<&str>,
+        elapsed: Duration,
+    ) -> Span {
         let end_ns = now_nanos();
         let route = Some(entry.route).filter(|r| *r != "-");
         // OTel's known methods; any other is `_OTHER` and names its span `HTTP`, so that a client
@@ -72,21 +78,19 @@ impl SpanCtx {
             "_OTHER"
         };
         let verb = if method == "_OTHER" { "HTTP" } else { method };
-        let text = |value: &str| json!({ "stringValue": value });
-        let mut attributes = vec![
-            ("http.request.method", text(method)),
-            ("url.path", text(entry.path)),
-        ];
+        let text = |value: &str| AttrValue::Text(value.to_string());
+        let mut attributes = Vec::with_capacity(11);
+        attributes.push(("http.request.method", text(method)));
+        attributes.push(("url.scheme", text(scheme)));
+        attributes.push(("url.path", text(entry.path)));
         if entry.status != 0 {
-            attributes.push((
-                "http.response.status_code",
-                json!({ "intValue": entry.status.to_string() }),
-            ));
+            attributes.push(("http.response.status_code", AttrValue::Int(entry.status)));
         }
         for (key, value) in [
             ("server.address", Some(entry.host).filter(|h| !h.is_empty())),
             ("client.address", entry.client_ip),
-            ("http.route", route),
+            // The route's name (`apps/echo`), not the path template OTel's `http.route` means.
+            ("gapura.route", route),
             ("gapura.service", service),
             ("gapura.consumer", entry.consumer),
             ("gapura.error_key", entry.error_key),
@@ -115,6 +119,13 @@ impl SpanCtx {
     }
 }
 
+/// An attribute's value until the span is encoded: plain data, so a span costs what its strings
+/// cost and its weight can say so.
+enum AttrValue {
+    Text(String),
+    Int(u16),
+}
+
 /// One finished span, as it waits in the export queue.
 pub struct Span {
     trace_id: String,
@@ -125,19 +136,27 @@ pub struct Span {
     end_ns: u64,
     /// A 5xx answer: OTel marks a server span an error for those, and only those.
     error: bool,
-    /// Keys and their OTLP `AnyValue`s.
-    attributes: Vec<(&'static str, Value)>,
+    attributes: Vec<(&'static str, AttrValue)>,
 }
 
 impl Span {
-    /// Roughly the bytes this span holds: its strings, which are what can grow.
+    /// The bytes this span holds: itself, its attribute slots, and every string's buffer.
     pub fn weight(&self) -> usize {
-        let attributes: usize = self
+        let texts: usize = self
             .attributes
             .iter()
-            .map(|(key, value)| key.len() + value["stringValue"].as_str().map_or(20, str::len))
+            .map(|(_, value)| match value {
+                AttrValue::Text(s) => s.capacity(),
+                AttrValue::Int(_) => 0,
+            })
             .sum();
-        64 + self.name.len() + attributes
+        std::mem::size_of::<Span>()
+            + self.attributes.capacity() * std::mem::size_of::<(&str, AttrValue)>()
+            + self.trace_id.capacity()
+            + self.span_id.capacity()
+            + self.parent.as_ref().map_or(0, String::capacity)
+            + self.name.capacity()
+            + texts
     }
 
     /// The OTLP JSON encoding: ids in hex, times in nanoseconds as strings, kind 2 (SERVER).
@@ -145,7 +164,13 @@ impl Span {
         let attributes: Vec<Value> = self
             .attributes
             .iter()
-            .map(|(key, value)| json!({ "key": key, "value": value }))
+            .map(|(key, value)| {
+                let value = match value {
+                    AttrValue::Text(s) => json!({ "stringValue": s }),
+                    AttrValue::Int(n) => json!({ "intValue": n.to_string() }),
+                };
+                json!({ "key": key, "value": value })
+            })
             .collect();
         let mut span = json!({
             "traceId": self.trace_id,
@@ -292,7 +317,12 @@ mod tests {
     #[test]
     fn a_span_carries_the_request_and_encodes_as_otlp_json() {
         let ctx = SpanCtx::start(Some(INCOMING), 1.0);
-        let span = ctx.finish(&entry(), Some("apps/echo:80"), Duration::from_millis(3));
+        let span = ctx.finish(
+            &entry(),
+            "https",
+            Some("apps/echo:80"),
+            Duration::from_millis(3),
+        );
         assert_eq!(span.end_ns - span.start_ns, 3_000_000);
         let body: Value = serde_json::from_slice(&encode("pod-a", &[span])).unwrap();
         let rs = &body["resourceSpans"][0];
@@ -329,9 +359,15 @@ mod tests {
             attr(s, "client.address"),
             Some(json!({"stringValue": "10.0.0.9"}))
         );
+        assert_eq!(attr(s, "url.scheme"), Some(json!({"stringValue": "https"})));
+        assert_eq!(
+            attr(s, "gapura.route"),
+            Some(json!({"stringValue": "apps/echo"}))
+        );
         assert_eq!(
             attr(s, "http.route"),
-            Some(json!({"stringValue": "apps/echo"}))
+            None,
+            "OTel's http.route is a path template, which a route's name is not"
         );
         assert_eq!(
             attr(s, "gapura.service"),
@@ -364,7 +400,7 @@ mod tests {
             ..entry()
         };
         let s = SpanCtx::start(None, 1.0)
-            .finish(&e, None, Duration::ZERO)
+            .finish(&e, "http", None, Duration::ZERO)
             .to_otlp();
         assert_eq!(s["name"], "GET", "no route, so the method alone");
         assert!(s.get("parentSpanId").is_none(), "a trace that starts here");
@@ -376,7 +412,7 @@ mod tests {
             .map(|a| a["key"].as_str().unwrap())
             .collect();
         for absent in [
-            "http.route",
+            "gapura.route",
             "gapura.service",
             "gapura.consumer",
             "gapura.listener",
@@ -394,7 +430,7 @@ mod tests {
             ..entry()
         };
         let s = SpanCtx::start(None, 1.0)
-            .finish(&e, None, Duration::ZERO)
+            .finish(&e, "http", None, Duration::ZERO)
             .to_otlp();
         assert_eq!(attr(&s, "http.response.status_code"), None);
         assert_eq!(attr(&s, "server.address"), None);
@@ -408,7 +444,7 @@ mod tests {
             ..entry()
         };
         let s = SpanCtx::start(None, 1.0)
-            .finish(&e, None, Duration::ZERO)
+            .finish(&e, "http", None, Duration::ZERO)
             .to_otlp();
         assert_eq!(s["name"], "HTTP apps/echo");
         assert_eq!(
@@ -420,7 +456,7 @@ mod tests {
     #[test]
     fn a_span_weighs_about_what_its_strings_hold() {
         let small = SpanCtx::start(None, 1.0)
-            .finish(&entry(), None, Duration::ZERO)
+            .finish(&entry(), "http", None, Duration::ZERO)
             .weight();
         let long_path = "/".repeat(10_000);
         let e = AccessLog {
@@ -428,8 +464,12 @@ mod tests {
             ..entry()
         };
         let big = SpanCtx::start(None, 1.0)
-            .finish(&e, None, Duration::ZERO)
+            .finish(&e, "http", None, Duration::ZERO)
             .weight();
         assert!(big >= small + 9_000, "{small} then {big}");
+        assert!(
+            small >= 400,
+            "the span itself and its attribute slots count, not only its strings: {small}"
+        );
     }
 }

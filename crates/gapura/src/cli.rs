@@ -205,7 +205,10 @@ impl Args {
                 let ok = reqwest::Url::parse(url)
                     .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
                 if !ok {
-                    return Err(format!("{flag} {url} is not an http:// or https:// URL"));
+                    // Not echoed: a sink's URL may carry `user:token@`.
+                    return Err(format!(
+                        "{flag} is not an http:// or https:// URL with a host"
+                    ));
                 }
             }
         }
@@ -578,6 +581,14 @@ mod tests {
         ] {
             assert!(with(bad).unwrap().validate().is_err(), "{bad:?}");
         }
+        let err = with(&["--http-log-url", "ftp://user:t0ken@logs.example"])
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(
+            !err.contains("t0ken"),
+            "a rejected URL is not echoed: {err}"
+        );
     }
 
     #[test]

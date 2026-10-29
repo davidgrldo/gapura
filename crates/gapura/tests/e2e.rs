@@ -881,7 +881,7 @@ async fn access_logs_and_spans_reach_their_collectors() {
         json!({"intValue": "200"})
     );
     assert_eq!(
-        span_attr(span, "http.route"),
+        span_attr(span, "gapura.route"),
         json!({"stringValue": "apps/echo"})
     );
     assert_eq!(

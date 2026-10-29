@@ -48,7 +48,8 @@ pub struct Queue<T> {
     capacity: usize,
     max_bytes: usize,
     inner: Mutex<Inner<T>>,
-    /// Woken by every push, so the worker can wait for an entry without polling.
+    /// Woken by the push that gives the queue its first entry and by the one that fills a batch,
+    /// so the worker can wait for either without polling.
     ready: Notify,
     queue_full: IntCounter,
     send_failed: IntCounter,
@@ -101,10 +102,16 @@ impl<T> Queue<T> {
         }
         inner.items.push_back((item, bytes));
         inner.bytes += bytes;
-        if !inner.warned
-            && (inner.items.len() * 5 >= self.capacity * 4 || inner.bytes * 5 >= self.max_bytes * 4)
-        {
+        // Decided under the lock, said after it: no request thread waits on a log write.
+        let warn = !inner.warned
+            && (inner.items.len() * 5 >= self.capacity * 4
+                || inner.bytes * 5 >= self.max_bytes * 4);
+        if warn {
             inner.warned = true;
+        }
+        let len = inner.items.len();
+        drop(inner);
+        if warn {
             tracing::warn!(
                 sink = self.sink,
                 capacity = self.capacity,
@@ -112,8 +119,11 @@ impl<T> Queue<T> {
                 "export queue 80% full: the sink is not keeping up, and records will be dropped once it is full"
             );
         }
-        drop(inner);
-        self.ready.notify_one();
+        // The worker waits for the first entry and, while a batch fills, for a full one; any other
+        // push would only wake it to find the batch still filling.
+        if len == 1 || len == MAX_BATCH {
+            self.ready.notify_one();
+        }
     }
 
     fn len(&self) -> usize {
@@ -284,6 +294,28 @@ mod tests {
             "an entry over the whole budget is not queued"
         );
         assert_eq!(q.queue_full.get(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_the_first_entry_and_a_full_batch_wake_the_worker() {
+        /// Whether the worker would be woken now: a permit is waiting for it.
+        async fn woken(q: &Queue<usize>) -> bool {
+            tokio::time::timeout(Duration::from_millis(1), q.ready.notified())
+                .await
+                .is_ok()
+        }
+        let q = Queue::new("test_wake", CAPACITY, MAX_BYTES);
+        q.push(0, 1);
+        assert!(woken(&q).await, "the first entry wakes it");
+        for n in 1..MAX_BATCH - 1 {
+            q.push(n, 1);
+        }
+        assert!(
+            !woken(&q).await,
+            "an entry to a batch still filling does not"
+        );
+        q.push(MAX_BATCH - 1, 1);
+        assert!(woken(&q).await, "the entry that fills the batch does");
     }
 
     #[test]

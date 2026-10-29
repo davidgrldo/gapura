@@ -1293,12 +1293,14 @@ impl ProxyHttp for GapuraProxy {
         };
         let line = write_access_log(&entry);
         if let (Some(queue), Some(line)) = (&self.sinks.http_log, line) {
-            let bytes = line.len();
+            // serde_json's buffer grows by doubling, so the capacity is what the line holds.
+            let bytes = line.capacity();
             queue.push(line, bytes);
         }
         if let (Some(traces), Some(span)) = (&self.sinks.traces, &ctx.span) {
             if span.sampled() {
-                let span = span.finish(&entry, ctx.req.cluster(), ctx.started.elapsed());
+                let span =
+                    span.finish(&entry, ctx.scheme, ctx.req.cluster(), ctx.started.elapsed());
                 let bytes = span.weight();
                 traces.queue.push(span, bytes);
             }
