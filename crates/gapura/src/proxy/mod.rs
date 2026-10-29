@@ -1299,8 +1299,11 @@ impl ProxyHttp for GapuraProxy {
         }
         if let (Some(traces), Some(span)) = (&self.sinks.traces, &ctx.span) {
             if span.sampled() {
-                let span =
-                    span.finish(&entry, ctx.scheme, ctx.req.cluster(), ctx.started.elapsed());
+                // Off the connection rather than `ctx.scheme`, which only a matched listener sets:
+                // a request that matched nothing on a TLS port was still made over TLS.
+                let tls = session.digest().is_some_and(|d| d.ssl_digest.is_some());
+                let scheme = if tls { "https" } else { "http" };
+                let span = span.finish(&entry, scheme, ctx.req.cluster(), ctx.started.elapsed());
                 let bytes = span.weight();
                 traces.queue.push(span, bytes);
             }
