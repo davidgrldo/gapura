@@ -670,8 +670,8 @@ impl ProxyHttp for GapuraProxy {
             let incoming = header_str(req, "traceparent");
             ctx.traceparent = match &self.sinks.traces {
                 // With spans exported the gateway is a hop of the trace, and the upstream's parent
-                // is its span. Without, it passes the caller's on, so that no upstream span names
-                // a parent nobody exported.
+                // is its span. Without, a caller's valid traceparent goes on unchanged, so the
+                // upstream's parent is the caller's span rather than one of ours nobody exported.
                 Some(traces) => {
                     let span = SpanCtx::start(incoming, traces.ratio);
                     let tp = span.traceparent();
@@ -1241,8 +1241,6 @@ impl ProxyHttp for GapuraProxy {
             effective_client_ip(session, &self.trusted_proxies, &self.trusted_client_headers)
                 .map(|ip| ip.to_string());
         let user_agent = header_str(session.req_header(), "user-agent").map(str::to_string);
-        // Read off the raw URI, not the extracted path: extraction strips the query, and this
-        // field is the one place the deployment may ask to keep it.
         // The header a key_auth policy reads counts as a credential in the query too, whatever
         // the policy itself reads.
         let key_names: Vec<&str> = ctx.rule().map_or_else(Vec::new, |rule| {
@@ -1254,6 +1252,8 @@ impl ProxyHttp for GapuraProxy {
                 })
                 .collect()
         });
+        // Read off the raw URI, not the extracted path: extraction strips the query, and this
+        // field is the one place the deployment may ask to keep it.
         let query = self
             .access_log_query
             .then(|| session.req_header().uri.query())

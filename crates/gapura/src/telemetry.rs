@@ -327,6 +327,7 @@ const SECRET_PARAMS: &[&str] = &[
     "api_key",
     "apikey",
     "api-key",
+    "x-api-key",
     "key",
     "token",
     "access_token",
@@ -562,9 +563,14 @@ mod tests {
             "matched once decoded, every other byte kept"
         );
         assert_eq!(
-            redact_query("x-api-key=k&q=1", &["x-api-key"]),
-            "x-api-key=<redacted>&q=1",
+            redact_query("x-shop-key=k&q=1", &["x-shop-key"]),
+            "x-shop-key=<redacted>&q=1",
             "a key_auth header name counts too"
+        );
+        assert_eq!(
+            redact_query("X-Api-Key=k", &[]),
+            "X-Api-Key=<redacted>",
+            "key_auth's default header, even on a request no rule was attributed"
         );
         assert_eq!(
             redact_query("key&sig=&page=2", &[]),
