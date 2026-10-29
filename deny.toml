@@ -41,6 +41,17 @@ ignore = [
     # Revisit when jsonwebtoken and openidconnect move to elliptic-curve 0.14, or if anything here
     # ever signs with an EC key.
     { id = "RUSTSEC-2026-0387", reason = "we verify ECDSA with public keys and hold no EC private key" },
+    # zstd 0.13 and zstd-safe 7 have no fixed release, and pingora-header-serde 0.9.0 pins both
+    # (so does Pingora's main branch); pingora-core's own zstd is on the fixed 0.14.3 / 8.2.0.
+    # header-serde only compresses the response headers of pingora-cache's `CacheMeta`, and
+    # Gapura never enables Pingora's HTTP cache, so none of its zstd code runs. Nor does it reach
+    # the flawed calls if it ever did: it uses zstd for `zstd::dict` training and zstd-safe's
+    # bulk `CCtx::compress` / `DCtx::decompress` (with and without a dictionary), never a stream
+    # constructor's `with_context` (-0391) or `DCtx::decompress_stream` (-0403), and the
+    # `seekable` feature (-0398) is off. Revisit when pingora-header-serde moves to zstd 0.14.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 under pingora-header-serde: no stream with_context, and the HTTP cache is off" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 under pingora-header-serde: the seekable feature is off" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 under pingora-header-serde: bulk decompress only, and the HTTP cache is off" },
 ]
 
 [licenses]
@@ -60,7 +71,12 @@ allow = [
     "0BSD",
     "BSL-1.0",
 ]
-exceptions = []
+exceptions = [
+    # CC0 is a public-domain dedication. tiny-keccak only runs at build time, inside the
+    # const-random-macro that seeds ahash, whose compile-time-rng flurry turns on under
+    # pingora-core 0.9.
+    { allow = ["CC0-1.0"], crate = "tiny-keccak" },
+]
 
 [bans]
 # The graph has real duplicates today (openssl-probe 0.1/0.2, zstd 0.13/0.14, zstd-safe 7/8,
