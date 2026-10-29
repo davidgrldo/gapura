@@ -8,6 +8,47 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A `cors` policy tells browsers which other origins may call a route (#PR).
+  `PUT /api/workspaces/{ws}/policies/cors` takes `{"target", "config": {"origins", "methods",
+  "headers", "expose_headers", "credentials", "max_age", "preflight_continue"}}`, on the
+  workspace, a service or a route. The most specific one applies.
+  - **Shape:** `origins` is required, at most 100. `methods` defaults to `GET HEAD PUT PATCH POST
+    DELETE`, and is stored filled in. `headers` empty echoes what a preflight asks for in
+    `Access-Control-Request-Headers`; `headers` and `expose_headers` take at most 64 header
+    names each. `credentials` and `preflight_continue` default to false, and `max_age` is 0 to
+    86,400 seconds, unset by default.
+  - **Origins:** `https://app.example.com` exactly, `https://*.example.com` for exactly one label
+    under it (not `a.b.example.com`, nor `example.com` itself), with a port when it is not the
+    scheme's own, or `*` alone. Schemes are http and https; a path, `null`, a `*.` before a name
+    with no dot, and `*` together with `credentials: true` are refused, so the gateway never
+    tells a browser that any page may read a signed-in user's answers. Everything is stored
+    lowercase, without the scheme's own port, as a browser writes `Origin`.
+  - **Preflights first:** an `OPTIONS` with `Origin` and `Access-Control-Request-Method` is
+    answered before every other policy -- ip_restriction, key_auth and jwt included -- since a
+    browser sends one without credentials. An allowed origin gets 204 with the
+    `Access-Control-Allow-*` headers, `Access-Control-Max-Age` when set, and `Vary: Origin`; any
+    other gets 403 `CORS_ORIGIN_FORBIDDEN`, counted in
+    `gapura_policy_refused_total{policy="cors", reason="origin"}`. Neither reaches the upstream.
+    With `preflight_continue`, a preflight goes through the rest of the chain to the upstream
+    instead, and its answer keeps the methods, headers and max-age the upstream gives.
+  - **Every other answer:** an allowed origin gets `Access-Control-Allow-Origin`, and
+    `Access-Control-Allow-Credentials` and `Access-Control-Expose-Headers` as configured, on the
+    upstream's answer and on the gateway's own refusals for the route alike, so a page can read
+    a 401's `X-Gapura-Error` when `expose_headers` names it. The upstream's own CORS headers are
+    removed first, so its `*` cannot widen the policy. A request from an origin the policy does
+    not allow is served without them, not refused: CORS is the browser's to enforce, and a caller
+    that is not a browser may send `Origin` too. `Vary: Origin` goes on every answer, beside any
+    `Vary` already there.
+  - **Order:** a `response_transformer` runs after the policy, so its edits have the last word.
+  - **Routes with methods:** a route that lists its methods must list `OPTIONS`, or a preflight
+    matches no route and is answered 404 before the policy runs. As with the transformers, a
+    redirect, a 404 for no route and the 500 or 503 for a rule with no backend or endpoint carry
+    no CORS headers.
+  - **Not from Kong:** no regex origins. Kong answers a preflight from an origin it does not allow
+    200 without CORS headers; this answers 403 with an error key.
+  - **Upgrade order:** a data plane older than this release cannot read a configuration that has
+    the policy, and keeps serving its last one, so upgrade data planes first.
+  - The console's form for it follows.
 - `request_transformer` and `response_transformer` policies edit the request sent upstream and
   the response sent back (#281). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
   `{"target", "config": {"headers", "query"}}` and `response_transformer` takes
