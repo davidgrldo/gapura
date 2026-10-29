@@ -58,8 +58,8 @@ pub async fn list_data_planes(State(state): State<AppState>, headers: HeaderMap)
         Ok(read) => read,
         Err(e) => return unavailable(&e),
     };
-    let etag = match config_api::served(&snapshot, &state.store_settings) {
-        Ok((_, etag)) => etag,
+    let (etag, _needs) = match config_api::served(&snapshot, &state.store_settings) {
+        Ok((_, etag, needs)) => (etag, needs),
         Err(e) => return unavailable(&e.into()),
     };
     match store.data_planes(&etag).await {

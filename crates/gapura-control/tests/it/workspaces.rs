@@ -304,7 +304,7 @@ async fn audit_count(store: &Store) -> i64 {
 /// What `/v1/config` serves now: the compiled configuration as text, and its tag.
 async fn served(store: &Store) -> (String, String) {
     let (_, snapshot) = store.snapshot().await.unwrap();
-    let (body, etag) =
+    let (body, etag, _) =
         gapura_control::config_api::served(&snapshot, &StoreSettings::default()).unwrap();
     (String::from_utf8(body).unwrap(), etag)
 }
