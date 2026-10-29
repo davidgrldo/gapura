@@ -5,11 +5,11 @@
 //! Pure, like `consumers`: the same check reads a request's body and a stored row, so a row only
 //! SQL written by hand could make fails the snapshot as a request carrying it would be refused.
 
-use crate::configuration::FieldError;
+use crate::configuration::{FieldError, METHODS};
 use gapura_core::client_ip::Cidr;
 use gapura_core::config::{
-    HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy, RequestTransformerPolicy,
-    ResponseTransformerPolicy,
+    CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy,
+    RequestTransformerPolicy, ResponseTransformerPolicy,
 };
 use gapura_core::credentials::CONSUMER_HEADER;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ pub const KINDS: &[&str] = &[
     "request_size_limit",
     "request_transformer",
     "response_transformer",
+    "cors",
 ];
 
 /// The most addresses and networks an ip_restriction policy lists, allow and deny together:
@@ -43,6 +44,21 @@ pub const MAX_VALUE_CHARS: usize = 4096;
 /// The longest header name or query parameter name a transformer names, in characters: far past
 /// any name in use, so it refuses only a mistake, and bounds what one edit adds to a head.
 const MAX_NAME_CHARS: usize = 256;
+
+/// The most origins a cors policy lists: more than a route has callers, and a bound on the list
+/// the data plane walks for every request that names an origin.
+pub const MAX_ORIGINS: usize = 100;
+
+/// The most header names a cors policy lists in `headers`, and again in `expose_headers`.
+pub const MAX_CORS_HEADERS: usize = 64;
+
+/// The longest a browser may keep a cors policy's preflight answer, a day: Firefox keeps one no
+/// longer, and Chromium no longer than two hours.
+pub const MAX_AGE_SECS: u64 = 86_400;
+
+/// What a cors policy tells a preflight when it names no methods: Kong's default, less `OPTIONS`,
+/// which is the preflight's own.
+const CORS_METHODS: [&str; 6] = ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"];
 
 /// The header names no transformer writes, removes or renames: what says how HTTP frames a
 /// message, where it goes, and what the connection carrying it does. A transform that removed
@@ -91,6 +107,7 @@ pub fn parse(kind: &str, config: serde_json::Value) -> Result<Plugin, FieldError
         "request_size_limit" => request_size_limit(config).map(Plugin::RequestSizeLimit),
         "request_transformer" => request_transformer(config).map(Plugin::RequestTransformer),
         "response_transformer" => response_transformer(config).map(Plugin::ResponseTransformer),
+        "cors" => cors(config).map(Plugin::Cors),
         _ => Err(field("kind", "There is no such policy kind.")),
     }
 }
@@ -222,6 +239,233 @@ fn response_transformer(
     };
     counted(&[("headers", &policy.headers)])?;
     Ok(policy)
+}
+
+/// Each read as any JSON value and judged in [`cors`], so that a field in the wrong shape is
+/// named by itself rather than as the whole configuration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorsInput {
+    #[serde(default)]
+    origins: serde_json::Value,
+    #[serde(default)]
+    methods: serde_json::Value,
+    #[serde(default)]
+    headers: serde_json::Value,
+    #[serde(default)]
+    expose_headers: serde_json::Value,
+    #[serde(default)]
+    credentials: serde_json::Value,
+    #[serde(default)]
+    max_age: serde_json::Value,
+    #[serde(default)]
+    preflight_continue: serde_json::Value,
+}
+
+/// A cors policy, stored with every default filled in, so the data plane reads it as it is:
+/// origins lowercased with the scheme's own port left off, as a browser writes `Origin`; methods
+/// uppercased, [`CORS_METHODS`] when none are named; header names lowercased.
+fn cors(config: serde_json::Value) -> Result<CorsPolicy, FieldError> {
+    let input: CorsInput = object(
+        "config",
+        config,
+        "Send origins, and any of methods, headers, expose_headers, credentials, max_age and \
+         preflight_continue.",
+    )?;
+    let credentials = flag("credentials", input.credentials)?;
+    let origins = texts("origins", input.origins, r#"["https://app.example.com"]"#)?;
+    if origins.is_empty() {
+        return Err(field(
+            "origins",
+            "List at least one origin, such as https://app.example.com.",
+        ));
+    }
+    if origins.len() > MAX_ORIGINS {
+        return Err(field(
+            "origins",
+            format!("List at most {MAX_ORIGINS} origins."),
+        ));
+    }
+    let origins = origins
+        .iter()
+        .map(|text| origin(text))
+        .collect::<Result<Vec<_>, _>>()?;
+    if origins.iter().any(|o| o == "*") {
+        // A browser refuses `*` with credentials, and echoing every origin instead would let any
+        // page read a signed-in user's answers.
+        if credentials {
+            return Err(field(
+                "origins",
+                "An origin of * cannot be sent with credentials: list the origins instead.",
+            ));
+        }
+        if origins.len() > 1 {
+            return Err(field(
+                "origins",
+                "List * alone: it already allows every origin.",
+            ));
+        }
+    }
+    let methods = texts("methods", input.methods, r#"["GET", "POST"]"#)?;
+    let methods = if methods.is_empty() {
+        CORS_METHODS.map(String::from).to_vec()
+    } else {
+        methods
+            .into_iter()
+            .map(|m| {
+                let m = m.to_ascii_uppercase();
+                if METHODS.contains(&m.as_str()) {
+                    Ok(m)
+                } else {
+                    Err(field(
+                        "methods",
+                        format!("Use methods from {}.", METHODS.join(", ")),
+                    ))
+                }
+            })
+            .collect::<Result<_, _>>()?
+    };
+    let max_age = if input.max_age.is_null() {
+        None
+    } else {
+        let secs = input
+            .max_age
+            .as_u64()
+            .filter(|n| *n <= MAX_AGE_SECS)
+            .ok_or_else(|| {
+                field(
+                    "max_age",
+                    format!("Use a whole number of seconds from 0 to {MAX_AGE_SECS}."),
+                )
+            })?;
+        Some(secs as u32)
+    };
+    Ok(CorsPolicy {
+        origins,
+        methods,
+        headers: header_names("headers", input.headers)?,
+        expose_headers: header_names("expose_headers", input.expose_headers)?,
+        credentials,
+        max_age,
+        preflight_continue: flag("preflight_continue", input.preflight_continue)?,
+    })
+}
+
+/// One origin entry in the form the data plane matches, or why it is not one: `*`;
+/// `scheme://host[:port]`; or `scheme://*.suffix[:port]`, the `*` standing for one label. The
+/// scheme is http or https, the host is letters, digits, hyphens and dots (an international name
+/// in its `xn--` form), and nothing follows the port.
+fn origin(text: &str) -> Result<String, FieldError> {
+    let lower = text.to_ascii_lowercase();
+    if lower == "*" {
+        return Ok(lower);
+    }
+    if lower == "null" {
+        return Err(field(
+            "origins",
+            "null is the origin of a sandboxed page or a local file, which any page can claim, so \
+             it cannot be allowed.",
+        ));
+    }
+    let shape = || {
+        field(
+            "origins",
+            format!(
+                "{text} is not an origin. Write scheme://host or scheme://host:port, such as \
+                 https://app.example.com or https://*.example.com, with no path."
+            ),
+        )
+    };
+    let (scheme, rest) = lower.split_once("://").ok_or_else(shape)?;
+    if scheme != "http" && scheme != "https" {
+        return Err(shape());
+    }
+    let (host, port) = match rest.split_once(':') {
+        Some((host, port)) => {
+            let n = port
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+                .then(|| port.parse::<u16>().ok())
+                .flatten()
+                .filter(|n| *n > 0)
+                .ok_or_else(shape)?;
+            (host, Some(n))
+        }
+        None => (rest, None),
+    };
+    let (wildcard, name) = match host.strip_prefix("*.") {
+        Some(name) => (true, name),
+        None => (false, host),
+    };
+    let label = |l: &str| {
+        (1..=63).contains(&l.len())
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if name.len() > 253 || !name.split('.').all(label) {
+        return Err(shape());
+    }
+    if wildcard && !name.contains('.') {
+        return Err(field(
+            "origins",
+            format!(
+                "{text} would allow every name under {name}. Put *. before a name with a dot in \
+                 it, such as https://*.example.com."
+            ),
+        ));
+    }
+    // A browser leaves the scheme's own port out of `Origin`, so an entry that named it would
+    // never match.
+    let port = match (scheme, port) {
+        ("http", Some(80)) | ("https", Some(443)) | (_, None) => String::new(),
+        (_, Some(n)) => format!(":{n}"),
+    };
+    Ok(format!("{scheme}://{host}{port}"))
+}
+
+/// A list of text at `at`, empty when absent.
+fn texts(at: &str, value: serde_json::Value, example: &str) -> Result<Vec<String>, FieldError> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_value(value).map_err(|_| field(at, format!("List text, such as {example}.")))
+}
+
+/// `true` or `false` at `at`, `false` when absent.
+fn flag(at: &str, value: serde_json::Value) -> Result<bool, FieldError> {
+    match value {
+        serde_json::Value::Null => Ok(false),
+        serde_json::Value::Bool(b) => Ok(b),
+        _ => Err(field(at, "Use true or false.")),
+    }
+}
+
+/// A cors policy's list of header names at `at`, lowercased: at most [`MAX_CORS_HEADERS`], each an
+/// RFC 9110 token of 1 to 256 characters.
+fn header_names(at: &str, value: serde_json::Value) -> Result<Vec<String>, FieldError> {
+    let names = texts(at, value, r#"["x-request-id"]"#)?;
+    if names.len() > MAX_CORS_HEADERS {
+        return Err(field(
+            at,
+            format!("List at most {MAX_CORS_HEADERS} header names."),
+        ));
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            if name.bytes().all(is_token) && (1..=MAX_NAME_CHARS).contains(&name.len()) {
+                Ok(name.to_ascii_lowercase())
+            } else {
+                Err(field(
+                    at,
+                    format!(
+                        "Use header names of 1 to {MAX_NAME_CHARS} letters, digits and \
+                         !#$%&'*+-.^_`|~."
+                    ),
+                ))
+            }
+        })
+        .collect()
 }
 
 /// `value` read as `T` when it is a JSON object, or `sentence` at `at`. Only an object: serde
@@ -533,6 +777,7 @@ mod tests {
             "request_size_limit" => json!({"max_bytes": 1024}),
             "request_transformer" => json!({"query": {"remove": ["debug"]}}),
             "response_transformer" => json!({"headers": {"add": [["x-served-by", "gapura"]]}}),
+            "cors" => json!({"origins": ["https://app.example"]}),
             other => panic!("no minimal configuration for {other}: add one here"),
         };
         for kind in KINDS {
@@ -900,5 +1145,157 @@ mod tests {
         assert_eq!(audited(&plugin), config(&plugin));
         let plugin = parse("request_size_limit", json!({"max_bytes": 1024})).unwrap();
         assert_eq!(audited(&plugin), config(&plugin));
+        let plugin = parse("cors", json!({"origins": ["https://app.example"]})).unwrap();
+        assert_eq!(audited(&plugin), config(&plugin));
+    }
+
+    /// Stored as the data plane matches it: origins lowercased with the scheme's own port left
+    /// off, as a browser writes `Origin`; the default methods filled in; header names lowercased.
+    #[test]
+    fn a_cors_policy_is_stored_with_its_defaults_filled_in() {
+        let plugin = parse(
+            "cors",
+            json!({
+                "origins": ["HTTPS://App.Example:443", "https://*.Example.org:8443", "http://localhost:80"],
+                "headers": ["X-Requested-With"],
+                "expose_headers": ["X-Gapura-Error"],
+                "max_age": 0,
+            }),
+        )
+        .unwrap();
+        let stored = json!({
+            "origins": ["https://app.example", "https://*.example.org:8443", "http://localhost"],
+            "methods": ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
+            "headers": ["x-requested-with"],
+            "expose_headers": ["x-gapura-error"],
+            "max_age": 0,
+        });
+        assert_eq!(config(&plugin), stored);
+        assert_eq!(parse("cors", stored).unwrap(), plugin);
+
+        let plugin = parse(
+            "cors",
+            json!({"origins": ["*"], "methods": ["get", "OPTIONS"], "preflight_continue": true}),
+        )
+        .unwrap();
+        assert_eq!(
+            config(&plugin),
+            json!({"origins": ["*"], "methods": ["GET", "OPTIONS"], "preflight_continue": true})
+        );
+        let largest = json!({"origins": ["https://a.example"], "max_age": MAX_AGE_SECS});
+        assert!(parse("cors", largest).is_ok());
+    }
+
+    /// `*` never goes with credentials: a browser refuses it, and an echo of every origin would
+    /// let any page read a signed-in user's answers.
+    #[test]
+    fn a_star_origin_is_refused_with_credentials_and_beside_others() {
+        let e = refused("cors", json!({"origins": ["*"], "credentials": true}));
+        assert_eq!(
+            (e.field.as_str(), e.sentence.as_str()),
+            (
+                "origins",
+                "An origin of * cannot be sent with credentials: list the origins instead."
+            )
+        );
+        let e = refused("cors", json!({"origins": ["*", "https://a.example"]}));
+        assert_eq!(e.field, "origins");
+        assert!(
+            parse(
+                "cors",
+                json!({"origins": ["https://*.example.com"], "credentials": true})
+            )
+            .is_ok(),
+            "a wildcard entry echoes only the origins under it"
+        );
+    }
+
+    #[test]
+    fn a_bad_cors_policy_names_its_field() {
+        let many: Vec<String> = (0..=MAX_ORIGINS)
+            .map(|i| format!("https://a{i}.example"))
+            .collect();
+        let headers: Vec<String> = (0..=MAX_CORS_HEADERS).map(|i| format!("x-{i}")).collect();
+        let one = |origin: &str| json!({ "origins": [origin] });
+        for (config, at) in [
+            (json!({}), "origins"),
+            (json!({"origins": []}), "origins"),
+            (json!({"origins": "https://a.example"}), "origins"),
+            (json!({ "origins": many }), "origins"),
+            (one("null"), "origins"),
+            (one("NULL"), "origins"),
+            (one("app.example"), "origins"),
+            (one("ftp://app.example"), "origins"),
+            (one("https://app.example/"), "origins"),
+            (one("https://app.example/path"), "origins"),
+            (one("https://app.example?q"), "origins"),
+            (one("https://app.example#f"), "origins"),
+            (one("https://u@app.example"), "origins"),
+            (one("https://app.example."), "origins"),
+            (one("https://app..example"), "origins"),
+            (one("https://bücher.example"), "origins"),
+            (one("https://app.example:0"), "origins"),
+            (one("https://app.example:65536"), "origins"),
+            (one("https://app.example:+80"), "origins"),
+            (one("https://app.example:"), "origins"),
+            (one("https://*.com"), "origins"),
+            (one("https://*"), "origins"),
+            (one("https://a.*.example"), "origins"),
+            (one("https://*.*.example"), "origins"),
+            (one("https://[::1]:3000"), "origins"),
+            (
+                json!({"origins": ["https://a.example"], "methods": ["FETCH"]}),
+                "methods",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "methods": "GET"}),
+                "methods",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "headers": ["x a"]}),
+                "headers",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "headers": [""]}),
+                "headers",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "expose_headers": headers}),
+                "expose_headers",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "max_age": MAX_AGE_SECS + 1}),
+                "max_age",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "max_age": -1}),
+                "max_age",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "max_age": "600"}),
+                "max_age",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "credentials": "yes"}),
+                "credentials",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "preflight_continue": 1}),
+                "preflight_continue",
+            ),
+            (
+                json!({"origins": ["https://a.example"], "allow_origins": ["*"]}),
+                "config",
+            ),
+            (json!(["https://a.example"]), "config"),
+        ] {
+            assert_eq!(refused("cors", config.clone()).field, at, "{config}");
+        }
+        let e = refused("cors", json!({"origins": ["https://*.com"]}));
+        assert!(
+            e.sentence.contains("*. before a name with a dot"),
+            "{}",
+            e.sentence
+        );
     }
 }
