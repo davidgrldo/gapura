@@ -70,6 +70,33 @@ pub struct Args {
     #[arg(long = "access-log-query")]
     pub access_log_query: bool,
 
+    /// POST every access-log line here as well, in batches as a JSON array, through a bounded
+    /// queue per replica that drops its oldest entries when the endpoint cannot keep up (counted
+    /// in `gapura_log_dropped_total`). An `https` endpoint's certificate is always verified
+    /// against the public roots.
+    #[arg(long, value_name = "URL")]
+    pub http_log_url: Option<String>,
+
+    /// File of `Name: value` lines sent as headers with every http_log POST, e.g. an
+    /// `Authorization` line. A file rather than a flag, so a token never reaches a process list.
+    #[arg(long, value_name = "FILE", requires = "http_log_url")]
+    pub http_log_headers_file: Option<std::path::PathBuf>,
+
+    /// Send one span per sampled request to this OTLP/HTTP traces endpoint, JSON-encoded, e.g.
+    /// `http://otel-collector:4318/v1/traces`. With it on, the gateway opens a span of its own,
+    /// and the upstream's `traceparent` names that span as its parent.
+    #[arg(long, value_name = "URL")]
+    pub otlp_traces_url: Option<String>,
+
+    /// File of `Name: value` lines sent as headers with every OTLP POST.
+    #[arg(long, value_name = "FILE", requires = "otlp_traces_url")]
+    pub otlp_headers_file: Option<std::path::PathBuf>,
+
+    /// Share of the traces that start at this gateway to sample, from 0 to 1; 1 when not given.
+    /// A request that arrives with a `traceparent` keeps its caller's decision.
+    #[arg(long, value_name = "RATIO", requires = "otlp_traces_url")]
+    pub otlp_sample_ratio: Option<f64>,
+
     /// Log level filter, e.g. `info` or `gapura=debug`.
     #[arg(long, default_value = "info")]
     pub log_level: String,
@@ -167,6 +194,25 @@ impl Args {
             } else if !lower.starts_with("https://") {
                 return Err(format!(
                     "--control-plane {url} is not an http:// or https:// URL"
+                ));
+            }
+        }
+        for (flag, url) in [
+            ("--http-log-url", &self.http_log_url),
+            ("--otlp-traces-url", &self.otlp_traces_url),
+        ] {
+            if let Some(url) = url {
+                let ok = reqwest::Url::parse(url)
+                    .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
+                if !ok {
+                    return Err(format!("{flag} {url} is not an http:// or https:// URL"));
+                }
+            }
+        }
+        if let Some(ratio) = self.otlp_sample_ratio {
+            if !(0.0..=1.0).contains(&ratio) {
+                return Err(format!(
+                    "--otlp-sample-ratio must be between 0 and 1, got {ratio}"
                 ));
             }
         }
@@ -472,6 +518,66 @@ mod tests {
         );
         let pinned = Args::try_parse_from(["gapura", "--kubernetes", "--threads", "3"]).unwrap();
         assert_eq!(pinned.worker_threads(), 3);
+    }
+
+    #[test]
+    fn export_flags_parse_and_are_checked() {
+        let base = ["gapura", "--config-dir", "/tmp/x"];
+        let with = |extra: &[&str]| Args::try_parse_from(base.iter().chain(extra).copied());
+        let args = Args::parse_from(base);
+        assert!(args.http_log_url.is_none() && args.otlp_traces_url.is_none());
+        assert!(args.otlp_sample_ratio.is_none());
+
+        let args = with(&[
+            "--http-log-url",
+            "https://logs.example/in",
+            "--http-log-headers-file",
+            "/run/h",
+            "--otlp-traces-url",
+            "http://otel:4318/v1/traces",
+            "--otlp-headers-file",
+            "/run/o",
+            "--otlp-sample-ratio",
+            "0.25",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.http_log_url.as_deref(),
+            Some("https://logs.example/in")
+        );
+        assert_eq!(args.otlp_sample_ratio, Some(0.25));
+        assert!(args.validate().is_ok());
+
+        assert!(
+            with(&["--otlp-sample-ratio", "0.5"]).is_err(),
+            "a ratio needs an endpoint"
+        );
+        assert!(
+            with(&["--http-log-headers-file", "/run/h"]).is_err(),
+            "headers need an endpoint"
+        );
+        assert!(
+            with(&["--otlp-headers-file", "/run/o"]).is_err(),
+            "headers need an endpoint"
+        );
+        for bad in [
+            &[
+                "--otlp-traces-url",
+                "http://otel:4318",
+                "--otlp-sample-ratio",
+                "1.5",
+            ][..],
+            &[
+                "--otlp-traces-url",
+                "http://otel:4318",
+                "--otlp-sample-ratio",
+                "NaN",
+            ],
+            &["--http-log-url", "ftp://logs.example"],
+            &["--otlp-traces-url", "not a url"],
+        ] {
+            assert!(with(bad).unwrap().validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]
