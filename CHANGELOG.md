@@ -31,6 +31,29 @@ means what it usually does, moving from one version below to a later one. Releas
   - The release image reports the tag it is published under; a build from source reports the
     crate's version. Migration 0012 adds two columns to `data_planes`.
 
+- **Security:** Pingora 0.9 (from 0.8.1), for RUSTSEC-2026-0388, -0390, -0391, -0398, -0403 and
+  -0410, which had turned the required `deny` check red on every pull request.
+  - **RUSTSEC-2026-0390, exposed:** a header the client named in `Connection` reached HTTP/1
+    upstreams. `Connection: X-Forwarded-For` let an HTTP/1 proxy between the gateway and the
+    origin that honours such names drop the gateway's `X-Forwarded-For`, and an origin that
+    trusts that proxy's account of the client could be misled. Now a header named in
+    `Connection`, and every hop-by-hop header, stops at the gateway, and a request whose
+    `Connection` names `Host` or an `X-Forwarded-*` header is refused 400
+    `INVALID_REQUEST_TARGET`. WebSocket upgrades still pass.
+  - **RUSTSEC-2026-0388, not exposed:** an HTTP/2 `Host` that disagrees with `:authority` was
+    already refused 400 (#161), and the route was matched on the host without userinfo, so no
+    request could pass one host's policies and reach another. Pingora now refuses these itself
+    as it reads the request, along with userinfo in `Host` or in the target, and compares
+    `Host` with an absolute-form target byte for byte, port included. Those 400s are Pingora's:
+    no `X-Gapura-Error`, no access log line.
+  - **zstd (RUSTSEC-2026-0391, -0398, -0403, -0410):** the copies under pingora-core move to
+    zstd 0.14.3, zstd-safe 8.2.0 and zstd-sys 2.1.2. pingora-header-serde 0.9.0 still pins
+    zstd 0.13 and zstd-safe 7, which have no fixed release; `deny.toml` ignores -0391, -0398
+    and -0403 for them, with the reasons: it only runs for Pingora's HTTP cache, which the
+    gateway never enables, and calls none of the flawed functions.
+  - tokio stays below 1.54: pingora-core 0.9.0 still builds the zero-capacity buffer tokio
+    1.54 panics on (cloudflare/pingora#1059).
+
 - `request_transformer` and `response_transformer` policies edit the request sent upstream and
   the response sent back (#281). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
   `{"target", "config": {"headers", "query"}}` and `response_transformer` takes

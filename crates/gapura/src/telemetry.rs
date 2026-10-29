@@ -344,8 +344,21 @@ mod tests {
 
     #[tokio::test]
     async fn pingora_listener_build_panic_is_recognised() {
+        use pingora::apps::http_app::{HttpServer, ServeHttp};
+        use pingora::protocols::http::ServerSession;
         use pingora::services::Service as _;
-        let mut service = pingora::services::listening::Service::prometheus_http_service();
+        // Any app will do: the build fails before one is ever called.
+        struct Nothing;
+        #[async_trait::async_trait]
+        impl ServeHttp for Nothing {
+            async fn response(&self, _: &mut ServerSession) -> http::Response<Vec<u8>> {
+                http::Response::default()
+            }
+        }
+        let mut service = pingora::services::listening::Service::new(
+            "probe".into(),
+            HttpServer::new_app(Nothing),
+        );
         // Not an address, so the build fails at once instead of after 30 s of retries.
         service.add_tcp("not an address");
         let (_tx, shutdown) = tokio::sync::watch::channel(false);

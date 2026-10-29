@@ -1126,15 +1126,16 @@ impl ProxyHttp for GapuraProxy {
         // whatever the error it failed the request with classifies as (any `HTTPStatus` but 503
         // and 504 is a 500), and the client did not abort, whichever side Pingora blames.
         let refused = ctx.refused.take();
+        let key = refused.or_else(|| failure::classify(e));
         // Mark it above the status mapping so that every path through this function reaches it: a
         // downstream failure yields no key and an abort mid-body has already written a response,
         // so neither reaches the error-response branch below. What the flag means then rests on
-        // `failure::classify` returning `None` for a downstream failure -- no key is what keeps
-        // an abort from being answered and logged as an error of ours.
-        if refused.is_none() && matches!(e.esource(), ErrorSource::Downstream) {
+        // `failure::classify` returning `None` for a downstream failure other than a malformed
+        // request -- no key is what keeps an abort from being answered and logged as an error of
+        // ours.
+        if key.is_none() {
             ctx.client_abort = true;
         }
-        let key = refused.or_else(|| failure::classify(e));
         let code = key.map_or(0, ErrorKey::status);
         if upstream {
             let kind = match e.etype() {
