@@ -49,7 +49,7 @@ struct Target {
 
 impl Target {
     fn new(url: &str, headers_file: Option<&Path>) -> Result<Target, String> {
-        let headers = match headers_file {
+        let mut headers = match headers_file {
             None => HeaderMap::new(),
             Some(path) => {
                 let text = std::fs::read_to_string(path)
@@ -57,22 +57,25 @@ impl Target {
                 parse_headers(&text).map_err(|e| format!("{}: {e}", path.display()))?
             }
         };
+        // Every body is JSON: a Content-Type line in the file would otherwise go beside this one.
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Target {
             url: url.to_string(),
             headers,
         })
     }
 
-    /// One POST of `body`; any 2xx is delivered, anything else is retried.
+    /// One POST of `body`; any 2xx is delivered, anything else, a redirect included, is retried.
+    /// A send error keeps its cause (refused, timed out, untrusted certificate) and drops its URL,
+    /// which may carry `user:token@`.
     async fn post(&self, client: &reqwest::Client, body: Bytes) -> Result<(), String> {
         let response = client
             .post(&self.url)
             .headers(self.headers.clone())
-            .header(CONTENT_TYPE, "application/json")
             .body(body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::source::jwks::chain(&e.without_url()))?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -127,6 +130,17 @@ pub struct Exporter {
     traces: Option<(Arc<Queue<Span>>, Target)>,
 }
 
+/// The client every sink POSTs with: certificates verified against the public roots, and no
+/// redirects. A redirect would turn a 301/302 POST into a bodiless GET whose 2xx counts as
+/// delivered, and would carry the headers file's tokens wherever it points: it is a failure.
+fn client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(SEND_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("cannot build the export client: {e}"))
+}
+
 /// The sinks `args` configures and the service that delivers to them, which is `None` when there
 /// is no sink. An unreadable or malformed headers file is an error, to stop the start.
 pub fn build(args: &crate::cli::Args) -> Result<(Sinks, Option<Exporter>), String> {
@@ -140,10 +154,7 @@ pub fn build(args: &crate::cli::Args) -> Result<(Sinks, Option<Exporter>), Strin
     if http_log.is_none() && traces.is_none() {
         return Ok((Sinks::default(), None));
     }
-    let client = reqwest::Client::builder()
-        .timeout(SEND_TIMEOUT)
-        .build()
-        .map_err(|e| format!("cannot build the export client: {e}"))?;
+    let client = client()?;
     let http_log = http_log.map(|t| (Arc::new(Queue::new(HTTP_LOG, CAPACITY, MAX_BYTES)), t));
     let traces = traces.map(|t| (Arc::new(Queue::new(OTLP_TRACES, CAPACITY, MAX_BYTES)), t));
     let sinks = Sinks {
@@ -233,7 +244,11 @@ mod tests {
     fn a_sink_gets_its_queue_its_ratio_and_its_headers_file() {
         let dir = tempfile::tempdir().unwrap();
         let headers = dir.path().join("headers");
-        std::fs::write(&headers, "Authorization: Bearer t\n").unwrap();
+        std::fs::write(
+            &headers,
+            "Authorization: Bearer t\nContent-Type: text/plain\n",
+        )
+        .unwrap();
         let args = crate::cli::Args::parse_from([
             "gapura",
             "--config-dir",
@@ -251,6 +266,15 @@ mod tests {
         let exporter = exporter.expect("a sink, so a service");
         let (_, target) = exporter.traces.as_ref().unwrap();
         assert_eq!(target.headers["authorization"], "Bearer t");
+        assert_eq!(
+            target
+                .headers
+                .get_all(CONTENT_TYPE)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["application/json"]
+        );
 
         let args = crate::cli::Args::parse_from([
             "gapura",
@@ -265,5 +289,47 @@ mod tests {
             panic!("an unreadable headers file must stop the start")
         };
         assert!(err.starts_with("cannot read /nonexistent/headers"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_a_failure_not_a_delivery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:9/elsewhere\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        });
+        let target = Target::new(&format!("http://{addr}/logs"), None).unwrap();
+        let err = target
+            .post(&client().unwrap(), Bytes::from_static(b"[]"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("307"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_send_error_says_why_and_not_where() {
+        // Nothing listens on a port just released.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let target = Target::new(
+            &format!("http://user:s3cret@127.0.0.1:{port}/logs?key=t0ken"),
+            None,
+        )
+        .unwrap();
+        let err = target
+            .post(&client().unwrap(), Bytes::from_static(b"[]"))
+            .await
+            .unwrap_err();
+        assert!(!err.contains("s3cret") && !err.contains("t0ken"), "{err}");
+        assert!(err.contains(": "), "a cause after the message: {err}");
     }
 }
