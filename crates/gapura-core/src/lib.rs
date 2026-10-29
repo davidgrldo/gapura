@@ -11,6 +11,7 @@ pub mod client_ip;
 pub mod config;
 pub mod credentials;
 pub mod duration;
+pub mod features;
 pub mod hostname;
 pub mod input;
 pub mod jwt;

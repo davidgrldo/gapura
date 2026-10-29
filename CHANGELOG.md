@@ -8,6 +8,29 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A data plane names the configuration features it reads, and the control plane no longer sends
+  one a configuration it cannot read (#283). Each poll carries `X-Gapura-Features` and
+  `User-Agent: gapura/<version>`. When the configuration uses a policy kind -- or a JWT policy's
+  `jwks_uri` -- that a data plane lacks, `/v1/config` answers it `409` with
+  `{"error":"incompatible","missing":[...]}`, and it keeps serving the configuration it has. It is
+  refused, never sent the configuration with the policy left out.
+  - **Seen from the data plane:** `gapura_config_incompatible` is 1 while it is refused, and its
+    log names what is missing, once per change. The example rules alert on it after 10 minutes.
+  - **Seen from the console's API:** `GET /api/data-planes` gives each one's `build`, the
+    `config_tag` it holds (12 hex digits), and what it is `missing` of the configuration served
+    now. The page follows.
+  - **Upgrade order:** a data plane from rc.17 or before names no features, and is taken to read
+    only `jwt` and `key_auth`: rc.16 read no more, and nothing on the wire tells it from rc.17. So
+    an rc.17 data plane is refused a configuration with a newer policy kind it could in fact read
+    until it is upgraded. Upgrade data planes before the control plane, as for any new policy
+    kind, and from rc.16 or later: an older one reads less than the control plane can tell. A
+    data plane from before this release treats the 409 as it treated the parse failure: it keeps
+    its configuration and logs.
+  - A data plane older than `jwks_uri`, sent a JWT policy naming one, used to parse it and refuse
+    every token on that route. It is now refused the configuration, and the console says why.
+  - The release image reports the tag it is published under; a build from source reports the
+    crate's version. Migration 0012 adds two columns to `data_planes`.
+
 - The data plane exports what it logs and traces (#285). `--http-log-url` POSTs every access-log
   line to an HTTP endpoint in JSON-array batches, and `--otlp-traces-url` sends a span per
   sampled request to an OTLP/HTTP collector, JSON-encoded, sampled as the caller's `traceparent`
@@ -22,6 +45,7 @@ means what it usually does, moving from one version below to a later one. Releas
     identified. Under `--access-log-query` the value of a credential-looking query parameter --
     `api_key`, `token`, `access_token` and the like, or one named like the header a route's
     key_auth policy reads -- is now written `<redacted>`, on stdout too.
+
 - A `cors` policy tells browsers which other origins may call a route (#282).
   `PUT /api/workspaces/{ws}/policies/cors` takes `{"target", "config": {"origins", "methods",
   "headers", "expose_headers", "credentials", "max_age", "preflight_continue"}}`, on the
@@ -64,6 +88,7 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Upgrade order:** a data plane older than this release cannot read a configuration that has
     the policy, and keeps serving its last one, so upgrade data planes first.
   - The console's form for it follows.
+
 - **Security:** Pingora 0.9 (from 0.8.1), for RUSTSEC-2026-0388, -0390, -0391, -0398, -0403 and
   -0410, which had turned the required `deny` check red on every pull request.
   - **RUSTSEC-2026-0390, exposed:** a header the client named in `Connection` reached HTTP/1

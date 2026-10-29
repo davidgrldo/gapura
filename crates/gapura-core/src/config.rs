@@ -12,6 +12,11 @@ use crate::client_ip::Cidr;
 // field added since would otherwise be a missing field that fails the whole load. At the top
 // level a missing field sensibly means "none of those". Inside an `Endpoint` it does not: an
 // address defaulting to the empty string is a silent hole where failing loudly is correct.
+//
+// A field a data plane predating it would ignore *wrongly* -- one that changes what a request is
+// allowed or how it is answered -- also needs a name in `features::FEATURES` and a line in
+// `Config::needs`, so the control plane refuses such a data plane the configuration instead of
+// letting it run without the field. A field it may safely ignore needs neither.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -434,8 +439,10 @@ pub struct JwtPolicy {
     /// no network and no key material is invented by this crate. A `jwks_uri` policy arrives with
     /// this empty, and the data plane writes in the last document it fetched there before the
     /// configuration is swapped in: where the string comes from changes, not how it is read.
-    /// Always written, so a data plane older than `jwks_uri` still parses a configuration naming
-    /// one, finds no keys here and refuses those routes rather than the whole configuration.
+    /// Always written, so a data plane older than `jwks_uri` that is sent one anyway, by a
+    /// control plane predating `features`, parses it, finds no keys here and refuses those
+    /// routes rather than the whole configuration. A control plane since then refuses that data
+    /// plane the configuration instead, naming `jwks_uri`.
     #[serde(default)]
     pub jwks: String,
     /// Where the issuer publishes its JWKS, `https` only. The control plane sets exactly one of

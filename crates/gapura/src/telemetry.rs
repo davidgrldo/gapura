@@ -35,6 +35,10 @@ pub struct Metrics {
     /// 1 while the configuration being served came off disk and has not been confirmed with the
     /// control plane since. The one number that says "this gateway is running blind".
     pub config_from_cache: IntGauge,
+    /// 1 while the control plane refuses this data plane the configuration it serves, because
+    /// this build lacks a feature that configuration uses. The last one keeps serving meanwhile;
+    /// the log names what is missing.
+    pub config_incompatible: IntGauge,
     /// Refusals by route, policy and reason. Both other labels are the point: "missing" and
     /// "bad_signature" are different operator problems, and so are a JWT policy and a key_auth
     /// one on the same route. A single counter would hide all of it.
@@ -113,6 +117,11 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
     config_from_cache: register_int_gauge!(
         "gapura_config_from_cache",
         "1 while serving a configuration read from the disk cache and not since confirmed"
+    )
+    .expect("metric registered once"),
+    config_incompatible: register_int_gauge!(
+        "gapura_config_incompatible",
+        "1 while the control plane refuses this build its configuration, for a feature it lacks"
     )
     .expect("metric registered once"),
     policy_refused_total: register_int_counter_vec!(

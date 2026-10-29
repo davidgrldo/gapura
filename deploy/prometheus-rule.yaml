@@ -37,6 +37,13 @@ spec:
       annotations:
         summary: Gapura config reloads are failing
         description: The previous config is still being served; the logs carry the translator error.
+    - alert: GapuraConfigIncompatible
+      expr: max(gapura_config_incompatible) == 1
+      for: 10m
+      labels: { severity: warning }
+      annotations:
+        summary: The control plane refuses a Gapura data plane its configuration
+        description: The configuration uses a feature this data plane's build lacks; it serves its last one until upgraded. Its log and the console's Data planes page name the feature.
     - alert: GapuraUpstreamErrors
       expr: |
         sum(rate(gapura_upstream_errors_total[5m]))

@@ -288,6 +288,29 @@ async fn call(app: &axum::Router, token: &str, tag: Option<&str>) -> (StatusCode
     (res.status(), etag)
 }
 
+/// `call`, introducing itself as `agent` and naming `features`, as a data plane of this build does.
+async fn call_as(
+    app: &axum::Router,
+    token: &str,
+    tag: Option<&str>,
+    agent: &str,
+    features: &str,
+) -> StatusCode {
+    let mut req = Request::builder()
+        .uri("/v1/config")
+        .header("authorization", format!("Bearer {token}"))
+        .header("user-agent", agent)
+        .header("x-gapura-features", features);
+    if let Some(tag) = tag {
+        req = req.header("if-none-match", tag);
+    }
+    app.clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
 async fn count(store: &Store, sql: &str) -> i64 {
     store
         .client()
@@ -749,6 +772,90 @@ async fn health_reads_from_the_calls() {
     let plane = row(&app, "edge-1", s.vi).await;
     assert_eq!(plane["status"], "not_seen");
     assert_eq!(plane["in_sync"], true, "what it holds has not changed");
+}
+
+/// The list says what each data plane runs, the configuration it holds, and what it lacks of the
+/// one served now -- worked out when the list is read, so it follows the configuration.
+#[tokio::test]
+async fn the_list_says_what_a_data_plane_runs_and_lacks() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let config = served(&store);
+    let s = seed(&store).await;
+    ok(&app, "POST", SERVICES, s.ada, SERVICE).await;
+    ok(&app, "POST", ROUTES, s.ada, ROUTE).await;
+    let (token, _) = register(&app, "edge-1", s.root).await;
+
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["build"], serde_json::Value::Null);
+    assert_eq!(plane["config_tag"], serde_json::Value::Null);
+    assert_eq!(plane["missing"], serde_json::json!([]), "it never called");
+
+    // As rc.17 and older call: no features, no build. It lacks nothing the configuration uses yet.
+    let (status, etag) = call(&config, &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = etag.unwrap();
+    call(&config, &token, Some(&etag)).await;
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["missing"], serde_json::json!([]));
+    assert_eq!(
+        plane["config_tag"],
+        etag.trim_matches('"')[..12],
+        "the first 12 digits of what it holds"
+    );
+
+    // A policy it cannot read: refused, and the list says why.
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "insert into plugins (workspace_id, name, config)
+               select id, 'ip_restriction', '{\"deny\":[\"203.0.113.7/32\"]}'
+                 from workspaces where name = 'default'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&config, &token, Some(&etag)).await.0,
+        StatusCode::CONFLICT
+    );
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["missing"], serde_json::json!(["ip_restriction"]));
+    assert_eq!(plane["in_sync"], false);
+
+    // Upgraded: it names every feature and says what it runs.
+    let all = gapura_core::features::FEATURES.join(",");
+    assert_eq!(
+        call_as(&config, &token, Some(&etag), "gapura/0.2.0-rc.17", &all).await,
+        StatusCode::OK
+    );
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["build"], "0.2.0-rc.17");
+    assert_eq!(plane["missing"], serde_json::json!([]));
+
+    // A refused call is recorded as what it said, so the list and the endpoint cannot disagree:
+    // this one names only `jwt` and the configuration uses `ip_restriction`. `etag` is stale, so
+    // it is not answered 304.
+    assert_eq!(
+        call_as(&config, &token, Some(&etag), "gapura/x", "jwt").await,
+        StatusCode::CONFLICT
+    );
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["build"], "x");
+    assert_eq!(plane["missing"], serde_json::json!(["ip_restriction"]));
+
+    // A header no data plane writes is the legacy baseline in the list too.
+    assert_eq!(
+        call_as(&config, &token, Some(&etag), "gapura/y", "JWT").await,
+        StatusCode::CONFLICT
+    );
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["build"], "y");
+    assert_eq!(plane["missing"], serde_json::json!(["ip_restriction"]));
 }
 
 #[tokio::test]

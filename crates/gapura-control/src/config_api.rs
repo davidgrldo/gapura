@@ -1,7 +1,8 @@
 //! `GET /v1/config`: the endpoint data planes poll for their configuration.
 //!
-//! A conditional GET. The data plane sends the version it holds as `If-None-Match` and gets
-//! either 304 or the configuration that replaces it. The call is also the liveness signal, so a
+//! A conditional GET. The data plane sends the version it holds as `If-None-Match` and gets 304,
+//! the configuration that replaces it, or 409 naming what it lacks to read that configuration
+//! (`X-Gapura-Features`, see `gapura_core::features`). The call is also the liveness signal, so a
 //! 304 still records that the caller is alive -- there is no second endpoint reporting a fact
 //! this one already carries.
 //!
@@ -12,6 +13,7 @@
 //! sharing the console's: an operator can reach the console through an ingress without that
 //! also publishing the keys.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use std::net::SocketAddr;
@@ -21,8 +23,9 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Extension, Router,
+    Extension, Json, Router,
 };
+use gapura_core::features;
 use gapura_core::store::{compile, refused_routes, StoreSettings, StoreSnapshot};
 use sha2::{Digest, Sha256};
 
@@ -132,13 +135,17 @@ fn is_transient(e: &std::io::Error) -> bool {
 /// would be told 304 and keep a configuration that is no longer the one served. The snapshot is
 /// read on every call anyway, so this costs CPU and no I/O. Config has no unordered maps, so
 /// equal configurations serialise to equal bytes.
+///
+/// `needs` is what a data plane has to read to be sent it
+/// ([`Config::needs`](gapura_core::config::Config::needs)).
 pub fn served(
     snapshot: &StoreSnapshot,
     settings: &StoreSettings,
-) -> serde_json::Result<(Vec<u8>, String)> {
-    let body = serde_json::to_vec(&compile(snapshot, settings))?;
+) -> serde_json::Result<(Vec<u8>, String, BTreeSet<&'static str>)> {
+    let config = compile(snapshot, settings);
+    let body = serde_json::to_vec(&config)?;
     let etag = format!("\"{:x}\"", Sha256::digest(&body));
-    Ok((body, etag))
+    Ok((body, etag, config.needs()))
 }
 
 pub fn router(api: Arc<ConfigApi>) -> Router {
@@ -182,6 +189,7 @@ async fn serve(
     // A served tag is 66 characters (quotes and 64 hex digits), so anything past 128 cannot be
     // one a data plane holds. It is recorded as unknown rather than storing what a caller sent.
     let recorded = sent.filter(|v| v.len() <= 128);
+    let has = named_features(&headers);
     // Recorded before the body is built and whatever the answer turns out to be: the caller is
     // alive either way, and a 304 is the overwhelming majority of these calls.
     if let Err(e) = api
@@ -192,6 +200,8 @@ async fn serve(
             version,
             recorded,
             peer.map(|p| p.0 .0.ip().to_canonical()),
+            build(&headers),
+            has.as_deref(),
         )
         .await
     {
@@ -200,7 +210,7 @@ async fn serve(
         tracing::warn!(error = %e, "recording a data plane's call");
     }
 
-    let (body, etag) = match served(&snapshot, &api.settings) {
+    let (body, etag, needs) = match served(&snapshot, &api.settings) {
         Ok(served) => served,
         Err(e) => {
             tracing::error!(error = %e, "serialising the configuration");
@@ -209,6 +219,21 @@ async fn serve(
     };
     if sent.is_some_and(|v| v == etag) {
         return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+    }
+    // Refused rather than sent: a data plane would fail to parse a policy kind it does not know,
+    // and would run without a field it does not know. It keeps serving what it holds, which is
+    // what it would have done after failing anyway, and now the console can say why. Debug, not
+    // warn: it lasts every poll until that data plane is upgraded, and the console and the data
+    // plane's own log already say it.
+    let missing = features::missing(&needs, has.as_deref());
+    if !missing.is_empty() {
+        tracing::debug!(missing = %missing.join(","), "refusing a data plane the configuration");
+        return (
+            StatusCode::CONFLICT,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "incompatible", "missing": missing })),
+        )
+            .into_response();
     }
     // Said when a data plane is sent a configuration, not on every poll, so it is logged once
     // per change and data plane rather than every few seconds: a route stored before the console
@@ -237,6 +262,42 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .to_str()
         .ok()?
         .strip_prefix("Bearer ")
+}
+
+/// The features a data plane says it reads, `X-Gapura-Features`. `None` when it named none (an
+/// empty header, or one of only commas), or more than 64, or a name that is not 1 to 64 of
+/// `a-z`, `0-9` and `_`: no data plane writes such a header, and it is read as saying nothing --
+/// the legacy baseline, here and in the console's list alike. Nothing past the 65th name is
+/// read, so a header cannot make this allocate for as many names as it has room to hold.
+///
+/// Named `named_features` so it does not shadow the `features` module `serve` also uses.
+fn named_features(headers: &HeaderMap) -> Option<Vec<String>> {
+    let raw = headers.get("x-gapura-features")?.to_str().ok()?;
+    // 65, not 64, so that a 65th name is still seen and the length check below rejects it.
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .take(65)
+        .map(str::to_string)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let fits = names.len() <= 64
+        && names.iter().all(|n| {
+            n.len() <= 64
+                && n.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        });
+    fits.then_some(names)
+}
+
+/// The build a data plane runs, from `User-Agent: gapura/<version>`, kept for the console at 1 to
+/// 128 characters; anything else calling is kept as it introduced itself.
+fn build(headers: &HeaderMap) -> Option<&str> {
+    let agent = headers.get(header::USER_AGENT)?.to_str().ok()?;
+    Some(agent.strip_prefix("gapura/").unwrap_or(agent)).filter(|b| !b.is_empty() && b.len() <= 128)
 }
 
 /// `WWW-Authenticate` so the failure is legible to whoever is holding a curl, because being
@@ -307,5 +368,56 @@ mod tests {
         )
         .is_err());
         assert!(tls_acceptor(b"", cert.key_pair.serialize_pem().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn what_a_data_plane_says_of_itself_is_read_within_bounds() {
+        let mut h = HeaderMap::new();
+        assert_eq!(named_features(&h), None, "no header is saying nothing");
+        h.insert(
+            "x-gapura-features",
+            "jwt, key_auth,,ip_restriction".parse().unwrap(),
+        );
+        assert_eq!(
+            named_features(&h).unwrap(),
+            ["jwt", "key_auth", "ip_restriction"]
+        );
+        h.insert("x-gapura-features", "".parse().unwrap());
+        assert_eq!(
+            named_features(&h),
+            None,
+            "an empty header is no data plane's"
+        );
+        h.insert("x-gapura-features", ",,".parse().unwrap());
+        assert_eq!(named_features(&h), None, "nor is one of only commas");
+        h.insert("x-gapura-features", "JWT".parse().unwrap());
+        assert_eq!(named_features(&h), None, "not a name a data plane writes");
+
+        // The bounds: 64 names and a 64-character name fit; one more of either does not.
+        let most = vec!["a"; 64].join(",");
+        h.insert("x-gapura-features", most.parse().unwrap());
+        assert_eq!(named_features(&h).map(|n| n.len()), Some(64));
+        let many = vec!["a"; 65].join(",");
+        h.insert("x-gapura-features", many.parse().unwrap());
+        assert_eq!(named_features(&h), None);
+        h.insert("x-gapura-features", "a".repeat(64).parse().unwrap());
+        assert_eq!(named_features(&h), Some(vec!["a".repeat(64)]));
+        h.insert("x-gapura-features", "a".repeat(65).parse().unwrap());
+        assert_eq!(named_features(&h), None);
+
+        assert_eq!(build(&h), None);
+        h.insert(header::USER_AGENT, "gapura/0.2.0-rc.17".parse().unwrap());
+        assert_eq!(build(&h), Some("0.2.0-rc.17"));
+        h.insert(header::USER_AGENT, "curl/8.7.1".parse().unwrap());
+        assert_eq!(build(&h), Some("curl/8.7.1"));
+        h.insert(header::USER_AGENT, "gapura/".parse().unwrap());
+        assert_eq!(build(&h), None, "a version of nothing is not a build");
+        h.insert(
+            header::USER_AGENT,
+            format!("gapura/{}", "x".repeat(128)).parse().unwrap(),
+        );
+        assert_eq!(build(&h).map(str::len), Some(128));
+        h.insert(header::USER_AGENT, "x".repeat(129).parse().unwrap());
+        assert_eq!(build(&h), None);
     }
 }
