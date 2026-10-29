@@ -9,7 +9,7 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - A data plane names the configuration features it reads, and the control plane no longer sends
-  one a configuration it cannot read (#PR). Each poll carries `X-Gapura-Features` and
+  one a configuration it cannot read (#283). Each poll carries `X-Gapura-Features` and
   `User-Agent: gapura/<version>`. When the configuration uses a policy kind -- or a JWT policy's
   `jwks_uri` -- that a data plane lacks, `/v1/config` answers it `409` with
   `{"error":"incompatible","missing":[...]}`, and it keeps serving the configuration it has. It is
