@@ -99,6 +99,10 @@ jobs:
         with:
           context: .
           file: ${{ matrix.file }}
+          # Compiled in as the version a data plane reports to the control plane (Dockerfile's
+          # GAPURA_VERSION). Not a script, so no shell sees it; the guard job has already checked
+          # a dispatched tag's shape. Dockerfile.control declares no such ARG and ignores it.
+          build-args: GAPURA_VERSION=${{ github.event.inputs.tag || github.ref_name }}
           platforms: ${{ matrix.platform }}
           # Push by digest; the tags are attached by the merge job below.
           outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
