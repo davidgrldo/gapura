@@ -70,7 +70,7 @@ and a key never changes meaning, so a client can match on it:
 
 | Key | Status | Cause |
 |---|---|---|
-| `INVALID_REQUEST_TARGET` | 400 | the path cannot be normalised, the host is ambiguous, or `;` parameters would route it elsewhere |
+| `INVALID_REQUEST_TARGET` | 400 | the path cannot be normalised, the host is ambiguous, `;` parameters would route it elsewhere, or `Connection` names `Host` or an `X-Forwarded-*` header |
 | `NO_ROUTE` | 404 | no rule matches |
 | `NO_BACKEND` | 500 | the rule has no valid backend |
 | `NO_ENDPOINTS` | 503 | the backend has no ready endpoint, or none left to try |
@@ -93,6 +93,11 @@ response header, so a route with such a transform answers as its operator config
 
 The 401 keys say whether a credential was presented, never why it was refused: that stays with
 the operator, in the `reason` label of `gapura_policy_refused_total`.
+
+A request Pingora cannot read as a well-formed one never reaches the gateway: two `Host` lines, a
+`Host` that differs from the request target's authority, userinfo in either, or an unparseable
+request line is answered with Pingora's own empty 400, which carries no key and leaves no access
+log line.
 
 ## The name
 

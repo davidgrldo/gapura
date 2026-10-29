@@ -16,8 +16,9 @@ pub const HEADER: &str = "X-Gapura-Error";
 /// what the caller got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKey {
-    /// The request target cannot be normalised, its host is ambiguous, or its `;` parameters
-    /// would route it elsewhere (#213).
+    /// The request target cannot be normalised, its host is ambiguous, its `;` parameters
+    /// would route it elsewhere (#213), or Pingora refused to forward its headers, as when
+    /// `Connection` names `Host` or an `X-Forwarded-*` header (RUSTSEC-2026-0390).
     InvalidRequestTarget,
     /// No rule matches.
     NoRoute,
@@ -193,6 +194,11 @@ pub fn classify(e: &Error) -> Option<ErrorKey> {
         ErrorType::HTTPStatus(503) => ErrorKey::NoEndpoints,
         ErrorType::HTTPStatus(504) => ErrorKey::UpstreamTimeout,
         ErrorType::HTTPStatus(_) => ErrorKey::InternalError,
+        // Not a client that went away but its request, refused as Pingora built the upstream
+        // request from it.
+        ErrorType::InvalidHTTPHeader if matches!(e.esource(), ErrorSource::Downstream) => {
+            ErrorKey::InvalidRequestTarget
+        }
         _ if matches!(e.esource(), ErrorSource::Downstream) => return None,
         _ if !upstream => ErrorKey::InternalError,
         ErrorType::ConnectTimedout => ErrorKey::UpstreamConnectTimeout,
@@ -404,7 +410,7 @@ mod tests {
 
     #[test]
     fn failures_keep_their_status_and_name_their_cause() {
-        let cases: [(Box<Error>, Option<ErrorKey>); 17] = [
+        let cases: [(Box<Error>, Option<ErrorKey>); 18] = [
             (
                 Error::new_up(ErrorType::ConnectTimedout),
                 Some(ErrorKey::UpstreamConnectTimeout),
@@ -458,6 +464,10 @@ mod tests {
                 Some(ErrorKey::UpstreamTimeout),
             ),
             (Error::new_down(ErrorType::ReadError), None),
+            (
+                Error::new_down(ErrorType::InvalidHTTPHeader),
+                Some(ErrorKey::InvalidRequestTarget),
+            ),
             (
                 Error::new_in(ErrorType::InternalError),
                 Some(ErrorKey::InternalError),

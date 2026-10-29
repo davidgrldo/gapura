@@ -21,7 +21,7 @@ base64 = "0.22"
 insta = { version = "1", features = ["yaml"] }
 proptest = "1"
 regex = "1.13"
-pingora = { version = "0.8", features = ["proxy", "openssl"] }
+pingora = { version = "0.9", features = ["proxy", "openssl"] }
 async-trait = "0.1"
 arc-swap = "1"
 bytes = "1"
@@ -35,9 +35,10 @@ anyhow = "1"
 kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls", "ring"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
 futures = "0.3"
-# Below 1.54: tokio 1.54 panics on a zero-capacity BufStream, which pingora-core 0.8.1 builds for
-# every accepted connection ("capacity must be greater than zero"). 1.53.3 is the lowest release
-# with RUSTSEC-2026-0386 fixed. Lift the cap together with the move to pingora 0.9.
+# Below 1.54: tokio 1.54 panics on a zero-capacity BufStream, which pingora-core (0.8.1 and still
+# 0.9.0) builds for every accepted connection ("capacity must be greater than zero",
+# cloudflare/pingora#1059). 1.53.3 is the lowest release with RUSTSEC-2026-0386 fixed. Lift the
+# cap with the Pingora release that fixes #1059.
 tokio = { version = ">=1.53.3, <1.54", features = ["full"] }
 # Postgres for the control plane's store. tokio-postgres rather than sqlx: the
 # compile-time query checking sqlx buys costs a committed .sqlx directory that has to be
