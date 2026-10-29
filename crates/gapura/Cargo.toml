@@ -47,3 +47,5 @@ h2 = { workspace = true }
 base64 = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
+# The export queue's tests run on a paused clock (`start_paused`), so a minute of retries takes no time.
+tokio = { workspace = true, features = ["test-util"] }

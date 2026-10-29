@@ -8,6 +8,20 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The data plane exports what it logs and traces (#285). `--http-log-url` POSTs every access-log
+  line to an HTTP endpoint in JSON-array batches, and `--otlp-traces-url` sends a span per
+  sampled request to an OTLP/HTTP collector, JSON-encoded, sampled as the caller's `traceparent`
+  says or, for a trace that starts at the gateway, at `--otlp-sample-ratio`.
+  `--http-log-headers-file` and `--otlp-headers-file` add headers such as a token. The chart's
+  `telemetry` values set them for the gateway and the data plane alike. Each sink is a queue per
+  replica, bounded at 10 000 records and 16 MiB, that never holds up a request, drops its oldest
+  record when full, and counts every record lost in `gapura_log_dropped_total{sink, reason}`.
+  - **Trace context:** with `--otlp-traces-url` on, the upstream's `traceparent` names the
+    gateway's span as its parent rather than the caller's. Without it nothing changes.
+  - **Access log:** every line gains `consumer`, the `workspace/username` a key_auth policy
+    identified. Under `--access-log-query` the value of a credential-looking query parameter --
+    `api_key`, `token`, `access_token` and the like, or one named like the header a route's
+    key_auth policy reads -- is now written `<redacted>`, on stdout too.
 - A `cors` policy tells browsers which other origins may call a route (#282).
   `PUT /api/workspaces/{ws}/policies/cors` takes `{"target", "config": {"origins", "methods",
   "headers", "expose_headers", "credentials", "max_age", "preflight_continue"}}`, on the

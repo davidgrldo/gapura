@@ -96,9 +96,43 @@ trustedClientHeaders: []
 # Include the request's query string in the access log (the flag is --access-log-query). Off by
 # default: query strings carry tokens and other secrets, and an access log is written to be
 # read. Turn it on when a log line has to name the exact request, not just its path -- the field
-# is `query`, and `path` never carries it.
+# is `query`, and `path` never carries it. The value of a credential-looking parameter (api_key,
+# token, access_token, presigned-URL signatures and the like, or the header a route's key_auth
+# reads) is written <redacted>.
 accessLog:
   query: false
+
+# Log and trace export, for the gateway above and for dataPlane alike (README "Log and trace
+# export"). Each sink is one queue per replica of 10 000 records or 16 MiB, whichever comes first,
+# sent in batches of up to 500 at most a second after the first record and retried for a minute; a
+# full queue drops its oldest records. Every record lost is counted in
+# gapura_log_dropped_total{sink, reason}, and no request ever waits on a sink. A sink follows no
+# redirect: a 3xx answer is a failed send.
+telemetry:
+  httpLog:
+    # POST every access-log line here as well, batched as a JSON array (--http-log-url). Empty is
+    # off. An https endpoint's certificate is verified against the public roots; there is no
+    # private-CA option yet.
+    url: ""
+    # Headers sent with every POST, e.g. `Authorization: Bearer ...`: `Name: value` lines in a
+    # Secret under `key`, mounted as a file (--http-log-headers-file) and never an argument. A
+    # Content-Type line is ignored: bodies are always application/json.
+    headers:
+      existingSecret: ""
+      key: headers
+  otlp:
+    # OTLP/HTTP traces endpoint, JSON-encoded (--otlp-traces-url), e.g.
+    # http://otel-collector.observability:4318/v1/traces. Empty is off. With it on the gateway
+    # opens a span per sampled request, and the upstream's traceparent names it as the parent.
+    # The same certificate rule applies to an https endpoint.
+    tracesUrl: ""
+    # Share of the traces that start at the gateway to sample, 0 to 1 (--otlp-sample-ratio). A
+    # request that arrives with a traceparent keeps its caller's decision.
+    sampleRatio: 1
+    # As httpLog.headers (--otlp-headers-file).
+    headers:
+      existingSecret: ""
+      key: headers
 
 # EnvFilter directives, e.g. "info" or "gapura=debug". Pingora logs every failed downstream
 # handshake at error level, including the ones a port scanner causes, so it is quieted by default.
@@ -337,9 +371,9 @@ console:
 # default. It reads no Kubernetes API, so it gets a ServiceAccount of its own with no token
 # mounted and no RBAC. Its own pods, labels and Service: the Kubernetes-mode gateway above keeps
 # serving Gateway API routes beside it. image, imagePullSecrets, privilegedPorts, logLevel,
-# threads, trustedProxies, trustedClientHeaders, accessLog, livenessPort, updateStrategy,
-# minReadySeconds, preStopDelaySeconds and terminationGracePeriodSeconds are the gateway's
-# values above and apply to both. No PodDisruptionBudget is rendered for it.
+# threads, trustedProxies, trustedClientHeaders, accessLog, telemetry, livenessPort,
+# updateStrategy, minReadySeconds, preStopDelaySeconds and terminationGracePeriodSeconds are the
+# gateway's values above and apply to both. No PodDisruptionBudget is rendered for it.
 dataPlane:
   enabled: false
   replicaCount: 2
