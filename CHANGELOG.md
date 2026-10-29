@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- A `cors` policy tells browsers which other origins may call a route (#PR).
+- A `cors` policy tells browsers which other origins may call a route (#282).
   `PUT /api/workspaces/{ws}/policies/cors` takes `{"target", "config": {"origins", "methods",
   "headers", "expose_headers", "credentials", "max_age", "preflight_continue"}}`, on the
   workspace, a service or a route. The most specific one applies.
