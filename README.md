@@ -113,13 +113,14 @@ as a `--control-plane` one does:
 - `--otlp-traces-url URL` sends a span per sampled request to an OTLP/HTTP traces endpoint,
   JSON-encoded (`http://otel-collector:4318/v1/traces`); `--otlp-headers-file` as above. The span
   is SERVER kind, named `GET <route>` (the method alone when no route matched), with
-  `http.request.method`, `http.response.status_code`, `url.path`, `server.address`,
-  `client.address`, `http.route`, and `gapura.service`, `gapura.consumer`, `gapura.error_key` and
-  `gapura.listener` when the request has them; a 5xx marks it an error. A method outside the nine
-  standard ones is reported as `_OTHER`, and its span is named `HTTP <route>`. With it on the
-  gateway is a hop of the trace, and the upstream's `traceparent` names the gateway's span as its
-  parent. A request that arrives with a `traceparent` keeps its caller's sampling decision; a
-  trace that starts at the gateway is sampled at `--otlp-sample-ratio` (0 to 1, default 1).
+  `http.request.method`, `http.response.status_code`, `url.scheme`, `url.path`, `server.address`,
+  `client.address`, and `gapura.route` (the route's name, not a path template), `gapura.service`,
+  `gapura.consumer`, `gapura.error_key` and `gapura.listener` when the request has them; a 5xx
+  marks it an error. A method outside the nine standard ones is reported as `_OTHER`, and its
+  span is named `HTTP <route>`. With it on the gateway is a hop of the trace, and the upstream's
+  `traceparent` names the gateway's span as its parent. A request that arrives with a
+  `traceparent` keeps its caller's sampling decision; a trace that starts at the gateway is
+  sampled at `--otlp-sample-ratio` (0 to 1, default 1).
 
 No request waits on a sink. Each sink has one queue per replica, bounded at 10 000 records and
 16 MiB: when either is reached it drops its oldest record for the new one, and it warns once it
@@ -139,9 +140,10 @@ an API key header never leave the gateway this way. An access-log line names the
 key_auth policy identified, in `consumer`. It carries the query string only with
 `--access-log-query`, and then -- on stdout too -- the value of a parameter named (in any case,
 once decoded) `api_key`, `apikey`, `api-key`, `x-api-key`, `key`, `token`, `access_token`,
-`id_token`, `refresh_token`, `client_secret`, `password`, `secret`, `signature`, `sig` or `code`,
-or like the header a route's key_auth policy reads, is written `<redacted>`. A span carries no
-query at all.
+`id_token`, `refresh_token`, `client_secret`, `password`, `secret`, `signature`, `sig`, `code`, or
+a presigned URL's `x-amz-security-token`, `x-amz-signature`, `x-amz-credential`,
+`x-goog-signature` or `x-goog-credential`, or like the header a route's key_auth policy reads, is
+written `<redacted>`. A span carries no query at all.
 
 ## The name
 

@@ -96,7 +96,9 @@ trustedClientHeaders: []
 # Include the request's query string in the access log (the flag is --access-log-query). Off by
 # default: query strings carry tokens and other secrets, and an access log is written to be
 # read. Turn it on when a log line has to name the exact request, not just its path -- the field
-# is `query`, and `path` never carries it.
+# is `query`, and `path` never carries it. The value of a credential-looking parameter (api_key,
+# token, access_token, presigned-URL signatures and the like, or the header a route's key_auth
+# reads) is written <redacted>.
 accessLog:
   query: false
 

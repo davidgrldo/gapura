@@ -300,7 +300,9 @@ pub struct AccessLog<'a> {
     pub mirrored: bool,
     pub listener: &'a str,
     pub route: &'a str,
-    /// The consumer a key_auth policy identified, as `workspace/username`; `null` without one.
+    /// The consumer a key_auth policy identified, as `workspace/username`, or as the bare
+    /// username when the policy belongs to no workspace (a configuration without workspaces);
+    /// `null` without one.
     pub consumer: Option<&'a str>,
     pub upstream: Option<&'a str>,
     pub client_ip: Option<&'a str>,

@@ -133,6 +133,8 @@ pub struct Exporter {
 /// The client every sink POSTs with: certificates verified against the public roots, and no
 /// redirects. A redirect would turn a 301/302 POST into a bodiless GET whose 2xx counts as
 /// delivered, and would carry the headers file's tokens wherever it points: it is a failure.
+/// ponytail: public roots only, no CA file or mTLS, and one POST in flight per sink; a private
+/// collector's CA, a client certificate and parallel sends are follow-ups.
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(SEND_TIMEOUT)

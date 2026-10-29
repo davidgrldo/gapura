@@ -66,7 +66,9 @@ pub struct Args {
 
     /// Include the request's query string in the access log. Off by default: query strings carry
     /// tokens and other secrets, and an access log is written to be read. With it on, a log line
-    /// names the exact request, not just its path.
+    /// names the exact request, not just its path. The value of a credential-looking parameter
+    /// (`api_key`, `token`, `access_token`, presigned-URL signatures and the like) is written
+    /// `<redacted>`.
     #[arg(long = "access-log-query")]
     pub access_log_query: bool,
 

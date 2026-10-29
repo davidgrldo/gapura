@@ -22,10 +22,12 @@ use tokio::time::Instant;
 use super::METRICS;
 
 /// Entries a sink holds before it drops the oldest.
+/// ponytail: fixed bounds, the same for every sink; flags when a deployment needs others.
 pub const CAPACITY: usize = 10_000;
 /// Bytes a sink holds before it drops its oldest entries: about what 10 000 ordinary records
 /// weigh. It is what keeps a run of long URLs or user agents from holding the gateway's memory
 /// while a sink is down.
+/// ponytail: fixed bounds, the same for every sink; flags when a deployment needs others.
 pub const MAX_BYTES: usize = 16 << 20;
 /// Entries in one batch at most.
 const MAX_BATCH: usize = 500;
