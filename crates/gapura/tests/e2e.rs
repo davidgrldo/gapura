@@ -2444,6 +2444,146 @@ async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     .await;
 }
 
+/// One store route to `upstream` at `/{name}`.
+fn one_route(upstream: SocketAddr, name: &str) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{PathMatch, Protocol};
+    use gapura_core::store::{StoreRoute, StoreService, StoreSnapshot};
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: String::new(),
+            name: name.into(),
+            service: "echo".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix(format!("/{name}"))],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        ..StoreSnapshot::default()
+    }
+}
+
+/// Ask `path` until it answers `status`, for up to 10 s. The data plane takes a configuration on
+/// its next poll rather than at once, so a single request right after the stand-in changes its
+/// answer would race that poll.
+async fn until_answers(gw: &Gateway, path: &str, status: u16) {
+    for _ in 0..100 {
+        let r = client(gw).get(url(gw, "echo.test", path)).send().await;
+        if r.is_ok_and(|r| r.status() == status) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{path} never answered {status}");
+}
+
+/// A data plane the control plane refuses keeps routing the configuration it holds, says so on
+/// /metrics, and takes the next one it can read. The refusal is the stand-in's: what decides it
+/// is gapura-control's, tested there; here, what the data plane sends and does about it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_configuration_keeps_the_last_one_and_says_so() {
+    use axum::http::{header, HeaderMap, StatusCode};
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    // Status, body and ETag the stand-in answers with; and the agent and features it last heard.
+    let answer = Arc::new(Mutex::new((200u16, String::new(), "\"v1\"".to_string())));
+    let heard = Arc::new(Mutex::new((String::new(), String::new())));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = listener.local_addr().unwrap();
+    let app = {
+        let (answer, heard) = (Arc::clone(&answer), Arc::clone(&heard));
+        Router::new().route(
+            "/v1/config",
+            axum::routing::get(move |headers: HeaderMap| {
+                let text = |name: &str| {
+                    headers
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                *heard.lock().unwrap() = (text("user-agent"), text("x-gapura-features"));
+                let (status, body, etag) = answer.lock().unwrap().clone();
+                async move {
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [
+                            (header::CONTENT_TYPE, "application/json".to_string()),
+                            (header::ETAG, etag),
+                        ],
+                        body,
+                    )
+                }
+            }),
+        )
+    };
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let first = Arc::clone(&answer);
+    let gw = start_gateway_from(
+        move |dir, http| {
+            let settings = gapura_core::store::StoreSettings {
+                http_ports: vec![http],
+            };
+            let config = gapura_core::store::compile(&one_route(upstream, "first"), &settings);
+            first.lock().unwrap().1 = serde_json::to_string(&config).unwrap();
+            let token = dir.join("token");
+            std::fs::write(&token, "e2e").unwrap();
+            vec![
+                "--control-plane".to_string(),
+                format!("http://{control}"),
+                "--control-plane-insecure-http".to_string(),
+                "--control-plane-token-file".to_string(),
+                token.to_str().unwrap().to_string(),
+            ]
+        },
+        &["--control-plane-interval", "1"],
+    )
+    .await;
+    until_answers(&gw, "/first", 200).await;
+    let (agent, features) = heard.lock().unwrap().clone();
+    assert!(agent.starts_with("gapura/"), "{agent}");
+    assert_eq!(features, gapura_core::features::FEATURES.join(","));
+
+    // Refused: it keeps routing what it holds, and says so.
+    *answer.lock().unwrap() = (
+        409,
+        r#"{"error":"incompatible","missing":["cors"]}"#.to_string(),
+        "\"v2\"".to_string(),
+    );
+    // From the start of a line: the gauge's HELP text begins "1 while", so the bare name and
+    // value also match `# HELP gapura_config_incompatible 1 while ...` at any value.
+    wait_for_metric(&gw, "\ngapura_config_incompatible 1\n").await;
+    until_answers(&gw, "/first", 200).await;
+
+    // A configuration it can read again: taken, and the gauge clears.
+    let settings = gapura_core::store::StoreSettings {
+        http_ports: vec![gw.http],
+    };
+    let second = gapura_core::store::compile(&one_route(upstream, "second"), &settings);
+    *answer.lock().unwrap() = (
+        200,
+        serde_json::to_string(&second).unwrap(),
+        "\"v3\"".to_string(),
+    );
+    until_answers(&gw, "/second", 200).await;
+    wait_for_metric(&gw, "\ngapura_config_incompatible 0\n").await;
+}
+
 /// An HTTP/1 head read off `sock` a byte at a time, lowercased. Unlike `read_head`, nothing after
 /// it is read: what the other side sends straight after a 101 stays on the socket, for HTTP/2.
 async fn read_head_unbuffered(sock: &mut tokio::net::TcpStream) -> String {
