@@ -173,3 +173,52 @@ lifecycle:
     sleep: { seconds: {{ $preStop }} }
 {{- end }}
 {{- end -}}
+
+{{/*
+Log and trace export (values: telemetry), shared by the gateway and the data plane. `part` is
+"args" for the container's flags, "volumes" for the header Secrets and "mounts" for where they
+are mounted; each renders nothing while no sink is on. Call it as
+include "gapura.telemetry" (dict "root" . "part" "args").
+*/}}
+{{- define "gapura.telemetry" -}}
+{{- $t := .root.Values.telemetry | default dict }}
+{{- $log := $t.httpLog | default dict }}
+{{- $logHeaders := $log.headers | default dict }}
+{{- $otlp := $t.otlp | default dict }}
+{{- $otlpHeaders := $otlp.headers | default dict }}
+{{- $logSecret := and $log.url $logHeaders.existingSecret }}
+{{- $otlpSecret := and $otlp.tracesUrl $otlpHeaders.existingSecret }}
+{{- if eq .part "args" }}
+{{- if $log.url }}
+- --http-log-url={{ $log.url }}
+{{- if $logSecret }}
+- --http-log-headers-file=/etc/gapura-http-log/{{ $logHeaders.key | default "headers" }}
+{{- end }}
+{{- end }}
+{{- if $otlp.tracesUrl }}
+- --otlp-traces-url={{ $otlp.tracesUrl }}
+{{- if not (kindIs "invalid" $otlp.sampleRatio) }}
+- --otlp-sample-ratio={{ $otlp.sampleRatio }}
+{{- end }}
+{{- if $otlpSecret }}
+- --otlp-headers-file=/etc/gapura-otlp/{{ $otlpHeaders.key | default "headers" }}
+{{- end }}
+{{- end }}
+{{- else if eq .part "volumes" }}
+{{- if $logSecret }}
+- name: http-log-headers
+  secret: { secretName: {{ $logHeaders.existingSecret }} }
+{{- end }}
+{{- if $otlpSecret }}
+- name: otlp-headers
+  secret: { secretName: {{ $otlpHeaders.existingSecret }} }
+{{- end }}
+{{- else }}
+{{- if $logSecret }}
+- { name: http-log-headers, mountPath: /etc/gapura-http-log, readOnly: true }
+{{- end }}
+{{- if $otlpSecret }}
+- { name: otlp-headers, mountPath: /etc/gapura-otlp, readOnly: true }
+{{- end }}
+{{- end }}
+{{- end -}}

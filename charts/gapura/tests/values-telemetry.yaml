@@ -1,0 +1,21 @@
+# Both export sinks on, each with a headers Secret, and a sample ratio, for the Kubernetes gateway
+# and for a data plane: the flags, the Secret volumes and their mounts render in both Deployments.
+telemetry:
+  httpLog:
+    url: https://logs.example.com/ingest
+    headers:
+      existingSecret: log-sink
+      key: auth
+  otlp:
+    tracesUrl: http://otel-collector.observability:4318/v1/traces
+    sampleRatio: 0.25
+    headers:
+      existingSecret: otlp-sink
+dataPlane:
+  enabled: true
+  replicaCount: 1
+  controlPlane:
+    url: http://127.0.0.1:18081
+    insecureHttp: true
+    token:
+      existingSecret: edge-token

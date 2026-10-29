@@ -7,3 +7,4 @@ metrics: null
 console: null
 accessLog: null
 dataPlane: null
+telemetry: null
