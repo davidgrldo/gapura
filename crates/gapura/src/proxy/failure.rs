@@ -42,6 +42,8 @@ pub enum ErrorKey {
     IpForbidden,
     /// A request_size_limit policy refused the body, by its length or as it streamed.
     RequestTooLarge,
+    /// A cors policy refused a preflight from an origin it does not allow.
+    CorsOriginForbidden,
     /// Connecting to the upstream timed out.
     UpstreamConnectTimeout,
     /// The upstream went quiet past the rule's timeout, or the request's budget ran out.
@@ -71,6 +73,7 @@ impl ErrorKey {
             Self::RateLimited => "RATE_LIMITED",
             Self::IpForbidden => "IP_FORBIDDEN",
             Self::RequestTooLarge => "REQUEST_TOO_LARGE",
+            Self::CorsOriginForbidden => "CORS_ORIGIN_FORBIDDEN",
             Self::UpstreamConnectTimeout => "UPSTREAM_CONNECT_TIMEOUT",
             Self::UpstreamTimeout => "UPSTREAM_TIMEOUT",
             Self::UpstreamConnectError => "UPSTREAM_CONNECT_ERROR",
@@ -88,7 +91,7 @@ impl ErrorKey {
             | Self::AuthJwtMissing
             | Self::AuthJwtInvalid
             | Self::Unauthorized => 401,
-            Self::IpForbidden => 403,
+            Self::IpForbidden | Self::CorsOriginForbidden => 403,
             Self::NoRoute => 404,
             Self::RequestTooLarge => 413,
             Self::RateLimited => 429,
@@ -113,7 +116,7 @@ impl ErrorKey {
             | Self::AuthJwtInvalid
             | Self::Unauthorized => "unauthorized",
             Self::RateLimited => "too many requests",
-            Self::IpForbidden => "forbidden",
+            Self::IpForbidden | Self::CorsOriginForbidden => "forbidden",
             Self::RequestTooLarge => "request too large",
             Self::UpstreamConnectTimeout | Self::UpstreamTimeout => "gateway timeout",
             Self::UpstreamConnectError | Self::UpstreamTlsError | Self::UpstreamError => {
@@ -149,6 +152,7 @@ impl ErrorKey {
             | Self::RateLimited
             | Self::IpForbidden
             | Self::RequestTooLarge
+            | Self::CorsOriginForbidden
             | Self::UpstreamTimeout
             | Self::UpstreamError
             | Self::InternalError => None,
@@ -268,7 +272,7 @@ pub fn render(key: ErrorKey, request_id: &str, json: bool) -> (&'static str, Str
 mod tests {
     use super::*;
 
-    const ALL: [ErrorKey; 18] = [
+    const ALL: [ErrorKey; 19] = [
         ErrorKey::InvalidRequestTarget,
         ErrorKey::NoRoute,
         ErrorKey::NoBackend,
@@ -281,6 +285,7 @@ mod tests {
         ErrorKey::RateLimited,
         ErrorKey::IpForbidden,
         ErrorKey::RequestTooLarge,
+        ErrorKey::CorsOriginForbidden,
         ErrorKey::UpstreamConnectTimeout,
         ErrorKey::UpstreamTimeout,
         ErrorKey::UpstreamConnectError,
@@ -510,5 +515,14 @@ mod tests {
         assert_eq!(ErrorKey::RequestTooLarge.status(), 413);
         assert_eq!(ErrorKey::RequestTooLarge.message(), "request too large");
         assert_eq!(ErrorKey::RequestTooLarge.parent(), None);
+    }
+
+    #[test]
+    fn a_preflight_from_an_origin_not_allowed_is_403() {
+        let key = ErrorKey::CorsOriginForbidden;
+        assert_eq!(key.as_str(), "CORS_ORIGIN_FORBIDDEN");
+        assert_eq!(key.status(), 403);
+        assert_eq!(key.message(), "forbidden");
+        assert_eq!(key.parent(), None);
     }
 }
