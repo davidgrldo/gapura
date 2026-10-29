@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- The data plane exports what it logs and traces (#PR). `--http-log-url` POSTs every access-log
+- The data plane exports what it logs and traces (#285). `--http-log-url` POSTs every access-log
   line to an HTTP endpoint in JSON-array batches, and `--otlp-traces-url` sends a span per
   sampled request to an OTLP/HTTP collector, JSON-encoded, sampled as the caller's `traceparent`
   says or, for a trace that starts at the gateway, at `--otlp-sample-ratio`.
