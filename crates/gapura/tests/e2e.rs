@@ -911,6 +911,78 @@ async fn access_logs_and_spans_reach_their_collectors() {
     );
 }
 
+/// In store mode an exported line names the consumer key_auth identified, and so does the span.
+/// With `--access-log-query`, a credential in the query string -- under a common name, or under
+/// the key_auth header's own -- reaches neither stdout nor the collector, and the key the caller
+/// authenticated with is nowhere in the export.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exported_record_names_its_consumer_and_never_its_key() {
+    let (collector, posted) = spawn_collector(0).await;
+    let logs = format!("http://{collector}/logs");
+    let traces = format!("http://{collector}/v1/traces");
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_store_gateway_with(
+        consumer_limited(upstream),
+        &[
+            "--access-log-query",
+            "--http-log-url",
+            logs.as_str(),
+            "--otlp-traces-url",
+            traces.as_str(),
+        ],
+    )
+    .await;
+    let r = client(&gw)
+        .get(url(
+            &gw,
+            "echo.test",
+            "/orders?x-api-key=roomy-key&api_key=leak-me&page=2",
+        ))
+        .header("x-api-key", "roomy-key")
+        .header("x-request-id", "keyed")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let stdout = gw.access_log("keyed").await;
+    assert_eq!(stdout["consumer"], "shop/roomy");
+    assert_eq!(
+        stdout["query"],
+        "x-api-key=<redacted>&api_key=<redacted>&page=2"
+    );
+    let trace_id = stdout["trace_id"].as_str().unwrap().to_string();
+
+    collected(&posted, |p| {
+        delivered(p, "/logs")
+            .iter()
+            .any(|l| l["request_id"] == "keyed")
+            && delivered(p, "/v1/traces")
+                .iter()
+                .any(|s| s["traceId"] == trace_id.as_str())
+    })
+    .await;
+    let posted = posted.lock().unwrap().clone();
+    let line = delivered(&posted, "/logs")
+        .into_iter()
+        .find(|l| l["request_id"] == "keyed")
+        .unwrap();
+    assert_eq!(line, stdout, "the exported line is the stdout line");
+    let span = delivered(&posted, "/v1/traces")
+        .into_iter()
+        .find(|s| s["traceId"] == trace_id.as_str())
+        .unwrap();
+    assert_eq!(
+        span_attr(&span, "gapura.consumer"),
+        json!({"stringValue": "shop/roomy"})
+    );
+
+    let everything =
+        serde_json::to_string(&posted.iter().map(|p| &p.body).collect::<Vec<_>>()).unwrap();
+    for secret in ["roomy-key", "leak-me"] {
+        assert!(!everything.contains(secret), "{secret} was exported");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn url_rewrite_changes_path_and_host() {
     let (gw, c) = setup().await;
