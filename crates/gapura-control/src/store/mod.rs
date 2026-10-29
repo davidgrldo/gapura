@@ -79,6 +79,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0011_consumer_policies",
         include_str!("../../migrations/0011_consumer_policies.sql"),
     ),
+    (
+        "0012_data_plane_build",
+        include_str!("../../migrations/0012_data_plane_build.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
@@ -426,7 +430,10 @@ impl Store {
 
     /// Liveness is the configuration call, not a second mechanism reporting the same fact. The
     /// address is the connection's peer, a proxy's when one is in front; the tag is the one the
-    /// data plane sent, so `None` when it sent none.
+    /// data plane sent, so `None` when it sent none. `build` and `features` are what it said of
+    /// itself, `None` when it said nothing usable, and replace what an earlier call said.
+    // One call's facts, each a column; a struct would only rename them.
+    #[expect(clippy::too_many_arguments)]
     pub async fn record_call(
         &self,
         data_plane: uuid::Uuid,
@@ -434,6 +441,8 @@ impl Store {
         version: i64,
         etag: Option<&str>,
         address: Option<std::net::IpAddr>,
+        build: Option<&str>,
+        features: Option<&[String]>,
     ) -> Result<()> {
         // tokio-postgres binds no IpAddr to inet without a feature it is not built with, so the
         // address goes over as text and the database parses it.
@@ -449,9 +458,18 @@ impl Store {
             "with t as (update data_plane_tokens set last_used_at = now() where id = $2)
              update data_planes
                 set last_seen_at = now(), last_seen_version = $3, last_seen_etag = $4,
-                    last_seen_address = coalesce($5::text::inet, last_seen_address)
+                    last_seen_address = coalesce($5::text::inet, last_seen_address),
+                    last_seen_build = $6, last_seen_features = $7
               where id = $1",
-            &[&data_plane, &token, &version, &etag, &address],
+            &[
+                &data_plane,
+                &token,
+                &version,
+                &etag,
+                &address,
+                &build,
+                &features,
+            ],
         )
         .await?;
         tx.commit().await?;

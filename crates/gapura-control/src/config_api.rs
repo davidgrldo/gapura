@@ -182,6 +182,7 @@ async fn serve(
     // A served tag is 66 characters (quotes and 64 hex digits), so anything past 128 cannot be
     // one a data plane holds. It is recorded as unknown rather than storing what a caller sent.
     let recorded = sent.filter(|v| v.len() <= 128);
+    let has = features(&headers);
     // Recorded before the body is built and whatever the answer turns out to be: the caller is
     // alive either way, and a 304 is the overwhelming majority of these calls.
     if let Err(e) = api
@@ -192,6 +193,8 @@ async fn serve(
             version,
             recorded,
             peer.map(|p| p.0 .0.ip().to_canonical()),
+            build(&headers),
+            has.as_deref(),
         )
         .await
     {
@@ -237,6 +240,34 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .to_str()
         .ok()?
         .strip_prefix("Bearer ")
+}
+
+/// The features a data plane says it reads, `X-Gapura-Features`. `None` when it named none, or
+/// more than 64, or a name that is not 1 to 64 of `a-z`, `0-9` and `_`: no data plane writes
+/// such a header, and it is read as saying nothing -- the legacy baseline, here and in the
+/// console's list alike.
+fn features(headers: &HeaderMap) -> Option<Vec<String>> {
+    let raw = headers.get("x-gapura-features")?.to_str().ok()?;
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect();
+    let fits = names.len() <= 64
+        && names.iter().all(|n| {
+            n.len() <= 64
+                && n.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        });
+    fits.then_some(names)
+}
+
+/// The build a data plane runs, from `User-Agent: gapura/<version>`, kept for the console at up
+/// to 128 characters; anything else calling is kept as it introduced itself.
+fn build(headers: &HeaderMap) -> Option<&str> {
+    let agent = headers.get(header::USER_AGENT)?.to_str().ok()?;
+    Some(agent.strip_prefix("gapura/").unwrap_or(agent)).filter(|b| b.len() <= 128)
 }
 
 /// `WWW-Authenticate` so the failure is legible to whoever is holding a curl, because being
@@ -307,5 +338,35 @@ mod tests {
         )
         .is_err());
         assert!(tls_acceptor(b"", cert.key_pair.serialize_pem().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn what_a_data_plane_says_of_itself_is_read_within_bounds() {
+        let mut h = HeaderMap::new();
+        assert_eq!(features(&h), None, "no header is saying nothing");
+        h.insert(
+            "x-gapura-features",
+            "jwt, key_auth,,ip_restriction".parse().unwrap(),
+        );
+        assert_eq!(features(&h).unwrap(), ["jwt", "key_auth", "ip_restriction"]);
+        h.insert("x-gapura-features", "".parse().unwrap());
+        assert_eq!(
+            features(&h).unwrap(),
+            Vec::<String>::new(),
+            "naming nothing is not silence"
+        );
+        h.insert("x-gapura-features", "JWT".parse().unwrap());
+        assert_eq!(features(&h), None, "not a name a data plane writes");
+        let many = vec!["a"; 65].join(",");
+        h.insert("x-gapura-features", many.parse().unwrap());
+        assert_eq!(features(&h), None);
+
+        assert_eq!(build(&h), None);
+        h.insert(header::USER_AGENT, "gapura/0.2.0-rc.17".parse().unwrap());
+        assert_eq!(build(&h), Some("0.2.0-rc.17"));
+        h.insert(header::USER_AGENT, "curl/8.7.1".parse().unwrap());
+        assert_eq!(build(&h), Some("curl/8.7.1"));
+        h.insert(header::USER_AGENT, "x".repeat(129).parse().unwrap());
+        assert_eq!(build(&h), None);
     }
 }
