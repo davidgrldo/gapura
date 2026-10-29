@@ -1,7 +1,8 @@
 //! Configuration from `gapura-control`, which owns it and hands it out only when asked.
 //!
-//! The data plane calls carrying the version it holds and gets either "nothing has changed" or
-//! the configuration that replaces it. The call is also the liveness signal: there is no second
+//! The data plane calls carrying the version it holds and the features it reads, and gets
+//! "nothing has changed", the configuration that replaces it, or a refusal naming what it lacks
+//! to read that configuration. The call is also the liveness signal: there is no second
 //! heartbeat reporting a fact this one already carries.
 
 use std::collections::{BTreeSet, HashMap};
@@ -19,6 +20,26 @@ use pingora::services::background::BackgroundService;
 
 use crate::source::jwks::{self, KeySources};
 use crate::store::Store;
+
+/// This build's version as the release stamps it, the tag it is published under, else the
+/// crate's, which every prerelease of one version shares. Said to the control plane on each
+/// poll for the console to show; it decides nothing.
+///
+/// Empty counts as unset: the Dockerfile declares the ARG for every build, release or not.
+const VERSION: &str = match option_env!("GAPURA_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
+/// What one poll learned.
+enum Polled {
+    /// The version held is the one served.
+    Unchanged,
+    /// A new version, and the configuration it is.
+    Changed(String, Config),
+    /// The control plane will not send what it serves now: this build lacks these features.
+    Incompatible(Vec<String>),
+}
 
 /// What the cache file holds. The version and the configuration together in one file, because
 /// two files can disagree with each other and one cannot.
@@ -124,21 +145,29 @@ impl ControlSource {
         }
     }
 
-    /// One poll. `held` is the version we have, if any.
-    async fn poll(
-        &self,
-        client: &reqwest::Client,
-        held: Option<&str>,
-    ) -> anyhow::Result<Option<(String, Config)>> {
+    /// One poll. `held` is the version we have, if any. Each poll names the features this build
+    /// reads, so the control plane refuses one it could not use rather than send it.
+    async fn poll(&self, client: &reqwest::Client, held: Option<&str>) -> anyhow::Result<Polled> {
         let mut req = client
             .get(format!("{}/v1/config", self.url.trim_end_matches('/')))
-            .bearer_auth(&self.token);
+            .bearer_auth(&self.token)
+            .header(
+                "x-gapura-features",
+                gapura_core::features::FEATURES.join(","),
+            );
         if let Some(v) = held {
             req = req.header(reqwest::header::IF_NONE_MATCH, v);
         }
         let res = req.send().await?;
         if res.status() == reqwest::StatusCode::NOT_MODIFIED {
-            return Ok(None);
+            return Ok(Polled::Unchanged);
+        }
+        if res.status() == reqwest::StatusCode::CONFLICT {
+            #[derive(Deserialize)]
+            struct Refusal {
+                missing: Vec<String>,
+            }
+            return Ok(Polled::Incompatible(res.json::<Refusal>().await?.missing));
         }
         if !res.status().is_success() {
             anyhow::bail!("the control plane answered {}", res.status());
@@ -149,11 +178,13 @@ impl ControlSource {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        Ok(Some((version, res.json().await?)))
+        Ok(Polled::Changed(version, res.json().await?))
     }
 
     async fn run(&self, mut shutdown: ShutdownWatch) {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent(format!("gapura/{}", VERSION.trim_start_matches('v')));
         if let Some(pem) = &self.ca_pem {
             match reqwest::Certificate::from_pem_bundle(pem) {
                 Ok(certs) => {
@@ -174,19 +205,39 @@ impl ControlSource {
             None => (None, None),
         };
 
+        let mut refused: Vec<String> = Vec::new();
         loop {
             let mut changed = false;
             match self.poll(&client, held.as_deref()).await {
-                Ok(Some((version, config))) => {
+                Ok(Polled::Changed(version, config)) => {
                     tracing::info!(version = %version, "new configuration");
                     held = Some(version);
                     latest = Some(config);
                     changed = true;
+                    crate::telemetry::METRICS.config_incompatible.set(0);
+                    refused.clear();
                 }
                 // The control plane just confirmed the version we hold: whatever we serve is no
                 // longer an unconfirmed cache, and the gauge that says "running blind" must stop
                 // saying it. `swap` would clear it too, but a 304 on a quiet cluster never swaps.
-                Ok(None) => crate::telemetry::METRICS.config_from_cache.set(0),
+                Ok(Polled::Unchanged) => {
+                    crate::telemetry::METRICS.config_from_cache.set(0);
+                    crate::telemetry::METRICS.config_incompatible.set(0);
+                    refused.clear();
+                }
+                // Kept serving, as after any failed poll. Said once per change of what is
+                // missing rather than every poll: it lasts until this data plane is upgraded.
+                Ok(Polled::Incompatible(missing)) => {
+                    crate::telemetry::METRICS.config_incompatible.set(1);
+                    if missing != refused {
+                        tracing::warn!(
+                            missing = %missing.join(","),
+                            "the control plane serves a configuration this build cannot read; \
+                             serving the last one until this data plane is upgraded"
+                        );
+                        refused = missing;
+                    }
+                }
                 Err(e) => {
                     // Keep serving. The cache is here precisely so that losing the
                     // control plane costs new configuration and not traffic.
