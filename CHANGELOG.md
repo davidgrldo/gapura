@@ -30,7 +30,8 @@ means what it usually does, moving from one version below to a later one. Releas
     other gets 403 `CORS_ORIGIN_FORBIDDEN`, counted in
     `gapura_policy_refused_total{policy="cors", reason="origin"}`. Neither reaches the upstream.
     With `preflight_continue`, a preflight goes through the rest of the chain to the upstream
-    instead, and its answer keeps the methods, headers and max-age the upstream gives.
+    instead, whatever its origin, and its answer keeps the methods, headers and max-age the
+    upstream gives, with the policy's own origin headers.
   - **Every other answer:** an allowed origin gets `Access-Control-Allow-Origin`, and
     `Access-Control-Allow-Credentials` and `Access-Control-Expose-Headers` as configured, on the
     upstream's answer and on the gateway's own refusals for the route alike, so a page can read

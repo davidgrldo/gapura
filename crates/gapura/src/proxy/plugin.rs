@@ -438,9 +438,9 @@ impl Access {
     /// credentials: an auth policy before it would refuse every preflight, and a browser would
     /// never send the request it asked about. Answering it before the address is judged tells a
     /// denied address no more than the policy's own CORS configuration, as Kong's cors (priority
-    /// 2000) runs before its ip-restriction (990). The address is judged before any credential is read, so a denied address
-    /// cannot tell a good key from a bad one by its answer. The credential checks keep the
-    /// order they arrive in among themselves. The declared length is judged after them, as Kong
+    /// 2000) runs before its ip-restriction (990). The address is judged before any credential is
+    /// read, so a denied address cannot tell a good key from a bad one by its answer. The
+    /// credential checks keep the order they arrive in among themselves. The declared length is judged after them, as Kong
     /// judges it after authentication, so a caller without a credential is told 401 whatever it
     /// sends; and before the limit, so a body refused for its declared length does not spend a
     /// caller's allowance. One refused as it streams does: the count runs in RequestBody, after
@@ -609,19 +609,21 @@ fn cors(rule: &RouteRule, policy: &CorsPolicy, req: &RequestHeader, cx: &mut Req
     if !policy.methods.is_empty() {
         let _ = resp.insert_header("Access-Control-Allow-Methods", policy.methods.join(", "));
     }
-    let mut vary = "Origin";
-    if policy.headers.is_empty() {
-        // No list of its own: whatever the preflight asks for, so the answer varies by that too.
+    let vary = if policy.headers.is_empty() {
+        // No list of its own: whatever the preflight asks for, so the answer varies by that too,
+        // whether or not this one asked for any -- a cache must not hand an answer that allows no
+        // headers to a preflight that asks for some.
         for asked in req
             .headers
             .get_all(http::header::ACCESS_CONTROL_REQUEST_HEADERS)
         {
             let _ = resp.append_header("Access-Control-Allow-Headers", asked.clone());
-            vary = "Origin, Access-Control-Request-Headers";
         }
+        "Origin, Access-Control-Request-Headers"
     } else {
         let _ = resp.insert_header("Access-Control-Allow-Headers", policy.headers.join(", "));
-    }
+        "Origin"
+    };
     if let Some(max_age) = policy.max_age {
         let _ = resp.insert_header("Access-Control-Max-Age", max_age.to_string());
     }
@@ -1368,6 +1370,28 @@ mod tests {
         assert_eq!(header(&resp, "vary"), Some("Origin"));
         assert_eq!(header(&resp, "access-control-allow-credentials"), None);
         assert_eq!(header(&resp, "access-control-max-age"), None);
+
+        // Echoing, the answer varies by what was asked even when nothing was, so a cache does not
+        // hand this one to a preflight that asks for headers.
+        let r = rule(vec![cors(|_| {})]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut cx = RequestCtx::default();
+        let flow = chain.access(
+            &proxy(),
+            &rt,
+            &r,
+            &preflight("https://app.example"),
+            None,
+            &mut cx,
+        );
+        let Flow::Respond(resp) = flow else {
+            panic!("not answered");
+        };
+        assert_eq!(header(&resp, "access-control-allow-headers"), None);
+        assert_eq!(
+            header(&resp, "vary"),
+            Some("Origin, Access-Control-Request-Headers")
+        );
     }
 
     /// A preflight from an origin the policy does not allow is refused before anything else
