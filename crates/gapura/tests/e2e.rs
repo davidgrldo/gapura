@@ -2061,6 +2061,166 @@ async fn transformers_edit_the_request_upstream_and_the_response_downstream() {
     assert_eq!(r.text().await.unwrap(), "401 unauthorized\n");
 }
 
+/// `/c` wants a key and has a cors policy, and its upstream answers every request with its own
+/// `Access-Control-Allow-Origin: *`, counting them. A preflight carries no key: it is answered
+/// before the key check and never reaches the upstream, 204 for an origin the policy allows and
+/// 403 for one it does not. Every other answer carries the policy's headers in place of the
+/// upstream's -- the gateway's own 401 too, so a page can read why it was refused -- and
+/// `Vary: Origin` whatever the origin.
+#[tokio::test(flavor = "multi_thread")]
+async fn cors_preflights_before_the_key_check_and_heads_every_answer() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use gapura_core::config::{CorsPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
+    use gapura_core::store::{
+        StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot,
+    };
+    use sha2::{Digest, Sha256};
+
+    let served = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = listener.local_addr().unwrap();
+    let count = Arc::clone(&served);
+    let app = Router::new().fallback(any(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+        async { ([("access-control-allow-origin", "*")], "upstream") }
+    }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let on = |plugin: Plugin| StorePlugin {
+        workspace: "shop".into(),
+        route: Some("c".into()),
+        service: None,
+        plugin,
+    };
+    let gw = start_store_gateway(StoreSnapshot {
+        services: vec![StoreService {
+            workspace: "shop".into(),
+            name: "cors".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: "shop".into(),
+            name: "c".into(),
+            service: "cors".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix("/c".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        plugins: vec![
+            on(Plugin::KeyAuth(KeyAuthPolicy::default())),
+            on(Plugin::Cors(CorsPolicy {
+                origins: vec!["https://app.example".into(), "https://*.example.org".into()],
+                methods: vec!["GET".into(), "POST".into()],
+                expose_headers: vec!["x-gapura-error".into()],
+                credentials: true,
+                max_age: Some(600),
+                ..CorsPolicy::default()
+            })),
+        ],
+        credentials: vec![StoreCredential {
+            key_hash: format!("{:x}", Sha256::digest(b"c-key")),
+            consumer: "page".into(),
+            workspace: "shop".into(),
+        }],
+        ..StoreSnapshot::default()
+    })
+    .await;
+    let c = client(&gw);
+    let preflight = |origin: &str| {
+        c.request(reqwest::Method::OPTIONS, url(&gw, "echo.test", "/c"))
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .send()
+    };
+    let get = |origin: &str, key: Option<&str>| {
+        let mut req = c.get(url(&gw, "echo.test", "/c")).header("origin", origin);
+        if let Some(key) = key {
+            req = req.header("x-api-key", key);
+        }
+        req.send()
+    };
+    let header = |r: &reqwest::Response, name: &str| {
+        r.headers()
+            .get(name)
+            .map(|v| v.to_str().unwrap().to_string())
+    };
+    let varies_by_origin = |r: &reqwest::Response| {
+        r.headers()
+            .get_all("vary")
+            .iter()
+            .any(|v| v.to_str().unwrap().contains("Origin"))
+    };
+
+    let r = preflight("https://app.example").await.unwrap();
+    assert_eq!(r.status(), 204);
+    for (name, value) in [
+        ("access-control-allow-origin", "https://app.example"),
+        ("access-control-allow-credentials", "true"),
+        ("access-control-allow-methods", "GET, POST"),
+        ("access-control-max-age", "600"),
+    ] {
+        assert_eq!(header(&r, name).as_deref(), Some(value), "{name}");
+    }
+    assert!(varies_by_origin(&r), "{:?}", r.headers());
+    assert!(header(&r, "x-request-id").is_some());
+
+    let r = preflight("https://evil.example").await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.headers()["x-gapura-error"], "CORS_ORIGIN_FORBIDDEN");
+    assert_eq!(header(&r, "access-control-allow-origin"), None);
+    assert!(varies_by_origin(&r));
+    assert_eq!(
+        served.load(Ordering::SeqCst),
+        0,
+        "no preflight went upstream"
+    );
+
+    let r = get("https://a.example.org", None).await.unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_KEY_MISSING");
+    assert_eq!(
+        header(&r, "access-control-allow-origin").as_deref(),
+        Some("https://a.example.org")
+    );
+    assert_eq!(
+        header(&r, "access-control-expose-headers").as_deref(),
+        Some("x-gapura-error")
+    );
+    assert!(varies_by_origin(&r));
+
+    let r = get("https://a.example.org", Some("c-key")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        header(&r, "access-control-allow-origin").as_deref(),
+        Some("https://a.example.org"),
+        "the policy's origin, not the upstream's *"
+    );
+    assert_eq!(
+        header(&r, "access-control-allow-credentials").as_deref(),
+        Some("true")
+    );
+    assert_eq!(r.text().await.unwrap(), "upstream");
+
+    // Two labels under the suffix are not one: served, but no page may read the answer.
+    let r = get("https://a.b.example.org", Some("c-key")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(header(&r, "access-control-allow-origin"), None);
+    assert_eq!(header(&r, "access-control-allow-credentials"), None);
+    assert!(varies_by_origin(&r));
+    assert_eq!(served.load(Ordering::SeqCst), 2);
+}
+
 /// Reads one response head off `sock`, through its blank line, and returns it whole, keeping in
 /// `pending` whatever arrived past it: an interim head and the final one can come in one read.
 async fn read_head(

@@ -131,7 +131,7 @@ impl Ctx {
             .route
             .and_then(|(l, r)| self.runtime.as_ref()?.chain(l, r)?.as_ref().ok());
         if let Some(chain) = chain {
-            chain.response(resp);
+            chain.response(&self.req, resp);
         }
     }
 
@@ -389,6 +389,8 @@ async fn answer(session: &mut Session, ctx: &mut Ctx, flow: Flow) -> Result<bool
         Flow::Continue => Ok(false),
         Flow::Respond(mut resp) => {
             let status = resp.status.as_u16();
+            // Before the steps, so that a transform can remove it, as it can from any answer.
+            resp.insert_header("X-Request-Id", ctx.request_id.clone())?;
             ctx.response_steps(&mut resp);
             session.write_response_header(resp, true).await?;
             ctx.local_status = Some(status);
@@ -805,7 +807,6 @@ impl ProxyHttp for GapuraProxy {
                 let mut resp = ResponseHeader::build(status, Some(3))?;
                 resp.insert_header("Location", location)?;
                 resp.insert_header("Content-Length", "0")?;
-                resp.insert_header("X-Request-Id", ctx.request_id.clone())?;
                 answer(session, ctx, Flow::Respond(Box::new(resp))).await
             }
             Decision::Misplaced { listener, rule } => {

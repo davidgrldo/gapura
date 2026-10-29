@@ -13,7 +13,7 @@
 use std::net::IpAddr;
 
 use gapura_core::config::{
-    Body, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase, Plugin,
+    Body, CorsPolicy, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase, Plugin,
     RequestTransformerPolicy, RouteRule,
 };
 use gapura_core::credentials;
@@ -76,7 +76,22 @@ pub struct RequestCtx {
     pub invoke: Invoke,
     /// The request body's bytes so far, as the RequestBody steps count them.
     body_bytes: u64,
+    /// What a cors policy's Access step decided, for its Response step.
+    cors: Option<Cors>,
     terminated: bool,
+}
+
+/// What a cors policy's Access step decided of a request.
+enum Cors {
+    /// It answered a preflight itself, and its answer is left as it built it.
+    Answered,
+    /// Anything else: the `Access-Control-Allow-Origin` to send, when the request named an origin
+    /// the policy allows, and whether this is a preflight passed to the upstream, whose answer
+    /// keeps the methods, headers and max-age it gives.
+    Pass {
+        allow: Option<String>,
+        preflight: bool,
+    },
 }
 
 impl RequestCtx {
@@ -129,6 +144,8 @@ pub struct Chain {
 
 /// A step of [`Phase::Access`].
 enum Access {
+    /// A cors policy: answers a preflight, and judges the origin of everything else.
+    Cors(CorsPolicy),
     Jwt(JwtPolicy),
     KeyAuth(KeyAuthPolicy),
     IpRestriction(IpRestrictionPolicy),
@@ -157,6 +174,8 @@ enum RequestBody {
 
 /// A step of [`Phase::Response`].
 enum Response {
+    /// A cors policy's headers, as its Access step decided them.
+    Cors(CorsPolicy),
     /// A response_transformer policy's header edits.
     Transform(HeaderEdits),
 }
@@ -269,11 +288,26 @@ impl Chain {
                         .response
                         .push(Response::Transform(policy.headers.clone()));
                 }
+                Plugin::Cors(policy) => {
+                    let lists = [&policy.methods, &policy.headers, &policy.expose_headers];
+                    if !lists
+                        .iter()
+                        .all(|list| http::HeaderValue::from_str(&list.join(", ")).is_ok())
+                    {
+                        return Err(Misplaced {
+                            plugin: plugin.kind(),
+                            why: "it writes a header name or value HTTP does not allow",
+                        });
+                    }
+                    chain.access.push(Access::Cors(policy.clone()));
+                    chain.response.push(Response::Cors(policy.clone()));
+                }
             }
         }
         // Stable, so policies of one rank keep the order they arrived in.
         chain.access.sort_by_key(Access::rank);
         chain.upstream_request.sort_by_key(UpstreamRequest::rank);
+        chain.response.sort_by_key(Response::rank);
         // Last, because the limit may be the consumer's own and may count per consumer, and the
         // consumer is not known until a policy has checked its credential.
         chain.access.push(Access::RateLimit);
@@ -322,12 +356,21 @@ impl Chain {
     /// the gateway's own. An interim head is not the answer and is left alone: a relayed `100
     /// Continue` is followed by the final head, which the steps edit, and they run once per
     /// answer. A 101 is final, and edited like any other.
-    pub fn response(&self, resp: &mut ResponseHeader) {
+    pub fn response(&self, cx: &RequestCtx, resp: &mut ResponseHeader) {
         if !is_final(resp.status) {
             return;
         }
         for step in &self.response {
             match step {
+                Response::Cors(policy) => match &cx.cors {
+                    Some(Cors::Answered) => {}
+                    Some(Cors::Pass { allow, preflight }) => {
+                        cors_headers(resp, policy, allow.as_deref(), *preflight)
+                    }
+                    // The Access step runs first on every request the rule answers, so this is
+                    // never so; were it, the request is one with no origin the policy allows.
+                    None => cors_headers(resp, policy, None, false),
+                },
                 Response::Transform(edits) => edit_headers(resp, edits),
             }
         }
@@ -377,11 +420,27 @@ impl UpstreamRequest {
     }
 }
 
+impl Response {
+    /// Where the step runs among the Response steps, lowest first, whatever order the policies
+    /// arrive in: cors before any transform, as Kong runs its cors (priority 2000) before its
+    /// response-transformer (800), so that the operator's transform has the last word.
+    fn rank(&self) -> u8 {
+        match self {
+            Response::Cors(_) => 0,
+            Response::Transform(_) => 1,
+        }
+    }
+}
+
 impl Access {
     /// Where the step runs among the Access steps, lowest first, whatever order the policies
-    /// arrive in. The address is judged before any credential is read, so a denied address
-    /// cannot tell a good key from a bad one by its answer. The credential checks keep the
-    /// order they arrive in among themselves. The declared length is judged after them, as Kong
+    /// arrive in. A CORS preflight is answered first, since a browser sends it without
+    /// credentials: an auth policy before it would refuse every preflight, and a browser would
+    /// never send the request it asked about. Answering it before the address is judged tells a
+    /// denied address no more than the policy's own CORS configuration, as Kong's cors (priority
+    /// 2000) runs before its ip-restriction (990). The address is judged before any credential is
+    /// read, so a denied address cannot tell a good key from a bad one by its answer. The
+    /// credential checks keep the order they arrive in among themselves. The declared length is judged after them, as Kong
     /// judges it after authentication, so a caller without a credential is told 401 whatever it
     /// sends; and before the limit, so a body refused for its declared length does not spend a
     /// caller's allowance. One refused as it streams does: the count runs in RequestBody, after
@@ -389,6 +448,7 @@ impl Access {
     /// count per consumer, and the consumer is not known until a credential is checked.
     fn rank(&self) -> u8 {
         match self {
+            Access::Cors(_) => 0,
             Access::IpRestriction(_) => 1,
             Access::Jwt(_) | Access::KeyAuth(_) => 2,
             Access::SizeLimit(_) => 3,
@@ -406,6 +466,7 @@ impl Access {
         cx: &mut RequestCtx,
     ) -> Flow {
         match self {
+            Access::Cors(policy) => cors(rule, policy, req, cx),
             Access::Jwt(policy) => {
                 // No keys for this document means it did not parse at swap time, or its
                 // `jwks_uri` has never loaded. Refusing is the safe direction: the alternative is
@@ -497,6 +558,136 @@ impl Access {
             }
             Access::RateLimit => limit(proxy, rt, rule, req, peer, cx),
         }
+    }
+}
+
+/// A cors policy's Access step. A preflight -- `OPTIONS` with `Origin` and
+/// `Access-Control-Request-Method` -- is answered here unless the policy passes it on: 204 to an
+/// origin it allows, 403 to any other. Everything else goes on, with the origin the policy allows
+/// recorded for the Response step; a request from one it does not is never refused for it, since
+/// CORS is the browser's to enforce and a caller that is not a browser may send `Origin` too.
+fn cors(rule: &RouteRule, policy: &CorsPolicy, req: &RequestHeader, cx: &mut RequestCtx) -> Flow {
+    // Two `Origin` lines are no origin a browser sends, and none of them is allowed.
+    let mut origins = req.headers.get_all(http::header::ORIGIN).iter();
+    let allow = match (origins.next(), origins.next()) {
+        (Some(origin), None) => origin
+            .to_str()
+            .ok()
+            .and_then(|o| policy.allowed(&o.to_ascii_lowercase())),
+        _ => None,
+    };
+    let preflight = req.method == http::Method::OPTIONS
+        && req.headers.contains_key(http::header::ORIGIN)
+        && req
+            .headers
+            .contains_key(http::header::ACCESS_CONTROL_REQUEST_METHOD);
+    if !preflight || policy.preflight_continue {
+        cx.cors = Some(Cors::Pass { allow, preflight });
+        return Flow::Continue;
+    }
+    let Some(allow) = allow else {
+        cx.cors = Some(Cors::Pass {
+            allow: None,
+            preflight: false,
+        });
+        return refuse(
+            rule,
+            "cors",
+            "origin",
+            ErrorKey::CorsOriginForbidden,
+            Vec::new(),
+        );
+    };
+    cx.cors = Some(Cors::Answered);
+    // Built whole here and left alone by the Response step; `X-Request-Id` is added where every
+    // answer a step builds is written.
+    let mut resp = ResponseHeader::build(204, Some(7)).expect("204 is a status");
+    let _ = resp.insert_header("Access-Control-Allow-Origin", allow);
+    if policy.credentials {
+        let _ = resp.insert_header("Access-Control-Allow-Credentials", "true");
+    }
+    if !policy.methods.is_empty() {
+        let _ = resp.insert_header("Access-Control-Allow-Methods", policy.methods.join(", "));
+    }
+    let vary = if policy.headers.is_empty() {
+        // No list of its own: whatever the preflight asks for, so the answer varies by that too,
+        // whether or not this one asked for any -- a cache must not hand an answer that allows no
+        // headers to a preflight that asks for some.
+        for asked in req
+            .headers
+            .get_all(http::header::ACCESS_CONTROL_REQUEST_HEADERS)
+        {
+            let _ = resp.append_header("Access-Control-Allow-Headers", asked.clone());
+        }
+        "Origin, Access-Control-Request-Headers"
+    } else {
+        let _ = resp.insert_header("Access-Control-Allow-Headers", policy.headers.join(", "));
+        "Origin"
+    };
+    if let Some(max_age) = policy.max_age {
+        let _ = resp.insert_header("Access-Control-Max-Age", max_age.to_string());
+    }
+    let _ = resp.insert_header("Vary", vary);
+    Flow::Respond(Box::new(resp))
+}
+
+/// A cors policy's headers on an answer other than its own preflight 204, `allow` being the
+/// `Access-Control-Allow-Origin` to send, if any. The upstream's own go first: the policy owns
+/// CORS on its routes, so an upstream's `*` cannot widen it. A preflight the policy passed to the
+/// upstream keeps the methods, headers and max-age the upstream answered it with.
+///
+/// No write here can fail: `Chain::compile` refuses a policy whose lists are no header value, and
+/// `allow` is `*` or an `Origin` value the request carried.
+fn cors_headers(
+    resp: &mut ResponseHeader,
+    policy: &CorsPolicy,
+    allow: Option<&str>,
+    preflight: bool,
+) {
+    let mut owned = vec![
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+        "access-control-expose-headers",
+    ];
+    if !preflight {
+        owned.extend([
+            "access-control-allow-methods",
+            "access-control-allow-headers",
+            "access-control-max-age",
+        ]);
+    }
+    for name in owned {
+        resp.remove_header(name);
+    }
+    if let Some(allow) = allow {
+        let _ = resp.insert_header("Access-Control-Allow-Origin", allow);
+        if policy.credentials {
+            let _ = resp.insert_header("Access-Control-Allow-Credentials", "true");
+        }
+        if !policy.expose_headers.is_empty() {
+            let _ = resp.insert_header(
+                "Access-Control-Expose-Headers",
+                policy.expose_headers.join(", "),
+            );
+        }
+    }
+    vary_origin(resp);
+}
+
+/// Make `resp`'s `Vary` name `Origin`: the answer differs by it, and a cache that kept one
+/// origin's answer would hand it to the next. Added as a line of its own beside any already there,
+/// and not at all when one already names it or is `*`, which says the answer varies by everything.
+fn vary_origin(resp: &mut ResponseHeader) {
+    let named = resp
+        .headers
+        .get_all(http::header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .any(|v| v == "*" || v.eq_ignore_ascii_case("origin"));
+    if !named {
+        let _ = resp.append_header("Vary", "Origin");
     }
 }
 
@@ -649,6 +840,7 @@ mod tests {
             size_limit(10),
             Plugin::RequestTransformer(RequestTransformerPolicy::default()),
             Plugin::ResponseTransformer(ResponseTransformerPolicy::default()),
+            cors(|_| {}),
         ] {
             let chain = Chain::compile(&rule(vec![plugin.clone()])).unwrap();
             // The request limit closes every chain and is not the plugin's.
@@ -1078,7 +1270,7 @@ mod tests {
             (401, true),
         ] {
             let mut resp = ResponseHeader::build(status, None).unwrap();
-            chain.response(&mut resp);
+            chain.response(&RequestCtx::default(), &mut resp);
             let got = resp.headers.get_all("x-served-by").iter().count();
             assert_eq!(got, usize::from(edited), "{status}");
         }
@@ -1106,6 +1298,281 @@ mod tests {
         assert!(
             Chain::compile(&on_redirect).is_err(),
             "a redirect reaches no Response step"
+        );
+    }
+
+    /// Allows `https://app.example` and one label under `example.org`, with its other fields as
+    /// `edit` leaves them.
+    fn cors(edit: impl FnOnce(&mut CorsPolicy)) -> Plugin {
+        let mut policy = CorsPolicy {
+            origins: vec!["https://app.example".into(), "https://*.example.org".into()],
+            methods: vec!["GET".into(), "POST".into()],
+            ..CorsPolicy::default()
+        };
+        edit(&mut policy);
+        Plugin::Cors(policy)
+    }
+
+    fn preflight(origin: &str) -> RequestHeader {
+        let mut req = RequestHeader::build("OPTIONS", b"/", None).unwrap();
+        req.insert_header("origin", origin).unwrap();
+        req.insert_header("access-control-request-method", "POST")
+            .unwrap();
+        req
+    }
+
+    fn header<'a>(resp: &'a ResponseHeader, name: &str) -> Option<&'a str> {
+        resp.headers.get(name).map(|v| v.to_str().unwrap())
+    }
+
+    /// Listed after key_auth and run before it, with no key: a browser sends a preflight without
+    /// credentials. The answer is built whole, and the Response step leaves it as it is.
+    #[test]
+    fn a_preflight_is_answered_before_any_credential_is_read() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![
+            key_auth(None),
+            ip_restriction(&["10.0.0.0/8"], &[]),
+            cors(|p| {
+                p.credentials = true;
+                p.max_age = Some(600);
+            }),
+        ]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut req = preflight("https://App.Example");
+        req.insert_header("access-control-request-headers", "x-a, content-type")
+            .unwrap();
+        let mut cx = RequestCtx::default();
+        let Flow::Respond(mut resp) = chain.access(&proxy(), &rt, &r, &req, None, &mut cx) else {
+            panic!("not answered");
+        };
+        chain.response(&cx, &mut resp);
+        assert_eq!(resp.status, 204);
+        for (name, value) in [
+            ("access-control-allow-origin", "https://app.example"),
+            ("access-control-allow-credentials", "true"),
+            ("access-control-allow-methods", "GET, POST"),
+            ("access-control-allow-headers", "x-a, content-type"),
+            ("access-control-max-age", "600"),
+            ("vary", "Origin, Access-Control-Request-Headers"),
+        ] {
+            assert_eq!(header(&resp, name), Some(value), "{name}");
+        }
+        assert_eq!(resp.headers.get_all("vary").iter().count(), 1);
+
+        // A list of its own is sent as it is, and the answer no longer varies by what was asked.
+        let r = rule(vec![cors(|p| p.headers = vec!["x-b".into()])]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut cx = RequestCtx::default();
+        let Flow::Respond(resp) = chain.access(&proxy(), &rt, &r, &req, None, &mut cx) else {
+            panic!("not answered");
+        };
+        assert_eq!(header(&resp, "access-control-allow-headers"), Some("x-b"));
+        assert_eq!(header(&resp, "vary"), Some("Origin"));
+        assert_eq!(header(&resp, "access-control-allow-credentials"), None);
+        assert_eq!(header(&resp, "access-control-max-age"), None);
+
+        // Echoing, the answer varies by what was asked even when nothing was, so a cache does not
+        // hand this one to a preflight that asks for headers.
+        let r = rule(vec![cors(|_| {})]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut cx = RequestCtx::default();
+        let flow = chain.access(
+            &proxy(),
+            &rt,
+            &r,
+            &preflight("https://app.example"),
+            None,
+            &mut cx,
+        );
+        let Flow::Respond(resp) = flow else {
+            panic!("not answered");
+        };
+        assert_eq!(header(&resp, "access-control-allow-headers"), None);
+        assert_eq!(
+            header(&resp, "vary"),
+            Some("Origin, Access-Control-Request-Headers")
+        );
+    }
+
+    /// A preflight from an origin the policy does not allow is refused before anything else
+    /// runs; one from two origins at once is no origin it allows.
+    #[test]
+    fn a_preflight_from_an_origin_not_allowed_is_refused() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![key_auth(None), cors(|_| {})]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut two = preflight("https://app.example");
+        two.append_header("origin", "https://app.example").unwrap();
+        for req in [
+            preflight("https://evil.example"),
+            preflight("null"),
+            preflight("https://a.b.example.org"),
+            two,
+        ] {
+            let mut cx = RequestCtx::default();
+            let failure = refused(chain.access(&proxy(), &rt, &r, &req, None, &mut cx));
+            assert_eq!(failure.key, ErrorKey::CorsOriginForbidden);
+            assert!(failure.headers.is_empty());
+            // The 403 says it varies by origin, and allows none.
+            let mut resp = ResponseHeader::build(403, None).unwrap();
+            chain.response(&cx, &mut resp);
+            assert_eq!(header(&resp, "access-control-allow-origin"), None);
+            assert_eq!(header(&resp, "vary"), Some("Origin"));
+        }
+    }
+
+    /// Passed on, a preflight goes through the rest of the chain, and the upstream's answer keeps
+    /// the methods it gives, with the policy's origin in place of the upstream's.
+    #[test]
+    fn a_preflight_passed_on_runs_the_rest_of_the_chain() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![key_auth(None), cors(|p| p.preflight_continue = true)]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut cx = RequestCtx::default();
+        let req = preflight("https://app.example");
+        let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+        assert_eq!(refused(flow).key, ErrorKey::AuthKeyMissing);
+
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("access-control-allow-origin", "*")
+            .unwrap();
+        resp.insert_header("access-control-allow-methods", "PUT")
+            .unwrap();
+        chain.response(&cx, &mut resp);
+        assert_eq!(
+            header(&resp, "access-control-allow-origin"),
+            Some("https://app.example")
+        );
+        assert_eq!(header(&resp, "access-control-allow-methods"), Some("PUT"));
+    }
+
+    /// The request a preflight asked about goes on, whatever its origin, and the answer carries
+    /// the policy's headers in place of the upstream's: the origin for one it allows, nothing for
+    /// one it does not, and `Vary: Origin` either way.
+    #[test]
+    fn an_actual_request_gets_the_policy_s_headers_in_place_of_the_upstream_s() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let r = rule(vec![cors(|p| {
+            p.credentials = true;
+            p.expose_headers = vec!["x-gapura-error".into(), "x-request-id".into()];
+        })]);
+        let chain = Chain::compile(&r).unwrap();
+        let answer = |origin: Option<&str>| {
+            let mut req = get();
+            if let Some(origin) = origin {
+                req.insert_header("origin", origin).unwrap();
+            }
+            let mut cx = RequestCtx::default();
+            let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+            assert!(matches!(flow, Flow::Continue), "{origin:?}");
+            let mut resp = ResponseHeader::build(200, None).unwrap();
+            for (name, value) in [
+                ("access-control-allow-origin", "*"),
+                ("access-control-allow-methods", "DELETE"),
+                ("access-control-max-age", "86400"),
+                ("access-control-expose-headers", "x-secret"),
+                ("vary", "Accept"),
+            ] {
+                resp.insert_header(name, value).unwrap();
+            }
+            chain.response(&cx, &mut resp);
+            resp
+        };
+        // Credentials and a `*.` entry: the origin itself, never `*`.
+        let resp = answer(Some("https://web.example.org"));
+        assert_eq!(
+            header(&resp, "access-control-allow-origin"),
+            Some("https://web.example.org")
+        );
+        assert_eq!(
+            header(&resp, "access-control-allow-credentials"),
+            Some("true")
+        );
+        assert_eq!(
+            header(&resp, "access-control-expose-headers"),
+            Some("x-gapura-error, x-request-id")
+        );
+        for resp in [resp, answer(Some("https://evil.example")), answer(None)] {
+            assert_eq!(header(&resp, "access-control-allow-methods"), None);
+            assert_eq!(header(&resp, "access-control-max-age"), None);
+            let vary: Vec<&str> = resp
+                .headers
+                .get_all("vary")
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            assert_eq!(vary, ["Accept", "Origin"]);
+        }
+        let resp = answer(Some("https://evil.example"));
+        for name in [
+            "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "access-control-expose-headers",
+        ] {
+            assert_eq!(header(&resp, name), None, "{name}");
+        }
+    }
+
+    /// The transform runs after the policy, whatever order they arrive in, so the operator's
+    /// edit has the last word.
+    #[test]
+    fn a_transform_edits_after_the_cors_policy() {
+        let rt = Runtime::new(Config::default(), 1, Vec::new());
+        let remove = Plugin::ResponseTransformer(ResponseTransformerPolicy {
+            headers: HeaderEdits {
+                remove: vec!["access-control-allow-origin".into()],
+                ..HeaderEdits::default()
+            },
+        });
+        let r = rule(vec![remove, cors(|_| {})]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut req = get();
+        req.insert_header("origin", "https://app.example").unwrap();
+        let mut cx = RequestCtx::default();
+        chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        chain.response(&cx, &mut resp);
+        assert_eq!(header(&resp, "access-control-allow-origin"), None);
+        assert_eq!(header(&resp, "vary"), Some("Origin"));
+    }
+
+    #[test]
+    fn vary_names_origin_once() {
+        for (before, after) in [
+            (&[][..], &["Origin"][..]),
+            (&["Accept"], &["Accept", "Origin"]),
+            (&["*"], &["*"]),
+            (&["origin"], &["origin"]),
+            (
+                &["Accept", "Accept-Encoding, ORIGIN"],
+                &["Accept", "Accept-Encoding, ORIGIN"],
+            ),
+        ] {
+            let mut resp = ResponseHeader::build(200, None).unwrap();
+            for v in before {
+                resp.append_header("vary", *v).unwrap();
+            }
+            vary_origin(&mut resp);
+            let got: Vec<&str> = resp
+                .headers
+                .get_all("vary")
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            assert_eq!(got, after, "{before:?}");
+        }
+    }
+
+    #[test]
+    fn a_cors_list_that_is_no_header_value_refuses_the_rule() {
+        let bad = cors(|p| p.expose_headers = vec!["x-a\r\nx-injected: 1".into()]);
+        assert_eq!(
+            Chain::compile(&rule(vec![bad])).err(),
+            Some(Misplaced {
+                plugin: "cors",
+                why: "it writes a header name or value HTTP does not allow",
+            })
         );
     }
 }

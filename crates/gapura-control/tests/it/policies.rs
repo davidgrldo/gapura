@@ -19,7 +19,7 @@ use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::Store;
 use gapura_core::config::{
-    Config, HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy,
+    Config, CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy,
     RequestTransformerPolicy,
 };
 use gapura_core::store::StoreSettings;
@@ -105,6 +105,7 @@ const SERVICES: &str = "/api/workspaces/default/services";
 const ROUTES: &str = "/api/workspaces/default/routes";
 const IP: &str = "/api/workspaces/default/policies/ip_restriction";
 const SIZE: &str = "/api/workspaces/default/policies/request_size_limit";
+const CORS: &str = "/api/workspaces/default/policies/cors";
 const TRANSFORM: &str = "/api/workspaces/default/policies/request_transformer";
 /// The compiled name of the seeded route.
 const COMPILED_ROUTE: &str = "default/orders-api";
@@ -760,6 +761,67 @@ async fn a_request_size_limit_reaches_the_compiled_rule() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
     assert_eq!(parse(&answer)["field"], "max_bytes", "{answer}");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusal wrote nothing"
+    );
+}
+
+/// A cors policy goes through the same endpoint: it compiles onto the rule with its defaults
+/// filled in, the route row says where it comes from, and `*` with credentials is refused at
+/// `origins`, writing nothing.
+#[tokio::test]
+async fn a_cors_policy_reaches_the_compiled_rule() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+
+    ok(
+        &app,
+        "PUT",
+        CORS,
+        s.ed,
+        &put(
+            "route:orders-api",
+            json!({"origins": ["https://App.Example"], "credentials": true}),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [Plugin::Cors(CorsPolicy {
+            origins: vec!["https://app.example".into()],
+            methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"]
+                .map(String::from)
+                .to_vec(),
+            credentials: true,
+            ..CorsPolicy::default()
+        })]
+    );
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["policies"]["cors"]["from"],
+        "route"
+    );
+
+    let before = everything(&store).await;
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        CORS,
+        Some(s.ed),
+        &put(
+            "workspace",
+            json!({"origins": ["*"], "credentials": true}),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(parse(&answer)["field"], "origins", "{answer}");
     assert_eq!(
         everything(&store).await,
         before,
