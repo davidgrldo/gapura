@@ -53,6 +53,9 @@ spec:
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext: {{- include "gapura.podSecurityContext" . | nindent 8 }}
+      {{- with (include "gapura.telemetry" (dict "root" . "part" "volumes") | trim) }}
+      volumes: {{- . | nindent 6 }}
+      {{- end }}
       containers:
       - name: gapura
         image: {{ include "gapura.image" . }}
@@ -94,6 +97,9 @@ spec:
         {{- if ((.Values.accessLog).query) }}
         - --access-log-query
         {{- end }}
+        {{- with (include "gapura.telemetry" (dict "root" . "part" "args") | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- if .Values.readOnly }}
         - --no-status
         {{- end }}
@@ -107,6 +113,9 @@ spec:
           valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
         {{- with .Values.extraEnv }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with (include "gapura.telemetry" (dict "root" . "part" "mounts") | trim) }}
+        volumeMounts: {{- . | nindent 8 }}
         {{- end }}
         ports:
         - { name: http, containerPort: {{ (.Values.ports).http }}, protocol: TCP }

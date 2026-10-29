@@ -137,6 +137,9 @@ spec:
       # The root filesystem is read-only; the configuration cache is the one thing written.
       - name: config-cache
         emptyDir: {}
+      {{- with (include "gapura.telemetry" (dict "root" . "part" "volumes") | trim) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
       - name: gapura
         image: {{ include "gapura.image" . }}
@@ -167,6 +170,9 @@ spec:
         {{- if ((.Values.accessLog).query) }}
         - --access-log-query
         {{- end }}
+        {{- with (include "gapura.telemetry" (dict "root" . "part" "args") | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- with $dp.extraArgs }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -176,6 +182,9 @@ spec:
         - { name: control-plane-ca, mountPath: /etc/gapura-control-plane-ca, readOnly: true }
         {{- end }}
         - { name: config-cache, mountPath: /var/cache/gapura }
+        {{- with (include "gapura.telemetry" (dict "root" . "part" "mounts") | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         ports:
         - { name: http, containerPort: {{ $http }}, protocol: TCP }
         - { name: https, containerPort: {{ $https }}, protocol: TCP }
