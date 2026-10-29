@@ -44,7 +44,7 @@ fn issued(result: Result<IssuedToken, WriteError>) -> Response {
 }
 
 /// `GET /api/data-planes`: every data plane by name, with its tokens' prefixes, whether it called
-/// lately and whether it holds what is served now.
+/// lately, what it runs, whether it holds what is served now and what it lacks of it.
 pub async fn list_data_planes(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let (store, caller) = match caller_of(&state, &headers).await {
         Ok(found) => found,
@@ -58,11 +58,11 @@ pub async fn list_data_planes(State(state): State<AppState>, headers: HeaderMap)
         Ok(read) => read,
         Err(e) => return unavailable(&e),
     };
-    let (etag, _needs) = match config_api::served(&snapshot, &state.store_settings) {
+    let (etag, needs) = match config_api::served(&snapshot, &state.store_settings) {
         Ok((_, etag, needs)) => (etag, needs),
         Err(e) => return unavailable(&e.into()),
     };
-    match store.data_planes(&etag).await {
+    match store.data_planes(&etag, &needs).await {
         Ok(list) => Json(list).into_response(),
         Err(e) => unavailable(&e),
     }

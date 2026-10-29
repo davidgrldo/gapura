@@ -61,9 +61,14 @@ fn status(text: &str) -> Result<&'static str> {
 }
 
 impl Store {
-    /// Every data plane by name, each with its tokens, newest first, and whether it holds what
-    /// is served now, whose tag is `current_etag`. No token or hash is read.
-    pub async fn data_planes(&self, current_etag: &str) -> Result<Vec<DataPlaneView>> {
+    /// Every data plane by name, each with its tokens, newest first; whether it holds what is
+    /// served now, whose tag is `current_etag`; and what it lacks of what that configuration
+    /// `needs`. No token or hash is read.
+    pub async fn data_planes(
+        &self,
+        current_etag: &str,
+        needs: &BTreeSet<&'static str>,
+    ) -> Result<Vec<DataPlaneView>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
@@ -75,6 +80,7 @@ impl Store {
                                      then 'connected'
                                  else 'not_seen' end as status,
                             d.last_seen_etag,
+                            d.last_seen_build, d.last_seen_features,
                             t.token_prefix, {} as token_created_at, {} as token_last_used_at
                        from data_planes d left join data_plane_tokens t on t.data_plane_id = d.id
                       order by d.name, t.created_at desc, t.token_prefix",
@@ -91,13 +97,24 @@ impl Store {
         for row in rows {
             let name: String = row.get("name");
             if out.last().is_none_or(|d| d.name != name) {
+                let status = status(row.get("status"))?;
+                let etag: Option<String> = row.get("last_seen_etag");
+                let features: Option<Vec<String>> = row.get("last_seen_features");
                 out.push(DataPlaneView {
                     name,
                     created_at: row.get("created_at"),
                     last_seen_at: row.get("last_seen_at"),
                     last_seen_address: row.get("last_seen_address"),
-                    status: status(row.get("status"))?,
-                    in_sync: data_planes::in_sync(row.get("last_seen_etag"), current_etag),
+                    status,
+                    in_sync: data_planes::in_sync(etag.as_deref(), current_etag),
+                    build: row.get("last_seen_build"),
+                    config_tag: etag.as_deref().map(data_planes::short_tag),
+                    // One that never called has said nothing to judge.
+                    missing: if status == "never" {
+                        Vec::new()
+                    } else {
+                        gapura_core::features::missing(needs, features.as_deref())
+                    },
                     tokens: Vec::new(),
                 });
             }
