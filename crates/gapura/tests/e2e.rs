@@ -913,16 +913,30 @@ async fn access_logs_and_spans_reach_their_collectors() {
 
 /// In store mode an exported line names the consumer key_auth identified, and so does the span.
 /// With `--access-log-query`, a credential in the query string -- under a common name, or under
-/// the key_auth header's own -- reaches neither stdout nor the collector, and the key the caller
-/// authenticated with is nowhere in the export.
+/// the name of the header the rule's key_auth reads, here `x-shop-key`, which no list of common
+/// names holds -- reaches neither stdout nor the collector, and the key the caller authenticated
+/// with is nowhere in the export.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exported_record_names_its_consumer_and_never_its_key() {
+    use gapura_core::config::{KeyAuthPolicy, Plugin};
     let (collector, posted) = spawn_collector(0).await;
     let logs = format!("http://{collector}/logs");
     let traces = format!("http://{collector}/v1/traces");
     let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    // The shared fixture's key_auth reads `x-api-key`, a name the redaction knows anyway. This
+    // one reads a header of its own, so the query's `x-shop-key` is redacted only because the
+    // rule names it.
+    let mut snapshot = consumer_limited(upstream);
+    for p in &mut snapshot.plugins {
+        if matches!(p.plugin, Plugin::KeyAuth(_)) {
+            p.plugin = Plugin::KeyAuth(KeyAuthPolicy {
+                header: "x-shop-key".into(),
+                ..Default::default()
+            });
+        }
+    }
     let gw = start_store_gateway_with(
-        consumer_limited(upstream),
+        snapshot,
         &[
             "--access-log-query",
             "--http-log-url",
@@ -936,9 +950,9 @@ async fn an_exported_record_names_its_consumer_and_never_its_key() {
         .get(url(
             &gw,
             "echo.test",
-            "/orders?x-api-key=roomy-key&api_key=leak-me&page=2",
+            "/orders?x-shop-key=roomy-key&api_key=leak-me&page=2",
         ))
-        .header("x-api-key", "roomy-key")
+        .header("x-shop-key", "roomy-key")
         .header("x-request-id", "keyed")
         .send()
         .await
@@ -948,7 +962,7 @@ async fn an_exported_record_names_its_consumer_and_never_its_key() {
     assert_eq!(stdout["consumer"], "shop/roomy");
     assert_eq!(
         stdout["query"],
-        "x-api-key=<redacted>&api_key=<redacted>&page=2"
+        "x-shop-key=<redacted>&api_key=<redacted>&page=2"
     );
     let trace_id = stdout["trace_id"].as_str().unwrap().to_string();
 
