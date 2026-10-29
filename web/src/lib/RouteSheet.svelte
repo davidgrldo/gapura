@@ -9,6 +9,7 @@
   import RateLimitControl from './RateLimitControl.svelte'
   import IpRestrictionControl from './IpRestrictionControl.svelte'
   import SizeLimitControl from './SizeLimitControl.svelte'
+  import CorsControl from './CorsControl.svelte'
   import { write } from './api.js'
   import { MAX_HEADERS, METHODS, PATH_LABEL, PATH_TYPES, base, ownPolicies } from './configuration.js'
   import { can } from './workspace.js'
@@ -472,8 +473,9 @@
         <RateLimitControl {workspace} target="route:{route.name}" applies={route.rate_limit} {role} onchanged={onsaved} />
         <IpRestrictionControl {workspace} target="route:{route.name}" applies={route.policies?.ip_restriction ?? null} {role} onchanged={onsaved} />
         <SizeLimitControl {workspace} target="route:{route.name}" service={route.service} applies={route.policies?.request_size_limit ?? null} {role} onchanged={onsaved} />
+        <CorsControl {workspace} target="route:{route.name}" applies={route.policies?.cors ?? null} {role} onchanged={onsaved} />
       {:else}
-        <p class="text-xs text-muted-foreground"><span class="font-medium">API key, JWT, request limit, IP restriction and body size limit.</span> Save it first, then require a key or a token, limit requests, restrict addresses or limit body size.</p>
+        <p class="text-xs text-muted-foreground"><span class="font-medium">API key, JWT, request limit, IP restriction, body size limit and CORS.</span> Save it first, then require a key or a token, limit requests, restrict addresses, limit body size or let pages on other origins call it.</p>
       {/if}
     </div>
     <Sheet.Footer>

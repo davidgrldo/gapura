@@ -1,0 +1,3 @@
+[
+  {"target": "route:catch-all", "config": {"origins": ["https://docs.example.com", "https://*.example.org"], "methods": ["GET", "HEAD"], "expose_headers": ["x-request-id"], "max_age": 600}, "updated_at": "2026-10-30T08:00:00.000000Z"}
+]

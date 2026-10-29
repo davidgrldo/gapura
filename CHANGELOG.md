@@ -8,6 +8,14 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console sets a CORS policy (#PR) on the workspace (on the Services page), on a service or
+  on a route.
+  - **Form:** origins one per line; the methods a preflight is told, ticked, starting from the
+    server's default; the request and exposed headers, separated by commas or spaces; credentials;
+    the preflight cache in seconds; and whether preflights pass to the upstream. Applied on its own
+    like the IP restriction, and a refusal is shown beside the field it is about.
+  - **Inherited policies:** a route or service that inherits one says where from.
+  - **Lists:** the service and route lists tag it `CORS`.
 - `request_transformer` and `response_transformer` policies edit the request sent upstream and
   the response sent back (#281). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
   `{"target", "config": {"headers", "query"}}` and `response_transformer` takes

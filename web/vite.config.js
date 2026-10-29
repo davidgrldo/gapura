@@ -58,13 +58,14 @@ import tailwindcss from '@tailwindcss/vite'
 // config: { allow?, deny? }, updated_at }]` in the order workspace, services, routes, and the rows'
 // `policies` tell the same story. request_size_limit.json is `/policies/request_size_limit`'s,
 // `[{ target, config: { max_bytes }, updated_at }]` in the same order, and the rows' `policies` tell
-// that story too.
+// that story too. cors.json is `/policies/cors`'s, `[{ target, config: { origins, methods,
+// headers?, expose_headers?, credentials?, max_age?, preflight_continue? }, updated_at }]`, likewise.
 //
 // The console's writes — a change to an account's roles, a group mapping put or removed, a
 // service or route created on its list, replaced or deleted by name, a consumer created or
-// deleted, a key revoked, an API-key or JWT requirement, a request limit, an IP restriction or a
-// body size limit put or removed — answer 204 and store nothing, for every persona, so the lists
-// read back as they were.
+// deleted, a key revoked, an API-key or JWT requirement, a request limit, an IP restriction, a
+// body size limit or a CORS policy put or removed — answer 204 and store nothing, for every
+// persona, so the lists read back as they were.
 // Issuing a key is the one write that answers with a body, as the server does: a made-up key, shown
 // once like the real one, and the expiry the request asked for. That is enough to look at the forms
 // and at what follows a save.
