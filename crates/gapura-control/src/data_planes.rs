@@ -75,8 +75,10 @@ pub struct DataPlaneView {
     /// another's; `None` when it held none.
     pub config_tag: Option<String>,
     /// What the configuration served now uses that it cannot read, so `/v1/config` refuses it
-    /// that configuration. Worked out when the list is read, against the features its last call
-    /// named, or rc.16's when it named none. Empty for one that never called.
+    /// that configuration unless it already holds it (a data plane holding the current tag is
+    /// answered 304). Worked out when the list is read, against the features its last call
+    /// named, or the legacy baseline (`LEGACY_FEATURES`) when it named none -- rc.17 and older
+    /// name none. Empty for one that never called.
     pub missing: Vec<String>,
     pub tokens: Vec<TokenView>,
 }

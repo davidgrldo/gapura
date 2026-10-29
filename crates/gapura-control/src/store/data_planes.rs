@@ -97,7 +97,7 @@ impl Store {
         for row in rows {
             let name: String = row.get("name");
             if out.last().is_none_or(|d| d.name != name) {
-                let status = status(row.get("status"))?;
+                let state = status(row.get("status"))?;
                 let etag: Option<String> = row.get("last_seen_etag");
                 let features: Option<Vec<String>> = row.get("last_seen_features");
                 out.push(DataPlaneView {
@@ -105,12 +105,12 @@ impl Store {
                     created_at: row.get("created_at"),
                     last_seen_at: row.get("last_seen_at"),
                     last_seen_address: row.get("last_seen_address"),
-                    status,
+                    status: state,
                     in_sync: data_planes::in_sync(etag.as_deref(), current_etag),
                     build: row.get("last_seen_build"),
                     config_tag: etag.as_deref().map(data_planes::short_tag),
                     // One that never called has said nothing to judge.
-                    missing: if status == "never" {
+                    missing: if state == "never" {
                         Vec::new()
                     } else {
                         gapura_core::features::missing(needs, features.as_deref())

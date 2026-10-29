@@ -433,7 +433,7 @@ impl Store {
     /// data plane sent, so `None` when it sent none. `build` and `features` are what it said of
     /// itself, `None` when it said nothing usable, and replace what an earlier call said.
     // One call's facts, each a column; a struct would only rename them.
-    #[expect(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_call(
         &self,
         data_plane: uuid::Uuid,

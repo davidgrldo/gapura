@@ -189,7 +189,7 @@ async fn serve(
     // A served tag is 66 characters (quotes and 64 hex digits), so anything past 128 cannot be
     // one a data plane holds. It is recorded as unknown rather than storing what a caller sent.
     let recorded = sent.filter(|v| v.len() <= 128);
-    let has = features(&headers);
+    let has = named_features(&headers);
     // Recorded before the body is built and whatever the answer turns out to be: the caller is
     // alive either way, and a 304 is the overwhelming majority of these calls.
     if let Err(e) = api
@@ -264,18 +264,26 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
-/// The features a data plane says it reads, `X-Gapura-Features`. `None` when it named none, or
-/// more than 64, or a name that is not 1 to 64 of `a-z`, `0-9` and `_`: no data plane writes
-/// such a header, and it is read as saying nothing -- the legacy baseline, here and in the
-/// console's list alike.
-fn features(headers: &HeaderMap) -> Option<Vec<String>> {
+/// The features a data plane says it reads, `X-Gapura-Features`. `None` when it named none (an
+/// empty header, or one of only commas), or more than 64, or a name that is not 1 to 64 of
+/// `a-z`, `0-9` and `_`: no data plane writes such a header, and it is read as saying nothing --
+/// the legacy baseline, here and in the console's list alike. Nothing past the 65th name is
+/// read, so a header cannot make this allocate for as many names as it has room to hold.
+///
+/// Named `named_features` so it does not shadow the `features` module `serve` also uses.
+fn named_features(headers: &HeaderMap) -> Option<Vec<String>> {
     let raw = headers.get("x-gapura-features")?.to_str().ok()?;
+    // 65, not 64, so that a 65th name is still seen and the length check below rejects it.
     let names: Vec<String> = raw
         .split(',')
         .map(str::trim)
         .filter(|n| !n.is_empty())
+        .take(65)
         .map(str::to_string)
         .collect();
+    if names.is_empty() {
+        return None;
+    }
     let fits = names.len() <= 64
         && names.iter().all(|n| {
             n.len() <= 64
@@ -285,11 +293,11 @@ fn features(headers: &HeaderMap) -> Option<Vec<String>> {
     fits.then_some(names)
 }
 
-/// The build a data plane runs, from `User-Agent: gapura/<version>`, kept for the console at up
-/// to 128 characters; anything else calling is kept as it introduced itself.
+/// The build a data plane runs, from `User-Agent: gapura/<version>`, kept for the console at 1 to
+/// 128 characters; anything else calling is kept as it introduced itself.
 fn build(headers: &HeaderMap) -> Option<&str> {
     let agent = headers.get(header::USER_AGENT)?.to_str().ok()?;
-    Some(agent.strip_prefix("gapura/").unwrap_or(agent)).filter(|b| b.len() <= 128)
+    Some(agent.strip_prefix("gapura/").unwrap_or(agent)).filter(|b| !b.is_empty() && b.len() <= 128)
 }
 
 /// `WWW-Authenticate` so the failure is legible to whoever is holding a curl, because being
@@ -365,29 +373,50 @@ mod tests {
     #[test]
     fn what_a_data_plane_says_of_itself_is_read_within_bounds() {
         let mut h = HeaderMap::new();
-        assert_eq!(features(&h), None, "no header is saying nothing");
+        assert_eq!(named_features(&h), None, "no header is saying nothing");
         h.insert(
             "x-gapura-features",
             "jwt, key_auth,,ip_restriction".parse().unwrap(),
         );
-        assert_eq!(features(&h).unwrap(), ["jwt", "key_auth", "ip_restriction"]);
+        assert_eq!(
+            named_features(&h).unwrap(),
+            ["jwt", "key_auth", "ip_restriction"]
+        );
         h.insert("x-gapura-features", "".parse().unwrap());
         assert_eq!(
-            features(&h).unwrap(),
-            Vec::<String>::new(),
-            "naming nothing is not silence"
+            named_features(&h),
+            None,
+            "an empty header is no data plane's"
         );
+        h.insert("x-gapura-features", ",,".parse().unwrap());
+        assert_eq!(named_features(&h), None, "nor is one of only commas");
         h.insert("x-gapura-features", "JWT".parse().unwrap());
-        assert_eq!(features(&h), None, "not a name a data plane writes");
+        assert_eq!(named_features(&h), None, "not a name a data plane writes");
+
+        // The bounds: 64 names and a 64-character name fit; one more of either does not.
+        let most = vec!["a"; 64].join(",");
+        h.insert("x-gapura-features", most.parse().unwrap());
+        assert_eq!(named_features(&h).map(|n| n.len()), Some(64));
         let many = vec!["a"; 65].join(",");
         h.insert("x-gapura-features", many.parse().unwrap());
-        assert_eq!(features(&h), None);
+        assert_eq!(named_features(&h), None);
+        h.insert("x-gapura-features", "a".repeat(64).parse().unwrap());
+        assert_eq!(named_features(&h), Some(vec!["a".repeat(64)]));
+        h.insert("x-gapura-features", "a".repeat(65).parse().unwrap());
+        assert_eq!(named_features(&h), None);
 
         assert_eq!(build(&h), None);
         h.insert(header::USER_AGENT, "gapura/0.2.0-rc.17".parse().unwrap());
         assert_eq!(build(&h), Some("0.2.0-rc.17"));
         h.insert(header::USER_AGENT, "curl/8.7.1".parse().unwrap());
         assert_eq!(build(&h), Some("curl/8.7.1"));
+        h.insert(header::USER_AGENT, "gapura/".parse().unwrap());
+        assert_eq!(build(&h), None, "a version of nothing is not a build");
+        h.insert(
+            header::USER_AGENT,
+            format!("gapura/{}", "x".repeat(128)).parse().unwrap(),
+        );
+        assert_eq!(build(&h).map(str::len), Some(128));
         h.insert(header::USER_AGENT, "x".repeat(129).parse().unwrap());
         assert_eq!(build(&h), None);
     }

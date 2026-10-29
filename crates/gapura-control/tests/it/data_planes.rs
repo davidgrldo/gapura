@@ -793,7 +793,7 @@ async fn the_list_says_what_a_data_plane_runs_and_lacks() {
     assert_eq!(plane["config_tag"], serde_json::Value::Null);
     assert_eq!(plane["missing"], serde_json::json!([]), "it never called");
 
-    // As rc.16 calls: no features, no build. It lacks nothing the configuration uses yet.
+    // As rc.17 and older call: no features, no build. It lacks nothing the configuration uses yet.
     let (status, etag) = call(&config, &token, None).await;
     assert_eq!(status, StatusCode::OK);
     let etag = etag.unwrap();
@@ -836,6 +836,26 @@ async fn the_list_says_what_a_data_plane_runs_and_lacks() {
     let plane = row(&app, "edge-1", s.vi).await;
     assert_eq!(plane["build"], "0.2.0-rc.17");
     assert_eq!(plane["missing"], serde_json::json!([]));
+
+    // A refused call is recorded as what it said, so the list and the endpoint cannot disagree:
+    // this one names only `jwt` and the configuration uses `ip_restriction`. `etag` is stale, so
+    // it is not answered 304.
+    assert_eq!(
+        call_as(&config, &token, Some(&etag), "gapura/x", "jwt").await,
+        StatusCode::CONFLICT
+    );
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["build"], "x");
+    assert_eq!(plane["missing"], serde_json::json!(["ip_restriction"]));
+
+    // A header no data plane writes is the legacy baseline in the list too.
+    assert_eq!(
+        call_as(&config, &token, Some(&etag), "gapura/y", "JWT").await,
+        StatusCode::CONFLICT
+    );
+    let plane = row(&app, "edge-1", s.vi).await;
+    assert_eq!(plane["build"], "y");
+    assert_eq!(plane["missing"], serde_json::json!(["ip_restriction"]));
 }
 
 #[tokio::test]

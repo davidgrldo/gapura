@@ -50,7 +50,7 @@ async fn get(
     get_as(app, token, if_none_match, Some(&FEATURES.join(","))).await
 }
 
-/// A poll naming `features`, or none at all, as rc.16 and older do.
+/// A poll naming `features`, or none at all, as rc.17 and older do.
 async fn get_as(
     app: &axum::Router,
     token: &str,
@@ -85,7 +85,7 @@ async fn get_as(
 
 /// A configuration a data plane cannot read is refused to it, naming what it lacks, rather than
 /// sent for it to fail on; one that reads it is sent it; one that names nothing is taken to read
-/// what rc.16 did; and one already holding it is told nothing changed.
+/// the legacy baseline; and one already holding it is told nothing changed.
 #[tokio::test]
 async fn a_data_plane_is_refused_what_it_cannot_read_and_told_why() {
     let Some((store, app, _guard)) = fixture().await else {
@@ -126,7 +126,20 @@ async fn a_data_plane_is_refused_what_it_cannot_read_and_told_why() {
     assert_eq!(
         status,
         StatusCode::CONFLICT,
-        "naming nothing is rc.16, which reads no ip_restriction"
+        "naming nothing is rc.17 and older, taken to read no ip_restriction"
+    );
+
+    // A header no data plane writes is read as saying nothing too: the legacy baseline, not
+    // "reads everything" and not "reads nothing".
+    let (status, _, body) = get_as(&app, &token, None, Some("JWT")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["missing"], serde_json::json!(["ip_restriction"]));
+    let (status, _, _) = get_as(&app, &token, None, Some(&vec!["jwt"; 65].join(","))).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "more names than any data plane has is no data plane's header"
     );
 
     let (status, etag, _) = get(&app, &token, None).await;

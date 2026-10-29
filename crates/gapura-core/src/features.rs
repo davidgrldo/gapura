@@ -23,9 +23,12 @@ pub const FEATURES: &[&str] = &[
     "response_transformer",
 ];
 
-/// What a data plane that names no features reads: rc.16 and every release before it. Releases
-/// before rc.16 read less than this, and nothing on the wire tells them apart, so the upgrade
-/// note asks for rc.16 first.
+/// What a data plane that names no features is taken to read: rc.17 and every release before it
+/// send none. rc.16 read only these, and nothing on the wire tells it from rc.17, which reads
+/// every kind in [`FEATURES`]; so a headerless data plane is assumed to read the least, and an
+/// rc.17 one is refused a newer kind it could read until it is upgraded -- refused, never sent
+/// something an rc.16 would fail on or misread. Releases before rc.16 read less still, which is
+/// why the upgrade note asks for rc.16 first.
 pub const LEGACY_FEATURES: &[&str] = &["jwt", "key_auth"];
 
 impl Config {
@@ -49,8 +52,8 @@ impl Config {
 }
 
 /// What `needs` asks for that a data plane reading `has` lacks, sorted. `None` is a data plane
-/// that named nothing, read as [`LEGACY_FEATURES`]. The one decision: `/v1/config` answers with it
-/// and the console's list shows it, so the two cannot disagree.
+/// that named nothing (rc.17 and older name none), read as [`LEGACY_FEATURES`]. The one decision:
+/// `/v1/config` answers with it and the console's list shows it, so the two cannot disagree.
 pub fn missing(needs: &BTreeSet<&'static str>, has: Option<&[String]>) -> Vec<String> {
     needs
         .iter()
@@ -71,9 +74,9 @@ mod tests {
         Timeouts,
     };
 
-    /// One policy of every kind. The `match` is exhaustive on purpose: a new kind does not
-    /// compile here until it is listed, and then `features_name_every_kind` fails until
-    /// [`FEATURES`] names it too.
+    /// One policy of every kind. The `match` is exhaustive so that a new kind does not compile
+    /// here until it is listed in it; whoever lists it adds a sample to `all` beside it, and
+    /// `features_name_every_kind_and_stay_sorted` then fails until [`FEATURES`] names it.
     fn every_kind() -> Vec<Plugin> {
         let all = vec![
             Plugin::Jwt(JwtPolicy::default()),
