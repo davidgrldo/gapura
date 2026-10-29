@@ -1,5 +1,10 @@
 //! Prometheus metrics, request/trace identifiers, and log setup.
 
+pub mod export;
+pub mod sinks;
+pub mod trace;
+
+use std::borrow::Cow;
 use std::io::Write;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,6 +60,11 @@ pub struct Metrics {
     pub objects_rejected_total: IntCounterVec,
     /// labels: route, result (`sent`, `error`, `timeout`, `overflow`)
     pub mirror_requests_total: IntCounterVec,
+    /// labels: sink (`http_log`, `otlp_traces`), reason (`queue_full`, `send_failed`). Records an
+    /// export sink lost: pushed out of its full queue, or in a batch still undelivered after
+    /// retrying. Both reasons, because a sink that cannot keep up and a collector that is down are
+    /// different problems.
+    pub log_dropped_total: IntCounterVec,
 }
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
@@ -181,6 +191,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
         &["route", "result"]
     )
     .expect("metric registered once"),
+    log_dropped_total: register_int_counter_vec!(
+        "gapura_log_dropped_total",
+        "Records an export sink dropped, by sink and reason",
+        &["sink", "reason"]
+    )
+    .expect("metric registered once"),
 });
 
 /// Unix time in seconds.
@@ -196,6 +212,14 @@ pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Unix time in nanoseconds.
+pub fn now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
 }
 
@@ -276,6 +300,8 @@ pub struct AccessLog<'a> {
     pub mirrored: bool,
     pub listener: &'a str,
     pub route: &'a str,
+    /// The consumer a key_auth policy identified, as `workspace/username`; `null` without one.
+    pub consumer: Option<&'a str>,
     pub upstream: Option<&'a str>,
     pub client_ip: Option<&'a str>,
     pub user_agent: Option<&'a str>,
@@ -285,13 +311,62 @@ pub struct AccessLog<'a> {
     pub error_key: Option<&'static str>,
 }
 
-pub fn write_access_log(entry: &AccessLog<'_>) {
-    if let Ok(line) = serde_json::to_string(entry) {
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        // A closed stdout must never take the gateway down.
-        let _ = writeln!(lock, "{line}");
+/// Write `entry` to stdout as one JSON line, and return the line, so that an export sink sends the
+/// same bytes rather than serializing the record a second time.
+pub fn write_access_log(entry: &AccessLog<'_>) -> Option<String> {
+    let line = serde_json::to_string(entry).ok()?;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    // A closed stdout must never take the gateway down.
+    let _ = writeln!(lock, "{line}");
+    Some(line)
+}
+
+/// Query parameters whose value is a credential often enough that no log line carries it.
+const SECRET_PARAMS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "key",
+    "token",
+    "access_token",
+    "id_token",
+    "refresh_token",
+    "client_secret",
+    "password",
+    "secret",
+    "signature",
+    "sig",
+    "code",
+];
+
+/// `query` with the value of every parameter named in [`SECRET_PARAMS`] or `also` written
+/// `<redacted>`. A name is matched once decoded and without case, so `API%5FKey` is `api_key`.
+/// Every other piece keeps the bytes the client sent, and its place, and a query with nothing to
+/// hide comes back borrowed.
+pub fn redact_query<'a>(query: &'a str, also: &[&str]) -> Cow<'a, str> {
+    // The length of a secret parameter's raw name, or None for a piece to keep as it is.
+    let secret_name = |piece: &str| -> Option<usize> {
+        let (name, _) = piece.split_once('=')?;
+        // `parse` decodes `+` and `%XX`; it yields nothing for an empty name.
+        let (decoded, _) = form_urlencoded::parse(name.as_bytes()).next()?;
+        SECRET_PARAMS
+            .iter()
+            .chain(also)
+            .any(|secret| decoded.eq_ignore_ascii_case(secret))
+            .then_some(name.len())
+    };
+    if !query.split('&').any(|piece| secret_name(piece).is_some()) {
+        return Cow::Borrowed(query);
     }
+    let pieces: Vec<Cow<'_, str>> = query
+        .split('&')
+        .map(|piece| match secret_name(piece) {
+            Some(n) => Cow::Owned(format!("{}=<redacted>", &piece[..n])),
+            None => Cow::Borrowed(piece),
+        })
+        .collect();
+    Cow::Owned(pieces.join("&"))
 }
 
 /// App logs: JSON lines on stderr, filtered by `RUST_LOG`-style directives.
@@ -394,6 +469,7 @@ mod tests {
             mirrored: false,
             listener: "infra/main/http",
             route: "apps/echo",
+            consumer: None,
             upstream: Some("10.0.0.1:8080"),
             client_ip: None,
             user_agent: None,
@@ -405,6 +481,7 @@ mod tests {
         assert_eq!(v["route"], "apps/echo");
         assert_eq!(v["mirrored"], false);
         assert!(v["client_ip"].is_null());
+        assert!(v["consumer"].is_null(), "no consumer is null, not absent");
         assert!(
             v["error_key"].is_null(),
             "an upstream's answer carries no key"
@@ -440,6 +517,7 @@ mod tests {
             mirrored: false,
             listener: "l",
             route: "r",
+            consumer: None,
             upstream: None,
             client_ip: None,
             user_agent: None,
@@ -465,5 +543,65 @@ mod tests {
                 .get()
                 >= 1
         );
+    }
+
+    #[test]
+    fn credential_parameters_are_redacted_and_the_rest_kept_as_sent() {
+        assert_eq!(
+            redact_query("api_key=abc&page=2", &[]),
+            "api_key=<redacted>&page=2"
+        );
+        assert_eq!(
+            redact_query("TOKEN=x&Key=y&keys=z", &[]),
+            "TOKEN=<redacted>&Key=<redacted>&keys=z",
+            "matched without case, and only whole names"
+        );
+        assert_eq!(
+            redact_query("API%5FKey=x&q=a%20b", &[]),
+            "API%5FKey=<redacted>&q=a%20b",
+            "matched once decoded, every other byte kept"
+        );
+        assert_eq!(
+            redact_query("x-api-key=k&q=1", &["x-api-key"]),
+            "x-api-key=<redacted>&q=1",
+            "a key_auth header name counts too"
+        );
+        assert_eq!(
+            redact_query("key&sig=&page=2", &[]),
+            "key&sig=<redacted>&page=2",
+            "a bare name has no value to hide"
+        );
+        assert!(matches!(redact_query("page=2&q=x", &[]), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn the_written_line_is_returned_for_the_sinks() {
+        let entry = AccessLog {
+            ts_ms: 1,
+            request_id: "r",
+            trace_id: "t",
+            method: "GET",
+            host: "h",
+            path: "/",
+            query: None,
+            status: 200,
+            bytes: 0,
+            duration_ms: 0,
+            upstream_duration_ms: None,
+            client_abort: false,
+            mirrored: false,
+            listener: "l",
+            route: "r",
+            consumer: Some("shop/roomy"),
+            upstream: None,
+            client_ip: None,
+            user_agent: None,
+            error: None,
+            error_key: None,
+        };
+        let line = write_access_log(&entry).expect("an access log line serializes");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["consumer"], "shop/roomy");
+        assert!(!line.contains('\n'), "one line, without its newline");
     }
 }

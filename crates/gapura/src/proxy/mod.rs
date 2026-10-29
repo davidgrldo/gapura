@@ -1250,6 +1250,7 @@ impl ProxyHttp for GapuraProxy {
             mirrored: ctx.mirrored,
             listener: &listener,
             route: &route,
+            consumer: None,
             upstream: upstream.as_deref(),
             client_ip: client_ip.as_deref(),
             user_agent: user_agent.as_deref(),
