@@ -81,6 +81,7 @@ and a key never changes meaning, so a client can match on it:
 | `RATE_LIMITED` | 429 | the rule's rate limit is spent for this client |
 | `IP_FORBIDDEN` | 403 | an ip_restriction policy refused the client address |
 | `REQUEST_TOO_LARGE` | 413 | a request_size_limit policy refused the body, by its length or as it streamed |
+| `CORS_ORIGIN_FORBIDDEN` | 403 | a cors policy refused a preflight from an origin it does not allow |
 | `UPSTREAM_CONNECT_TIMEOUT` | 504 | connecting to the upstream timed out |
 | `UPSTREAM_TIMEOUT` | 504 | the upstream went quiet past the rule's timeout, or the request's budget ran out |
 | `UPSTREAM_CONNECT_ERROR` | 502 | the upstream refused the connection or could not be reached |
