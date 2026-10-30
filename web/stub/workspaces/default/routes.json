@@ -61,6 +61,10 @@
       "request_size_limit": {
         "from": "service",
         "updated_at": "2026-10-24T09:00:00.000000Z"
+      },
+      "cors": {
+        "from": "route",
+        "updated_at": "2026-10-30T08:00:00.000000Z"
       }
     }
   }

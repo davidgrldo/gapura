@@ -372,7 +372,7 @@ for (const [file, row, sent] of [
 }
 console.log('ok: the service and route sheets save with the stamp they opened with')
 
-// The IP restriction and body size controls' bounds are policies.rs's, and every kind kept through
+// The IP restriction, body size and CORS controls' bounds are policies.rs's, and every kind kept through
 // `/policies/{kind}` needs a label on the audit page, read from it for the same reasons as the
 // request-limit bounds: a bound that drifts refuses what the form allows, and a kind with no label
 // reads in the audit log as a key requirement.
@@ -399,6 +399,24 @@ else throw new Error(`${POLICIES}: MAX_BODY_BYTES is written as ${bodyBytesText}
 if (serverBodyBytes !== MAX_BODY_BYTES) {
   throw new Error(`MAX_BODY_BYTES in src/lib/configuration.js is ${MAX_BODY_BYTES}, the server's is ${bodyBytesText} (${serverBodyBytes})`)
 }
+// The CORS control's bounds and the methods it says a preflight is told when none are ticked.
+const { MAX_ORIGINS, MAX_AGE_SECS, CORS_METHODS } = await import('./src/lib/configuration.js')
+for (const [name, mine, type] of [
+  ['MAX_ORIGINS', MAX_ORIGINS, 'usize'],
+  ['MAX_AGE_SECS', MAX_AGE_SECS, 'u64'],
+]) {
+  const server = policiesSource.match(new RegExp(`pub const ${name}: ${type} = ([\\d_]+);`))
+  if (!server) throw new Error(`${POLICIES} has no ${name}`)
+  if (Number(server[1].replaceAll('_', '')) !== mine) {
+    throw new Error(`${name} in src/lib/configuration.js is ${mine}, the server's is ${server[1]}`)
+  }
+}
+const corsMethods = policiesSource.match(/const CORS_METHODS: \[&str; \d+\] = \[([^\]]*)\];/)
+if (!corsMethods) throw new Error(`${POLICIES} has no CORS_METHODS`)
+const serverCorsMethods = [...corsMethods[1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+if (serverCorsMethods.join() !== CORS_METHODS.join()) {
+  throw new Error(`CORS_METHODS in src/lib/configuration.js is ${CORS_METHODS}, the server's is ${serverCorsMethods}`)
+}
 const policyKinds = policiesSource.match(/pub const KINDS: &\[&str\] = &\[([\s\S]*?)\];/)
 if (!policyKinds) throw new Error(`${POLICIES} has no KINDS`)
 const serverPolicyKinds = [...policyKinds[1].replace(/\/\/.*$/gm, '').matchAll(/"([^"]+)"/g)].map((m) => m[1])
@@ -407,4 +425,4 @@ const { POLICY_LABEL } = await import('./src/lib/audit.js')
 for (const kind of serverPolicyKinds) {
   if (!POLICY_LABEL[kind]) throw new Error(`POLICY_LABEL in src/lib/audit.js has no label for ${kind}, which ${POLICIES} keeps`)
 }
-console.log("ok: the IP restriction and body size bounds and every policy kind's audit label match the server")
+console.log("ok: the IP restriction, body size and CORS bounds and every policy kind's audit label match the server")
