@@ -10,7 +10,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 - The console's Data planes page shows each data plane's version and the configuration it holds,
   and, for one the control plane refuses (#283), "Can't apply" with what it needs and that it
-  needs upgrading (#PR).
+  needs upgrading (#287).
 
 - A data plane names the configuration features it reads, and the control plane no longer sends
   one a configuration it cannot read (#283). Each poll carries `X-Gapura-Features` and
