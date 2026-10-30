@@ -6,6 +6,9 @@
     "last_seen_address": "10.0.3.7",
     "status": "connected",
     "in_sync": true,
+    "build": "0.2.0-rc.18",
+    "config_tag": "9f2c4e1ab03d",
+    "missing": [],
     "tokens": [
       {
         "prefix": "gpdp_3f9a1c0e",
@@ -26,6 +29,9 @@
     "last_seen_address": null,
     "status": "never",
     "in_sync": null,
+    "build": null,
+    "config_tag": null,
+    "missing": [],
     "tokens": []
   },
   {
@@ -35,6 +41,12 @@
     "last_seen_address": "10.1.0.12",
     "status": "connected",
     "in_sync": false,
+    "build": "0.2.0-rc.16",
+    "config_tag": "41d8e0c7b2fa",
+    "missing": [
+      "ip_restriction",
+      "jwks_uri"
+    ],
     "tokens": [
       {
         "prefix": "gpdp_9c4e07a5",
