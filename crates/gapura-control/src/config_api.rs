@@ -4,7 +4,9 @@
 //! the configuration that replaces it, or 409 naming what it lacks to read that configuration
 //! (`X-Gapura-Features`, see `gapura_core::features`). The call is also the liveness signal, so a
 //! 304 still records that the caller is alive -- there is no second endpoint reporting a fact
-//! this one already carries.
+//! this one already carries. A poll that already holds what is served may ask (`Prefer: wait=N`,
+//! at most 60 s) to be held until that changes, woken by the `bump_config_version` trigger's
+//! notification.
 //!
 //! **This is the one endpoint that serves private key material.** `admin.rs` on the data plane
 //! redacts `tls/key_pem` even on its admin port, and that rule is right; this is its single
@@ -175,6 +177,11 @@ async fn serve(
         }
     };
 
+    // Taken before the snapshot is read, so a change landing between the read and the wait
+    // below wakes it instead of being slept through.
+    let mut changes = api.store.config_changes();
+    changes.borrow_and_update();
+
     let (version, snapshot) = match api.store.snapshot().await {
         Ok(v) => v,
         Err(e) => {
@@ -216,6 +223,27 @@ async fn serve(
             tracing::error!(error = %e, "serialising the configuration");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+    };
+    // Held while it already has what is served and asked to wait: answered the moment a write
+    // may have changed that, or with the 304 it would have had once the wait is up. Nothing is
+    // held meanwhile but this task; the snapshot's pooled connection went back when it was read.
+    // The snapshot is replaced along with what it compiled to, so the routes said below to be
+    // left out are those of the configuration actually sent.
+    let (snapshot, body, etag, needs) = match wait(&headers) {
+        Some(wait) if sent.is_some_and(|v| v == etag) => {
+            if tokio::time::timeout(wait, changes.changed()).await.is_err() {
+                (snapshot, body, etag, needs)
+            } else {
+                match reread(&api).await {
+                    Ok(now) => now,
+                    Err(e) => {
+                        tracing::error!(error = %e, "reading the configuration after a change");
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                }
+            }
+        }
+        _ => (snapshot, body, etag, needs),
     };
     if sent.is_some_and(|v| v == etag) {
         return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
@@ -298,6 +326,28 @@ fn named_features(headers: &HeaderMap) -> Option<Vec<String>> {
 fn build(headers: &HeaderMap) -> Option<&str> {
     let agent = headers.get(header::USER_AGENT)?.to_str().ok()?;
     Some(agent.strip_prefix("gapura/").unwrap_or(agent)).filter(|b| !b.is_empty() && b.len() <= 128)
+}
+
+/// How long a poll asks to be held while nothing changes: `Prefer: wait=N` (RFC 7240), capped at
+/// a minute, so a data plane's interval sets it without a proxy's idle timeout having to.
+fn wait(headers: &HeaderMap) -> Option<std::time::Duration> {
+    headers
+        .get_all("prefer")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .find_map(|p| p.trim().strip_prefix("wait=")?.parse::<u64>().ok())
+        .map(|s| std::time::Duration::from_secs(s.min(60)))
+}
+
+/// The configuration as it is now, read again after a change: the snapshot, and what `served`
+/// gives for it.
+async fn reread(
+    api: &ConfigApi,
+) -> anyhow::Result<(StoreSnapshot, Vec<u8>, String, BTreeSet<&'static str>)> {
+    let (_, snapshot) = api.store.snapshot().await?;
+    let (body, etag, needs) = served(&snapshot, &api.settings)?;
+    Ok((snapshot, body, etag, needs))
 }
 
 /// `WWW-Authenticate` so the failure is legible to whoever is holding a curl, because being
@@ -419,5 +469,28 @@ mod tests {
         assert_eq!(build(&h).map(str::len), Some(128));
         h.insert(header::USER_AGENT, "x".repeat(129).parse().unwrap());
         assert_eq!(build(&h), None);
+    }
+
+    #[test]
+    fn a_poll_asks_to_be_held_for_at_most_a_minute() {
+        use std::time::Duration;
+        let mut h = HeaderMap::new();
+        assert_eq!(wait(&h), None, "no header is no wait");
+        h.insert("prefer", "wait=5".parse().unwrap());
+        assert_eq!(wait(&h), Some(Duration::from_secs(5)));
+        h.insert("prefer", "respond-async, wait=10".parse().unwrap());
+        assert_eq!(
+            wait(&h),
+            Some(Duration::from_secs(10)),
+            "found among other preferences"
+        );
+        h.insert("prefer", "wait=999".parse().unwrap());
+        assert_eq!(
+            wait(&h),
+            Some(Duration::from_secs(60)),
+            "capped at a minute"
+        );
+        h.insert("prefer", "wait=x".parse().unwrap());
+        assert_eq!(wait(&h), None, "not a number of seconds");
     }
 }

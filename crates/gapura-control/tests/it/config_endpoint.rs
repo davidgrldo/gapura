@@ -632,3 +632,97 @@ async fn a_bad_configuration_certificate_stops_the_start_before_any_migration() 
         .get::<_, bool>("ran");
     assert!(!migrated, "the schema must still be untouched: {stderr}");
 }
+
+/// Waits for the store's change listener to have connected. It counts once on connecting, for
+/// whatever it could have missed before then, and a poll held before that count would be woken by
+/// it and answered early, as though something had changed. Locally it has always connected by the
+/// time the first poll is answered, but nothing orders the two.
+async fn listening(store: &Store) {
+    let mut changes = store.config_changes();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        changes.wait_for(|n| *n > 0),
+    )
+    .await
+    .expect("listening within 5 s")
+    .expect("the listener runs");
+}
+
+/// A poll holding the current tag that asks to wait is answered when a write changes what is
+/// served, well inside the wait, rather than at its end.
+#[tokio::test]
+async fn a_held_poll_is_woken_by_a_change() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
+    let (_, etag, _) = get(&app, &token, None).await;
+    let etag = etag.unwrap();
+    listening(&store).await;
+
+    let held = {
+        let (app, token, etag) = (app.clone(), token.clone(), etag.clone());
+        tokio::spawn(async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/config")
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("if-none-match", etag)
+                        .header("x-gapura-features", FEATURES.join(","))
+                        .header("prefer", "wait=30")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            res.status()
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'orders.internal', 8080 from workspaces limit 1;
+             insert into routes (workspace_id, service_id, name, paths)
+               select w.id, s.id, 'orders-api', '[{\"type\":\"prefix\",\"value\":\"/\"}]'
+                 from workspaces w, services s limit 1;",
+        )
+        .await
+        .unwrap();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(2), held)
+        .await
+        .expect("woken within 2 s, not at the end of its 30 s wait")
+        .unwrap();
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// With nothing changing, a held poll is answered 304 once its wait is up.
+#[tokio::test]
+async fn a_held_poll_with_nothing_new_is_told_so_after_its_wait() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
+    let (_, etag, _) = get(&app, &token, None).await;
+    listening(&store).await;
+    let started = std::time::Instant::now();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/config")
+                .header("authorization", format!("Bearer {token}"))
+                .header("if-none-match", etag.unwrap())
+                .header("x-gapura-features", FEATURES.join(","))
+                .header("prefer", "wait=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+}
