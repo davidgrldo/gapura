@@ -8,6 +8,10 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- The console's Data planes page shows each data plane's version and the configuration it holds,
+  and, for one the control plane refuses (#283), "Can't apply" with what it needs and that it
+  needs upgrading (#287).
+
 - The console sets a CORS policy (#286) on the workspace (on the Services page), on a service or
   on a route.
   - **Form:** origins one per line; the methods a preflight is told, ticked, starting from the
@@ -16,6 +20,7 @@ means what it usually does, moving from one version below to a later one. Releas
     like the IP restriction, and a refusal is shown beside the field it is about.
   - **Inherited policies:** a route or service that inherits one says where from.
   - **Lists:** the service and route lists tag it `CORS`.
+
 - A data plane names the configuration features it reads, and the control plane no longer sends
   one a configuration it cannot read (#283). Each poll carries `X-Gapura-Features` and
   `User-Agent: gapura/<version>`. When the configuration uses a policy kind -- or a JWT policy's

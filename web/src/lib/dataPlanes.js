@@ -26,3 +26,10 @@ export function sync(plane) {
   const tone = plane.in_sync === true ? 'ok' : plane.in_sync === false ? 'warn' : 'idle'
   return { words, tone, stale: plane.status !== 'connected' }
 }
+
+// Why the control plane refuses it the configuration served now, when it does: the features that
+// configuration uses which its build cannot read. Null when it lacks nothing.
+export function blocked(plane) {
+  if (!plane.missing?.length) return null
+  return `Needs ${plane.missing.join(', ')}. Upgrade this data plane.`
+}

@@ -4,7 +4,7 @@
   import DataPlaneSheet from '../lib/DataPlaneSheet.svelte'
   import Tag from '../lib/Tag.svelte'
   import * as Table from '$lib/components/ui/table/index.js'
-  import { STATUS_TONE, status, sync } from '../lib/dataPlanes.js'
+  import { STATUS_TONE, blocked, status, sync } from '../lib/dataPlanes.js'
 
   let { me } = $props()
   const superuser = $derived(me.superuser)
@@ -76,7 +76,8 @@
   <div class="grid max-w-2xl gap-1 text-sm text-muted-foreground">
     <p>
       Gateways that fetch their configuration from this control plane. Behind can show for a few seconds after a
-      change, until each one's next call.
+      change, until each one's next call. One whose build cannot read the configuration served now keeps its last
+      one and says what it needs.
     </p>
     {#if !superuser}
       <p>Only a superuser registers data planes: each one can read every workspace's configuration, private keys included.</p>
@@ -108,6 +109,8 @@
             <Table.Head>Name</Table.Head>
             <Table.Head>Status</Table.Head>
             <Table.Head>In sync</Table.Head>
+            <Table.Head>Version</Table.Head>
+            <Table.Head>Configuration</Table.Head>
             <Table.Head>
               Address <span class="font-normal text-muted-foreground">(as the control plane sees it)</span>
             </Table.Head>
@@ -124,13 +127,23 @@
               <Table.Cell class="font-mono">{plane.name}</Table.Cell>
               <Table.Cell><Tag tone={STATUS_TONE[plane.status] ?? 'idle'}>{status(plane)}</Tag></Table.Cell>
               <Table.Cell>
-                {#if insync === null}
+                {#if blocked(plane)}
+                  <!-- Refused rather than behind: it will not catch up on its own. -->
+                  <Tag tone="warn">Can't apply</Tag>
+                  <p class="mt-1 max-w-xs text-xs text-muted-foreground">{blocked(plane)}</p>
+                {:else if insync === null}
                   <span class="text-muted-foreground">—</span>
                 {:else if insync.stale}
                   <span class="text-muted-foreground">{insync.words}, as of its last call</span>
                 {:else}
                   <Tag tone={insync.tone}>{insync.words}</Tag>
                 {/if}
+              </Table.Cell>
+              <Table.Cell class="font-mono">
+                {#if plane.build}{plane.build}{:else}<span class="font-sans text-muted-foreground">—</span>{/if}
+              </Table.Cell>
+              <Table.Cell class="font-mono">
+                {#if plane.config_tag}{plane.config_tag}{:else}<span class="font-sans text-muted-foreground">—</span>{/if}
               </Table.Cell>
               <Table.Cell class="font-mono">
                 {#if plane.last_seen_address}{plane.last_seen_address}{:else}<span class="font-sans text-muted-foreground">—</span>{/if}
