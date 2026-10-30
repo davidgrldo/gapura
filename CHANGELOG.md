@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- The console sets a CORS policy (#PR) on the workspace (on the Services page), on a service or
+- The console sets a CORS policy (#286) on the workspace (on the Services page), on a service or
   on a route.
   - **Form:** origins one per line; the methods a preflight is told, ticked, starting from the
     server's default; the request and exposed headers, separated by commas or spaces; credentials;
