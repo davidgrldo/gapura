@@ -9,7 +9,7 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - A configuration change reaches data planes in about a second rather than one poll interval
-  (#PR). A data plane already holding what is served asks `/v1/config` to hold its poll
+  (#288). A data plane already holding what is served asks `/v1/config` to hold its poll
   (`Prefer: wait=<interval>`, at most 60 s); the control plane answers as soon as the
   `bump_config_version` trigger notifies `gapura_config` (migration 0013), or with the usual 304
   once the wait is up. Each control plane process keeps one Postgres connection, outside its
