@@ -83,6 +83,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0012_data_plane_build",
         include_str!("../../migrations/0012_data_plane_build.sql"),
     ),
+    (
+        "0013_config_notify",
+        include_str!("../../migrations/0013_config_notify.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
