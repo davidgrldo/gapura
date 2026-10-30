@@ -8,6 +8,18 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A configuration change reaches data planes in about a second rather than one poll interval
+  (#288). A data plane already holding what is served asks `/v1/config` to hold its poll
+  (`Prefer: wait=<interval>`, at most 60 s); the control plane answers as soon as the
+  `bump_config_version` trigger notifies `gapura_config` (migration 0013), or with the usual 304
+  once the wait is up. Each control plane process keeps one Postgres connection, outside its
+  pool, listening for those notifications.
+  - **Upgrade order:** either side may go first. An older control plane answers at once, and the
+    data plane still paces its polls by its interval; an older data plane does not ask to wait.
+  - **Behind a proxy:** a held poll is a request idle for up to the data plane's interval, and its
+    client timeout is now that interval plus 15 s. A proxy between them that times out idle
+    requests sooner turns each into an error the data plane retries on its next tick.
+
 - The console's Data planes page shows each data plane's version and the configuration it holds,
   and, for one the control plane refuses (#283), "Can't apply" with what it needs and that it
   needs upgrading (#287).

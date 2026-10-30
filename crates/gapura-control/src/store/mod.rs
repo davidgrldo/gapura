@@ -83,6 +83,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0012_data_plane_build",
         include_str!("../../migrations/0012_data_plane_build.sql"),
     ),
+    (
+        "0013_config_notify",
+        include_str!("../../migrations/0013_config_notify.sql"),
+    ),
 ];
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
@@ -97,6 +101,23 @@ pub struct Store {
     /// validation, and entries are checked on read.
     regex_cache:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Result<(), String>>>>,
+    /// How the pool connects, kept for the one connection that listens for changes, which is
+    /// not the pool's: a pooled connection is handed back and would stop listening.
+    pg: tokio_postgres::Config,
+    tls: tls::MakeRustls,
+    listener: std::sync::OnceLock<Listener>,
+}
+
+/// The task listening for `gapura_config`, ended when the store is dropped.
+struct Listener {
+    changes: tokio::sync::watch::Receiver<u64>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Store {
@@ -128,11 +149,8 @@ impl Store {
                  proxy); add sslmode=require to DATABASE_URL to encrypt and verify it"
             );
         }
-        let manager = Manager::from_config(
-            pg,
-            tls::MakeRustls::new(extra_ca)?,
-            ManagerConfig::default(),
-        );
+        let tls = tls::MakeRustls::new(extra_ca)?;
+        let manager = Manager::from_config(pg.clone(), tls.clone(), ManagerConfig::default());
         let pool = Pool::builder(manager)
             .build()
             .context("building the Postgres pool")?;
@@ -141,6 +159,9 @@ impl Store {
         Ok(Self {
             pool,
             regex_cache: Default::default(),
+            pg,
+            tls,
+            listener: std::sync::OnceLock::new(),
         })
     }
 
@@ -533,6 +554,79 @@ impl Store {
 
     pub fn timeout() -> Duration {
         Duration::from_secs(5)
+    }
+
+    /// A receiver that changes whenever the configuration may have: on each `gapura_config`
+    /// notification from `bump_config_version`, and each time the listening connection is
+    /// (re)made, because a notification sent while it was down is lost. The first call starts
+    /// the listener, which runs until the store is dropped; a store that never serves
+    /// `/v1/config` never opens it.
+    ///
+    /// Call `borrow_and_update` on the receiver before reading the snapshot it guards: a change
+    /// between the two is then seen, rather than slept through.
+    pub fn config_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.listener
+            .get_or_init(|| {
+                let (tx, changes) = tokio::sync::watch::channel(0);
+                let task = tokio::spawn(listen(self.pg.clone(), self.tls.clone(), tx));
+                Listener { changes, task }
+            })
+            .changes
+            .clone()
+    }
+}
+
+/// Holds one connection that `LISTEN`s on `gapura_config`, counting what it hears into `tx`.
+/// Reconnects after any failure, waiting from half a second up to thirty; each connection made
+/// counts once, for whatever was missed without one.
+async fn listen(
+    pg: tokio_postgres::Config,
+    tls: tls::MakeRustls,
+    tx: tokio::sync::watch::Sender<u64>,
+) {
+    let mut wait = Duration::from_millis(500);
+    loop {
+        match pg.connect(tls.clone()).await {
+            Ok((client, mut connection)) => {
+                // The connection has to be polled for the LISTEN to complete and for anything to
+                // arrive, so it is driven on its own task, which hands notifications over here.
+                let (heard, mut hearing) = tokio::sync::mpsc::unbounded_channel();
+                let driver = tokio::spawn(async move {
+                    while let Some(message) =
+                        std::future::poll_fn(|cx| connection.poll_message(cx)).await
+                    {
+                        match message {
+                            Ok(tokio_postgres::AsyncMessage::Notification(_)) => {
+                                let _ = heard.send(());
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "the configuration change listener lost its connection");
+                                break;
+                            }
+                        }
+                    }
+                });
+                match client.batch_execute("listen gapura_config").await {
+                    Ok(()) => {
+                        wait = Duration::from_millis(500);
+                        tx.send_modify(|n| *n += 1);
+                        while hearing.recv().await.is_some() {
+                            tx.send_modify(|n| *n += 1);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "listening for configuration changes")
+                    }
+                }
+                driver.abort();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "connecting to listen for configuration changes")
+            }
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(30));
     }
 }
 

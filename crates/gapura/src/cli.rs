@@ -142,8 +142,9 @@ pub struct Args {
     #[arg(long)]
     pub config_cache: Option<std::path::PathBuf>,
 
-    /// How often to ask. Propagation is bounded by this; the fix, when it
-    /// matters, is to hold the request open rather than to invert the direction.
+    /// How often to ask. A poll that already holds what is served asks to be held until that
+    /// changes, up to this long, so a change arrives within about a second; from a control plane
+    /// that does not hold polls, within this.
     #[arg(long, default_value = "5", value_name = "SECONDS")]
     pub control_plane_interval: u64,
 
