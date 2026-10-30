@@ -11,6 +11,10 @@ RUN apt-get update \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+# The tag this image is published under, which the data plane reports to the control plane as
+# its version: every prerelease of one version shares the crate's. Empty outside a release, and
+# the crate's version is used.
+ARG GAPURA_VERSION
 # Cache mounts keep the OpenSSL build across image rebuilds; the binary is copied out of
 # the cache because a cache mount is not part of the layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

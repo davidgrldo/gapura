@@ -18,6 +18,7 @@ use axum::Extension;
 use gapura_control::config_api::{router, ConfigApi};
 use gapura_control::store::Store;
 use gapura_core::config::Config;
+use gapura_core::features::FEATURES;
 use gapura_core::matcher::{RegexMap, RequestAttrs};
 use gapura_core::store::StoreSettings;
 use tower::ServiceExt;
@@ -40,16 +41,30 @@ async fn fixture() -> Option<(
     Some((store, router(api), guard))
 }
 
+/// A poll as a data plane of this build makes it: naming every feature it reads.
 async fn get(
     app: &axum::Router,
     token: &str,
     if_none_match: Option<&str>,
+) -> (StatusCode, Option<String>, Vec<u8>) {
+    get_as(app, token, if_none_match, Some(&FEATURES.join(","))).await
+}
+
+/// A poll naming `features`, or none at all, as rc.17 and older do.
+async fn get_as(
+    app: &axum::Router,
+    token: &str,
+    if_none_match: Option<&str>,
+    features: Option<&str>,
 ) -> (StatusCode, Option<String>, Vec<u8>) {
     let mut req = Request::builder()
         .uri("/v1/config")
         .header("authorization", format!("Bearer {token}"));
     if let Some(v) = if_none_match {
         req = req.header("if-none-match", v);
+    }
+    if let Some(f) = features {
+        req = req.header("x-gapura-features", f);
     }
     let res = app
         .clone()
@@ -66,6 +81,76 @@ async fn get(
         .await
         .unwrap();
     (status, etag, body.to_vec())
+}
+
+/// A configuration a data plane cannot read is refused to it, naming what it lacks, rather than
+/// sent for it to fail on; one that reads it is sent it; one that names nothing is taken to read
+/// the legacy baseline; and one already holding it is told nothing changed.
+#[tokio::test]
+async fn a_data_plane_is_refused_what_it_cannot_read_and_told_why() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
+    store
+        .client()
+        .await
+        .unwrap()
+        .batch_execute(
+            "insert into services (workspace_id, name, protocol, host, port)
+               select id, 'orders', 'http', 'orders.internal', 8080 from workspaces limit 1;
+             insert into routes (workspace_id, service_id, name, paths)
+               select w.id, s.id, 'orders-api', '[{\"type\":\"prefix\",\"value\":\"/\"}]'
+                 from workspaces w, services s limit 1;
+             insert into plugins (workspace_id, name, config)
+               select id, 'ip_restriction', '{\"deny\":[\"203.0.113.7/32\"]}'
+                 from workspaces limit 1;",
+        )
+        .await
+        .expect("seeding");
+
+    let without: Vec<&str> = FEATURES
+        .iter()
+        .copied()
+        .filter(|f| *f != "ip_restriction")
+        .collect();
+    let (status, _, body) = get_as(&app, &token, None, Some(&without.join(","))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "incompatible", "missing": ["ip_restriction"]})
+    );
+
+    let (status, _, _) = get_as(&app, &token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "naming nothing is rc.17 and older, taken to read no ip_restriction"
+    );
+
+    // A header no data plane writes is read as saying nothing too: the legacy baseline, not
+    // "reads everything" and not "reads nothing".
+    let (status, _, body) = get_as(&app, &token, None, Some("JWT")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["missing"], serde_json::json!(["ip_restriction"]));
+    let (status, _, _) = get_as(&app, &token, None, Some(&vec!["jwt"; 65].join(","))).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "more names than any data plane has is no data plane's header"
+    );
+
+    let (status, etag, _) = get(&app, &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = get_as(&app, &token, etag.as_deref(), Some("jwt")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_MODIFIED,
+        "it already holds what would be refused"
+    );
 }
 
 #[tokio::test]

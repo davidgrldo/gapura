@@ -500,6 +500,16 @@ spec:
       for: 5m
       labels:
         severity: warning
+    - alert: GapuraConfigIncompatible
+      annotations:
+        description: The configuration uses a feature this data plane's build lacks;
+          it serves its last one until upgraded. Its log and the console's Data planes
+          page name the feature.
+        summary: The control plane refuses a Gapura data plane its configuration
+      expr: max(gapura_config_incompatible) == 1
+      for: 10m
+      labels:
+        severity: warning
     - alert: GapuraUpstreamErrors
       annotations:
         description: 'Ratio of upstream error attempts (gapura_upstream_errors_total,

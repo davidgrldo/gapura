@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use gapura_core::config::{HeaderOps, Mirror, PathMatch, Protocol, RouteRule, Timeouts};
+use gapura_core::config::{HeaderOps, Mirror, PathMatch, Plugin, Protocol, RouteRule, Timeouts};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
@@ -44,8 +44,11 @@ use crate::proxy::select::{
     pick_backend, pick_endpoint, random_roll, redirect_location, rewrite_path, Local,
 };
 use crate::store::{Runtime, Store};
+use crate::telemetry::sinks::Sinks;
+use crate::telemetry::trace::SpanCtx;
 use crate::telemetry::{
-    now_millis, request_id, trace_id_of, traceparent, write_access_log, AccessLog, METRICS,
+    now_millis, redact_query, request_id, trace_id_of, traceparent, write_access_log, AccessLog,
+    METRICS,
 };
 
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,6 +76,9 @@ pub struct GapuraProxy {
     pub limiter: rate_limit::RateLimiter,
     /// Whether the access log carries the request's query string (`--access-log-query`).
     pub access_log_query: bool,
+    /// Where `logging` sends each request's record and span, beside stdout: empty unless
+    /// `--http-log-url` or `--otlp-traces-url` was given.
+    pub sinks: Sinks,
 }
 
 /// Per-request state. Indices point into `runtime.config`; holding the Arc keeps that
@@ -89,6 +95,8 @@ pub struct Ctx {
     extracted: Option<Extracted>,
     request_id: String,
     traceparent: String,
+    /// The gateway's own span for this request, while span export is on.
+    span: Option<SpanCtx>,
     scheme: &'static str,
     port: u16,
     local_status: Option<u16>,
@@ -123,7 +131,7 @@ impl Ctx {
             .route
             .and_then(|(l, r)| self.runtime.as_ref()?.chain(l, r)?.as_ref().ok());
         if let Some(chain) = chain {
-            chain.response(resp);
+            chain.response(&self.req, resp);
         }
     }
 
@@ -381,6 +389,8 @@ async fn answer(session: &mut Session, ctx: &mut Ctx, flow: Flow) -> Result<bool
         Flow::Continue => Ok(false),
         Flow::Respond(mut resp) => {
             let status = resp.status.as_u16();
+            // Before the steps, so that a transform can remove it, as it can from any answer.
+            resp.insert_header("X-Request-Id", ctx.request_id.clone())?;
             ctx.response_steps(&mut resp);
             session.write_response_header(resp, true).await?;
             ctx.local_status = Some(status);
@@ -628,6 +638,7 @@ impl ProxyHttp for GapuraProxy {
             extracted: None,
             request_id: String::new(),
             traceparent: String::new(),
+            span: None,
             scheme: "http",
             port: 0,
             local_status: None,
@@ -658,7 +669,19 @@ impl ProxyHttp for GapuraProxy {
                 })
                 .map(str::to_string)
                 .unwrap_or_else(request_id);
-            ctx.traceparent = traceparent(header_str(req, "traceparent"));
+            let incoming = header_str(req, "traceparent");
+            ctx.traceparent = match &self.sinks.traces {
+                // With spans exported the gateway is a hop of the trace, and the upstream's parent
+                // is its span. Without, a caller's valid traceparent goes on unchanged, so the
+                // upstream's parent is the caller's span rather than one of ours nobody exported.
+                Some(traces) => {
+                    let span = SpanCtx::start(incoming, traces.ratio);
+                    let tp = span.traceparent();
+                    ctx.span = Some(span);
+                    tp
+                }
+                None => traceparent(incoming),
+            };
         }
         match Extracted::from_request(session.req_header()) {
             Ok(ex) => ctx.extracted = Some(ex),
@@ -784,7 +807,6 @@ impl ProxyHttp for GapuraProxy {
                 let mut resp = ResponseHeader::build(status, Some(3))?;
                 resp.insert_header("Location", location)?;
                 resp.insert_header("Content-Length", "0")?;
-                resp.insert_header("X-Request-Id", ctx.request_id.clone())?;
                 answer(session, ctx, Flow::Respond(Box::new(resp))).await
             }
             Decision::Misplaced { listener, rule } => {
@@ -1126,15 +1148,16 @@ impl ProxyHttp for GapuraProxy {
         // whatever the error it failed the request with classifies as (any `HTTPStatus` but 503
         // and 504 is a 500), and the client did not abort, whichever side Pingora blames.
         let refused = ctx.refused.take();
+        let key = refused.or_else(|| failure::classify(e));
         // Mark it above the status mapping so that every path through this function reaches it: a
         // downstream failure yields no key and an abort mid-body has already written a response,
         // so neither reaches the error-response branch below. What the flag means then rests on
-        // `failure::classify` returning `None` for a downstream failure -- no key is what keeps
-        // an abort from being answered and logged as an error of ours.
-        if refused.is_none() && matches!(e.esource(), ErrorSource::Downstream) {
+        // `failure::classify` returning `None` for a downstream failure other than a malformed
+        // request -- no key is what keeps an abort from being answered and logged as an error of
+        // ours.
+        if key.is_none() {
             ctx.client_abort = true;
         }
-        let key = refused.or_else(|| failure::classify(e));
         let code = key.map_or(0, ErrorKey::status);
         if upstream {
             let kind = match e.etype() {
@@ -1220,12 +1243,24 @@ impl ProxyHttp for GapuraProxy {
             effective_client_ip(session, &self.trusted_proxies, &self.trusted_client_headers)
                 .map(|ip| ip.to_string());
         let user_agent = header_str(session.req_header(), "user-agent").map(str::to_string);
+        // The header a key_auth policy reads counts as a credential in the query too, whatever
+        // the policy itself reads.
+        let key_names: Vec<&str> = ctx.rule().map_or_else(Vec::new, |rule| {
+            rule.plugins
+                .iter()
+                .filter_map(|p| match p {
+                    Plugin::KeyAuth(k) => Some(k.header.as_str()),
+                    _ => None,
+                })
+                .collect()
+        });
         // Read off the raw URI, not the extracted path: extraction strips the query, and this
         // field is the one place the deployment may ask to keep it.
         let query = self
             .access_log_query
             .then(|| session.req_header().uri.query())
-            .flatten();
+            .flatten()
+            .map(|q| redact_query(q, &key_names));
         let (host, path, method) = match &ctx.extracted {
             Some(ex) => (ex.host.as_str(), ex.path.as_str(), ex.method.as_str()),
             None => (
@@ -1234,14 +1269,14 @@ impl ProxyHttp for GapuraProxy {
                 session.req_header().method.as_str(),
             ),
         };
-        write_access_log(&AccessLog {
+        let entry = AccessLog {
             ts_ms: now_millis(),
             request_id: &ctx.request_id,
             trace_id: trace_id_of(&ctx.traceparent),
             method,
             host,
             path,
-            query,
+            query: query.as_deref(),
             status,
             bytes: session.body_bytes_sent(),
             duration_ms: ctx.started.elapsed().as_millis() as u64,
@@ -1250,12 +1285,30 @@ impl ProxyHttp for GapuraProxy {
             mirrored: ctx.mirrored,
             listener: &listener,
             route: &route,
+            consumer: ctx.req.consumer.as_ref().map(|c| c.id.as_str()),
             upstream: upstream.as_deref(),
             client_ip: client_ip.as_deref(),
             user_agent: user_agent.as_deref(),
             error: e.map(|e| e.to_string()),
             error_key: ctx.error_key.map(ErrorKey::as_str),
-        });
+        };
+        let line = write_access_log(&entry);
+        if let (Some(queue), Some(line)) = (&self.sinks.http_log, line) {
+            // serde_json's buffer grows by doubling, so the capacity is what the line holds.
+            let bytes = line.capacity();
+            queue.push(line, bytes);
+        }
+        if let (Some(traces), Some(span)) = (&self.sinks.traces, &ctx.span) {
+            if span.sampled() {
+                // Off the connection rather than `ctx.scheme`, which only a matched listener sets:
+                // a request that matched nothing on a TLS port was still made over TLS.
+                let tls = session.digest().is_some_and(|d| d.ssl_digest.is_some());
+                let scheme = if tls { "https" } else { "http" };
+                let span = span.finish(&entry, scheme, ctx.req.cluster(), ctx.started.elapsed());
+                let bytes = span.weight();
+                traces.queue.push(span, bytes);
+            }
+        }
         // Once the answer is out, whatever it was: a request refused in Access gets here too, and
         // so a step can settle what it counted for one.
         let chain = ctx
@@ -1843,6 +1896,7 @@ spec:
             trusted_client_headers: vec![],
             limiter: Default::default(),
             access_log_query: false,
+            sinks: Default::default(),
         };
         let session = Session::new_h1(Box::new(tokio::io::duplex(64).0));
         let ctx = proxy.new_ctx();

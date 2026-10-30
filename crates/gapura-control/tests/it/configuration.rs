@@ -2110,7 +2110,7 @@ async fn rows_stored_before_the_path_and_header_checks_are_served_safely() {
         ]
     );
     // Served to a data plane the same way.
-    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let (body, _, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
     let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
     assert_eq!(served, config);
 }
@@ -2162,7 +2162,7 @@ async fn a_stored_route_whose_path_names_path_parameters_is_not_served() {
     assert_eq!(refused[0].0, "default/beta");
     assert!(refused[0].1.contains("path parameters"), "{}", refused[0].1);
     // Served to a data plane the same way.
-    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let (body, _, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
     let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
     assert_eq!(served, config);
 }
@@ -2204,7 +2204,7 @@ async fn served_path_rewrite(
     route: &str,
 ) -> Option<gapura_core::config::PathRewrite> {
     let (_, snapshot) = store.snapshot().await.unwrap();
-    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let (body, _, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
     let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
     let rule = served.listeners[0]
         .rules
@@ -2427,7 +2427,7 @@ async fn strip_path_beside_a_regex_is_refused_and_a_stored_one_is_not_served() {
     assert_eq!(refused.len(), 1);
     assert_eq!(refused[0].0, "default/test");
     assert!(refused[0].1.contains("strip path"), "{}", refused[0].1);
-    let (body, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
+    let (body, _, _) = gapura_control::config_api::served(&snapshot, &Default::default()).unwrap();
     let served: gapura_core::config::Config = serde_json::from_slice(&body).unwrap();
     let rules: Vec<&str> = served.listeners[0]
         .rules

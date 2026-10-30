@@ -57,6 +57,10 @@ fn main() {
         tracing::error!(%addr, %error, "cannot bind a listen address, refusing to start");
         std::process::exit(1);
     }
+    let (sinks, exporter) = telemetry::sinks::build(&args).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "cannot set up log and trace export, refusing to start");
+        std::process::exit(1);
+    });
 
     let store = Arc::new(store::Store::empty());
     let settings = args.settings().expect("valid settings");
@@ -78,6 +82,9 @@ fn main() {
     };
     let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
+    if let Some(exporter) = exporter {
+        server.add_service(background_service("telemetry", exporter));
+    }
 
     if let Some(url) = &args.control_plane {
         let path = args
@@ -159,6 +166,7 @@ fn main() {
             trusted_client_headers: args.trusted_client_headers.clone(),
             limiter: Default::default(),
             access_log_query: args.access_log_query,
+            sinks,
         },
     );
     for addr in &args.listen_http {

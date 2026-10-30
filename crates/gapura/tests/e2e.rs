@@ -162,6 +162,101 @@ fn url(gw: &Gateway, host: &str, path: &str) -> String {
     format!("http://{host}:{}{path}", gw.http)
 }
 
+/// One POST a stand-in collector received.
+#[derive(Clone)]
+struct Posted {
+    path: String,
+    headers: axum::http::HeaderMap,
+    body: Value,
+    /// Whether the collector answered it 500.
+    refused: bool,
+}
+
+/// A stand-in log and trace collector: it keeps every POST and answers the first `refuse_first`
+/// of them 500, the rest 200.
+async fn spawn_collector(refuse_first: usize) -> (SocketAddr, Arc<Mutex<Vec<Posted>>>) {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let posted: Arc<Mutex<Vec<Posted>>> = Arc::default();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let keep = Arc::clone(&posted);
+    let app = Router::new().fallback(any(move |req: Request| {
+        let (keep, sent) = (Arc::clone(&keep), Arc::clone(&sent));
+        async move {
+            let path = req.uri().path().to_string();
+            let headers = req.headers().clone();
+            let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+            let refused = sent.fetch_add(1, SeqCst) < refuse_first;
+            keep.lock().unwrap().push(Posted {
+                path,
+                headers,
+                body,
+                refused,
+            });
+            if refused {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                axum::http::StatusCode::OK
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, posted)
+}
+
+/// What the collector took at `path`: every record of every POST it answered 200, an access-log
+/// line for `/logs` and an OTLP span for anything else.
+fn delivered(posted: &[Posted], path: &str) -> Vec<Value> {
+    posted
+        .iter()
+        .filter(|p| p.path == path && !p.refused)
+        .flat_map(|p| match path {
+            "/logs" => p.body.as_array().cloned().unwrap_or_default(),
+            _ => p.body["resourceSpans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|rs| rs["scopeSpans"].as_array().into_iter().flatten())
+                .flat_map(|ss| ss["spans"].as_array().cloned().unwrap_or_default())
+                .collect(),
+        })
+        .collect()
+}
+
+/// A span attribute's OTLP value, `{"stringValue": ...}` or `{"intValue": ...}`; null if absent.
+fn span_attr(span: &Value, key: &str) -> Value {
+    span["attributes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["key"] == key)
+        .map(|a| a["value"].clone())
+        .unwrap_or(Value::Null)
+}
+
+/// Wait up to 10 s for `done` to hold over what the collector got: a batch waits up to a second
+/// to fill, and a refused one is sent again after a short delay.
+async fn collected(posted: &Arc<Mutex<Vec<Posted>>>, done: impl Fn(&[Posted]) -> bool) {
+    for _ in 0..200 {
+        if done(&posted.lock().unwrap()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let got: Vec<(String, bool, Value)> = posted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| (p.path.clone(), p.refused, p.body.clone()))
+        .collect();
+    panic!("the collector never got what the test waits for; it got {got:?}");
+}
+
 /// One Gateway on the HTTP port, one HTTPRoute with a rule per scenario, and three Services.
 fn config(http_port: u16, upstream: SocketAddr, dead: SocketAddr, reuse: SocketAddr) -> String {
     format!(
@@ -640,6 +735,266 @@ async fn request_id_and_traceparent_pass_through() {
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["headers"]["x-request-id"], "abc-123");
     assert_eq!(body["headers"]["traceparent"], tp);
+}
+
+/// With both sinks on: every request's access-log line reaches the http_log endpoint with the
+/// headers file's headers, the same line as stdout, and a batch the collector refuses is sent
+/// again; a span keeps the caller's trace, names the caller's span as its parent, and is the
+/// parent the upstream is told of; a trace that starts here has a span with no parent; a caller
+/// that did not sample is logged but has no span; and the caller's credential is in nothing
+/// exported.
+#[tokio::test(flavor = "multi_thread")]
+async fn access_logs_and_spans_reach_their_collectors() {
+    let (collector, posted) = spawn_collector(1).await;
+    let dir = tempfile::tempdir().unwrap();
+    let headers = dir.path().join("headers");
+    std::fs::write(
+        &headers,
+        "# the collector's token\nAuthorization: Bearer sink-token\n",
+    )
+    .unwrap();
+    let logs = format!("http://{collector}/logs");
+    let traces = format!("http://{collector}/v1/traces");
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &[
+            "--http-log-url",
+            logs.as_str(),
+            "--http-log-headers-file",
+            headers.to_str().unwrap(),
+            "--otlp-traces-url",
+            traces.as_str(),
+        ],
+    )
+    .await;
+    let c = client(&gw);
+
+    let r = c
+        .get(url(&gw, "echo.test", "/api/traced"))
+        .header("x-request-id", "traced")
+        .header(
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        )
+        .header("authorization", "Bearer caller-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let echoed: Value = r.json().await.unwrap();
+    let upstream_tp = echoed["headers"]["traceparent"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let upstream_tp: Vec<&str> = upstream_tp.split('-').collect();
+    assert_eq!(
+        upstream_tp[1], "0af7651916cd43dd8448eb211c80319c",
+        "the caller's trace"
+    );
+    assert_ne!(
+        upstream_tp[2], "b7ad6b7169203331",
+        "the upstream's parent is the gateway's span"
+    );
+    assert_eq!(upstream_tp[3], "01");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/api/rooted"))
+        .header("x-request-id", "rooted")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = c
+        .get(url(&gw, "echo.test", "/api/unsampled"))
+        .header("x-request-id", "unsampled")
+        .header(
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-00",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let stdout_traced = gw.access_log("traced").await;
+    let rooted = gw.access_log("rooted").await["trace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    gw.access_log("unsampled").await;
+
+    let traces_wanted = ["0af7651916cd43dd8448eb211c80319c", rooted.as_str()];
+    collected(&posted, |p| {
+        let lines = delivered(p, "/logs");
+        let spans = delivered(p, "/v1/traces");
+        ["traced", "rooted", "unsampled"]
+            .iter()
+            .all(|id| lines.iter().any(|l| l["request_id"] == *id))
+            && traces_wanted
+                .iter()
+                .all(|t| spans.iter().any(|s| s["traceId"] == *t))
+    })
+    .await;
+    let posted = posted.lock().unwrap().clone();
+
+    let refused: Vec<&Posted> = posted.iter().filter(|p| p.refused).collect();
+    assert_eq!(refused.len(), 1);
+    assert!(
+        posted
+            .iter()
+            .any(|p| !p.refused && p.path == refused[0].path && p.body == refused[0].body),
+        "the refused batch was sent again, the same records"
+    );
+    for p in &posted {
+        assert_eq!(p.headers["content-type"], "application/json");
+        if p.path == "/logs" {
+            assert_eq!(p.headers["authorization"], "Bearer sink-token");
+        } else {
+            assert!(
+                p.headers.get("authorization").is_none(),
+                "only the http_log sink's file"
+            );
+        }
+    }
+
+    let lines = delivered(&posted, "/logs");
+    let traced = lines.iter().find(|l| l["request_id"] == "traced").unwrap();
+    assert_eq!(
+        *traced, stdout_traced,
+        "the exported line is the stdout line"
+    );
+    assert!(traced["consumer"].is_null());
+
+    let spans = delivered(&posted, "/v1/traces");
+    let span = spans
+        .iter()
+        .find(|s| s["traceId"] == "0af7651916cd43dd8448eb211c80319c")
+        .unwrap();
+    assert_eq!(span["parentSpanId"], "b7ad6b7169203331");
+    assert_eq!(
+        span["spanId"], upstream_tp[2],
+        "the span the upstream was told is its parent"
+    );
+    assert_eq!(span["name"], "GET apps/echo");
+    assert_eq!(
+        span_attr(span, "http.response.status_code"),
+        json!({"intValue": "200"})
+    );
+    assert_eq!(
+        span_attr(span, "gapura.route"),
+        json!({"stringValue": "apps/echo"})
+    );
+    assert_eq!(
+        span_attr(span, "gapura.service"),
+        json!({"stringValue": "apps/echo:80"})
+    );
+    let root = spans
+        .iter()
+        .find(|s| s["traceId"] == rooted.as_str())
+        .unwrap();
+    assert!(
+        root.get("parentSpanId").is_none(),
+        "a trace that starts here has no parent"
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|s| s["traceId"] != "11111111111111111111111111111111"),
+        "a caller that did not sample has no span"
+    );
+
+    let everything =
+        serde_json::to_string(&posted.iter().map(|p| &p.body).collect::<Vec<_>>()).unwrap();
+    assert!(
+        !everything.contains("caller-secret"),
+        "a caller credential was exported"
+    );
+}
+
+/// In store mode an exported line names the consumer key_auth identified, and so does the span.
+/// With `--access-log-query`, a credential in the query string -- under a common name, or under
+/// the name of the header the rule's key_auth reads, here `x-shop-key`, which no list of common
+/// names holds -- reaches neither stdout nor the collector, and the key the caller authenticated
+/// with is nowhere in the export.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exported_record_names_its_consumer_and_never_its_key() {
+    use gapura_core::config::{KeyAuthPolicy, Plugin};
+    let (collector, posted) = spawn_collector(0).await;
+    let logs = format!("http://{collector}/logs");
+    let traces = format!("http://{collector}/v1/traces");
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    // The shared fixture's key_auth reads `x-api-key`, a name the redaction knows anyway. This
+    // one reads a header of its own, so the query's `x-shop-key` is redacted only because the
+    // rule names it.
+    let mut snapshot = consumer_limited(upstream);
+    for p in &mut snapshot.plugins {
+        if matches!(p.plugin, Plugin::KeyAuth(_)) {
+            p.plugin = Plugin::KeyAuth(KeyAuthPolicy {
+                header: "x-shop-key".into(),
+                ..Default::default()
+            });
+        }
+    }
+    let gw = start_store_gateway_with(
+        snapshot,
+        &[
+            "--access-log-query",
+            "--http-log-url",
+            logs.as_str(),
+            "--otlp-traces-url",
+            traces.as_str(),
+        ],
+    )
+    .await;
+    let r = client(&gw)
+        .get(url(
+            &gw,
+            "echo.test",
+            "/orders?x-shop-key=roomy-key&api_key=leak-me&page=2",
+        ))
+        .header("x-shop-key", "roomy-key")
+        .header("x-request-id", "keyed")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let stdout = gw.access_log("keyed").await;
+    assert_eq!(stdout["consumer"], "shop/roomy");
+    assert_eq!(
+        stdout["query"],
+        "x-shop-key=<redacted>&api_key=<redacted>&page=2"
+    );
+    let trace_id = stdout["trace_id"].as_str().unwrap().to_string();
+
+    collected(&posted, |p| {
+        delivered(p, "/logs")
+            .iter()
+            .any(|l| l["request_id"] == "keyed")
+            && delivered(p, "/v1/traces")
+                .iter()
+                .any(|s| s["traceId"] == trace_id.as_str())
+    })
+    .await;
+    let posted = posted.lock().unwrap().clone();
+    let line = delivered(&posted, "/logs")
+        .into_iter()
+        .find(|l| l["request_id"] == "keyed")
+        .unwrap();
+    assert_eq!(line, stdout, "the exported line is the stdout line");
+    let span = delivered(&posted, "/v1/traces")
+        .into_iter()
+        .find(|s| s["traceId"] == trace_id.as_str())
+        .unwrap();
+    assert_eq!(
+        span_attr(&span, "gapura.consumer"),
+        json!({"stringValue": "shop/roomy"})
+    );
+
+    let everything =
+        serde_json::to_string(&posted.iter().map(|p| &p.body).collect::<Vec<_>>()).unwrap();
+    for secret in ["roomy-key", "leak-me"] {
+        assert!(!everything.contains(secret), "{secret} was exported");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1706,6 +2061,166 @@ async fn transformers_edit_the_request_upstream_and_the_response_downstream() {
     assert_eq!(r.text().await.unwrap(), "401 unauthorized\n");
 }
 
+/// `/c` wants a key and has a cors policy, and its upstream answers every request with its own
+/// `Access-Control-Allow-Origin: *`, counting them. A preflight carries no key: it is answered
+/// before the key check and never reaches the upstream, 204 for an origin the policy allows and
+/// 403 for one it does not. Every other answer carries the policy's headers in place of the
+/// upstream's -- the gateway's own 401 too, so a page can read why it was refused -- and
+/// `Vary: Origin` whatever the origin.
+#[tokio::test(flavor = "multi_thread")]
+async fn cors_preflights_before_the_key_check_and_heads_every_answer() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use gapura_core::config::{CorsPolicy, KeyAuthPolicy, PathMatch, Plugin, Protocol};
+    use gapura_core::store::{
+        StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot,
+    };
+    use sha2::{Digest, Sha256};
+
+    let served = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = listener.local_addr().unwrap();
+    let count = Arc::clone(&served);
+    let app = Router::new().fallback(any(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+        async { ([("access-control-allow-origin", "*")], "upstream") }
+    }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let on = |plugin: Plugin| StorePlugin {
+        workspace: "shop".into(),
+        route: Some("c".into()),
+        service: None,
+        plugin,
+    };
+    let gw = start_store_gateway(StoreSnapshot {
+        services: vec![StoreService {
+            workspace: "shop".into(),
+            name: "cors".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: "shop".into(),
+            name: "c".into(),
+            service: "cors".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix("/c".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        plugins: vec![
+            on(Plugin::KeyAuth(KeyAuthPolicy::default())),
+            on(Plugin::Cors(CorsPolicy {
+                origins: vec!["https://app.example".into(), "https://*.example.org".into()],
+                methods: vec!["GET".into(), "POST".into()],
+                expose_headers: vec!["x-gapura-error".into()],
+                credentials: true,
+                max_age: Some(600),
+                ..CorsPolicy::default()
+            })),
+        ],
+        credentials: vec![StoreCredential {
+            key_hash: format!("{:x}", Sha256::digest(b"c-key")),
+            consumer: "page".into(),
+            workspace: "shop".into(),
+        }],
+        ..StoreSnapshot::default()
+    })
+    .await;
+    let c = client(&gw);
+    let preflight = |origin: &str| {
+        c.request(reqwest::Method::OPTIONS, url(&gw, "echo.test", "/c"))
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .send()
+    };
+    let get = |origin: &str, key: Option<&str>| {
+        let mut req = c.get(url(&gw, "echo.test", "/c")).header("origin", origin);
+        if let Some(key) = key {
+            req = req.header("x-api-key", key);
+        }
+        req.send()
+    };
+    let header = |r: &reqwest::Response, name: &str| {
+        r.headers()
+            .get(name)
+            .map(|v| v.to_str().unwrap().to_string())
+    };
+    let varies_by_origin = |r: &reqwest::Response| {
+        r.headers()
+            .get_all("vary")
+            .iter()
+            .any(|v| v.to_str().unwrap().contains("Origin"))
+    };
+
+    let r = preflight("https://app.example").await.unwrap();
+    assert_eq!(r.status(), 204);
+    for (name, value) in [
+        ("access-control-allow-origin", "https://app.example"),
+        ("access-control-allow-credentials", "true"),
+        ("access-control-allow-methods", "GET, POST"),
+        ("access-control-max-age", "600"),
+    ] {
+        assert_eq!(header(&r, name).as_deref(), Some(value), "{name}");
+    }
+    assert!(varies_by_origin(&r), "{:?}", r.headers());
+    assert!(header(&r, "x-request-id").is_some());
+
+    let r = preflight("https://evil.example").await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.headers()["x-gapura-error"], "CORS_ORIGIN_FORBIDDEN");
+    assert_eq!(header(&r, "access-control-allow-origin"), None);
+    assert!(varies_by_origin(&r));
+    assert_eq!(
+        served.load(Ordering::SeqCst),
+        0,
+        "no preflight went upstream"
+    );
+
+    let r = get("https://a.example.org", None).await.unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_KEY_MISSING");
+    assert_eq!(
+        header(&r, "access-control-allow-origin").as_deref(),
+        Some("https://a.example.org")
+    );
+    assert_eq!(
+        header(&r, "access-control-expose-headers").as_deref(),
+        Some("x-gapura-error")
+    );
+    assert!(varies_by_origin(&r));
+
+    let r = get("https://a.example.org", Some("c-key")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        header(&r, "access-control-allow-origin").as_deref(),
+        Some("https://a.example.org"),
+        "the policy's origin, not the upstream's *"
+    );
+    assert_eq!(
+        header(&r, "access-control-allow-credentials").as_deref(),
+        Some("true")
+    );
+    assert_eq!(r.text().await.unwrap(), "upstream");
+
+    // Two labels under the suffix are not one: served, but no page may read the answer.
+    let r = get("https://a.b.example.org", Some("c-key")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(header(&r, "access-control-allow-origin"), None);
+    assert_eq!(header(&r, "access-control-allow-credentials"), None);
+    assert!(varies_by_origin(&r));
+    assert_eq!(served.load(Ordering::SeqCst), 2);
+}
+
 /// Reads one response head off `sock`, through its blank line, and returns it whole, keeping in
 /// `pending` whatever arrived past it: an interim head and the final one can come in one read.
 async fn read_head(
@@ -1848,7 +2363,9 @@ async fn every_forwarded_for_line_is_walked_behind_a_trusted_proxy() {
 }
 
 /// #161: matched on the first `Host` line, a backend could serve the second. Two lines are a
-/// malformed request and are refused before any route is consulted.
+/// malformed request and are refused before any route is consulted. Since Pingora 0.9 Pingora
+/// itself refuses them as it reads the request, before any Gapura hook runs, so the 400 is
+/// Pingora's: no `X-Gapura-Error`, no access log line.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_host_lines_are_refused_as_400() {
     let (gw, _c) = setup().await;
@@ -1860,7 +2377,6 @@ async fn two_host_lines_are_refused_as_400() {
             "GET /api/x HTTP/1.1\r\n",
             "Host: echo.test\r\n",
             "Host: other.test\r\n",
-            "X-Request-Id: two-hosts\r\n",
             "Connection: close\r\n",
             "\r\n",
         )
@@ -1873,16 +2389,58 @@ async fn two_host_lines_are_refused_as_400() {
     let response = String::from_utf8_lossy(&response);
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
     assert!(
-        response
-            .to_ascii_lowercase()
-            .contains("x-gapura-error: invalid_request_target"),
-        "{response}"
+        !response.contains("\"path\""),
+        "never forwarded: {response}"
     );
-    let line = gw.access_log("two-hosts").await;
+}
+
+/// RUSTSEC-2026-0390: a header the client names in `Connection` is hop-by-hop and stops here, so
+/// an HTTP/1 hop behind the gateway cannot be told to strip one; naming a header the gateway
+/// sets for the upstream is refused as 400, not taken for a client that went away.
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_nominated_headers_stop_at_the_gateway() {
+    let (gw, _c) = setup().await;
+    let exchange = |request: &'static str| async move {
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", gw.http))
+            .await
+            .unwrap();
+        sock.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        sock.read_to_end(&mut response).await.unwrap();
+        String::from_utf8_lossy(&response).to_ascii_lowercase()
+    };
+
+    let forwarded = exchange(concat!(
+        "GET /api/x HTTP/1.1\r\n",
+        "Host: echo.test\r\n",
+        "Connection: close, x-probe\r\n",
+        "X-Probe: 1\r\n",
+        "\r\n",
+    ))
+    .await;
+    assert!(forwarded.starts_with("http/1.1 200"), "{forwarded}");
+    assert!(!forwarded.contains("\"x-probe\""), "{forwarded}");
+    assert!(
+        forwarded.contains("\"x-forwarded-for\":\"127.0.0.1\""),
+        "{forwarded}"
+    );
+
+    let refused = exchange(concat!(
+        "GET /api/x HTTP/1.1\r\n",
+        "Host: echo.test\r\n",
+        "Connection: close, X-Forwarded-For\r\n",
+        "X-Request-Id: nominates-xff\r\n",
+        "\r\n",
+    ))
+    .await;
+    assert!(refused.starts_with("http/1.1 400"), "{refused}");
+    assert!(
+        refused.contains("x-gapura-error: invalid_request_target"),
+        "{refused}"
+    );
+    let line = gw.access_log("nominates-xff").await;
     assert_eq!(line["status"], 400, "{line}");
-    assert_eq!(line["error_key"], "INVALID_REQUEST_TARGET", "{line}");
-    assert_eq!(line["route"], "-", "no route is consulted: {line}");
-    assert!(line["upstream"].is_null(), "{line}");
+    assert_eq!(line["client_abort"], false, "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2442,6 +3000,146 @@ async fn a_jwks_uri_that_never_loads_refuses_every_token() {
         &format!("gapura_jwks_last_success_timestamp_seconds{{uri=\"{uri}\"}} 0"),
     )
     .await;
+}
+
+/// One store route to `upstream` at `/{name}`.
+fn one_route(upstream: SocketAddr, name: &str) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{PathMatch, Protocol};
+    use gapura_core::store::{StoreRoute, StoreService, StoreSnapshot};
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: String::new(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: String::new(),
+            name: name.into(),
+            service: "echo".into(),
+            hosts: vec![],
+            paths: vec![PathMatch::Prefix(format!("/{name}"))],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        ..StoreSnapshot::default()
+    }
+}
+
+/// Ask `path` until it answers `status`, for up to 10 s. The data plane takes a configuration on
+/// its next poll rather than at once, so a single request right after the stand-in changes its
+/// answer would race that poll.
+async fn until_answers(gw: &Gateway, path: &str, status: u16) {
+    for _ in 0..100 {
+        let r = client(gw).get(url(gw, "echo.test", path)).send().await;
+        if r.is_ok_and(|r| r.status() == status) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{path} never answered {status}");
+}
+
+/// A data plane the control plane refuses keeps routing the configuration it holds, says so on
+/// /metrics, and takes the next one it can read. The refusal is the stand-in's: what decides it
+/// is gapura-control's, tested there; here, what the data plane sends and does about it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_configuration_keeps_the_last_one_and_says_so() {
+    use axum::http::{header, HeaderMap, StatusCode};
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    // Status, body and ETag the stand-in answers with; and the agent and features it last heard.
+    let answer = Arc::new(Mutex::new((200u16, String::new(), "\"v1\"".to_string())));
+    let heard = Arc::new(Mutex::new((String::new(), String::new())));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = listener.local_addr().unwrap();
+    let app = {
+        let (answer, heard) = (Arc::clone(&answer), Arc::clone(&heard));
+        Router::new().route(
+            "/v1/config",
+            axum::routing::get(move |headers: HeaderMap| {
+                let text = |name: &str| {
+                    headers
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                *heard.lock().unwrap() = (text("user-agent"), text("x-gapura-features"));
+                let (status, body, etag) = answer.lock().unwrap().clone();
+                async move {
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [
+                            (header::CONTENT_TYPE, "application/json".to_string()),
+                            (header::ETAG, etag),
+                        ],
+                        body,
+                    )
+                }
+            }),
+        )
+    };
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let first = Arc::clone(&answer);
+    let gw = start_gateway_from(
+        move |dir, http| {
+            let settings = gapura_core::store::StoreSettings {
+                http_ports: vec![http],
+            };
+            let config = gapura_core::store::compile(&one_route(upstream, "first"), &settings);
+            first.lock().unwrap().1 = serde_json::to_string(&config).unwrap();
+            let token = dir.join("token");
+            std::fs::write(&token, "e2e").unwrap();
+            vec![
+                "--control-plane".to_string(),
+                format!("http://{control}"),
+                "--control-plane-insecure-http".to_string(),
+                "--control-plane-token-file".to_string(),
+                token.to_str().unwrap().to_string(),
+            ]
+        },
+        &["--control-plane-interval", "1"],
+    )
+    .await;
+    until_answers(&gw, "/first", 200).await;
+    let (agent, features) = heard.lock().unwrap().clone();
+    assert!(agent.starts_with("gapura/"), "{agent}");
+    assert_eq!(features, gapura_core::features::FEATURES.join(","));
+
+    // Refused: it keeps routing what it holds, and says so.
+    *answer.lock().unwrap() = (
+        409,
+        r#"{"error":"incompatible","missing":["cors"]}"#.to_string(),
+        "\"v2\"".to_string(),
+    );
+    // From the start of a line: the gauge's HELP text begins "1 while", so the bare name and
+    // value also match `# HELP gapura_config_incompatible 1 while ...` at any value.
+    wait_for_metric(&gw, "\ngapura_config_incompatible 1\n").await;
+    until_answers(&gw, "/first", 200).await;
+
+    // A configuration it can read again: taken, and the gauge clears.
+    let settings = gapura_core::store::StoreSettings {
+        http_ports: vec![gw.http],
+    };
+    let second = gapura_core::store::compile(&one_route(upstream, "second"), &settings);
+    *answer.lock().unwrap() = (
+        200,
+        serde_json::to_string(&second).unwrap(),
+        "\"v3\"".to_string(),
+    );
+    until_answers(&gw, "/second", 200).await;
+    wait_for_metric(&gw, "\ngapura_config_incompatible 0\n").await;
 }
 
 /// An HTTP/1 head read off `sock` a byte at a time, lowercased. Unlike `read_head`, nothing after

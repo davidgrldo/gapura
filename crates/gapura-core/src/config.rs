@@ -12,6 +12,11 @@ use crate::client_ip::Cidr;
 // field added since would otherwise be a missing field that fails the whole load. At the top
 // level a missing field sensibly means "none of those". Inside an `Endpoint` it does not: an
 // address defaulting to the empty string is a silent hole where failing loudly is correct.
+//
+// A field a data plane predating it would ignore *wrongly* -- one that changes what a request is
+// allowed or how it is answered -- also needs a name in `features::FEATURES` and a line in
+// `Config::needs`, so the control plane refuses such a data plane the configuration instead of
+// letting it run without the field. A field it may safely ignore needs neither.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -302,6 +307,7 @@ pub enum Plugin {
     RequestSizeLimit(RequestSizeLimitPolicy),
     RequestTransformer(RequestTransformerPolicy),
     ResponseTransformer(ResponseTransformerPolicy),
+    Cors(CorsPolicy),
 }
 
 /// Where in a request a plugin runs. Each plugin declares its own ([`Plugin::phases`]) and runs
@@ -357,6 +363,7 @@ impl Plugin {
             Plugin::RequestSizeLimit(_) => "request_size_limit",
             Plugin::RequestTransformer(_) => "request_transformer",
             Plugin::ResponseTransformer(_) => "response_transformer",
+            Plugin::Cors(_) => "cors",
         }
     }
 
@@ -372,6 +379,9 @@ impl Plugin {
             Plugin::RequestSizeLimit(_) => &[Phase::Access, Phase::RequestBody],
             Plugin::RequestTransformer(_) => &[Phase::UpstreamRequest],
             Plugin::ResponseTransformer(_) => &[Phase::Response],
+            // Access answers a preflight and judges the origin; Response writes what it decided
+            // on every answer, the gateway's own included.
+            Plugin::Cors(_) => &[Phase::Access, Phase::Response],
         }
     }
 
@@ -382,7 +392,8 @@ impl Plugin {
             | Plugin::KeyAuth(_)
             | Plugin::IpRestriction(_)
             | Plugin::RequestTransformer(_)
-            | Plugin::ResponseTransformer(_) => Body::None,
+            | Plugin::ResponseTransformer(_)
+            | Plugin::Cors(_) => Body::None,
             Plugin::RequestSizeLimit(_) => Body::Stream,
         }
     }
@@ -428,8 +439,10 @@ pub struct JwtPolicy {
     /// no network and no key material is invented by this crate. A `jwks_uri` policy arrives with
     /// this empty, and the data plane writes in the last document it fetched there before the
     /// configuration is swapped in: where the string comes from changes, not how it is read.
-    /// Always written, so a data plane older than `jwks_uri` still parses a configuration naming
-    /// one, finds no keys here and refuses those routes rather than the whole configuration.
+    /// Always written, so a data plane older than `jwks_uri` that is sent one anyway, by a
+    /// control plane predating `features`, parses it, finds no keys here and refuses those
+    /// routes rather than the whole configuration. A control plane since then refuses that data
+    /// plane the configuration instead, naming `jwks_uri`.
     #[serde(default)]
     pub jwks: String,
     /// Where the issuer publishes its JWKS, `https` only. The control plane sets exactly one of
@@ -562,6 +575,81 @@ pub struct RequestTransformerPolicy {
 pub struct ResponseTransformerPolicy {
     #[serde(default, skip_serializing_if = "HeaderEdits::is_empty")]
     pub headers: HeaderEdits,
+}
+
+/// Tell browsers which other origins may call the route. A preflight -- `OPTIONS` with `Origin`
+/// and `Access-Control-Request-Method` -- is answered before every other policy, since a browser
+/// sends one without credentials: 204 for an origin the policy allows, 403
+/// `CORS_ORIGIN_FORBIDDEN` for one it does not. Every other answer the route gives, the gateway's
+/// own refusals included, carries `Access-Control-Allow-Origin` for an allowed origin, in place of
+/// whatever the upstream sent, and `Vary: Origin` always. A request from an origin the policy does
+/// not allow is still served, without the header: CORS is the browser's to enforce, and a caller
+/// that is not a browser may send `Origin` too.
+///
+/// The control plane stores every list in the form this reads: origins and header names lowercase,
+/// methods uppercase, the default methods filled in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorsPolicy {
+    /// `*`, alone; `scheme://host[:port]`; or `scheme://*.suffix[:port]`, which allows exactly one
+    /// label before the suffix.
+    pub origins: Vec<String>,
+    /// `Access-Control-Allow-Methods` on a preflight.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// `Access-Control-Allow-Headers` on a preflight. Empty echoes the headers the preflight asks
+    /// for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<String>,
+    /// `Access-Control-Expose-Headers`: what a page may read of an answer beyond the few headers
+    /// every page may.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_headers: Vec<String>,
+    /// Send `Access-Control-Allow-Credentials: true`, which lets a page send cookies and read the
+    /// answer. Never with an origin of `*`, which browsers refuse with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub credentials: bool,
+    /// `Access-Control-Max-Age` on a preflight, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u32>,
+    /// Pass a preflight to the upstream, through the rest of the chain, rather than answer it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preflight_continue: bool,
+}
+
+impl CorsPolicy {
+    /// The `Access-Control-Allow-Origin` to answer `origin` with, or `None` when the policy does
+    /// not allow it. `origin` is the request's one `Origin` value, lowercased. An exact entry, or
+    /// one `*.` entry, is answered with the origin itself, so a page reading it sees its own
+    /// origin; `*` with `*`. `null`, the origin a sandboxed page or a local file sends, is never
+    /// allowed: any page can claim it.
+    pub fn allowed(&self, origin: &str) -> Option<String> {
+        if origin == "null" {
+            return None;
+        }
+        let matches = |entry: &String| match entry.split_once("*.") {
+            // The label in place of the `*` is one label: letters, digits and hyphens, so
+            // `a.b.example.com` is not under `*.example.com`, and the port, part of the tail,
+            // is the entry's or absent on both sides.
+            Some((scheme, tail)) => origin
+                .strip_prefix(scheme)
+                .and_then(|rest| rest.strip_suffix(tail))
+                .and_then(|label| label.strip_suffix('.'))
+                .is_some_and(|label| {
+                    !label.is_empty()
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                }),
+            None => entry == origin,
+        };
+        if self.origins.iter().any(|entry| entry == "*") {
+            Some("*".to_string())
+        } else if self.origins.iter().any(matches) {
+            Some(origin.to_string())
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -919,6 +1007,7 @@ mod tests {
             Plugin::RequestSizeLimit(RequestSizeLimitPolicy { max_bytes: 1 }),
             Plugin::RequestTransformer(RequestTransformerPolicy::default()),
             Plugin::ResponseTransformer(ResponseTransformerPolicy::default()),
+            Plugin::Cors(CorsPolicy::default()),
         ] {
             assert_eq!(
                 serde_json::to_value(&plugin).unwrap()["kind"],
@@ -979,6 +1068,79 @@ mod tests {
             serde_json::to_value(&empty).unwrap(),
             serde_json::json!({"kind": "response_transformer"})
         );
+    }
+
+    /// Every field but `origins` is left off the wire at its default, so a policy reads as what it
+    /// changes. Access answers a preflight, Response writes the headers, and no body is read.
+    #[test]
+    fn a_cors_policy_is_its_lists_on_the_wire() {
+        let wire = serde_json::json!({
+            "kind": "cors",
+            "origins": ["https://app.example"],
+            "methods": ["GET", "POST"],
+            "expose_headers": ["x-gapura-error"],
+            "credentials": true,
+            "max_age": 600
+        });
+        let p: Plugin = serde_json::from_value(wire.clone()).unwrap();
+        let Plugin::Cors(policy) = &p else {
+            panic!("{p:?}");
+        };
+        assert!(policy.headers.is_empty() && !policy.preflight_continue);
+        assert_eq!(serde_json::to_value(&p).unwrap(), wire);
+        assert_eq!(p.phases(), [Phase::Access, Phase::Response]);
+        assert_eq!(p.body(), Body::None);
+        assert_eq!(
+            serde_json::to_value(Plugin::Cors(CorsPolicy::default())).unwrap(),
+            serde_json::json!({"kind": "cors", "origins": []})
+        );
+    }
+
+    fn cors(origins: &[&str]) -> CorsPolicy {
+        CorsPolicy {
+            origins: origins.iter().map(|o| o.to_string()).collect(),
+            ..CorsPolicy::default()
+        }
+    }
+
+    #[test]
+    fn an_origin_is_allowed_exactly_or_one_label_under_a_wildcard() {
+        let p = cors(&[
+            "https://app.example",
+            "https://*.example.org",
+            "http://*.dev.test:8080",
+        ]);
+        for (origin, allowed) in [
+            ("https://app.example", true),
+            ("http://app.example", false),
+            ("https://app.example:443", false),
+            ("https://app.example.", false),
+            ("https://a.example.org", true),
+            ("https://web-1.example.org", true),
+            ("https://a.b.example.org", false),
+            ("https://example.org", false),
+            ("https://.example.org", false),
+            ("https://aexample.org", false),
+            ("https://a.example.org:8443", false),
+            ("http://a.example.org", false),
+            ("https://evil.com/.example.org", false),
+            ("https://u:p@a.example.org", false),
+            ("https://xn--bcher-kva.example.org", true),
+            ("http://a.dev.test:8080", true),
+            ("http://a.dev.test", false),
+            ("http://a.dev.test:80", false),
+            ("null", false),
+        ] {
+            let want = allowed.then(|| origin.to_string());
+            assert_eq!(p.allowed(origin), want, "{origin}");
+        }
+    }
+
+    #[test]
+    fn a_star_allows_every_origin_but_null() {
+        let p = cors(&["*"]);
+        assert_eq!(p.allowed("https://anyone.example"), Some("*".to_string()));
+        assert_eq!(p.allowed("null"), None);
     }
 
     #[test]

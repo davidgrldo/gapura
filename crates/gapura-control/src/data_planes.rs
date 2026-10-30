@@ -48,6 +48,11 @@ pub fn in_sync(sent: Option<&str>, current: &str) -> Option<bool> {
     sent.map(|s| s == current)
 }
 
+/// A served tag, `"<64 hex>"`, as its first 12 digits.
+pub fn short_tag(tag: &str) -> String {
+    tag.trim_matches('"').chars().take(12).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TokenView {
     pub prefix: String,
@@ -64,6 +69,17 @@ pub struct DataPlaneView {
     /// `connected`, `not_seen` or `never`.
     pub status: &'static str,
     pub in_sync: Option<bool>,
+    /// What it runs, as its last call said (`0.2.0-rc.17`); `None` when it said nothing.
+    pub build: Option<String>,
+    /// The first 12 hex digits of the configuration it held on its last call, to read beside
+    /// another's; `None` when it held none.
+    pub config_tag: Option<String>,
+    /// What the configuration served now uses that it cannot read, so `/v1/config` refuses it
+    /// that configuration unless it already holds it (a data plane holding the current tag is
+    /// answered 304). Worked out when the list is read, against the features its last call
+    /// named, or the legacy baseline (`LEGACY_FEATURES`) when it named none -- rc.17 and older
+    /// name none. Empty for one that never called.
+    pub missing: Vec<String>,
     pub tokens: Vec<TokenView>,
 }
 
@@ -95,6 +111,12 @@ mod tests {
         assert_eq!(in_sync(None, "\"a\""), None);
         assert_eq!(in_sync(Some("\"a\""), "\"a\""), Some(true));
         assert_eq!(in_sync(Some("\"b\""), "\"a\""), Some(false));
+    }
+
+    #[test]
+    fn a_tag_is_shown_short() {
+        assert_eq!(short_tag("\"0123456789abcdef0123\""), "0123456789ab");
+        assert_eq!(short_tag("\"abc\""), "abc");
     }
 
     #[test]

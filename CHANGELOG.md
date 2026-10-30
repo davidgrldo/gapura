@@ -16,6 +16,110 @@ means what it usually does, moving from one version below to a later one. Releas
     like the IP restriction, and a refusal is shown beside the field it is about.
   - **Inherited policies:** a route or service that inherits one says where from.
   - **Lists:** the service and route lists tag it `CORS`.
+- A data plane names the configuration features it reads, and the control plane no longer sends
+  one a configuration it cannot read (#283). Each poll carries `X-Gapura-Features` and
+  `User-Agent: gapura/<version>`. When the configuration uses a policy kind -- or a JWT policy's
+  `jwks_uri` -- that a data plane lacks, `/v1/config` answers it `409` with
+  `{"error":"incompatible","missing":[...]}`, and it keeps serving the configuration it has. It is
+  refused, never sent the configuration with the policy left out.
+  - **Seen from the data plane:** `gapura_config_incompatible` is 1 while it is refused, and its
+    log names what is missing, once per change. The example rules alert on it after 10 minutes.
+  - **Seen from the console's API:** `GET /api/data-planes` gives each one's `build`, the
+    `config_tag` it holds (12 hex digits), and what it is `missing` of the configuration served
+    now. The page follows.
+  - **Upgrade order:** a data plane from rc.17 or before names no features, and is taken to read
+    only `jwt` and `key_auth`: rc.16 read no more, and nothing on the wire tells it from rc.17. So
+    an rc.17 data plane is refused a configuration with a newer policy kind it could in fact read
+    until it is upgraded. Upgrade data planes before the control plane, as for any new policy
+    kind, and from rc.16 or later: an older one reads less than the control plane can tell. A
+    data plane from before this release treats the 409 as it treated the parse failure: it keeps
+    its configuration and logs.
+  - A data plane older than `jwks_uri`, sent a JWT policy naming one, used to parse it and refuse
+    every token on that route. It is now refused the configuration, and the console says why.
+  - The release image reports the tag it is published under; a build from source reports the
+    crate's version. Migration 0012 adds two columns to `data_planes`.
+
+- The data plane exports what it logs and traces (#285). `--http-log-url` POSTs every access-log
+  line to an HTTP endpoint in JSON-array batches, and `--otlp-traces-url` sends a span per
+  sampled request to an OTLP/HTTP collector, JSON-encoded, sampled as the caller's `traceparent`
+  says or, for a trace that starts at the gateway, at `--otlp-sample-ratio`.
+  `--http-log-headers-file` and `--otlp-headers-file` add headers such as a token. The chart's
+  `telemetry` values set them for the gateway and the data plane alike. Each sink is a queue per
+  replica, bounded at 10 000 records and 16 MiB, that never holds up a request, drops its oldest
+  record when full, and counts every record lost in `gapura_log_dropped_total{sink, reason}`.
+  - **Trace context:** with `--otlp-traces-url` on, the upstream's `traceparent` names the
+    gateway's span as its parent rather than the caller's. Without it nothing changes.
+  - **Access log:** every line gains `consumer`, the `workspace/username` a key_auth policy
+    identified. Under `--access-log-query` the value of a credential-looking query parameter --
+    `api_key`, `token`, `access_token` and the like, or one named like the header a route's
+    key_auth policy reads -- is now written `<redacted>`, on stdout too.
+
+- A `cors` policy tells browsers which other origins may call a route (#282).
+  `PUT /api/workspaces/{ws}/policies/cors` takes `{"target", "config": {"origins", "methods",
+  "headers", "expose_headers", "credentials", "max_age", "preflight_continue"}}`, on the
+  workspace, a service or a route. The most specific one applies.
+  - **Shape:** `origins` is required, at most 100. `methods` defaults to `GET HEAD PUT PATCH POST
+    DELETE`, and is stored filled in. `headers` empty echoes what a preflight asks for in
+    `Access-Control-Request-Headers`; `headers` and `expose_headers` take at most 64 header
+    names each. `credentials` and `preflight_continue` default to false, and `max_age` is 0 to
+    86,400 seconds, unset by default.
+  - **Origins:** `https://app.example.com` exactly, `https://*.example.com` for exactly one label
+    under it (not `a.b.example.com`, nor `example.com` itself), with a port when it is not the
+    scheme's own, or `*` alone. Schemes are http and https; a path, `null`, a `*.` before a name
+    with no dot, and `*` together with `credentials: true` are refused, so the gateway never
+    tells a browser that any page may read a signed-in user's answers. Everything is stored
+    lowercase, without the scheme's own port, as a browser writes `Origin`.
+  - **Preflights first:** an `OPTIONS` with `Origin` and `Access-Control-Request-Method` is
+    answered before every other policy -- ip_restriction, key_auth and jwt included -- since a
+    browser sends one without credentials. An allowed origin gets 204 with the
+    `Access-Control-Allow-*` headers, `Access-Control-Max-Age` when set, and `Vary: Origin`; any
+    other gets 403 `CORS_ORIGIN_FORBIDDEN`, counted in
+    `gapura_policy_refused_total{policy="cors", reason="origin"}`. Neither reaches the upstream.
+    With `preflight_continue`, a preflight goes through the rest of the chain to the upstream
+    instead, whatever its origin, and its answer keeps the methods, headers and max-age the
+    upstream gives, with the policy's own origin headers.
+  - **Every other answer:** an allowed origin gets `Access-Control-Allow-Origin`, and
+    `Access-Control-Allow-Credentials` and `Access-Control-Expose-Headers` as configured, on the
+    upstream's answer and on the gateway's own refusals for the route alike, so a page can read
+    a 401's `X-Gapura-Error` when `expose_headers` names it. The upstream's own CORS headers are
+    removed first, so its `*` cannot widen the policy. A request from an origin the policy does
+    not allow is served without them, not refused: CORS is the browser's to enforce, and a caller
+    that is not a browser may send `Origin` too. `Vary: Origin` goes on every answer, beside any
+    `Vary` already there.
+  - **Order:** a `response_transformer` runs after the policy, so its edits have the last word.
+  - **Routes with methods:** a route that lists its methods must list `OPTIONS`, or a preflight
+    matches no route and is answered 404 before the policy runs. As with the transformers, a
+    redirect, a 404 for no route and the 500 or 503 for a rule with no backend or endpoint carry
+    no CORS headers.
+  - **Not from Kong:** no regex origins. Kong answers a preflight from an origin it does not allow
+    200 without CORS headers; this answers 403 with an error key.
+  - **Upgrade order:** a data plane older than this release cannot read a configuration that has
+    the policy, and keeps serving its last one, so upgrade data planes first.
+  - The console's form for it follows.
+
+- **Security:** Pingora 0.9 (from 0.8.1), for RUSTSEC-2026-0388, -0390, -0391, -0398, -0403 and
+  -0410, which had turned the required `deny` check red on every pull request.
+  - **RUSTSEC-2026-0390, exposed:** a header the client named in `Connection` reached HTTP/1
+    upstreams. `Connection: X-Forwarded-For` let an HTTP/1 proxy between the gateway and the
+    origin that honours such names drop the gateway's `X-Forwarded-For`, and an origin that
+    trusts that proxy's account of the client could be misled. Now a header named in
+    `Connection`, and every hop-by-hop header, stops at the gateway, and a request whose
+    `Connection` names `Host` or an `X-Forwarded-*` header is refused 400
+    `INVALID_REQUEST_TARGET`. WebSocket upgrades still pass.
+  - **RUSTSEC-2026-0388, not exposed:** an HTTP/2 `Host` that disagrees with `:authority` was
+    already refused 400 (#161), and the route was matched on the host without userinfo, so no
+    request could pass one host's policies and reach another. Pingora now refuses these itself
+    as it reads the request, along with userinfo in `Host` or in the target, and compares
+    `Host` with an absolute-form target byte for byte, port included. Those 400s are Pingora's:
+    no `X-Gapura-Error`, no access log line.
+  - **zstd (RUSTSEC-2026-0391, -0398, -0403, -0410):** the copies under pingora-core move to
+    zstd 0.14.3, zstd-safe 8.2.0 and zstd-sys 2.1.2. pingora-header-serde 0.9.0 still pins
+    zstd 0.13 and zstd-safe 7, which have no fixed release; `deny.toml` ignores -0391, -0398
+    and -0403 for them, with the reasons: it only runs for Pingora's HTTP cache, which the
+    gateway never enables, and calls none of the flawed functions.
+  - tokio stays below 1.54: pingora-core 0.9.0 still builds the zero-capacity buffer tokio
+    1.54 panics on (cloudflare/pingora#1059).
+
 - `request_transformer` and `response_transformer` policies edit the request sent upstream and
   the response sent back (#281). `PUT /api/workspaces/{ws}/policies/request_transformer` takes
   `{"target", "config": {"headers", "query"}}` and `response_transformer` takes

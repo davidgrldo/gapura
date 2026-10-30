@@ -45,10 +45,11 @@ a separate control plane is optional rather than required:
   service -- and can count per consumer or per value of a header as well as per address; a
   consumer's own limit comes before any limit on everyone, in Kong's order.
 - **Operations**: Prometheus metrics, a JSON access log carrying trace context and the client
-  address as seen behind trusted proxies, a Grafana dashboard and example alerts, status written
-  only by the replica holding the Lease, an address per Gateway when one shared address is not
-  enough (`gatewayAddresses`), and hot reload by atomic config swap so in-flight requests finish
-  on the config they started with.
+  address as seen behind trusted proxies, export of that log to an HTTP endpoint and of a span per
+  request to an OTLP collector, a Grafana dashboard and example alerts, status written only by the
+  replica holding the Lease, an address per Gateway when one shared address is not enough
+  (`gatewayAddresses`), and hot reload by atomic config swap so in-flight requests finish on the
+  config they started with.
 - **Console**: off by default. `console.enabled` deploys `gapura-control` in its own Deployment
   and Service with read-only RBAC: sign-in from a local users file or OIDC, and routes scoped to
   the namespaces each group is granted. The stock install stays one binary with no database;
@@ -70,7 +71,7 @@ and a key never changes meaning, so a client can match on it:
 
 | Key | Status | Cause |
 |---|---|---|
-| `INVALID_REQUEST_TARGET` | 400 | the path cannot be normalised, the host is ambiguous, or `;` parameters would route it elsewhere |
+| `INVALID_REQUEST_TARGET` | 400 | the path cannot be normalised, the host is ambiguous, `;` parameters would route it elsewhere, or `Connection` names `Host` or an `X-Forwarded-*` header |
 | `NO_ROUTE` | 404 | no rule matches |
 | `NO_BACKEND` | 500 | the rule has no valid backend |
 | `NO_ENDPOINTS` | 503 | the backend has no ready endpoint, or none left to try |
@@ -81,6 +82,7 @@ and a key never changes meaning, so a client can match on it:
 | `RATE_LIMITED` | 429 | the rule's rate limit is spent for this client |
 | `IP_FORBIDDEN` | 403 | an ip_restriction policy refused the client address |
 | `REQUEST_TOO_LARGE` | 413 | a request_size_limit policy refused the body, by its length or as it streamed |
+| `CORS_ORIGIN_FORBIDDEN` | 403 | a cors policy refused a preflight from an origin it does not allow |
 | `UPSTREAM_CONNECT_TIMEOUT` | 504 | connecting to the upstream timed out |
 | `UPSTREAM_TIMEOUT` | 504 | the upstream went quiet past the rule's timeout, or the request's budget ran out |
 | `UPSTREAM_CONNECT_ERROR` | 502 | the upstream refused the connection or could not be reached |
@@ -93,6 +95,56 @@ response header, so a route with such a transform answers as its operator config
 
 The 401 keys say whether a credential was presented, never why it was refused: that stays with
 the operator, in the `reason` label of `gapura_policy_refused_total`.
+
+A request Pingora cannot read as a well-formed one never reaches the gateway: two `Host` lines, a
+`Host` that differs from the request target's authority, userinfo in either, or an unparseable
+request line is answered with Pingora's own empty 400, which carries no key and leaves no access
+log line.
+
+### Log and trace export
+
+Each replica can send what it logs and traces to collectors of its own. These are flags (the
+chart's `telemetry` values), not per-route policies, so a Kubernetes-mode gateway exports exactly
+as a `--control-plane` one does:
+
+- `--http-log-url URL` POSTs every access-log line -- the same JSON as stdout -- in batches, as a
+  JSON array. `--http-log-headers-file FILE` adds `Name: value` lines as headers to each POST, for
+  a token that should never be an argument; a `Content-Type` line there is ignored, since a body
+  is always `application/json`.
+- `--otlp-traces-url URL` sends a span per sampled request to an OTLP/HTTP traces endpoint,
+  JSON-encoded (`http://otel-collector:4318/v1/traces`); `--otlp-headers-file` as above. The span
+  is SERVER kind, named `GET <route>` (the method alone when no route matched), with
+  `http.request.method`, `http.response.status_code`, `url.scheme`, `url.path`, `server.address`,
+  `client.address`, and `gapura.route` (the route's name, not a path template), `gapura.service`,
+  `gapura.consumer`, `gapura.error_key` and `gapura.listener` when the request has them; a 5xx
+  marks it an error. A method outside the nine standard ones is reported as `_OTHER`, and its
+  span is named `HTTP <route>`. With it on the gateway is a hop of the trace, and the upstream's
+  `traceparent` names the gateway's span as its parent. A request that arrives with a
+  `traceparent` keeps its caller's sampling decision; a trace that starts at the gateway is
+  sampled at `--otlp-sample-ratio` (0 to 1, default 1).
+
+No request waits on a sink. Each sink has one queue per replica, bounded at 10 000 records and
+16 MiB: when either is reached it drops its oldest record for the new one, and it warns once it
+is 80% full. A batch holds up to 500 records and is sent at most a second after the first one
+queued. A batch that fails is sent again after 10 ms, then twice as long each time up to a minute
+apart, for a minute before it is dropped. Every record lost is counted in
+`gapura_log_dropped_total{sink, reason}`: `sink` is `http_log` or `otlp_traces`, `reason` is
+`queue_full` or `send_failed`. Once shutdown begins a batch no longer waits to fill and is retried
+for 5 s, so the requests that finish during the grace period are exported too.
+
+A sink verifies an `https://` endpoint's certificate against the public roots (there is no
+private-CA flag yet) and follows no redirect: a 3xx answer is a failed send, retried like any
+other.
+
+Nothing exported carries a request header, so `Authorization`, `Proxy-Authorization`, `Cookie` and
+an API key header never leave the gateway this way. An access-log line names the consumer a
+key_auth policy identified, in `consumer`. It carries the query string only with
+`--access-log-query`, and then -- on stdout too -- the value of a parameter named (in any case,
+once decoded) `api_key`, `apikey`, `api-key`, `x-api-key`, `key`, `token`, `access_token`,
+`id_token`, `refresh_token`, `client_secret`, `password`, `secret`, `signature`, `sig`, `code`, or
+a presigned URL's `x-amz-security-token`, `x-amz-signature`, `x-amz-credential`,
+`x-goog-signature` or `x-goog-credential`, or like the header a route's key_auth policy reads, is
+written `<redacted>`. A span carries no query at all.
 
 ## The name
 

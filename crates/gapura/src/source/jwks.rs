@@ -371,7 +371,7 @@ pub async fn fetch(source: Source) -> Result<Answer, String> {
 
 /// An error and its causes on one line. reqwest's own message is "error sending request for url";
 /// the connect or certificate cause an operator needs is in its sources.
-fn chain(e: &dyn std::error::Error) -> String {
+pub(crate) fn chain(e: &dyn std::error::Error) -> String {
     let mut out = e.to_string();
     let mut cause = e.source();
     while let Some(c) = cause {
