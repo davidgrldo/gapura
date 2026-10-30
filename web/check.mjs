@@ -426,3 +426,23 @@ for (const kind of serverPolicyKinds) {
   if (!POLICY_LABEL[kind]) throw new Error(`POLICY_LABEL in src/lib/audit.js has no label for ${kind}, which ${POLICIES} keeps`)
 }
 console.log("ok: the IP restriction, body size and CORS bounds and every policy kind's audit label match the server")
+
+// The stub's data planes carry every field GET /api/data-planes serialises, read off the Rust
+// struct, so a field the API gains cannot be missing from what the page is drawn against; and
+// one of them is refused a configuration, so the page's warning for that is drawn at all.
+{
+  const DATA_PLANES = '../crates/gapura-control/src/data_planes.rs'
+  const struct = readFileSync(DATA_PLANES, 'utf8').match(/pub struct DataPlaneView \{([\s\S]*?)\n\}/)
+  if (!struct) throw new Error(`${DATA_PLANES}: no "pub struct DataPlaneView" to read the fields from`)
+  const fields = [...struct[1].matchAll(/^ {4}pub ([a-z_]+):/gm)].map((m) => m[1])
+  if (fields.length === 0) throw new Error(`${DATA_PLANES}: DataPlaneView has no fields this could read`)
+  const planes = JSON.parse(readFileSync('stub/data-planes.json', 'utf8'))
+  for (const plane of planes) {
+    const absent = fields.filter((f) => !(f in plane))
+    if (absent.length) throw new Error(`stub/data-planes.json: ${plane.name} lacks ${absent.join(', ')}`)
+  }
+  if (!planes.some((p) => p.missing.length > 0)) {
+    throw new Error('stub/data-planes.json: no data plane is refused a configuration, so the page never draws one')
+  }
+  console.log('ok: the stub data planes carry every field the API serialises, and one of them is refused')
+}
