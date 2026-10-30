@@ -3,7 +3,9 @@
 //! The data plane calls carrying the version it holds and the features it reads, and gets
 //! "nothing has changed", the configuration that replaces it, or a refusal naming what it lacks
 //! to read that configuration. The call is also the liveness signal: there is no second
-//! heartbeat reporting a fact this one already carries.
+//! heartbeat reporting a fact this one already carries. A poll that already holds what is served
+//! asks the control plane to hold it until that changes, up to one interval, so a change arrives
+//! within about a second.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -154,7 +156,8 @@ impl ControlSource {
             .header(
                 "x-gapura-features",
                 gapura_core::features::FEATURES.join(","),
-            );
+            )
+            .header("prefer", format!("wait={}", self.interval.as_secs().max(1)));
         if let Some(v) = held {
             req = req.header(reqwest::header::IF_NONE_MATCH, v);
         }
@@ -182,8 +185,10 @@ impl ControlSource {
     }
 
     async fn run(&self, mut shutdown: ShutdownWatch) {
+        // A poll the control plane holds lasts up to the interval, and the answer then needs the
+        // 15 seconds any request was given before.
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(self.interval + Duration::from_secs(15))
             .user_agent(format!("gapura/{}", VERSION.trim_start_matches('v')));
         if let Some(pem) = &self.ca_pem {
             match reqwest::Certificate::from_pem_bundle(pem) {
@@ -207,6 +212,7 @@ impl ControlSource {
 
         let mut refused: Vec<String> = Vec::new();
         loop {
+            let tick = tokio::time::Instant::now();
             let mut changed = false;
             match self.poll(&client, held.as_deref()).await {
                 Ok(Polled::Changed(version, config)) => {
@@ -279,8 +285,12 @@ impl ControlSource {
                 }
             }
 
+            // Paced by when the tick began, not by when the poll returned: a held poll that ends
+            // at a change is followed by the rest of this tick's wait rather than a second poll at
+            // once, so DNS and JWKS refreshes keep their cadence; and a control plane that does not
+            // hold polls -- one predating `Prefer: wait` -- costs no busy loop.
             tokio::select! {
-                _ = tokio::time::sleep(self.interval) => {}
+                _ = tokio::time::sleep_until(tick + self.interval) => {}
                 _ = shutdown.changed() => return,
             }
         }
