@@ -1,6 +1,17 @@
 {
   "entries": [
     {
+      "id": 219,
+      "at": "2026-10-30T08:00:00.000000Z",
+      "actor": "nadia.putri",
+      "actor_method": "local",
+      "action": "create",
+      "object_kind": "policy",
+      "workspace": "default",
+      "before": null,
+      "after": { "target": "route:catch-all", "kind": "cors", "config": {"origins": ["https://docs.example.com", "https://*.example.org"], "methods": ["GET", "HEAD"], "expose_headers": ["x-request-id"], "max_age": 600} }
+    },
+    {
       "id": 218,
       "at": "2026-10-24T09:00:00.000000Z",
       "actor": "nadia.putri",
