@@ -1,6 +1,7 @@
 <script>
   import { get } from '../lib/api.js'
   import Failure from '../lib/Failure.svelte'
+  import CorsControl from '../lib/CorsControl.svelte'
   import IpRestrictionControl from '../lib/IpRestrictionControl.svelte'
   import ServiceSheet from '../lib/ServiceSheet.svelte'
   import SizeLimitControl from '../lib/SizeLimitControl.svelte'
@@ -98,6 +99,10 @@
     <h2 id="workspace-size-limit" class="text-sm font-medium">Limit request bodies on every route in {workspace}</h2>
     <SizeLimitControl {workspace} target="workspace" {role} onchanged={load} />
   </section>
+  <section class="mb-6 grid max-w-md gap-2" aria-labelledby="workspace-cors">
+    <h2 id="workspace-cors" class="text-sm font-medium">Let pages on other origins call every route in {workspace}</h2>
+    <CorsControl {workspace} target="workspace" {role} onchanged={load} />
+  </section>
   <div class="mb-3 flex items-center justify-between gap-4">
     <p class="text-sm text-muted-foreground">The upstreams routes in {workspace} send traffic to.</p>
     {#if can.write(role)}<ServiceSheet mode="create" {workspace} {role} onsaved={load} onremoved={focusHeading} />{/if}
@@ -148,6 +153,12 @@
                     <span class="inline-flex font-sans" title={sized(s, max)}>
                       <Tag tone="idle"><span aria-hidden="true">{max ? `≤${sizeText(max)}` : 'size'}</span></Tag>
                       <span class="sr-only">, {max ? `bodies over ${sizeText(max)} are refused` : 'request bodies are limited'} (from the {s.policies.request_size_limit.from})</span>
+                    </span>
+                  {/if}
+                  {#if s.policies?.cors}
+                    <span class="inline-flex font-sans" title="Pages on other origins may call it (from the {s.policies.cors.from})">
+                      <Tag tone="idle"><span aria-hidden="true">CORS</span></Tag>
+                      <span class="sr-only">, pages on other origins may call it (from the {s.policies.cors.from})</span>
                     </span>
                   {/if}
                 </span>

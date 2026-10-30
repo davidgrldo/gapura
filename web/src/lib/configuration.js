@@ -59,6 +59,12 @@ export function sizeText(maxBytes) {
   const { amount, unit } = sizeParts(maxBytes)
   return amount === 1 && unit === 'bytes' ? '1 byte' : `${amount} ${unit}`
 }
+// A CORS policy's bounds, as policies.rs's MAX_ORIGINS and MAX_AGE_SECS, and the methods it
+// tells a preflight when none are ticked, as its CORS_METHODS; web/check.mjs fails the build when
+// they drift.
+export const MAX_ORIGINS = 100
+export const MAX_AGE_SECS = 86_400
+export const CORS_METHODS = ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE']
 // Names as a sentence lists them: "a", "a and b", "a, b and c".
 export const listed = (names) =>
   names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
@@ -109,8 +115,9 @@ const OWN_POLICIES = [
   // Kept in the row's `policies` map, as every kind written through `/policies/{kind}` is.
   [(row) => row?.policies?.ip_restriction, 'IP restriction'],
   [(row) => row?.policies?.request_size_limit, 'body size limit'],
+  [(row) => row?.policies?.cors, 'CORS policy'],
 ]
-const HOW_MANY = ['', 'one', 'two', 'three', 'four', 'five']
+const HOW_MANY = ['', 'one', 'two', 'three', 'four', 'five', 'six']
 export function ownPolicies(row, kind) {
   const names = OWN_POLICIES.filter(([of]) => of(row)?.from === kind).map(([, name]) => `the ${name}`)
   if (names.length === 0) return ''

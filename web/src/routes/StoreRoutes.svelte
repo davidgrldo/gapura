@@ -173,6 +173,12 @@
                       <span class="sr-only">, {max ? `bodies over ${sizeText(max)} are refused` : 'request bodies are limited'} (from the {r.policies.request_size_limit.from})</span>
                     </span>
                   {/if}
+                  {#if r.policies?.cors}
+                    <span class="inline-flex font-sans" title="Pages on other origins may call it (from the {r.policies.cors.from})">
+                      <Tag tone="idle"><span aria-hidden="true">CORS</span></Tag>
+                      <span class="sr-only">, pages on other origins may call it (from the {r.policies.cors.from})</span>
+                    </span>
+                  {/if}
                 </span>
               </Table.Cell>
               <Table.Cell class="font-mono">{r.service}</Table.Cell>
