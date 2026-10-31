@@ -8,6 +8,15 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- SIGTERM can drain before the listeners close: `--drain-seconds N` keeps every listener
+  accepting for N seconds after it, with `/readyz` answering `503 not ready: draining`, then
+  stops as before. Pingora alone closes the listeners the moment SIGTERM arrives, so a load
+  balancer still sending to the gateway met refused connections.
+  - **Chart:** `preStopDelaySeconds` (15) is now passed as `--drain-seconds` instead of a
+    `preStop` sleep, so it works on every Kubernetes version rather than 1.30+ only, and the pod
+    reports itself not ready while it drains. The value keeps its name and its cap.
+  - **Elsewhere:** off unless set; give the kill timeout room for N + 60 s.
+
 - A configuration change reaches data planes in about a second rather than one poll interval
   (#288). A data plane already holding what is served asks `/v1/config` to hold its poll
   (`Prefer: wait=<interval>`, at most 60 s); the control plane answers as soon as the
