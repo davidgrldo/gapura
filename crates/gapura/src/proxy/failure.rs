@@ -44,10 +44,6 @@ pub enum ErrorKey {
     /// A credential was presented that the policy cannot check: a JWT policy holds no key it
     /// can verify with -- its `jwks_uri` has not loaded, or its JWKS did not parse. Not a 401:
     /// the credential may be good, and an outage must not read as a wrong key.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "answered by the auth chain, which comes next")
-    )]
     AuthUnavailable,
     /// Never answered: the parent of the `AUTH_*` keys that answer 401 (see
     /// [`ErrorKey::parent`]), so what is looked up by key can cover every refused credential at

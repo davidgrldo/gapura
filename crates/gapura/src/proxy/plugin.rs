@@ -21,7 +21,7 @@ use pingora::http::{RequestHeader, ResponseHeader};
 
 use crate::proxy::failure::ErrorKey;
 use crate::proxy::transform::{edit_headers, edit_query, writable};
-use crate::proxy::{client_ip_of, is_final, jwt, jwt_refusal, rate_limit, GapuraProxy};
+use crate::proxy::{client_ip_of, is_final, jwt, jwt_verdict, rate_limit, GapuraProxy};
 use crate::store::Runtime;
 use crate::telemetry::METRICS;
 
@@ -472,11 +472,11 @@ impl Access {
             Access::Cors(policy) => cors(rule, policy, req, cx),
             Access::Jwt(policy) => {
                 // No keys for this document means it did not parse at swap time, or its
-                // `jwks_uri` has never loaded. Refusing is the safe direction: the alternative is
-                // passing traffic through unverified because verification was impossible.
+                // `jwks_uri` has never loaded; `jwt_verdict` answers a token there
+                // `AUTH_UNAVAILABLE`.
                 let empty = jwt::Keys::default();
                 let keys = rt.jwt_keys(&policy.jwks).unwrap_or(&empty);
-                match jwt_refusal(req, policy, keys) {
+                match jwt_verdict(req, policy, keys).err() {
                     None => Flow::Continue,
                     Some((key, reason, challenge)) => {
                         // A key the policy does not hold may be one its IdP has just started

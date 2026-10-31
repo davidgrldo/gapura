@@ -2975,8 +2975,9 @@ async fn a_jwks_uri_is_fetched_rotated_and_outlives_its_idp() {
     .await;
 }
 
-/// A URL that has never answered leaves its policy with no keys, which refuses every token as
-/// invalid -- never admits one unverified.
+/// A URL that has never answered leaves its policy with no keys, which answers every token
+/// `AUTH_UNAVAILABLE` -- never admits one unverified, and never tells a caller whose token may be
+/// good that it is a bad one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     let (ca_pem, _, _) = idp_tls();
@@ -2992,9 +2993,8 @@ async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     )
     .await;
     let r = guarded(&gw, &signed_by(&ec_key("any"))).await;
-    assert_eq!(r.status(), 401);
-    assert_eq!(r.headers()["x-gapura-error"], "AUTH_JWT_INVALID");
-    assert_eq!(r.headers()["www-authenticate"], "Bearer");
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_UNAVAILABLE");
     wait_for_metric(
         &gw,
         &format!("gapura_jwks_last_success_timestamp_seconds{{uri=\"{uri}\"}} 0"),
