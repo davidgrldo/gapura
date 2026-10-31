@@ -2665,6 +2665,7 @@ fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
                 limit: hour(2, LimitBy::Ip),
             },
         ],
+        consumers: Vec::new(),
     }
 }
 

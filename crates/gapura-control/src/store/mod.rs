@@ -416,6 +416,7 @@ impl Store {
                 plugins,
                 credentials,
                 rate_limits,
+                consumers: Vec::new(),
             },
         ))
     }

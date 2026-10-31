@@ -719,10 +719,10 @@ fn headers(input: Vec<HeaderMatch>) -> Result<Vec<HeaderMatch>, FieldError> {
                 "A route matches the host through its hosts; list it there.",
             ));
         }
-        // Routes are matched before key_auth runs and before the data plane replaces the
-        // client's own consumer header, so a match on it would read what the client claims
-        // (#228).
-        if name == gapura_core::credentials::CONSUMER_HEADER {
+        // Routes are matched before a credential policy runs and before the data plane replaces
+        // the client's own copy of each header it sets about the caller, so a match on one would
+        // read what the client claims (#228).
+        if gapura_core::credentials::GATEWAY_HEADERS.contains(&name.as_str()) {
             return Err(field(
                 at,
                 format!(
@@ -1641,13 +1641,26 @@ mod tests {
     }
 
     #[test]
-    fn a_header_match_cannot_name_the_consumer_header() {
+    fn a_header_match_cannot_name_a_header_the_gateway_sets() {
         let err = headers(vec![header("x-consumer-USERNAME", "admin")]).unwrap_err();
         assert_eq!(err.field, "headers[0].name");
         assert_eq!(
             err.sentence,
             "The gateway sets x-consumer-username after a route is matched, so a route cannot match on it."
         );
+        // Every one of them, in any letter case, and at any position in the list.
+        for name in gapura_core::credentials::GATEWAY_HEADERS {
+            let err =
+                headers(vec![header("x-a", "1"), header(&name.to_uppercase(), "1")]).unwrap_err();
+            assert_eq!(err.field, "headers[1].name", "{name}");
+            assert_eq!(
+                err.sentence,
+                format!(
+                    "The gateway sets {name} after a route is matched, so a route cannot match on it."
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]

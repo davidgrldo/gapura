@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    Cluster, ClusterTls, Config, ConsumerRateLimits, Filters, KeyAuthPolicy, KvMatch,
-    ListenerConfig, PathMatch, PathRewrite, Plugin, PortEntry, Protocol, RateLimit, ResolveTarget,
-    Rewrite, RouteMatch, RouteRule, Timeouts, WeightedBackend,
+    AuthPolicy, Cluster, ClusterTls, Config, ConsumerRateLimits, Filters, JwtPolicy, KeyAuthPolicy,
+    KvMatch, ListenerConfig, PathMatch, PathRewrite, Plugin, PortEntry, Protocol, RateLimit,
+    ResolveTarget, Rewrite, RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
 
 /// Where traffic goes. `host` is resolved by the data plane, not here; see [`Cluster::resolve`].
@@ -153,6 +153,18 @@ pub struct StoreCredential {
     pub workspace: String,
 }
 
+/// A consumer, for [`Config::consumers`]: who a jwt `consumer_claim` and an auth policy's
+/// `anonymous` may name, and the groups an acl judges.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreConsumer {
+    /// The consumer's workspace; empty for a snapshot that has no workspaces.
+    #[serde(default)]
+    pub workspace: String,
+    pub username: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoreSnapshot {
     pub services: Vec<StoreService>,
@@ -163,6 +175,8 @@ pub struct StoreSnapshot {
     pub credentials: Vec<StoreCredential>,
     #[serde(default)]
     pub rate_limits: Vec<StoreRateLimit>,
+    #[serde(default)]
+    pub consumers: Vec<StoreConsumer>,
 }
 
 /// Runtime settings that are the data plane's, not the store's: which ports this process bound.
@@ -200,9 +214,9 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
     // foreign key should make it unreachable and the console should refuse it first; this is
     // what stands between those two being wrong and a crash.
     //
-    // A route that matches on the consumer header (#228), whose exact or prefix path names
-    // `;params` (#247), or that strips a regex path, is not served at all; see
-    // [`refused_routes`].
+    // A route that matches on a header the gateway sets about the caller (#228), whose exact or
+    // prefix path names `;params` (#247), or that strips a regex path, is not served at all;
+    // see [`refused_routes`].
     let mut routes: Vec<&StoreRoute> = snap
         .routes
         .iter()
@@ -217,6 +231,21 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .then_with(|| a.workspace.cmp(&b.workspace))
             .then_with(|| a.name.cmp(&b.name))
     });
+
+    // Built before the routes, because an auth policy keeps its anonymous consumer only while
+    // the consumer is in it; see [`plugins_for`].
+    let consumers: BTreeMap<String, Vec<String>> = snap
+        .consumers
+        .iter()
+        .map(|c| {
+            let mut groups = c.groups.clone();
+            groups.sort();
+            (
+                crate::credentials::consumer_id(&c.workspace, &c.username),
+                groups,
+            )
+        })
+        .collect();
 
     let mut clusters = BTreeMap::new();
     let mut rules = Vec::with_capacity(routes.len());
@@ -255,7 +284,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
         // re-prioritised ahead of it, resetting the window. A store route is one rule, so its
         // index within its route is always 0, as an HTTPRoute with one rule's is.
         let position = rules.len();
-        let plugins = plugins_for(&snap.plugins, route);
+        let plugins = plugins_for(&snap.plugins, route, &consumers);
         rules.push(RouteRule {
             route: route_id(route),
             rule_index: 0,
@@ -347,7 +376,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .map(|c| (c.key_hash.clone(), c.workspace.clone()))
             .collect(),
         consumer_rate_limits: consumer_rate_limits(&snap.rate_limits, &routes),
-        consumers: BTreeMap::new(),
+        consumers,
     }
 }
 
@@ -356,10 +385,10 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 /// write; this covers rows stored before it did, and the whole route is left out rather than
 /// only the offending match, which would widen it.
 ///
-/// - A header match naming [`CONSUMER_HEADER`](crate::credentials::CONSUMER_HEADER) (#228).
-///   Routes are matched before `key_auth` runs and before the data plane replaces the client's
-///   own consumer header, so such a match reads whatever the client claims to be. Dropping only
-///   that match would widen the route to every consumer.
+/// - A header match naming one of [`GATEWAY_HEADERS`](crate::credentials::GATEWAY_HEADERS)
+///   (#228). Routes are matched before a credential policy runs and before the data plane
+///   replaces the client's own copy of each, so such a match reads whatever the client claims
+///   to be. Dropping only that match would widen the route to every consumer.
 /// - An exact or prefix path containing `;` (#247). A servlet backend strips `;params` before
 ///   resolving a path, so `GET /api;v=2` would run this route's policies while the backend
 ///   serves `/api`, whose route may carry others. Dropping only that path could leave the route
@@ -376,7 +405,7 @@ pub fn refused_routes(snap: &StoreSnapshot) -> Vec<(String, &'static str)> {
 
 /// Why [`compile`] leaves `route` out, or `None` to serve it; see [`refused_routes`].
 fn refusal(route: &StoreRoute) -> Option<&'static str> {
-    if matches_consumer_header(route) {
+    if matches_gateway_header(route) {
         return Some(
             "it matches on a header the gateway sets itself; remove that header match to serve it",
         );
@@ -405,10 +434,11 @@ fn names_path_parameters(route: &StoreRoute) -> bool {
     })
 }
 
-fn matches_consumer_header(route: &StoreRoute) -> bool {
+fn matches_gateway_header(route: &StoreRoute) -> bool {
     route.headers.iter().any(|h| {
-        h.name
-            .eq_ignore_ascii_case(crate::credentials::CONSUMER_HEADER)
+        crate::credentials::GATEWAY_HEADERS
+            .iter()
+            .any(|g| h.name.eq_ignore_ascii_case(g))
     })
 }
 
@@ -448,8 +478,14 @@ pub fn uppercase_escapes(path: &str) -> String {
 ///
 /// A consumer is not one of the targets here: the policies are what identify the consumer, so
 /// none can depend on it. Only a request limit can be a consumer's own; see
-/// [`consumer_rate_limits`].
-fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
+/// [`consumer_rate_limits`]. The policies that name a consumer -- an auth policy's anonymous, a
+/// jwt policy's claim -- are stamped with the route's workspace, which is the one they name it
+/// in, and `consumers` is what tells an anonymous one that is gone from one that is there.
+fn plugins_for(
+    all: &[StorePlugin],
+    route: &StoreRoute,
+    consumers: &BTreeMap<String, Vec<String>>,
+) -> Vec<Plugin> {
     let mut chosen: Vec<(u8, &Plugin)> = Vec::new();
     for p in all {
         let Some(rank) = rank(
@@ -473,6 +509,28 @@ fn plugins_for(all: &[StorePlugin], route: &StoreRoute) -> Vec<Plugin> {
             // carries the workspace it was written in, and the data plane checks the key's.
             Plugin::KeyAuth(policy) if !route.workspace.is_empty() => {
                 Plugin::KeyAuth(KeyAuthPolicy {
+                    workspace: Some(route.workspace.clone()),
+                    ..policy.clone()
+                })
+            }
+            // An anonymous consumer that no longer exists is no one: requests without a
+            // credential are refused rather than admitted as a consumer the store dropped.
+            Plugin::Auth(policy) => {
+                let workspace = (!route.workspace.is_empty()).then(|| route.workspace.clone());
+                let anonymous = policy.anonymous.clone().filter(|name| {
+                    consumers.contains_key(&crate::credentials::consumer_id(&route.workspace, name))
+                });
+                Plugin::Auth(AuthPolicy {
+                    anonymous,
+                    workspace,
+                })
+            }
+            // Only a policy that reads a claim looks a consumer up, so only one that does is
+            // told the workspace to look in.
+            Plugin::Jwt(policy)
+                if policy.consumer_claim.is_some() && !route.workspace.is_empty() =>
+            {
+                Plugin::Jwt(JwtPolicy {
                     workspace: Some(route.workspace.clone()),
                     ..policy.clone()
                 })
@@ -1025,6 +1083,7 @@ mod tests {
                 },
             ],
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
         };
         let cfg = compile(&snap, &StoreSettings::default());
         let [Plugin::KeyAuth(policy)] = plugins_on(&cfg, "team-a/api") else {
@@ -1035,6 +1094,128 @@ mod tests {
         assert_eq!(cfg.credential_workspaces["hash-b"], "team-b");
         // The upstream is still told the bare name: within a workspace it is unique.
         assert_eq!(cfg.credentials["hash-b"], "mobile");
+    }
+
+    #[test]
+    fn consumers_reach_the_configuration_with_their_groups_by_id() {
+        let snap = StoreSnapshot {
+            consumers: vec![
+                StoreConsumer {
+                    workspace: "shop".into(),
+                    username: "mobile".into(),
+                    groups: vec!["staff".into(), "ops".into()],
+                },
+                StoreConsumer {
+                    workspace: String::new(),
+                    username: "solo".into(),
+                    groups: vec![],
+                },
+            ],
+            ..StoreSnapshot::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        assert_eq!(cfg.consumers["shop/mobile"], ["ops", "staff"], "sorted");
+        assert!(cfg.consumers["solo"].is_empty());
+        assert_eq!(cfg.consumers.len(), 2);
+    }
+
+    /// A route-level policy row in workspace `shop`, for the two routes the next tests share.
+    fn shop_policy(route: &str, plugin: Plugin) -> StorePlugin {
+        StorePlugin {
+            workspace: "shop".into(),
+            route: Some(route.into()),
+            service: None,
+            plugin,
+        }
+    }
+
+    /// Routes `a` and `b` in workspace `shop` on one service, with `plugins` attached by route
+    /// and `consumers` (by username) in the workspace, compiled.
+    fn shop_config(plugins: Vec<StorePlugin>, consumers: &[&str]) -> Config {
+        compile(
+            &StoreSnapshot {
+                services: vec![ws_svc("shop", "orders", "orders.internal")],
+                routes: vec![
+                    ws_route("shop", "a", "orders", "api.example"),
+                    ws_route("shop", "b", "orders", "api.example"),
+                ],
+                plugins,
+                consumers: consumers
+                    .iter()
+                    .map(|username| StoreConsumer {
+                        workspace: "shop".into(),
+                        username: (*username).into(),
+                        groups: Vec::new(),
+                    })
+                    .collect(),
+                ..StoreSnapshot::default()
+            },
+            &StoreSettings::default(),
+        )
+    }
+
+    /// An anonymous consumer is looked up in the policy's own workspace, so the policy carries it.
+    /// One the store no longer has is dropped, which refuses a caller without a credential:
+    /// keeping the name would admit them as a consumer that is gone, with whatever the data plane
+    /// then found under it.
+    #[test]
+    fn an_auth_policy_carries_its_workspace_and_drops_an_anonymous_consumer_that_is_gone() {
+        let auth = |anonymous: &str| {
+            Plugin::Auth(AuthPolicy {
+                anonymous: Some(anonymous.into()),
+                workspace: None,
+            })
+        };
+        let cfg = shop_config(
+            vec![
+                shop_policy("a", auth("guest")),
+                shop_policy("b", auth("deleted")),
+            ],
+            &["guest"],
+        );
+        assert_eq!(
+            plugins_on(&cfg, "shop/a"),
+            [Plugin::Auth(AuthPolicy {
+                anonymous: Some("guest".into()),
+                workspace: Some("shop".into()),
+            })]
+        );
+        assert_eq!(
+            plugins_on(&cfg, "shop/b"),
+            [Plugin::Auth(AuthPolicy {
+                anonymous: None,
+                workspace: Some("shop".into()),
+            })]
+        );
+    }
+
+    /// Only a policy that reads a claim looks a consumer up, so only that one is stamped: another
+    /// would carry a workspace it never reads, and a configuration that says more than it means.
+    #[test]
+    fn a_jwt_policy_is_stamped_with_its_workspace_only_when_it_names_a_consumer_claim() {
+        let jwt = |consumer_claim: Option<&str>| {
+            Plugin::Jwt(JwtPolicy {
+                consumer_claim: consumer_claim.map(str::to_string),
+                jwks: "{}".into(),
+                ..JwtPolicy::default()
+            })
+        };
+        let cfg = shop_config(
+            vec![
+                shop_policy("a", jwt(Some("sub"))),
+                shop_policy("b", jwt(None)),
+            ],
+            &[],
+        );
+        let [Plugin::Jwt(named)] = plugins_on(&cfg, "shop/a") else {
+            panic!("one jwt policy on a");
+        };
+        assert_eq!(named.workspace.as_deref(), Some("shop"));
+        assert_eq!(named.consumer_claim.as_deref(), Some("sub"));
+        let [Plugin::Jwt(unnamed)] = plugins_on(&cfg, "shop/b") else {
+            panic!("one jwt policy on b");
+        };
+        assert_eq!(unnamed.workspace, None);
     }
 
     /// Names are unique per workspace, so two workspaces may both have an `orders` service. Keyed
@@ -1128,6 +1309,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/orders", 0)],
@@ -1147,6 +1329,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 8080)],
             routes: vec![route("orders-api", "orders", "/", 0)],
@@ -1173,6 +1356,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("v1", "v1.internal", 80), svc("v2", "v2.internal", 80)],
             routes: vec![
@@ -1221,6 +1405,7 @@ mod tests {
         let forwards = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: services.clone(),
             routes: vec![route("aaa", "a", "/", 5), route("bbb", "b", "/", 5)],
@@ -1228,6 +1413,7 @@ mod tests {
         let backwards = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services,
             routes: vec![route("bbb", "b", "/", 5), route("aaa", "a", "/", 5)],
@@ -1250,6 +1436,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("ghost", "does-not-exist", "/", 0)],
@@ -1267,6 +1454,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![StoreRoute {
@@ -1504,6 +1692,36 @@ mod tests {
         );
     }
 
+    /// #228 for every header the gateway sets about the caller, not only the consumer's name: a
+    /// route matched on `x-consumer-groups` or `x-anonymous-consumer` reads what the client
+    /// claims just as one matched on `x-consumer-username` does, in any letter case.
+    #[test]
+    fn a_route_matching_on_any_header_the_gateway_sets_is_refused() {
+        let why =
+            "it matches on a header the gateway sets itself; remove that header match to serve it";
+        for name in crate::credentials::GATEWAY_HEADERS {
+            let mut spoof = ws_route("shop", "admin", "orders", "api.example");
+            spoof.headers = vec![kv(&name.to_uppercase(), "admin")];
+            let snap = StoreSnapshot {
+                services: vec![ws_svc("shop", "orders", "orders.internal")],
+                routes: vec![spoof, ws_route("shop", "public", "orders", "api.example")],
+                ..Default::default()
+            };
+            assert_eq!(
+                refused_routes(&snap),
+                [("shop/admin".to_string(), why)],
+                "{name}"
+            );
+            let cfg = compile(&snap, &StoreSettings::default());
+            assert_eq!(
+                hit(&cfg, 80, "api.example", "/x", "GET"),
+                Some("shop/public"),
+                "{name}"
+            );
+            assert_eq!(cfg.listeners[0].rules.len(), 1, "{name}");
+        }
+    }
+
     /// #247: a route stored before the control plane refused `;` in an exact or prefix path is
     /// left out whole -- dropping only that path could leave it with none, which is every path
     /// -- and named, while a regex naming `;` and the other routes compile as before.
@@ -1730,6 +1948,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1764,6 +1983,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1801,6 +2021,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1837,6 +2058,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             services: vec![svc("orders", "a", 80), svc("billing", "b", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -1867,6 +2089,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
             plugins: vec![
@@ -2161,6 +2384,7 @@ mod tests {
         let snap = StoreSnapshot {
             credentials: Vec::new(),
             rate_limits: Vec::new(),
+            consumers: Vec::new(),
             plugins: Vec::new(),
             services: vec![svc("orders", "orders.internal", 80)],
             routes: vec![route("api", "orders", "/", 0)],
