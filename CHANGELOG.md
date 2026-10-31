@@ -8,7 +8,7 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
-- SIGTERM can drain before the listeners close: `--drain-seconds N` keeps every listener
+- SIGTERM can drain before the listeners close (#289): `--drain-seconds N` keeps every listener
   accepting for N seconds after it, with `/readyz` answering `503 not ready: draining`, then
   stops as before. Pingora alone closes the listeners the moment SIGTERM arrives, so a load
   balancer still sending to the gateway met refused connections.
