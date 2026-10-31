@@ -36,10 +36,6 @@ pub enum ErrorKey {
     AuthJwtInvalid,
     /// An auth policy's chain found none of its credentials on the request, and names no
     /// anonymous consumer. A chain of one policy answers that policy's own `*_MISSING` instead.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "answered by the auth chain, which comes next")
-    )]
     AuthMissing,
     /// A credential was presented that the policy cannot check: a JWT policy holds no key it
     /// can verify with -- its `jwks_uri` has not loaded, or its JWKS did not parse. Not a 401:
