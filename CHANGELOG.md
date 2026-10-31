@@ -23,8 +23,8 @@ means what it usually does, moving from one version below to a later one. Releas
   - **Groups:** `PUT` and `DELETE /api/workspaces/{ws}/consumers/{name}/groups/{group}`, one group
     at a time (migration 0014). The upstream is told `x-consumer-groups`, and
     `x-anonymous-consumer: true` for the anonymous consumer. Both are removed from every inbound
-    request, as `x-consumer-username` is; a route may not match on them, and a request
-    transformer may not write them.
+    request, as `x-consumer-username` is, and a request transformer can no longer be given one
+    to write; one stored before this release keeps working.
   - **JWT consumers:** a JWT requirement's `consumer_claim` (such as `sub`) names the caller's
     consumer, so its groups, its own request limit and `x-consumer-username` apply; a token whose
     claim names no consumer is refused `AUTH_JWT_INVALID`.
@@ -33,7 +33,14 @@ means what it usually does, moving from one version below to a later one. Releas
     `AUTH_JWT_INVALID`, so an IdP outage no longer reads as a bad token. An API key header whose
     value is not text is now `AUTH_KEY_INVALID` rather than `AUTH_KEY_MISSING`.
   - **Upgrade order:** data planes first. A data plane without `auth`, `acl` or
-    `jwt_consumer_claim` is refused a configuration that uses them (409, #283).
+    `jwt_consumer_claim` is refused a configuration that uses them (409, #283). An older data
+    plane strips only `x-consumer-username`, so an upstream must not trust `x-consumer-groups` or
+    `x-anonymous-consumer` until every data plane in front of it runs this release.
+  - **Routes left out:** a stored route that matches on `x-consumer-groups` or
+    `x-anonymous-consumer` is now left out of the configuration with a "not serving a route"
+    warning, as one matching on `x-consumer-username` has been (#228): routes are matched before
+    the gateway replaces those headers, so such a match reads whatever the client claims. Remove
+    that header match to serve it again; the console now refuses one.
 
 - A configuration change reaches data planes in about a second rather than one poll interval
   (#288). A data plane already holding what is served asks `/v1/config` to hold its poll
