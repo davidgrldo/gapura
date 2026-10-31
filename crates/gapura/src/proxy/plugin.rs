@@ -64,10 +64,6 @@ pub struct Consumer {
     /// what a limit counts by consumer.
     pub id: String,
     /// The auth policy's anonymous consumer: the request presented no credential.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the upstream headers, which come next")
-    )]
     pub anonymous: bool,
 }
 

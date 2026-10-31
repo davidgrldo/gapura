@@ -460,6 +460,35 @@ fn jwt_verdict(
     jwt::verify(policy, keys, presented).map_err(|r| (ErrorKey::from(&r), r.as_str(), "Bearer"))
 }
 
+/// The gateway's word about who called, on the request sent upstream. Every header it sets is
+/// removed first, unconditionally: a client that sends one itself must not be believed, an
+/// upstream cannot tell the two apart, and stripping only when a policy ran would leave every
+/// route without one forwarding whatever a caller claimed. Then the consumer's name, its groups
+/// `, `-separated as Kong sends them, and, for the anonymous consumer, `x-anonymous-consumer`.
+fn consumer_headers(
+    upstream: &mut RequestHeader,
+    consumer: Option<&plugin::Consumer>,
+    config: &gapura_core::config::Config,
+) -> Result<()> {
+    use gapura_core::credentials::{
+        ANONYMOUS_HEADER, CONSUMER_HEADER, GATEWAY_HEADERS, GROUPS_HEADER,
+    };
+    for name in GATEWAY_HEADERS {
+        upstream.remove_header(name);
+    }
+    let Some(consumer) = consumer else {
+        return Ok(());
+    };
+    upstream.insert_header(CONSUMER_HEADER, consumer.name.as_str())?;
+    if let Some(groups) = config.consumers.get(&consumer.id).filter(|g| !g.is_empty()) {
+        upstream.insert_header(GROUPS_HEADER, groups.join(", "))?;
+    }
+    if consumer.anonymous {
+        upstream.insert_header(ANONYMOUS_HEADER, "true")?;
+    }
+    Ok(())
+}
+
 /// The client address after the trusted-proxy walk, the same answer the access log records:
 /// one computation so limiting and logging can never disagree about who the client is.
 /// `trusted_client_headers` names the single-IP headers (e.g. CF-Connecting-IP) consulted when
@@ -924,17 +953,7 @@ impl ProxyHttp for GapuraProxy {
         };
         let rule = &rt.config.listeners[li].rules[ri];
 
-        // Removed unconditionally, before anything is set. This header is the gateway's word
-        // about who called; a client that sends it themselves must not be believed, and an
-        // upstream cannot tell the two apart. Stripping only when a policy ran would leave every
-        // route without one forwarding whatever a caller claimed.
-        upstream.remove_header(gapura_core::credentials::CONSUMER_HEADER);
-        if let Some(consumer) = &ctx.req.consumer {
-            upstream.insert_header(
-                gapura_core::credentials::CONSUMER_HEADER,
-                consumer.name.as_str(),
-            )?;
-        }
+        consumer_headers(upstream, ctx.req.consumer.as_ref(), &rt.config)?;
 
         // Forward the path that was matched. Without this a normalised request would match one
         // string and reach the backend as another, which is exactly the disagreement
@@ -1584,6 +1603,49 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"]["key"], "NO_ROUTE");
         assert_eq!(v["error"]["request_id"], "req-2");
+    }
+
+    #[test]
+    fn the_gateways_consumer_headers_replace_whatever_the_client_sent() {
+        use gapura_core::credentials::{ANONYMOUS_HEADER, CONSUMER_HEADER, GROUPS_HEADER};
+        let config = gapura_core::config::Config {
+            consumers: std::collections::BTreeMap::from([(
+                "shop/mobile".to_string(),
+                vec!["ops".to_string(), "staff".to_string()],
+            )]),
+            ..Default::default()
+        };
+        let spoofed = || {
+            let mut up = RequestHeader::build("GET", b"/", None).unwrap();
+            for name in [CONSUMER_HEADER, GROUPS_HEADER, ANONYMOUS_HEADER] {
+                up.insert_header(name, "admin").unwrap();
+            }
+            up
+        };
+        let mut up = spoofed();
+        consumer_headers(&mut up, None, &config).unwrap();
+        for name in [CONSUMER_HEADER, GROUPS_HEADER, ANONYMOUS_HEADER] {
+            assert!(up.headers.get(name).is_none(), "{name}");
+        }
+        let mobile = plugin::Consumer {
+            name: "mobile".into(),
+            id: "shop/mobile".into(),
+            anonymous: false,
+        };
+        let mut up = spoofed();
+        consumer_headers(&mut up, Some(&mobile), &config).unwrap();
+        assert_eq!(up.headers[CONSUMER_HEADER], "mobile");
+        assert_eq!(up.headers[GROUPS_HEADER], "ops, staff");
+        assert!(up.headers.get(ANONYMOUS_HEADER).is_none());
+        let guest = plugin::Consumer {
+            name: "guest".into(),
+            id: "shop/guest".into(),
+            anonymous: true,
+        };
+        let mut up = spoofed();
+        consumer_headers(&mut up, Some(&guest), &config).unwrap();
+        assert_eq!(up.headers[ANONYMOUS_HEADER], "true");
+        assert!(up.headers.get(GROUPS_HEADER).is_none());
     }
 
     #[test]
