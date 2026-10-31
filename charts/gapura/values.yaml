@@ -133,6 +133,14 @@ telemetry:
     headers:
       existingSecret: ""
       key: headers
+  # Request debug timing (README "Debug timing"): a request whose X-Gapura-Debug-Token header
+  # carries this token is answered with a Server-Timing header of the time its route match, each
+  # access policy, the upstream connect and first byte, and the whole request took. The token in
+  # a Secret under `key`, mounted as a file (--debug-token-file) and never an argument. Empty is
+  # off, and then no request is timed whatever it carries.
+  debugTiming:
+    existingSecret: ""
+    key: token
 
 # EnvFilter directives, e.g. "info" or "gapura=debug". Pingora logs every failed downstream
 # handshake at error level, including the ones a port scanner causes, so it is quieted by default.
@@ -180,12 +188,13 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
-# Seconds a terminating pod keeps accepting new connections before it is sent SIGTERM. On SIGTERM
-# Pingora closes its listeners at once and only then waits for in-flight requests, while the pod
-# leaves the Service endpoints asynchronously and a cloud load balancer keeps routing to the node
-# until its health checks fail (often 10 to 30 s). Without a delay every rollout or node drain
-# refuses connections for that window. Applied on Kubernetes 1.30+ (the `sleep` pre-stop action;
-# the image has no shell). Set it to your load balancer's deregistration time; 0 disables it.
+# Seconds a terminating pod keeps accepting new connections after SIGTERM, with /readyz answering
+# 503, before it closes its listeners (`--drain-seconds`; the name is from when it was a pre-stop
+# sleep). Pingora alone closes them the moment SIGTERM arrives and only then waits for in-flight
+# requests, while the pod leaves the Service endpoints asynchronously and a cloud load balancer
+# keeps routing to the node until its health checks fail (often 10 to 30 s). Without a delay every
+# rollout or node drain refuses connections for that window. Set it to your load balancer's
+# deregistration time; 0 disables it.
 preStopDelaySeconds: 15
 
 # Seconds a new pod must stay Ready before the rollout counts it available and terminates an old
@@ -194,7 +203,7 @@ minReadySeconds: 10
 
 # preStopDelaySeconds, then up to 60 s of Pingora draining in-flight requests (a 30 s grace period
 # and a 30 s graceful shutdown timeout). Below 61 the chart refuses to render, since the pod would
-# be SIGKILLed mid-drain; a value too small for the whole pre-stop delay shortens the delay to fit.
+# be SIGKILLed mid-drain; a value too small for the whole delay shortens the delay to fit.
 terminationGracePeriodSeconds: 90
 
 podAnnotations: {}

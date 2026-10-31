@@ -134,13 +134,20 @@ capabilities:
   {{- end }}
 {{- end -}}
 
-{{- define "gapura.probes" -}}
-{{- /* The pre-stop delay comes out of the grace period's budget, so it is cut to what the grace
-       period leaves after the drain rather than refused: a values file carrying 0.1.0's 75 s
+{{- /* `--drain-seconds` from preStopDelaySeconds, the name it had while it was a pre-stop sleep.
+       The delay comes out of the grace period's budget, so it is cut to what the grace period
+       leaves after Pingora's own drain rather than refused: a values file carrying 0.1.0's 75 s
        must keep rendering on upgrade, with the 14 s it has room for. deployment.yaml refuses a
        grace period below 61, so this never goes negative. */ -}}
+{{- define "gapura.drainArg" -}}
 {{- $grace := int (.Values.terminationGracePeriodSeconds | default 0) -}}
-{{- $preStop := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) -}}
+{{- $drain := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) -}}
+{{- if gt $drain 0 }}
+- --drain-seconds={{ $drain }}
+{{- end }}
+{{- end -}}
+
+{{- define "gapura.probes" -}}
 readinessProbe:
   httpGet: { path: /readyz, port: admin }
   periodSeconds: 5
@@ -163,21 +170,12 @@ startupProbe:
   httpGet: { path: /healthz, port: admin }
   periodSeconds: 2
   failureThreshold: 30
-{{- if and (gt $preStop 0) (semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version) }}
-# Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
-# Service's endpoints asynchronously and an external load balancer keeps sending to the
-# node until its own health checks fail. Holding SIGTERM back keeps serving those. The
-# sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
-lifecycle:
-  preStop:
-    sleep: { seconds: {{ $preStop }} }
-{{- end }}
 {{- end -}}
 
 {{/*
-Log and trace export (values: telemetry), shared by the gateway and the data plane. `part` is
-"args" for the container's flags, "volumes" for the header Secrets and "mounts" for where they
-are mounted; each renders nothing while no sink is on. Call it as
+Log and trace export and debug timing (values: telemetry), shared by the gateway and the data
+plane. `part` is "args" for the container's flags, "volumes" for the header and token Secrets and
+"mounts" for where they are mounted; each renders nothing while none is on. Call it as
 include "gapura.telemetry" (dict "root" . "part" "args").
 */}}
 {{- define "gapura.telemetry" -}}
@@ -188,6 +186,7 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 {{- $otlpHeaders := $otlp.headers | default dict }}
 {{- $logSecret := and $log.url $logHeaders.existingSecret }}
 {{- $otlpSecret := and $otlp.tracesUrl $otlpHeaders.existingSecret }}
+{{- $debug := $t.debugTiming | default dict }}
 {{- if eq .part "args" }}
 {{- if $log.url }}
 - --http-log-url={{ $log.url }}
@@ -204,6 +203,9 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 - --otlp-headers-file=/etc/gapura-otlp/{{ $otlpHeaders.key | default "headers" }}
 {{- end }}
 {{- end }}
+{{- if $debug.existingSecret }}
+- --debug-token-file=/etc/gapura-debug-token/{{ $debug.key | default "token" }}
+{{- end }}
 {{- else if eq .part "volumes" }}
 {{- if $logSecret }}
 - name: http-log-headers
@@ -213,12 +215,19 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 - name: otlp-headers
   secret: { secretName: {{ $otlpHeaders.existingSecret }} }
 {{- end }}
+{{- if $debug.existingSecret }}
+- name: debug-token
+  secret: { secretName: {{ $debug.existingSecret }} }
+{{- end }}
 {{- else }}
 {{- if $logSecret }}
 - { name: http-log-headers, mountPath: /etc/gapura-http-log, readOnly: true }
 {{- end }}
 {{- if $otlpSecret }}
 - { name: otlp-headers, mountPath: /etc/gapura-otlp, readOnly: true }
+{{- end }}
+{{- if $debug.existingSecret }}
+- { name: debug-token, mountPath: /etc/gapura-debug-token, readOnly: true }
 {{- end }}
 {{- end }}
 {{- end -}}

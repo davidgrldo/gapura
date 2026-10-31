@@ -594,6 +594,7 @@ spec:
         - --listen-https=0.0.0.0:443
         - --admin=0.0.0.0:9090
         - --log-level=info,pingora_core::services::listening=warn
+        - --drain-seconds=15
         volumeMounts:
         - { name: control-plane-token, mountPath: /etc/gapura-control-plane-token, readOnly: true }
         - { name: control-plane-ca, mountPath: /etc/gapura-control-plane-ca, readOnly: true }
@@ -617,13 +618,6 @@ spec:
           httpGet: { path: /healthz, port: admin }
           periodSeconds: 2
           failureThreshold: 30
-        # Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
-        # Service's endpoints asynchronously and an external load balancer keeps sending to the
-        # node until its own health checks fail. Holding SIGTERM back keeps serving those. The
-        # sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
-        lifecycle:
-          preStop:
-            sleep: { seconds: 15 }
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -696,6 +690,7 @@ spec:
         - --controller-name=gapura.dev/controller
         - --log-level=info,pingora_core::services::listening=warn
         - --lease-name=gapura-leader
+        - --drain-seconds=15
         - --publish-service=$(POD_NAMESPACE)/gapura
         env:
         - name: POD_NAME
@@ -721,13 +716,6 @@ spec:
           httpGet: { path: /healthz, port: admin }
           periodSeconds: 2
           failureThreshold: 30
-        # Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
-        # Service's endpoints asynchronously and an external load balancer keeps sending to the
-        # node until its own health checks fail. Holding SIGTERM back keeps serving those. The
-        # sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
-        lifecycle:
-          preStop:
-            sleep: { seconds: 15 }
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

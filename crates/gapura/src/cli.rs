@@ -72,6 +72,13 @@ pub struct Args {
     #[arg(long = "access-log-query")]
     pub access_log_query: bool,
 
+    /// File holding the token that turns on request debug timing: a request whose
+    /// `X-Gapura-Debug-Token` header carries it is answered with a `Server-Timing` header of the
+    /// time each phase and policy took. A file so the token never reaches a process list. Absent
+    /// is off, and no request is timed whatever it carries.
+    #[arg(long, value_name = "FILE")]
+    pub debug_token_file: Option<std::path::PathBuf>,
+
     /// POST every access-log line here as well, in batches as a JSON array, through a bounded
     /// queue per replica that drops its oldest entries when the endpoint cannot keep up (counted
     /// in `gapura_log_dropped_total`). An `https` endpoint's certificate is always verified
@@ -107,6 +114,13 @@ pub struct Args {
     /// set it to the CPU limit in Kubernetes.
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
+
+    /// Seconds to keep accepting connections after SIGTERM, with /readyz answering 503, before
+    /// the listeners close and in-flight requests drain. Long enough for a load balancer health
+    /// checking /readyz to stop sending here; it adds to the time a stop takes, so the
+    /// orchestrator's kill timeout must cover it. 0 closes the listeners at once.
+    #[arg(long, default_value_t = 0, value_name = "SECONDS")]
+    pub drain_seconds: u64,
 
     /// Read Gateway API resources from the Kubernetes API server (in-cluster, or $KUBECONFIG).
     #[arg(long)]

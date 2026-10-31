@@ -9,7 +9,8 @@
 //! refused body is no failure), `logging` (access log + metrics, the Terminate steps). The
 //! Response steps also run on every answer the gateway writes itself for a request attributed to
 //! a rule (`Ctx::response_steps`). The steps are each rule's plugins, compiled per generation
-//! (`plugin`). Outcomes feed passive outlier detection (`outlier`).
+//! (`plugin`). Outcomes feed passive outlier detection (`outlier`). A request carrying the debug
+//! token is timed along the way (`timing`).
 
 pub mod attrs;
 // Shared with the console, which has to answer the same question for its sign-in limits.
@@ -20,6 +21,7 @@ pub mod outlier;
 pub mod plugin;
 pub mod rate_limit;
 pub mod select;
+mod timing;
 pub mod tls;
 mod transform;
 
@@ -31,6 +33,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use gapura_core::config::{HeaderOps, Mirror, PathMatch, Plugin, Protocol, RouteRule, Timeouts};
 use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::protocols::Digest;
 use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorSource, ErrorType, Result};
@@ -79,6 +82,9 @@ pub struct GapuraProxy {
     /// Where `logging` sends each request's record and span, beside stdout: empty unless
     /// `--http-log-url` or `--otlp-traces-url` was given.
     pub sinks: Sinks,
+    /// SHA-256 of the token that turns on a request's debug timing (`--debug-token-file`). `None`
+    /// is off, and then no request is timed whatever it carries.
+    pub debug_token: Option<[u8; 32]>,
 }
 
 /// Per-request state. Indices point into `runtime.config`; holding the Arc keeps that
@@ -125,13 +131,23 @@ impl Ctx {
     /// answer the rule gives skips its steps. A request attributed to no rule -- a redirect, one
     /// that matched none, one with no backend to send it to -- has none to run, and a rule whose
     /// plugins cannot all run has none either.
-    fn response_steps(&self, resp: &mut ResponseHeader) {
+    ///
+    /// A timed request's `Server-Timing` goes on after the steps, so that no transform takes off
+    /// what the caller presented the debug token for.
+    fn response_steps(&mut self, resp: &mut ResponseHeader) {
         let chain = self
             .req
             .route
             .and_then(|(l, r)| self.runtime.as_ref()?.chain(l, r)?.as_ref().ok());
         if let Some(chain) = chain {
+            let start = timing::start(&self.req.timing);
             chain.response(&self.req, resp);
+            timing::stop(&mut self.req.timing, start, "response");
+        }
+        if let Some(t) = self.req.timing.as_deref_mut() {
+            t.push("total", self.started.elapsed());
+            // A header value the map refuses cannot come of names and numbers.
+            let _ = resp.append_header("Server-Timing", t.header());
         }
     }
 
@@ -718,6 +734,17 @@ impl ProxyHttp for GapuraProxy {
                 None => traceparent(incoming),
             };
         }
+        if let Some(want) = &self.debug_token {
+            let req = session.req_header_mut();
+            if req
+                .headers
+                .get(timing::HEADER)
+                .is_some_and(|v| timing::token_matches(want, v.as_bytes()))
+            {
+                ctx.req.timing = Some(Box::default());
+            }
+            req.remove_header(timing::HEADER);
+        }
         match Extracted::from_request(session.req_header()) {
             Ok(ex) => ctx.extracted = Some(ex),
             Err(why) => {
@@ -740,6 +767,7 @@ impl ProxyHttp for GapuraProxy {
             return Ok(true);
         }
 
+        let route_start = timing::start(&ctx.req.timing);
         let decision = {
             let ex = ctx.extracted.as_ref().expect("set above");
             match rt
@@ -799,6 +827,7 @@ impl ProxyHttp for GapuraProxy {
                 }
             }
         };
+        timing::stop(&mut ctx.req.timing, route_start, "route");
 
         ctx.runtime = Some(rt);
         match decision {
@@ -936,6 +965,22 @@ impl ProxyHttp for GapuraProxy {
         Ok(Box::new(peer))
     }
 
+    /// Times a timed request's connect, from when `upstream_peer` handed Pingora the peer. A
+    /// pooled connection is `connect.reused`, and costs next to nothing.
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        _peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        _digest: Option<&Digest>,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
+        let name = if reused { "connect.reused" } else { "connect" };
+        timing::stop(&mut ctx.req.timing, ctx.upstream_started, name);
+        Ok(())
+    }
+
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
@@ -1005,7 +1050,9 @@ impl ProxyHttp for GapuraProxy {
         // after the steps, so that no policy can misreport the peer the last `X-Forwarded-For`
         // hop names or the id the access log records.
         if let Some(Ok(chain)) = rt.chain(li, ri) {
+            let start = timing::start(&ctx.req.timing);
             chain.upstream_request(upstream);
+            timing::stop(&mut ctx.req.timing, start, "upstream_request");
         }
 
         if let Some(ex) = &ctx.extracted {
@@ -1030,6 +1077,9 @@ impl ProxyHttp for GapuraProxy {
             if !ctx.mirrored {
                 fire_mirror(&rt, mirror, upstream, ctx);
             }
+        }
+        if let Some(t) = ctx.req.timing.as_deref_mut() {
+            t.sent = Some(Instant::now());
         }
         Ok(())
     }
@@ -1081,6 +1131,11 @@ impl ProxyHttp for GapuraProxy {
         // one before every 503, and it would never be ejected.
         if !is_final(upstream_response.status) {
             return Ok(());
+        }
+        if let Some(t) = ctx.req.timing.as_deref_mut() {
+            if let Some(sent) = t.sent.take() {
+                t.push("ttfb", sent.elapsed());
+            }
         }
         // The gateway failures, as Envoy counts them: the endpoint answered, but the way a broken
         // proxy or an overloaded instance does. A 500 is the application's, usually the request's.
@@ -2004,6 +2059,7 @@ spec:
             limiter: Default::default(),
             access_log_query: false,
             sinks: Default::default(),
+            debug_token: None,
         };
         let session = Session::new_h1(Box::new(tokio::io::duplex(64).0));
         let ctx = proxy.new_ctx();
