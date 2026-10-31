@@ -54,10 +54,6 @@ pub enum ErrorKey {
     /// A cors policy refused a preflight from an origin it does not allow.
     CorsOriginForbidden,
     /// An acl policy refused the consumer's groups, or a request no policy identified.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "answered by the auth chain, which comes next")
-    )]
     AclForbidden,
     /// Connecting to the upstream timed out.
     UpstreamConnectTimeout,

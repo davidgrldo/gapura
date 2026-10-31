@@ -13,8 +13,8 @@
 use std::net::IpAddr;
 
 use gapura_core::config::{
-    Body, CorsPolicy, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase, Plugin,
-    RequestTransformerPolicy, RouteRule,
+    AclPolicy, Body, CorsPolicy, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase,
+    Plugin, RequestTransformerPolicy, RouteRule,
 };
 use gapura_core::credentials;
 use pingora::http::{RequestHeader, ResponseHeader};
@@ -158,6 +158,8 @@ enum Access {
     KeyAuth(KeyAuthPolicy),
     /// An auth policy's chain over the rule's credential policies; see [`any_of`].
     AnyOf(Box<AnyOf>),
+    /// An acl policy: judges the groups of the consumer the credential policies identified.
+    Acl(AclPolicy),
     IpRestriction(IpRestrictionPolicy),
     /// A request_size_limit policy's cap, judged against the declared `Content-Length`.
     SizeLimit(u64),
@@ -348,9 +350,7 @@ impl Chain {
                     chain.access.push(Access::Cors(policy.clone()));
                     chain.response.push(Response::Cors(policy.clone()));
                 }
-                // Temporary: the step that runs it is the next change, and nothing sends a
-                // configuration that holds one until the control plane learns the kind.
-                Plugin::Acl(_) => {}
+                Plugin::Acl(policy) => chain.access.push(Access::Acl(policy.clone())),
             }
         }
         // An auth policy with no credential policy beside it does nothing: a workspace-wide one
@@ -655,19 +655,22 @@ impl Access {
     /// 2000) runs before its ip-restriction (990). The address is judged before any credential is
     /// read, so a denied address cannot tell a good key from a bad one by its answer. jwt runs
     /// before key_auth, the order an auth policy's chain tries them in (Gravitee's JWT 0 and API
-    /// key 500), so the two modes never disagree about which is asked first. The declared length
-    /// is judged after them, as Kong judges it after authentication, so a caller without a
-    /// credential is told 401 whatever it sends; and before the limit, so a body refused for its
-    /// declared length does not spend a caller's allowance. One refused as it streams does: the
-    /// count runs in RequestBody, after the limit has counted the request. The limit is last: it
-    /// may be the consumer's own and may count per consumer, and the consumer is not known until a
-    /// credential is checked.
+    /// key 500), so the two modes never disagree about which is asked first. The acl runs after
+    /// the credentials, whose consumer it judges, as Kong's acl (950) runs after its auth plugins
+    /// (1250, 1450); and before the declared length, so a caller it refuses is told 403 whatever
+    /// it sends. The declared length is judged after the credentials too, as Kong judges it after
+    /// authentication, so a caller without a credential is told 401 whatever it sends; and before
+    /// the limit, so a body refused for its declared length does not spend a caller's allowance.
+    /// One refused as it streams does: the count runs in RequestBody, after the limit has counted
+    /// the request. The limit is last: it may be the consumer's own and may count per consumer,
+    /// and the consumer is not known until a credential is checked.
     fn rank(&self) -> u8 {
         match self {
             Access::Cors(_) => 0,
             Access::IpRestriction(_) => 1,
             Access::Jwt(_) | Access::AnyOf(_) => 2,
             Access::KeyAuth(_) => 3,
+            Access::Acl(_) => 4,
             Access::SizeLimit(_) => 5,
             Access::RateLimit => 6,
         }
@@ -687,6 +690,20 @@ impl Access {
             Access::Jwt(policy) => admit(rule, "jwt", check_jwt(proxy, rt, req, policy), cx),
             Access::KeyAuth(policy) => admit(rule, "key_auth", check_key(rt, req, policy), cx),
             Access::AnyOf(any) => any_of(proxy, rt, rule, req, any, cx),
+            Access::Acl(policy) => {
+                // An identified consumer the configuration lists no groups for is in none.
+                let groups = cx.consumer.as_ref().map(|c| {
+                    rt.config
+                        .consumers
+                        .get(&c.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
+                });
+                match policy.refusal(groups) {
+                    None => Flow::Continue,
+                    Some(reason) => refuse(rule, "acl", reason, ErrorKey::AclForbidden, Vec::new()),
+                }
+            }
             Access::IpRestriction(policy) => match policy.refusal(client_of(proxy, req, peer)) {
                 None => Flow::Continue,
                 Some(reason) => refuse(
@@ -1002,6 +1019,7 @@ mod tests {
             Plugin::Jwt(JwtPolicy::default()),
             Plugin::KeyAuth(KeyAuthPolicy::default()),
             auth(Some("guest")),
+            acl(&["staff"], &[]),
             ip_restriction(&["10.0.0.0/8"], &[]),
             size_limit(10),
             Plugin::RequestTransformer(RequestTransformerPolicy::default()),
@@ -1341,6 +1359,40 @@ mod tests {
         let (flow, cx) = run(&r, &get());
         assert!(matches!(flow, Flow::Continue));
         assert!(cx.consumer.is_none());
+    }
+
+    fn acl(allow: &[&str], deny: &[&str]) -> Plugin {
+        let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+        Plugin::Acl(gapura_core::config::AclPolicy {
+            allow: list(allow),
+            deny: list(deny),
+        })
+    }
+
+    /// Listed first and run after the credentials: the groups judged are the consumer's.
+    #[test]
+    fn an_acl_judges_the_identified_consumers_groups() {
+        let r = rule(vec![
+            acl(&["staff"], &[]),
+            auth(Some("guest")),
+            key_auth(Some("shop")),
+        ]);
+        assert!(matches!(run(&r, &keyed()).0, Flow::Continue));
+        let failure = refused(run(&r, &get()).0);
+        assert_eq!(failure.key, ErrorKey::AclForbidden);
+        assert!(failure.headers.is_empty(), "a 403 carries no challenge");
+    }
+
+    #[test]
+    fn an_acl_refuses_a_request_nobody_identified() {
+        let r = rule(vec![
+            acl(&[], &["suspended"]),
+            Plugin::Jwt(jwt_policy(false)),
+        ]);
+        assert_eq!(
+            refused(run(&r, &bearer("mobile".into())).0).key,
+            ErrorKey::AclForbidden
+        );
     }
 
     /// Listed after key_auth and run before it: a denied address is refused without its key
