@@ -1446,6 +1446,54 @@ async fn admin_endpoints() {
     );
 }
 
+/// With `--drain-seconds`, SIGTERM makes /readyz answer 503 at once while the proxy still accepts
+/// new connections and serves them; a SIGINT during the drain still stops the process at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn sigterm_drains_before_the_listeners_close() {
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let mut gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &["--drain-seconds", "60"],
+    )
+    .await;
+    let signal = |name: &str, gw: &Gateway| {
+        let ok = Command::new("kill")
+            .args([format!("-{name}"), gw.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "kill -{name} failed");
+    };
+    signal("TERM", &gw);
+    let readyz = format!("http://127.0.0.1:{}/readyz", gw.admin);
+    let mut answer = None;
+    for _ in 0..100 {
+        let r = reqwest::get(&readyz).await.expect("admin still accepts");
+        if r.status() == 503 {
+            answer = Some(r.text().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(answer.as_deref(), Some("not ready: draining\n"));
+    // A new client is a new connection: the listener is still accepting, not only finishing the
+    // ones it had.
+    let r = client(&gw)
+        .get(url(&gw, "echo.test", "/api"))
+        .send()
+        .await
+        .expect("the proxy still accepts while draining");
+    assert_eq!(r.status(), 200);
+    signal("INT", &gw);
+    for _ in 0..100 {
+        if gw.child.try_wait().unwrap().is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("SIGINT during the drain did not stop the gateway");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_gateway_on_the_same_port_is_reachable() {
     let (gw, c) = setup().await;

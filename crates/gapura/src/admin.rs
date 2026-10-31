@@ -1,6 +1,7 @@
 //! Admin endpoints on their own port (keep it off the public Service; see Plan 4):
 //! /healthz, /readyz, /metrics, /debug/config.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,6 +14,8 @@ use crate::store::Store;
 
 pub struct AdminApp {
     pub store: Arc<Store>,
+    /// Set once SIGTERM arrives (see `Drain` in main.rs), and never cleared.
+    pub draining: Arc<AtomicBool>,
 }
 
 fn respond(status: StatusCode, content_type: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -30,7 +33,16 @@ impl AdminApp {
         match path {
             "/healthz" => respond(StatusCode::OK, "text/plain", b"ok\n".to_vec()),
             "/readyz" => {
-                if self.store.is_ready() {
+                if self.draining.load(Ordering::Relaxed) {
+                    // Checked first: a gateway shutting down is not ready, however good its
+                    // config, and saying so while it still serves is what lets a load balancer
+                    // stop sending before the listeners close.
+                    respond(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "text/plain",
+                        b"not ready: draining\n".to_vec(),
+                    )
+                } else if self.store.is_ready() {
                     // The generation of the runtime actually being served right now.
                     let generation = self.store.load().generation;
                     respond(
@@ -226,7 +238,10 @@ mod tests {
         .unwrap();
         let store = Arc::new(Store::empty());
         store.swap(Config::default(), vec![patch]);
-        let app = AdminApp { store };
+        let app = AdminApp {
+            store,
+            draining: Default::default(),
+        };
         let r = app.handle("/debug/status");
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "application/json");
@@ -236,6 +251,7 @@ mod tests {
         // Empty before the first swap: the honest answer, not an error.
         let fresh = AdminApp {
             store: Arc::new(Store::empty()),
+            draining: Default::default(),
         };
         assert_eq!(fresh.handle("/debug/status").status(), StatusCode::OK);
     }
@@ -245,6 +261,7 @@ mod tests {
         let store = Arc::new(Store::empty());
         let app = AdminApp {
             store: store.clone(),
+            draining: Default::default(),
         };
         assert_eq!(app.handle("/healthz").status(), StatusCode::OK);
         let not_ready = app.handle("/readyz");
@@ -292,5 +309,11 @@ mod tests {
         let metrics = app.handle("/metrics");
         assert_eq!(metrics.status(), StatusCode::OK);
         assert_eq!(app.handle("/nope").status(), StatusCode::NOT_FOUND);
+        // Shutting down outranks a loaded config, and /healthz is not about readiness.
+        app.draining.store(true, Ordering::Relaxed);
+        let draining = app.handle("/readyz");
+        assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(draining.body(), b"not ready: draining\n");
+        assert_eq!(app.handle("/healthz").status(), StatusCode::OK);
     }
 }
