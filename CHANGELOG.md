@@ -9,7 +9,7 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - One route can accept a JWT or an API key, name who a caller without one is, and refuse
-  consumers by group (#PR).
+  consumers by group (#291).
   - **`auth` policy:** on a route, service or workspace, switches its jwt and key_auth policies
     from "all must pass" to "any one": jwt is tried first, then key_auth, and the first that finds
     its credential decides; a credential it refuses is never tried as the other kind. A request
