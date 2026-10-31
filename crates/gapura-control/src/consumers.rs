@@ -1,9 +1,9 @@
-//! Consumers, their API keys, the key_auth and JWT requirements, and request limits: what a
-//! request may contain, and how many may come.
+//! Consumers, their groups, their API keys, the key_auth and JWT requirements, and request
+//! limits: what a request may contain, and how many may come.
 //!
 //! Pure, like `configuration`, whose permission rule it shares: a viewer reads, an editor creates
-//! consumers, issues keys and switches key_auth, JWT and rate_limit policies on and off, an admin
-//! deletes consumers and revokes keys.
+//! consumers, puts them in groups and takes them out, issues keys and switches key_auth, JWT and
+//! rate_limit policies on and off, an admin deletes consumers and revokes keys.
 
 use crate::configuration::{self, FieldError};
 use gapura_core::config::{JwtPolicy, LimitBy, RateLimit};

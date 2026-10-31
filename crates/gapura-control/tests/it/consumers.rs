@@ -790,6 +790,8 @@ async fn deleting_a_consumer_takes_its_keys_and_says_which() {
     // A consumer with no limits of its own has no `limits` in its entry, which so reads as it
     // did before a consumer could have any.
     assert!(before.get("limits").is_none(), "{before}");
+    // Nor a `groups`, for a consumer in none.
+    assert!(before.get("groups").is_none(), "{before}");
     let mut keys: Vec<String> = serde_json::from_value(before["keys"].clone()).unwrap();
     keys.sort();
     let mut expected = vec![first, second];
@@ -1246,7 +1248,9 @@ async fn every_consumer_reaches_the_configuration_with_its_groups() {
         "a consumer starts with no groups"
     );
 
-    // Groups are set by SQL here: the endpoints that write them come after the column.
+    // Groups are set by SQL here, so that what is read is the compiled configuration and not the
+    // endpoints that write them, which `a_consumer_is_put_in_a_group_once_and_taken_out_again`
+    // reads.
     let db = store.client().await.unwrap();
     db.batch_execute(
         r#"update consumers set groups = '{staff,ops}'
@@ -1442,6 +1446,53 @@ async fn a_group_change_that_is_refused_writes_nothing() {
             .len(),
         gapura_control::consumers::MAX_GROUPS
     );
+}
+
+/// Deleting a consumer takes its groups with it, and the entry says which they were, sorted, since
+/// an acl judged it by them and nothing else records them once the row is gone. A consumer in
+/// none has no `groups` in its entry, which so reads as it did before a consumer could be in any.
+#[tokio::test]
+async fn deleting_a_consumer_records_its_groups() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"web"}"#).await;
+    for group in ["staff", "ops"] {
+        ok(
+            &app,
+            "PUT",
+            &format!("{CONSUMERS}/mobile/groups/{group}"),
+            s.ed,
+            "",
+        )
+        .await;
+    }
+    for name in ["mobile", "web"] {
+        ok(&app, "DELETE", &format!("{CONSUMERS}/{name}"), s.ada, "").await;
+    }
+    let entries: Vec<serde_json::Value> = store
+        .client()
+        .await
+        .unwrap()
+        .query(
+            "select before from audit_log
+              where object_kind = 'consumer' and action = 'delete' order by id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(
+        entries[0],
+        serde_json::json!({"name": "mobile", "keys": [], "groups": ["ops", "staff"]})
+    );
+    assert_eq!(entries[1], serde_json::json!({"name": "web", "keys": []}));
+    assert_eq!(entries.len(), 2);
 }
 
 #[tokio::test]

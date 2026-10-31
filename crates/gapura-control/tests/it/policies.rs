@@ -952,6 +952,115 @@ async fn a_request_transformer_reaches_the_rule_and_its_audit_names_no_values() 
     );
 }
 
+/// A transformer naming `x-consumer-groups` or `x-anonymous-consumer` was valid before the
+/// gateway set them, so a stored one must keep compiling: a row `policies::parse` refused would
+/// fail the snapshot and answer 503 to every data plane. Only a write is refused, naming the list,
+/// and the refusal writes nothing.
+#[tokio::test]
+async fn a_transformer_naming_a_header_the_gateway_now_sets_is_refused_on_a_write_only() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let before = everything(&store).await;
+
+    for (op, name, list) in [
+        (
+            "add",
+            "x-consumer-groups",
+            json!([["x-consumer-groups", "staff"]]),
+        ),
+        (
+            "append",
+            "x-consumer-groups",
+            json!([["X-Consumer-Groups", "staff"]]),
+        ),
+        (
+            "replace",
+            "x-anonymous-consumer",
+            json!([["x-anonymous-consumer", "no"]]),
+        ),
+        (
+            "remove",
+            "x-anonymous-consumer",
+            json!(["X-ANONYMOUS-CONSUMER"]),
+        ),
+        (
+            "rename",
+            "x-consumer-groups",
+            json!([["x-consumer-groups", "x-team"]]),
+        ),
+        (
+            "rename",
+            "x-anonymous-consumer",
+            json!([["x-team", "x-anonymous-consumer"]]),
+        ),
+    ] {
+        let body = put("route:orders-api", json!({"headers": {op: list}}), None);
+        let (status, answer) = send(&app, "PUT", TRANSFORM, Some(s.ed), &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {answer}");
+        assert_eq!(parse(&answer)["field"], format!("headers.{op}"), "{answer}");
+        assert!(sentence(&answer).starts_with(name), "{answer}");
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+
+    // A row stored before they were the gateway's, written by hand here, is read as it was.
+    let stored = json!({"headers": {"add": [["x-consumer-groups", "staff"]]}});
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "insert into plugins (workspace_id, name, config, service_id)
+             select workspace_id, 'request_transformer', $1, id from services where name = 'orders'",
+            &[&stored],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [Plugin::RequestTransformer(RequestTransformerPolicy {
+            headers: HeaderEdits {
+                add: vec![("x-consumer-groups".into(), "staff".into())],
+                ..HeaderEdits::default()
+            },
+            query: HeaderEdits::default(),
+        })]
+    );
+    let listed = read(&app, TRANSFORM, s.ed).await;
+    assert_eq!(listed[0]["target"], "service:orders");
+    assert_eq!(listed[0]["config"], stored);
+
+    // Replacing it is a write: it takes the row over once it names neither.
+    let read_at = listed[0]["updated_at"].as_str().unwrap().to_string();
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        TRANSFORM,
+        Some(s.ed),
+        &put("service:orders", stored, Some(&read_at)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    ok(
+        &app,
+        "PUT",
+        TRANSFORM,
+        s.ed,
+        &put(
+            "service:orders",
+            json!({"headers": {"add": [["x-team", "core"]]}}),
+            Some(&read_at),
+        ),
+    )
+    .await;
+}
+
 /// The auth policy the compiled seeded route carries, if any.
 fn auth_on(config: &Config) -> Option<AuthPolicy> {
     plugins_on(config, COMPILED_ROUTE)

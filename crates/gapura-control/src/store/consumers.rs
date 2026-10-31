@@ -330,7 +330,9 @@ impl Store {
     /// `limits`, each limit of its own that did -- its target, limit and window, and what it
     /// counted by when that was not the address -- in the order `rate_limits` lists them, since
     /// no policy entry records their going. A consumer with no limits of its own has no `limits`
-    /// in its entry, which so reads as it did before a consumer could have any.
+    /// in its entry, which so reads as it did before a consumer could have any, and one in no
+    /// group has no `groups` for the same reason; one in some lists them under `groups`, since
+    /// a group is what an acl judged it by and the entry is all that says which it was in.
     pub async fn delete_consumer(
         &self,
         caller: Uuid,
@@ -351,7 +353,8 @@ impl Store {
         let actor = decide(&tx, caller, workspace, Action::Delete).await?;
         let Some(row) = tx
             .query_opt(
-                "select id from consumers where workspace_id = $1 and username = $2 for update",
+                "select id, groups from consumers
+                  where workspace_id = $1 and username = $2 for update",
                 &[&workspace, &name],
             )
             .await?
@@ -362,6 +365,9 @@ impl Store {
             .into());
         };
         let id: Uuid = row.get("id");
+        // Read under the same lock as the delete, so a group added or taken away at the same time
+        // is in the entry or already waited for, never lost between.
+        let groups: Vec<String> = row.get("groups");
         // Issuing holds the consumer `for share`, so no key can be added between this read and
         // the delete: the `for update` above waits for it, and it for this.
         let keys: Vec<String> = tx
@@ -405,6 +411,9 @@ impl Store {
             })
             .collect();
         let mut before = serde_json::json!({ "name": name, "keys": keys });
+        if !groups.is_empty() {
+            before["groups"] = groups.into();
+        }
         if !limits.is_empty() {
             before["limits"] = limits.into();
         }

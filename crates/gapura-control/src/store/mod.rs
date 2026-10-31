@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
-use gapura_core::config::{
-    AuthPolicy, JwtPolicy, KeyAuthPolicy, KvMatch, PathMatch, Plugin, Protocol,
-};
+use gapura_core::config::{JwtPolicy, KeyAuthPolicy, KvMatch, PathMatch, Plugin, Protocol};
 use gapura_core::store::{
     StoreConsumer, StoreCredential, StorePlugin, StoreRateLimit, StoreRoute, StoreService,
     StoreSnapshot,
@@ -431,27 +429,6 @@ impl Store {
                 groups: r.get("groups"),
             })
             .collect();
-        // A deleted anonymous consumer is dropped when the configuration is compiled, which
-        // refuses callers without a credential; say so here, where there are names to say it with.
-        for p in &plugins {
-            if let Plugin::Auth(AuthPolicy {
-                anonymous: Some(name),
-                ..
-            }) = &p.plugin
-            {
-                if !consumers
-                    .iter()
-                    .any(|c| c.workspace == p.workspace && &c.username == name)
-                {
-                    tracing::warn!(
-                        workspace = %p.workspace,
-                        consumer = %name,
-                        "an auth policy names an anonymous consumer that does not exist; requests without a credential are refused"
-                    );
-                }
-            }
-        }
-
         tx.commit().await?;
         Ok((
             version,

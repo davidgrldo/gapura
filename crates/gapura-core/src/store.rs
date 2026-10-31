@@ -234,18 +234,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
 
     // Built before the routes, because an auth policy keeps its anonymous consumer only while
     // the consumer is in it; see [`plugins_for`].
-    let consumers: BTreeMap<String, Vec<String>> = snap
-        .consumers
-        .iter()
-        .map(|c| {
-            let mut groups = c.groups.clone();
-            groups.sort();
-            (
-                crate::credentials::consumer_id(&c.workspace, &c.username),
-                groups,
-            )
-        })
-        .collect();
+    let consumers = consumer_table(snap);
 
     let mut clusters = BTreeMap::new();
     let mut rules = Vec::with_capacity(routes.len());
@@ -467,6 +456,56 @@ pub fn uppercase_escapes(path: &str) -> String {
     String::from_utf8(bytes).expect("only ASCII hex digits were uppercased")
 }
 
+/// The groups of every consumer of `snap`, sorted, by [`consumer_id`](crate::credentials::consumer_id):
+/// the workspace and the username, so two workspaces' consumers of one name are two.
+fn consumer_table(snap: &StoreSnapshot) -> BTreeMap<String, Vec<String>> {
+    snap.consumers
+        .iter()
+        .map(|c| {
+            let mut groups = c.groups.clone();
+            groups.sort();
+            (
+                crate::credentials::consumer_id(&c.workspace, &c.username),
+                groups,
+            )
+        })
+        .collect()
+}
+
+/// Whether `consumers` has a consumer by `name` in `workspace`. The one question that decides
+/// whether an auth policy keeps its anonymous consumer, asked both by [`plugins_for`], which
+/// drops one that is gone, and by [`missing_anonymous`], which says so, so that what is warned of
+/// is what is dropped.
+fn has_consumer(consumers: &BTreeMap<String, Vec<String>>, workspace: &str, name: &str) -> bool {
+    consumers.contains_key(&crate::credentials::consumer_id(workspace, name))
+}
+
+/// The auth policies of `snap` whose `anonymous` names a consumer its workspace does not have, as
+/// `(workspace, username)`, sorted, each pair once however many policies name it.
+///
+/// [`compile`] drops such a name, which refuses a caller without a credential; the store answers
+/// every poll from a snapshot and has no one to tell, so whoever serves the snapshot says so from
+/// this, once per change rather than once per poll.
+pub fn missing_anonymous(snap: &StoreSnapshot) -> Vec<(String, String)> {
+    let consumers = consumer_table(snap);
+    let mut missing: Vec<(String, String)> = snap
+        .plugins
+        .iter()
+        .filter_map(|p| match &p.plugin {
+            Plugin::Auth(AuthPolicy {
+                anonymous: Some(name),
+                ..
+            }) if !has_consumer(&consumers, &p.workspace, name) => {
+                Some((p.workspace.clone(), name.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 /// The policies that apply to one route, most specific wins.
 ///
 /// A policy on the route beats one on its service, which beats one attached to neither and so to
@@ -517,9 +556,10 @@ fn plugins_for(
             // credential are refused rather than admitted as a consumer the store dropped.
             Plugin::Auth(policy) => {
                 let workspace = (!route.workspace.is_empty()).then(|| route.workspace.clone());
-                let anonymous = policy.anonymous.clone().filter(|name| {
-                    consumers.contains_key(&crate::credentials::consumer_id(&route.workspace, name))
-                });
+                let anonymous = policy
+                    .anonymous
+                    .clone()
+                    .filter(|name| has_consumer(consumers, &route.workspace, name));
                 Plugin::Auth(AuthPolicy {
                     anonymous,
                     workspace,
@@ -1187,6 +1227,77 @@ mod tests {
                 workspace: Some("shop".into()),
             })]
         );
+    }
+
+    /// A consumer is looked up in the policy's own workspace: `guest` of `payments` is no
+    /// anonymous consumer of a `shop` policy, which is dropped, and the helper that tells of it
+    /// names the pair, once however many policies name it.
+    #[test]
+    fn an_anonymous_consumer_of_another_workspace_is_dropped() {
+        let auth = Plugin::Auth(AuthPolicy {
+            anonymous: Some("guest".into()),
+            workspace: None,
+        });
+        let snap = StoreSnapshot {
+            services: vec![ws_svc("shop", "orders", "orders.internal")],
+            routes: vec![
+                ws_route("shop", "a", "orders", "api.example"),
+                ws_route("shop", "b", "orders", "api.example"),
+            ],
+            plugins: vec![shop_policy("a", auth.clone()), shop_policy("b", auth)],
+            consumers: vec![StoreConsumer {
+                workspace: "payments".into(),
+                username: "guest".into(),
+                groups: Vec::new(),
+            }],
+            ..StoreSnapshot::default()
+        };
+        let cfg = compile(&snap, &StoreSettings::default());
+        for route in ["shop/a", "shop/b"] {
+            assert_eq!(
+                plugins_on(&cfg, route),
+                [Plugin::Auth(AuthPolicy {
+                    anonymous: None,
+                    workspace: Some("shop".into()),
+                })],
+                "{route}"
+            );
+        }
+        assert_eq!(
+            missing_anonymous(&snap),
+            [("shop".to_string(), "guest".to_string())]
+        );
+    }
+
+    /// Only the names the store lacks are listed: one it has, in the policy's own workspace, is
+    /// kept and not said, and a policy that names none says nothing.
+    #[test]
+    fn a_missing_anonymous_consumer_is_listed_and_one_that_exists_is_not() {
+        let auth = |anonymous: Option<&str>| {
+            Plugin::Auth(AuthPolicy {
+                anonymous: anonymous.map(str::to_string),
+                workspace: None,
+            })
+        };
+        let snap = StoreSnapshot {
+            plugins: vec![
+                shop_policy("a", auth(Some("guest"))),
+                shop_policy("b", auth(Some("deleted"))),
+                shop_policy("c", auth(None)),
+                shop_policy("d", Plugin::KeyAuth(KeyAuthPolicy::default())),
+            ],
+            consumers: vec![StoreConsumer {
+                workspace: "shop".into(),
+                username: "guest".into(),
+                groups: Vec::new(),
+            }],
+            ..StoreSnapshot::default()
+        };
+        assert_eq!(
+            missing_anonymous(&snap),
+            [("shop".to_string(), "deleted".to_string())]
+        );
+        assert!(missing_anonymous(&StoreSnapshot::default()).is_empty());
     }
 
     /// Only a policy that reads a claim looks a consumer up, so only that one is stamped: another

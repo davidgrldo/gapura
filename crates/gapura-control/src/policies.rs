@@ -11,7 +11,7 @@ use gapura_core::config::{
     AclPolicy, AuthPolicy, CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin,
     RequestSizeLimitPolicy, RequestTransformerPolicy, ResponseTransformerPolicy,
 };
-use gapura_core::credentials::{ANONYMOUS_HEADER, CONSUMER_HEADER, GATEWAY_HEADERS, GROUPS_HEADER};
+use gapura_core::credentials::{ANONYMOUS_HEADER, CONSUMER_HEADER, GROUPS_HEADER};
 use serde::{Deserialize, Serialize};
 
 /// The kinds this endpoint keeps, as [`Plugin::kind`] names them.
@@ -284,16 +284,63 @@ fn request_transformer(config: serde_json::Value) -> Result<RequestTransformerPo
         config,
         "Send headers and query, each with any of remove, rename, replace, add and append.",
     )?;
-    // The request transform runs after the gateway has set the headers about the caller from the
-    // credential it checked, so a transform that wrote one would name whichever consumer, groups
-    // or anonymous caller the policy said.
-    let refused: Vec<&str> = FRAMING.iter().copied().chain(GATEWAY_HEADERS).collect();
+    // The request transform runs after the gateway has set the consumer header from the key it
+    // checked, so a transform that wrote it would name whichever consumer the policy said. The
+    // headers the gateway came to set later are refused by [`newly_reserved`], on a write only.
+    let refused: Vec<&str> = FRAMING.iter().copied().chain([CONSUMER_HEADER]).collect();
     let policy = RequestTransformerPolicy {
         headers: edits("headers", &input.headers, true, &refused)?,
         query: edits("query", &input.query, false, &[])?,
     };
     counted(&[("headers", &policy.headers), ("query", &policy.query)])?;
     Ok(policy)
+}
+
+/// Refuses a request transformer whose header edits name [`GROUPS_HEADER`] or
+/// [`ANONYMOUS_HEADER`], the headers the gateway came to set about the caller after request
+/// transformers could be stored, in any case, in every list: a removal or a rename away from one
+/// would take the groups or the anonymous mark from the upstream just as an `add` would forge
+/// them.
+///
+/// Called on a write only, never by [`parse`]. `parse` also reads the stored rows, and a stored
+/// row it refuses fails the whole snapshot, so `/v1/config` would answer 503 to every data plane;
+/// a transformer written before these headers were the gateway's, one that adds
+/// `x-consumer-groups` to something its upstream reads, would then take them all down. Such a row
+/// keeps working as it did, and only a new write is held to the new reservation.
+pub fn newly_reserved(plugin: &Plugin) -> Result<(), FieldError> {
+    let Plugin::RequestTransformer(policy) = plugin else {
+        return Ok(());
+    };
+    let edits = &policy.headers;
+    let renamed: Vec<&str> = edits
+        .rename
+        .iter()
+        .flat_map(|(from, to)| [from.as_str(), to.as_str()])
+        .collect();
+    let lists: [(&str, Vec<&str>); 5] = [
+        ("remove", edits.remove.iter().map(String::as_str).collect()),
+        ("rename", renamed),
+        (
+            "replace",
+            edits.replace.iter().map(|(n, _)| n.as_str()).collect(),
+        ),
+        ("add", edits.add.iter().map(|(n, _)| n.as_str()).collect()),
+        (
+            "append",
+            edits.append.iter().map(|(n, _)| n.as_str()).collect(),
+        ),
+    ];
+    for (op, names) in lists {
+        for name in names {
+            if let Some(reserved) = [GROUPS_HEADER, ANONYMOUS_HEADER]
+                .into_iter()
+                .find(|r| r.eq_ignore_ascii_case(name))
+            {
+                return Err(field(&format!("headers.{op}"), refusal(reserved)));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn response_transformer(
@@ -829,6 +876,7 @@ pub struct PolicyFromView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gapura_core::credentials::GATEWAY_HEADERS;
     use serde_json::json;
 
     #[test]
@@ -1057,9 +1105,9 @@ mod tests {
     }
 
     /// The names that frame and route a message are refused in every list of both kinds, in any
-    /// case; the headers the gateway sets about the caller only in a request transform's headers,
-    /// since the response's are the upstream's to send and a query parameter of one of those names
-    /// is no header.
+    /// case; the consumer header only in a request transform's headers, since the response's are
+    /// the upstream's to send and a query parameter of that name is no header. The headers the
+    /// gateway set about the caller later are refused by [`newly_reserved`] instead.
     #[test]
     fn the_framing_headers_and_the_consumer_headers_are_refused() {
         for name in FRAMING.iter().copied().chain(["Content-Length", "HOST"]) {
@@ -1087,10 +1135,42 @@ mod tests {
             "x-consumer-username is set by the gateway from the consumer a key names, so a \
              transform cannot write it."
         );
-        // Every list refuses each header the gateway sets about the caller, in any case, a removal
-        // and a rename away from it too: the gateway sets them just before the transform runs, so
-        // either would take the consumer, its groups or its being anonymous from the upstream.
+        // Every list refuses the consumer header, in any case, a removal and a rename away from it
+        // too: the gateway sets it just before the transform runs, so either would take the
+        // consumer from the upstream.
+        let name = CONSUMER_HEADER;
+        let shouted = name.to_ascii_uppercase();
+        for (op, list) in [
+            ("remove", json!([shouted])),
+            ("rename", json!([["x-user", shouted]])),
+            ("rename", json!([[name, "x-user"]])),
+            ("replace", json!([[name, "alice"]])),
+            ("add", json!([[shouted, "alice"]])),
+            ("append", json!([[name, "alice"]])),
+        ] {
+            let e = refused("request_transformer", json!({"headers": {op: list}}));
+            assert_eq!(e.field, format!("headers.{op}"), "{list}");
+            assert!(e.sentence.starts_with(name), "{}", e.sentence);
+            assert!(e.sentence.ends_with("cannot write it."), "{}", e.sentence);
+        }
+        // A response's are the upstream's to send, and a query parameter of the name is no
+        // header: neither is refused for any header the gateway sets about the caller.
         for name in GATEWAY_HEADERS {
+            let response = json!({"headers": {"add": [[name, "alice"]]}});
+            assert!(parse("response_transformer", response).is_ok(), "{name}");
+            let parameter = json!({"query": {"add": [[name, "alice"], ["host", "h"]]}});
+            assert!(parse("request_transformer", parameter).is_ok(), "{name}");
+        }
+        assert!(parse("response_transformer", consumer).is_ok());
+    }
+
+    /// A request transformer stored before the gateway set the groups and the anonymous mark
+    /// names them as any other header, and [`parse`] reads the stored rows, so it must still take
+    /// one: a row it refused would fail the whole snapshot. Only [`newly_reserved`], on a write,
+    /// refuses them, in every list and in any case.
+    #[test]
+    fn the_groups_and_anonymous_headers_are_refused_on_a_write_and_not_on_a_read() {
+        for name in [GROUPS_HEADER, ANONYMOUS_HEADER] {
             let shouted = name.to_ascii_uppercase();
             for (op, list) in [
                 ("remove", json!([shouted])),
@@ -1100,19 +1180,49 @@ mod tests {
                 ("add", json!([[shouted, "alice"]])),
                 ("append", json!([[name, "alice"]])),
             ] {
-                let e = refused("request_transformer", json!({"headers": {op: list}}));
-                assert_eq!(e.field, format!("headers.{op}"), "{list}");
+                let config = json!({"headers": {op: list}});
+                let plugin = parse("request_transformer", config.clone())
+                    .unwrap_or_else(|e| panic!("{config} is read as it was stored: {e:?}"));
+                let e = newly_reserved(&plugin).expect_err(&config.to_string());
+                assert_eq!(e.field, format!("headers.{op}"), "{config}");
                 assert!(e.sentence.starts_with(name), "{}", e.sentence);
                 assert!(e.sentence.ends_with("cannot write it."), "{}", e.sentence);
             }
-            // A response's are the upstream's to send, and a query parameter of the name is no
-            // header.
-            let response = json!({"headers": {"add": [[name, "alice"]]}});
-            assert!(parse("response_transformer", response).is_ok(), "{name}");
-            let parameter = json!({"query": {"add": [[name, "alice"], ["host", "h"]]}});
-            assert!(parse("request_transformer", parameter).is_ok(), "{name}");
         }
-        assert!(parse("response_transformer", consumer).is_ok());
+        let groups = parse(
+            "request_transformer",
+            json!({"headers": {"add": [[GROUPS_HEADER, "staff"]]}}),
+        )
+        .unwrap();
+        assert_eq!(
+            newly_reserved(&groups).unwrap_err().sentence,
+            "x-consumer-groups is set by the gateway from the groups of the consumer a credential \
+             names, so a transform cannot write it."
+        );
+
+        // The rest of the headers and the other kinds are left alone, and so is a query
+        // parameter of the name.
+        let other = [
+            parse(
+                "request_transformer",
+                json!({"headers": {"add": [["x-a", "1"]]}}),
+            )
+            .unwrap(),
+            parse(
+                "request_transformer",
+                json!({"query": {"add": [[GROUPS_HEADER, "staff"]]}}),
+            )
+            .unwrap(),
+            parse(
+                "response_transformer",
+                json!({"headers": {"add": [[GROUPS_HEADER, "staff"]]}}),
+            )
+            .unwrap(),
+            parse("acl", json!({"allow": ["staff"]})).unwrap(),
+        ];
+        for plugin in &other {
+            assert!(newly_reserved(plugin).is_ok(), "{plugin:?}");
+        }
     }
 
     /// A transformer with nothing to do is refused, and so is one past [`MAX_EDITS`], headers and
