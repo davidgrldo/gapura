@@ -46,7 +46,8 @@ a separate control plane is optional rather than required:
   consumer's own limit comes before any limit on everyone, in Kong's order.
 - **Operations**: Prometheus metrics, a JSON access log carrying trace context and the client
   address as seen behind trusted proxies, export of that log to an HTTP endpoint and of a span per
-  request to an OTLP collector, a Grafana dashboard and example alerts, status written only by the
+  request to an OTLP collector, per-request debug timing behind a token ([Debug
+  timing](#debug-timing)), a Grafana dashboard and example alerts, status written only by the
   replica holding the Lease, an address per Gateway when one shared address is not enough
   (`gatewayAddresses`), and hot reload by atomic config swap so in-flight requests finish on the
   config they started with.
@@ -145,6 +146,32 @@ once decoded) `api_key`, `apikey`, `api-key`, `x-api-key`, `key`, `token`, `acce
 a presigned URL's `x-amz-security-token`, `x-amz-signature`, `x-amz-credential`,
 `x-goog-signature` or `x-goog-credential`, or like the header a route's key_auth policy reads, is
 written `<redacted>`. A span carries no query at all.
+
+### Debug timing
+
+`--debug-token-file FILE` (the chart's `telemetry.debugTiming`, a Secret) turns on request debug
+timing. A request whose `X-Gapura-Debug-Token` header carries that token is answered with a
+`Server-Timing` header, in milliseconds, which browser devtools show under Timing:
+
+```
+Server-Timing: route;dur=0.034, access.rate_limit;dur=0.001, connect;dur=0.158,
+  upstream_request;dur=0.000, ttfb;dur=0.441, response;dur=0.000, total;dur=0.815
+```
+
+`route` is the route match; `access.<policy>` each Access step in the order it ran
+(`access.cors`, `access.ip_restriction`, `access.jwt`, `access.key_auth`,
+`access.request_size_limit`, and `access.rate_limit`, which every rule has); `upstream_request`
+and `response` those phases' steps (header edits) taken whole; `connect` the upstream connect
+(`connect.reused` for a pooled connection); `ttfb` from the request handed upstream to its
+response head; `total` from the request read to the answer's head. A retry repeats `connect`,
+`upstream_request` and `ttfb`. An answer the gateway gives itself, a 401 or a 404, carries what
+ran before it.
+
+The token is compared as a SHA-256 digest, in constant time, and the header is removed from every
+request while a token is configured, so no upstream sees it. A request without the token, or with
+another value, is not timed and gets no header; loopback is no exception. Without the flag nothing
+is timed at all. The header goes on after the Response steps, so a response transformer cannot
+remove it. The request body's streamed steps and anything after the head are not in it.
 
 ## The name
 

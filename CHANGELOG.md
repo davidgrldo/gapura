@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Request debug timing: with `--debug-token-file` (the chart's `telemetry.debugTiming`), a request
+  whose `X-Gapura-Debug-Token` header carries the token is answered with a `Server-Timing` header:
+  the route match, each Access policy, the UpstreamRequest and Response phases, the upstream
+  connect and time to first byte, and the total. The token is compared in constant time and never
+  forwarded; without it, or without the flag, nothing is measured.
+
 - A configuration change reaches data planes in about a second rather than one poll interval
   (#288). A data plane already holding what is served asks `/v1/config` to hold its poll
   (`Prefer: wait=<interval>`, at most 60 s); the control plane answers as soon as the
