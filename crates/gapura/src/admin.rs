@@ -195,6 +195,7 @@ mod tests {
             credentials: [(KEY_HASH.to_string(), "team-x".to_string())].into(),
             credential_workspaces: [(KEY_HASH.to_string(), "orders".to_string())].into(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let mut v = serde_json::to_value(&config).unwrap();
         redact(&mut v);
@@ -270,6 +271,7 @@ mod tests {
                 credentials: Default::default(),
                 credential_workspaces: Default::default(),
                 consumer_rate_limits: Default::default(),
+                consumers: Default::default(),
             },
             Vec::new(),
         );

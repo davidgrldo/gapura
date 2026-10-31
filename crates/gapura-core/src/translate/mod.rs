@@ -442,6 +442,7 @@ fn assemble(
         credentials: BTreeMap::new(),
         credential_workspaces: Default::default(),
         consumer_rate_limits: Default::default(),
+        consumers: Default::default(),
     }
 }
 

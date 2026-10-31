@@ -347,6 +347,7 @@ pub fn compile(snap: &StoreSnapshot, settings: &StoreSettings) -> Config {
             .map(|c| (c.key_hash.clone(), c.workspace.clone()))
             .collect(),
         consumer_rate_limits: consumer_rate_limits(&snap.rate_limits, &routes),
+        consumers: BTreeMap::new(),
     }
 }
 

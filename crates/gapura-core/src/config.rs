@@ -69,6 +69,16 @@ pub struct Config {
     /// plane starts sending the table, not after.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub consumer_rate_limits: BTreeMap<String, ConsumerRateLimits>,
+    /// Every consumer, by id (`workspace/username`, as
+    /// [`credentials::consumer_id`](crate::credentials::consumer_id) builds it), to its groups,
+    /// sorted. Held once, like `credentials`. What an acl policy judges, what the upstream is told
+    /// in `x-consumer-groups`, and the consumers a jwt `consumer_claim` and an auth policy's
+    /// `anonymous` may name: one absent here is no consumer.
+    ///
+    /// A data plane that predates it ignores it; every policy that reads it is a feature such a
+    /// data plane lacks, so the control plane never sends it one that needs it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub consumers: BTreeMap<String, Vec<String>>,
 }
 
 /// One consumer's own request limits, which replace a rule's [`RouteRule::rate_limit`] for that
@@ -308,6 +318,8 @@ pub enum Plugin {
     RequestTransformer(RequestTransformerPolicy),
     ResponseTransformer(ResponseTransformerPolicy),
     Cors(CorsPolicy),
+    Auth(AuthPolicy),
+    Acl(AclPolicy),
 }
 
 /// Where in a request a plugin runs. Each plugin declares its own ([`Plugin::phases`]) and runs
@@ -364,13 +376,15 @@ impl Plugin {
             Plugin::RequestTransformer(_) => "request_transformer",
             Plugin::ResponseTransformer(_) => "response_transformer",
             Plugin::Cors(_) => "cors",
+            Plugin::Auth(_) => "auth",
+            Plugin::Acl(_) => "acl",
         }
     }
 
     /// The phases this plugin runs in; see [`Phase`].
     pub fn phases(&self) -> &'static [Phase] {
         match self {
-            Plugin::Jwt(_) | Plugin::IpRestriction(_) => &[Phase::Access],
+            Plugin::Jwt(_) | Plugin::IpRestriction(_) | Plugin::Acl(_) => &[Phase::Access],
             // Access identifies the caller. On the way upstream the key is removed: it is the
             // gateway's to check, not the upstream's to see.
             Plugin::KeyAuth(_) => &[Phase::Access, Phase::UpstreamRequest],
@@ -382,6 +396,9 @@ impl Plugin {
             // Access answers a preflight and judges the origin; Response writes what it decided
             // on every answer, the gateway's own included.
             Plugin::Cors(_) => &[Phase::Access, Phase::Response],
+            // No step of its own: it decides how the credential policies' Access step is
+            // compiled, and does nothing on a rule that has none.
+            Plugin::Auth(_) => &[],
         }
     }
 
@@ -393,7 +410,9 @@ impl Plugin {
             | Plugin::IpRestriction(_)
             | Plugin::RequestTransformer(_)
             | Plugin::ResponseTransformer(_)
-            | Plugin::Cors(_) => Body::None,
+            | Plugin::Cors(_)
+            | Plugin::Auth(_)
+            | Plugin::Acl(_) => Body::None,
             Plugin::RequestSizeLimit(_) => Body::Stream,
         }
     }
@@ -454,6 +473,17 @@ pub struct JwtPolicy {
     /// certificate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_ca_pem: Option<String>,
+    /// The claim that names the caller's consumer, by username in `workspace`: `sub`, or
+    /// whatever the IdP puts the client's name in. Read once the token verifies; a token whose
+    /// claim is not a string, or names no consumer, is refused as an invalid token. `None`
+    /// identifies no consumer, so a JWT caller then has no groups, no limit of its own and no
+    /// `x-consumer-username`. Kong's openid-connect calls this `consumer_claim`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_claim: Option<String>,
+    /// Set by the store from the policy's workspace when `consumer_claim` is, as for
+    /// [`KeyAuthPolicy::workspace`]: a token names a consumer of that workspace only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Refuse a request by the address it came from: the client address the access log names,
@@ -484,6 +514,58 @@ impl IpRestrictionPolicy {
             return Some("denied");
         }
         if !self.allow.is_empty() && !self.allow.iter().any(|net| net.contains(ip)) {
+            return Some("not_allowed");
+        }
+        None
+    }
+}
+
+/// Accept any one of the rule's credential policies rather than all of them: Gravitee's security
+/// chain. Without this policy a rule with both a jwt and a key_auth policy needs both, as it
+/// always has, so no route accepts less after an upgrade than it did before.
+///
+/// With it, the data plane tries jwt and then key_auth (Gravitee orders JWT 0 and API keys 500),
+/// and the first that finds its credential on the request decides: a credential it accepts
+/// identifies the caller, one it refuses is refused, and is never tried as the other kind. A
+/// request that carries neither is the `anonymous` consumer, or is refused. A refused credential
+/// never becomes anonymous: Kong's `anonymous` does that, and a caller whose key was revoked would
+/// silently become a guest rather than be told.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthPolicy {
+    /// The consumer a request that presents no credential is taken to be, by username in
+    /// `workspace`, so its request limit and its groups apply to every such caller. `None`
+    /// refuses such a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anonymous: Option<String>,
+    /// Set by the store from the policy's workspace, as for [`KeyAuthPolicy::workspace`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
+
+/// Refuse a request by its consumer's groups, after the credential policies identified it:
+/// Kong's acl. Deny first, as [`IpRestrictionPolicy`]: a consumer in any `deny` group is refused
+/// even if it is also in an `allow` one; then a consumer in none of a non-empty `allow` is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AclPolicy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+}
+
+impl AclPolicy {
+    /// Why a request whose consumer is in `groups` is refused, as the refusal metric's reason;
+    /// `None` admits it. `groups` is `None` for a request no policy identified: there are no
+    /// groups to judge, and admitting it would let every caller without a credential past a
+    /// deny list.
+    pub fn refusal(&self, groups: Option<&[String]>) -> Option<&'static str> {
+        let Some(groups) = groups else {
+            return Some("no_consumer");
+        };
+        if groups.iter().any(|g| self.deny.contains(g)) {
+            return Some("denied");
+        }
+        if !self.allow.is_empty() && !groups.iter().any(|g| self.allow.contains(g)) {
             return Some("not_allowed");
         }
         None
@@ -861,6 +943,7 @@ mod tests {
             credentials: BTreeMap::from([("abc123".to_string(), "team-orders".to_string())]),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
@@ -1336,5 +1419,48 @@ mod tests {
             unknown.is_err(),
             "an unknown `by` must not fall back to the address: {unknown:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::AclPolicy;
+
+    fn acl(allow: &[&str], deny: &[&str]) -> AclPolicy {
+        let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+        AclPolicy {
+            allow: list(allow),
+            deny: list(deny),
+        }
+    }
+
+    fn groups(g: &[&str]) -> Vec<String> {
+        g.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn deny_is_read_before_allow() {
+        let p = acl(&["staff"], &["suspended"]);
+        assert_eq!(
+            p.refusal(Some(&groups(&["staff", "suspended"]))),
+            Some("denied")
+        );
+        assert_eq!(p.refusal(Some(&groups(&["staff"]))), None);
+        assert_eq!(p.refusal(Some(&groups(&["guests"]))), Some("not_allowed"));
+    }
+
+    #[test]
+    fn a_deny_list_alone_admits_everyone_else_and_a_consumer_with_no_groups() {
+        let p = acl(&[], &["suspended"]);
+        assert_eq!(p.refusal(Some(&groups(&["staff"]))), None);
+        assert_eq!(p.refusal(Some(&[])), None);
+    }
+
+    /// A request no policy identified has no groups to judge, and is refused whatever the lists
+    /// say: an acl that admitted it would be no acl for every caller who sends no credential.
+    #[test]
+    fn a_request_without_a_consumer_is_refused() {
+        assert_eq!(acl(&[], &["suspended"]).refusal(None), Some("no_consumer"));
+        assert_eq!(acl(&["staff"], &[]).refusal(None), Some("no_consumer"));
     }
 }

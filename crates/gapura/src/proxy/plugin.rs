@@ -302,6 +302,9 @@ impl Chain {
                     chain.access.push(Access::Cors(policy.clone()));
                     chain.response.push(Response::Cors(policy.clone()));
                 }
+                // Temporary: the chain that runs them is the next change, and nothing sends a
+                // configuration that holds either until the control plane learns the kinds.
+                Plugin::Auth(_) | Plugin::Acl(_) => {}
             }
         }
         // Stable, so policies of one rank keep the order they arrived in.

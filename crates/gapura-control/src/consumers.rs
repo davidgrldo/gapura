@@ -260,6 +260,7 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
             jwks: String::new(),
             jwks_uri: Some(key_url(uri)?),
             jwks_ca_pem: configuration::ca_pem(jwks_ca_pem, "jwks_ca_pem")?,
+            ..JwtPolicy::default()
         }),
     }
 }
