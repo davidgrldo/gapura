@@ -74,8 +74,9 @@ pub struct RequestCtx {
     /// configuration. Set once it is proxied or refused, so metrics and the access log name the
     /// route; a redirect, or a request with nowhere to go, is not attributed and is logged as `-`.
     pub route: Option<(usize, usize)>,
-    /// Carried here rather than written straight onto the request: the upstream header can only
-    /// be set after the inbound one is removed, and that happens later.
+    /// Carried here rather than written straight onto the request: the upstream headers that
+    /// name the consumer can only be set after the inbound ones are removed, and that happens
+    /// later.
     pub consumer: Option<Consumer>,
     pub invoke: Invoke,
     /// The request body's bytes so far, as the RequestBody steps count them.
@@ -558,10 +559,22 @@ fn check_key(
     req: &RequestHeader,
     policy: &KeyAuthPolicy,
 ) -> Result<Option<Consumer>, Refused> {
-    let presented = req
-        .headers
-        .get(&policy.header)
-        .and_then(|v| v.to_str().ok());
+    let refused = |r: credentials::Refusal| Refused {
+        key: ErrorKey::from(&r),
+        reason: r.as_str(),
+        headers: vec![(
+            "WWW-Authenticate",
+            format!("Key realm=\"{}\"", policy.header),
+        )],
+    };
+    // A key header that is there but cannot be read as text is a key nobody was issued, not an
+    // absent one: taken for absent, a chain with an anonymous consumer would admit the request as
+    // anonymous, and an invalid credential never becomes anonymous.
+    let presented = match req.headers.get(&policy.header).map(|v| v.to_str()) {
+        None => None,
+        Some(Ok(key)) => Some(key),
+        Some(Err(_)) => return Err(refused(credentials::Refusal::Unknown)),
+    };
     let workspace = policy.workspace.as_deref();
     match credentials::identify(&rt.config, presented, workspace) {
         Ok(name) => Ok(Some(Consumer {
@@ -569,14 +582,7 @@ fn check_key(
             name: name.to_string(),
             anonymous: false,
         })),
-        Err(r) => Err(Refused {
-            key: ErrorKey::from(&r),
-            reason: r.as_str(),
-            headers: vec![(
-                "WWW-Authenticate",
-                format!("Key realm=\"{}\"", policy.header),
-            )],
-        }),
+        Err(r) => Err(refused(r)),
     }
 }
 
@@ -635,8 +641,9 @@ fn any_of(
         return Flow::Continue;
     }
     if absent.len() == 1 {
-        let (kind, r) = absent.pop().expect("one");
-        return refuse(rule, kind, r.reason, r.key, r.headers);
+        if let Some((kind, r)) = absent.pop() {
+            return refuse(rule, kind, r.reason, r.key, r.headers);
+        }
     }
     let headers = absent.into_iter().flat_map(|(_, r)| r.headers).collect();
     refuse(rule, "auth", "missing", ErrorKey::AuthMissing, headers)
@@ -1159,6 +1166,16 @@ mod tests {
         }
     }
 
+    /// A jwt policy whose keys come from a `jwks_uri` that has never loaded: `Runtime::new` leaves
+    /// it with none.
+    fn keyless_jwt_policy() -> JwtPolicy {
+        JwtPolicy {
+            jwks: String::new(),
+            jwks_uri: Some("https://idp.example/jwks".into()),
+            ..jwt_policy(true)
+        }
+    }
+
     fn bearer(sub: serde_json::Value) -> RequestHeader {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         let mut header = Header::new(Algorithm::HS256);
@@ -1264,6 +1281,34 @@ mod tests {
         (flow, cx)
     }
 
+    /// A rule on a route of its own, so a metric a test reads is that test's alone: the registry
+    /// is shared by every test running in parallel.
+    fn named(route: &str, plugins: Vec<Plugin>) -> RouteRule {
+        RouteRule {
+            route: route.into(),
+            ..rule(plugins)
+        }
+    }
+
+    /// What `policy_refused_total` has counted for `route`, `kind` and `reason`.
+    fn counted(route: &str, kind: &str, reason: &str) -> u64 {
+        METRICS
+            .policy_refused_total
+            .with_label_values(&[route, kind, reason])
+            .get()
+    }
+
+    /// A key header whose bytes are not text, which `to_str` cannot read.
+    fn unreadable_key() -> RequestHeader {
+        let mut req = get();
+        req.insert_header(
+            "x-api-key",
+            http::HeaderValue::from_bytes(b"k-\x80").unwrap(),
+        )
+        .unwrap();
+        req
+    }
+
     #[test]
     fn either_credential_admits_a_chain() {
         let r = rule(vec![
@@ -1357,6 +1402,67 @@ mod tests {
         assert!(cx.consumer.is_none());
     }
 
+    /// A key that is there but cannot be read is a key nobody was issued, not an absent one: read
+    /// as absent, a chain with an anonymous consumer would admit it as anonymous, and an invalid
+    /// credential never becomes anonymous.
+    #[test]
+    fn a_key_that_cannot_be_read_is_refused_not_absent() {
+        let r = named(
+            "shop/unreadable-key",
+            vec![key_auth(Some("shop")), auth(None)],
+        );
+        let failure = refused(run(&r, &unreadable_key()).0);
+        assert_eq!(failure.key, ErrorKey::AuthKeyInvalid);
+        let challenges: Vec<&str> = failure.headers.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(challenges, ["Key realm=\"x-api-key\""]);
+        assert_eq!(counted("shop/unreadable-key", "key_auth", "unknown"), 1);
+        assert_eq!(counted("shop/unreadable-key", "key_auth", "missing"), 0);
+
+        // Without an auth policy, the key is the policy's own to check, and refused the same.
+        let alone = rule(vec![key_auth(Some("shop"))]);
+        assert_eq!(
+            refused(run(&alone, &unreadable_key()).0).key,
+            ErrorKey::AuthKeyInvalid
+        );
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_read_is_not_the_anonymous_consumer() {
+        let r = rule(vec![auth(Some("guest")), key_auth(Some("shop"))]);
+        let (flow, cx) = run(&r, &unreadable_key());
+        assert_eq!(refused(flow).key, ErrorKey::AuthKeyInvalid);
+        assert!(cx.consumer.is_none());
+    }
+
+    /// A token a policy has no key to check is `AUTH_UNAVAILABLE`, and the first policy that
+    /// finds its credential decides: it does not fall through to the good key beside the token,
+    /// nor to the anonymous consumer. It asks the caller to come back and challenges for nothing.
+    #[test]
+    fn a_503_in_a_chain_is_not_taken_for_an_absent_credential() {
+        let r = rule(vec![
+            auth(Some("guest")),
+            Plugin::Jwt(keyless_jwt_policy()),
+            key_auth(Some("shop")),
+        ]);
+        let mut req = keyed();
+        req.insert_header("authorization", "Bearer some.token.here")
+            .unwrap();
+        let failure = refused(run(&r, &req).0);
+        assert_eq!(failure.key, ErrorKey::AuthUnavailable);
+        let names: Vec<&str> = failure.headers.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["Retry-After"]);
+    }
+
+    /// A chain of one jwt policy answers as the policy alone always has.
+    #[test]
+    fn a_chain_of_one_jwt_policy_keeps_its_own_key_and_challenge() {
+        let r = rule(vec![auth(None), Plugin::Jwt(jwt_policy(true))]);
+        let failure = refused(run(&r, &get()).0);
+        assert_eq!(failure.key, ErrorKey::AuthJwtMissing);
+        let challenges: Vec<&str> = failure.headers.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(challenges, ["Bearer"]);
+    }
+
     fn acl(allow: &[&str], deny: &[&str]) -> Plugin {
         let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
         Plugin::Acl(gapura_core::config::AclPolicy {
@@ -1389,6 +1495,23 @@ mod tests {
             refused(run(&r, &bearer("mobile".into())).0).key,
             ErrorKey::AclForbidden
         );
+    }
+
+    /// The acl runs before the declared length, so a caller it refuses is told 403 whatever it
+    /// sends; one it admits is still held to the length.
+    #[test]
+    fn an_acl_runs_before_the_size_limit() {
+        let r = rule(vec![
+            size_limit(10),
+            acl(&["staff"], &[]),
+            auth(Some("guest")),
+            key_auth(Some("shop")),
+        ]);
+        let failure = refused(run(&r, &with_length(100)).0);
+        assert_eq!(failure.key, ErrorKey::AclForbidden);
+        let mut staff = with_length(100);
+        staff.insert_header("x-api-key", "k-1").unwrap();
+        assert_eq!(refused(run(&r, &staff).0).key, ErrorKey::RequestTooLarge);
     }
 
     /// Listed after key_auth and run before it: a denied address is refused without its key
@@ -1557,6 +1680,79 @@ mod tests {
         assert_eq!(refusals(), 1);
         let mut upgraded = RequestCtx::default();
         assert_eq!(chain.request_body(&r, &mut upgraded, 1 << 30, true), None);
+    }
+
+    /// In a chain a policy that finds no credential of its kind says only "not mine", and is
+    /// counted nowhere: a good key admits the request, and the jwt policy that passed it on has
+    /// refused nothing.
+    #[test]
+    fn a_chain_that_admits_counts_no_missing_credential() {
+        let r = named(
+            "shop/chain-admits",
+            vec![
+                auth(None),
+                Plugin::Jwt(jwt_policy(true)),
+                key_auth(Some("shop")),
+            ],
+        );
+        assert!(matches!(run(&r, &keyed()).0, Flow::Continue));
+        for kind in ["jwt", "key_auth", "auth"] {
+            assert_eq!(counted("shop/chain-admits", kind, "missing"), 0, "{kind}");
+        }
+    }
+
+    /// A request neither policy finds a credential on is one refusal, the chain's own, counted
+    /// once as `auth`: not once per policy as well.
+    #[test]
+    fn a_chain_with_no_credential_counts_one_auth_refusal() {
+        let r = named(
+            "shop/chain-empty",
+            vec![
+                auth(None),
+                Plugin::Jwt(jwt_policy(true)),
+                key_auth(Some("shop")),
+            ],
+        );
+        assert_eq!(
+            refused(run(&r, &get()).0).key,
+            ErrorKey::AuthMissing,
+            "a chain of two"
+        );
+        assert_eq!(counted("shop/chain-empty", "auth", "missing"), 1);
+        assert_eq!(counted("shop/chain-empty", "jwt", "missing"), 0);
+        assert_eq!(counted("shop/chain-empty", "key_auth", "missing"), 0);
+    }
+
+    /// A refusal inside a chain is counted against the policy that made it, not against `auth`.
+    #[test]
+    fn a_token_naming_no_consumer_is_counted_against_the_jwt_policy() {
+        let r = named(
+            "shop/chain-unknown",
+            vec![
+                auth(None),
+                Plugin::Jwt(jwt_policy(true)),
+                key_auth(Some("shop")),
+            ],
+        );
+        let (flow, _) = run(&r, &bearer("nobody".into()));
+        assert_eq!(refused(flow).key, ErrorKey::AuthJwtInvalid);
+        assert_eq!(counted("shop/chain-unknown", "jwt", "unknown_consumer"), 1);
+        assert_eq!(counted("shop/chain-unknown", "auth", "missing"), 0);
+    }
+
+    #[test]
+    fn a_token_on_a_policy_with_no_keys_is_counted_as_no_keys() {
+        let r = named(
+            "shop/chain-keyless",
+            vec![
+                auth(None),
+                Plugin::Jwt(keyless_jwt_policy()),
+                key_auth(Some("shop")),
+            ],
+        );
+        let (flow, _) = run(&r, &bearer("mobile".into()));
+        assert_eq!(refused(flow).key, ErrorKey::AuthUnavailable);
+        assert_eq!(counted("shop/chain-keyless", "jwt", "no_keys"), 1);
     }
 
     /// A retry replays the body read so far before it reads on, so each attempt counts from

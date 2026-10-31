@@ -328,9 +328,9 @@ fn apply_header_ops(target: &mut impl HeaderTarget, ops: &HeaderOps) -> Result<(
 /// The head and body of a locally generated error answer: the key in `X-Gapura-Error` and in
 /// the body, plain text unless the caller prefers JSON, the request id, and never any internal
 /// detail. `extra` carries what one kind of answer adds: the challenge on a 401, the limit
-/// headers on a 429. `Content-Length` is always explicit: without it the body is
-/// close-delimited, and the connection closes after every error while pingora announces
-/// keep-alive.
+/// headers on a 429, `Retry-After` on a 503 `AUTH_UNAVAILABLE`. `Content-Length` is always
+/// explicit: without it the body is close-delimited, and the connection closes after every error
+/// while pingora announces keep-alive.
 fn error_response(
     key: ErrorKey,
     request_id: &str,
