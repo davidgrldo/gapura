@@ -175,9 +175,9 @@ lifecycle:
 {{- end -}}
 
 {{/*
-Log and trace export (values: telemetry), shared by the gateway and the data plane. `part` is
-"args" for the container's flags, "volumes" for the header Secrets and "mounts" for where they
-are mounted; each renders nothing while no sink is on. Call it as
+Log and trace export and debug timing (values: telemetry), shared by the gateway and the data
+plane. `part` is "args" for the container's flags, "volumes" for the header and token Secrets and
+"mounts" for where they are mounted; each renders nothing while none is on. Call it as
 include "gapura.telemetry" (dict "root" . "part" "args").
 */}}
 {{- define "gapura.telemetry" -}}
@@ -188,6 +188,7 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 {{- $otlpHeaders := $otlp.headers | default dict }}
 {{- $logSecret := and $log.url $logHeaders.existingSecret }}
 {{- $otlpSecret := and $otlp.tracesUrl $otlpHeaders.existingSecret }}
+{{- $debug := $t.debugTiming | default dict }}
 {{- if eq .part "args" }}
 {{- if $log.url }}
 - --http-log-url={{ $log.url }}
@@ -204,6 +205,9 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 - --otlp-headers-file=/etc/gapura-otlp/{{ $otlpHeaders.key | default "headers" }}
 {{- end }}
 {{- end }}
+{{- if $debug.existingSecret }}
+- --debug-token-file=/etc/gapura-debug-token/{{ $debug.key | default "token" }}
+{{- end }}
 {{- else if eq .part "volumes" }}
 {{- if $logSecret }}
 - name: http-log-headers
@@ -213,12 +217,19 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 - name: otlp-headers
   secret: { secretName: {{ $otlpHeaders.existingSecret }} }
 {{- end }}
+{{- if $debug.existingSecret }}
+- name: debug-token
+  secret: { secretName: {{ $debug.existingSecret }} }
+{{- end }}
 {{- else }}
 {{- if $logSecret }}
 - { name: http-log-headers, mountPath: /etc/gapura-http-log, readOnly: true }
 {{- end }}
 {{- if $otlpSecret }}
 - { name: otlp-headers, mountPath: /etc/gapura-otlp, readOnly: true }
+{{- end }}
+{{- if $debug.existingSecret }}
+- { name: debug-token, mountPath: /etc/gapura-debug-token, readOnly: true }
 {{- end }}
 {{- end }}
 {{- end -}}

@@ -133,6 +133,14 @@ telemetry:
     headers:
       existingSecret: ""
       key: headers
+  # Request debug timing (README "Debug timing"): a request whose X-Gapura-Debug-Token header
+  # carries this token is answered with a Server-Timing header of the time its route match, each
+  # access policy, the upstream connect and first byte, and the whole request took. The token in
+  # a Secret under `key`, mounted as a file (--debug-token-file) and never an argument. Empty is
+  # off, and then no request is timed whatever it carries.
+  debugTiming:
+    existingSecret: ""
+    key: token
 
 # EnvFilter directives, e.g. "info" or "gapura=debug". Pingora logs every failed downstream
 # handshake at error level, including the ones a port scanner causes, so it is quieted by default.

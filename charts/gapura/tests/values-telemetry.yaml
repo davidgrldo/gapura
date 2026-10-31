@@ -1,5 +1,6 @@
-# Both export sinks on, each with a headers Secret, and a sample ratio, for the Kubernetes gateway
-# and for a data plane: the flags, the Secret volumes and their mounts render in both Deployments.
+# Both export sinks on, each with a headers Secret, a sample ratio and the debug timing token, for
+# the Kubernetes gateway and for a data plane: the flags, the Secret volumes and their mounts render
+# in both Deployments.
 telemetry:
   httpLog:
     url: https://logs.example.com/ingest
@@ -11,6 +12,8 @@ telemetry:
     sampleRatio: 0.25
     headers:
       existingSecret: otlp-sink
+  debugTiming:
+    existingSecret: debug-timing
 dataPlane:
   enabled: true
   replicaCount: 1
