@@ -7,14 +7,19 @@ mod source;
 mod store;
 mod telemetry;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use pingora::apps::http_app::HttpServer;
 use pingora::listeners::tls::TlsSettings;
 use pingora::proxy::http_proxy_service;
 use pingora::server::configuration::ServerConf;
-use pingora::server::Server;
+use pingora::server::{
+    RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, UnixShutdownSignalWatch,
+};
 use pingora::services::background::background_service;
 use pingora::services::listening::Service;
 use sha2::{Digest, Sha256};
@@ -38,6 +43,38 @@ fn first_unbindable(addrs: &[std::net::SocketAddr]) -> Option<(std::net::SocketA
             Ok(_) => None,
             Err(e) => Some((*addr, e.to_string())),
         })
+}
+
+/// Pingora's signal handling with SIGTERM held back `seconds`.
+///
+/// On SIGTERM Pingora stops every accept loop at once, the admin port's too, and only then waits
+/// out its grace period for requests already in flight: a load balancer still sending here meets
+/// refused connections until it notices. This flags `/readyz` as draining at once and hands
+/// Pingora the SIGTERM only after the delay, so the listeners keep accepting while a load balancer
+/// health checking `/readyz` stops sending. A second signal ends the delay: SIGINT for a fast
+/// stop, SIGTERM again to stop draining now.
+struct Drain {
+    seconds: u64,
+    draining: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ShutdownSignalWatch for Drain {
+    async fn recv(&self) -> ShutdownSignal {
+        let signal = UnixShutdownSignalWatch.recv().await;
+        if !matches!(signal, ShutdownSignal::GracefulTerminate) || self.seconds == 0 {
+            return signal;
+        }
+        self.draining.store(true, Ordering::Relaxed);
+        tracing::info!(
+            seconds = self.seconds,
+            "SIGTERM received, draining: /readyz answers 503 while the listeners keep accepting"
+        );
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(self.seconds)) => signal,
+            next = UnixShutdownSignalWatch.recv() => next,
+        }
+    }
 }
 
 fn main() {
@@ -207,10 +244,12 @@ fn main() {
     }
     server.add_service(proxy);
 
+    let draining = Arc::new(AtomicBool::new(false));
     let mut admin = Service::new(
         "gapura admin".to_string(),
         HttpServer::new_app(admin::AdminApp {
             store: store.clone(),
+            draining: draining.clone(),
         }),
     );
     admin.add_tcp(&args.admin.to_string());
@@ -218,5 +257,12 @@ fn main() {
     server.add_service(admin);
 
     tracing::info!(http = ?args.listen_http, https = ?args.listen_https, admin = %args.admin, "gapura listening");
-    server.run_forever();
+    // `run_forever` with our own signal handling, and the same exit.
+    server.run(RunArgs {
+        shutdown_signal: Box::new(Drain {
+            seconds: args.drain_seconds,
+            draining,
+        }),
+    });
+    std::process::exit(0)
 }

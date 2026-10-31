@@ -134,13 +134,20 @@ capabilities:
   {{- end }}
 {{- end -}}
 
-{{- define "gapura.probes" -}}
-{{- /* The pre-stop delay comes out of the grace period's budget, so it is cut to what the grace
-       period leaves after the drain rather than refused: a values file carrying 0.1.0's 75 s
+{{- /* `--drain-seconds` from preStopDelaySeconds, the name it had while it was a pre-stop sleep.
+       The delay comes out of the grace period's budget, so it is cut to what the grace period
+       leaves after Pingora's own drain rather than refused: a values file carrying 0.1.0's 75 s
        must keep rendering on upgrade, with the 14 s it has room for. deployment.yaml refuses a
        grace period below 61, so this never goes negative. */ -}}
+{{- define "gapura.drainArg" -}}
 {{- $grace := int (.Values.terminationGracePeriodSeconds | default 0) -}}
-{{- $preStop := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) -}}
+{{- $drain := min (int (.Values.preStopDelaySeconds | default 0)) (sub $grace 61) -}}
+{{- if gt $drain 0 }}
+- --drain-seconds={{ $drain }}
+{{- end }}
+{{- end -}}
+
+{{- define "gapura.probes" -}}
 readinessProbe:
   httpGet: { path: /readyz, port: admin }
   periodSeconds: 5
@@ -163,15 +170,6 @@ startupProbe:
   httpGet: { path: /healthz, port: admin }
   periodSeconds: 2
   failureThreshold: 30
-{{- if and (gt $preStop 0) (semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version) }}
-# Pingora closes its listeners the moment SIGTERM arrives, but the pod leaves the
-# Service's endpoints asynchronously and an external load balancer keeps sending to the
-# node until its own health checks fail. Holding SIGTERM back keeps serving those. The
-# sleep action (Kubernetes 1.30+) because the image has no shell for `exec: sleep`.
-lifecycle:
-  preStop:
-    sleep: { seconds: {{ $preStop }} }
-{{- end }}
 {{- end -}}
 
 {{/*

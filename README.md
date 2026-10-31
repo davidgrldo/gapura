@@ -49,8 +49,8 @@ a separate control plane is optional rather than required:
   request to an OTLP collector, per-request debug timing behind a token ([Debug
   timing](#debug-timing)), a Grafana dashboard and example alerts, status written only by the
   replica holding the Lease, an address per Gateway when one shared address is not enough
-  (`gatewayAddresses`), and hot reload by atomic config swap so in-flight requests finish on the
-  config they started with.
+  (`gatewayAddresses`), hot reload by atomic config swap so in-flight requests finish on the
+  config they started with, and a drain on SIGTERM ([Shutdown](#shutdown)).
 - **Console**: off by default. `console.enabled` deploys `gapura-control` in its own Deployment
   and Service with read-only RBAC: sign-in from a local users file or OIDC, and routes scoped to
   the namespaces each group is granted. The stock install stays one binary with no database;
@@ -101,6 +101,17 @@ A request Pingora cannot read as a well-formed one never reaches the gateway: tw
 `Host` that differs from the request target's authority, userinfo in either, or an unparseable
 request line is answered with Pingora's own empty 400, which carries no key and leaves no access
 log line.
+
+### Shutdown
+
+On SIGTERM, Pingora closes the listeners at once (the admin port's too), waits a 30 s grace
+period for requests in flight, then gives the rest up to 30 s more. `--drain-seconds N` (the
+chart's `preStopDelaySeconds`, 15 by default) puts N seconds before that, during which `/readyz`
+answers `503 not ready: draining` and every listener keeps accepting, so a load balancer health
+checking `/readyz` stops sending here before connections are refused. Pick N from its
+deregistration time, and give the orchestrator's kill timeout room for N + 60 s (`docker stop`
+waits 10 s by default; `--time` raises it). A second SIGTERM ends the drain early; SIGINT stops at
+once.
 
 ### Log and trace export
 
