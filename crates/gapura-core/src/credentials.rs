@@ -18,6 +18,17 @@ use sha2::{Digest, Sha256};
 /// an authentication feature into an impersonation one.
 pub const CONSUMER_HEADER: &str = "x-consumer-username";
 
+/// The header an upstream is told the identified consumer's groups in, `, `-separated: Kong's.
+pub const GROUPS_HEADER: &str = "x-consumer-groups";
+
+/// The header that tells an upstream the caller presented no credential and is an auth policy's
+/// anonymous consumer: Kong's.
+pub const ANONYMOUS_HEADER: &str = "x-anonymous-consumer";
+
+/// Every header the gateway sets about the caller. Each is removed from every inbound request
+/// before any is set, for the reason [`CONSUMER_HEADER`] is, and a route may not match on one.
+pub const GATEWAY_HEADERS: [&str; 3] = [CONSUMER_HEADER, GROUPS_HEADER, ANONYMOUS_HEADER];
+
 #[derive(Debug, PartialEq)]
 pub enum Refusal {
     Missing,

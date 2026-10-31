@@ -14,10 +14,13 @@ use crate::config::{Config, Plugin};
 /// data plane predating it would misread rather than refuse. A test fails while a kind is
 /// missing here; a field has no such check, which is why [`Config`] says when one needs a name.
 pub const FEATURES: &[&str] = &[
+    "acl",
+    "auth",
     "cors",
     "ip_restriction",
     "jwks_uri",
     "jwt",
+    "jwt_consumer_claim",
     "key_auth",
     "request_size_limit",
     "request_transformer",
@@ -34,7 +37,7 @@ pub const LEGACY_FEATURES: &[&str] = &["jwt", "key_auth"];
 
 impl Config {
     /// The features this configuration uses: the kind of every policy on every rule, and
-    /// `jwks_uri` wherever a JWT policy names one.
+    /// `jwks_uri` or `jwt_consumer_claim` wherever a JWT policy names one.
     pub fn needs(&self) -> BTreeSet<&'static str> {
         let mut needs = BTreeSet::new();
         let plugins = self
@@ -46,6 +49,9 @@ impl Config {
             needs.insert(plugin.kind());
             if matches!(plugin, Plugin::Jwt(jwt) if jwt.jwks_uri.is_some()) {
                 needs.insert("jwks_uri");
+            }
+            if matches!(plugin, Plugin::Jwt(jwt) if jwt.consumer_claim.is_some()) {
+                needs.insert("jwt_consumer_claim");
             }
         }
         needs
@@ -70,9 +76,9 @@ pub fn missing(needs: &BTreeSet<&'static str>, has: Option<&[String]>) -> Vec<St
 mod tests {
     use super::*;
     use crate::config::{
-        CorsPolicy, Filters, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, ListenerConfig,
-        Protocol, RequestSizeLimitPolicy, RequestTransformerPolicy, ResponseTransformerPolicy,
-        RouteRule, Timeouts,
+        AclPolicy, AuthPolicy, CorsPolicy, Filters, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy,
+        ListenerConfig, Protocol, RequestSizeLimitPolicy, RequestTransformerPolicy,
+        ResponseTransformerPolicy, RouteRule, Timeouts,
     };
 
     /// One policy of every kind. The `match` is exhaustive so that a new kind does not compile
@@ -87,6 +93,8 @@ mod tests {
             Plugin::RequestTransformer(RequestTransformerPolicy::default()),
             Plugin::ResponseTransformer(ResponseTransformerPolicy::default()),
             Plugin::Cors(CorsPolicy::default()),
+            Plugin::Auth(AuthPolicy::default()),
+            Plugin::Acl(AclPolicy::default()),
         ];
         for plugin in &all {
             match plugin {
@@ -96,7 +104,9 @@ mod tests {
                 | Plugin::RequestSizeLimit(_)
                 | Plugin::RequestTransformer(_)
                 | Plugin::ResponseTransformer(_)
-                | Plugin::Cors(_) => {}
+                | Plugin::Cors(_)
+                | Plugin::Auth(_)
+                | Plugin::Acl(_) => {}
             }
         }
         all
@@ -168,11 +178,25 @@ mod tests {
     }
 
     #[test]
+    fn a_jwt_policy_that_names_a_consumer_claim_needs_it() {
+        let named = Plugin::Jwt(JwtPolicy {
+            consumer_claim: Some("sub".into()),
+            ..JwtPolicy::default()
+        });
+        assert!(with(vec![named]).needs().contains("jwt_consumer_claim"));
+        assert!(!with(vec![Plugin::Jwt(JwtPolicy::default())])
+            .needs()
+            .contains("jwt_consumer_claim"));
+    }
+
+    #[test]
     fn missing_reads_silence_as_the_legacy_baseline() {
         let needs = with(every_kind()).needs();
         assert_eq!(
             missing(&needs, None),
             [
+                "acl",
+                "auth",
                 "cors",
                 "ip_restriction",
                 "request_size_limit",

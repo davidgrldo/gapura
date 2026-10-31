@@ -10,7 +10,8 @@ use anyhow::{Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use gapura_core::config::{JwtPolicy, KeyAuthPolicy, KvMatch, PathMatch, Plugin, Protocol};
 use gapura_core::store::{
-    StoreCredential, StorePlugin, StoreRateLimit, StoreRoute, StoreService, StoreSnapshot,
+    StoreConsumer, StoreCredential, StorePlugin, StoreRateLimit, StoreRoute, StoreService,
+    StoreSnapshot,
 };
 use sha2::{Digest, Sha256};
 use tokio_postgres::config::SslMode;
@@ -86,6 +87,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0013_config_notify",
         include_str!("../../migrations/0013_config_notify.sql"),
+    ),
+    (
+        "0014_consumer_groups",
+        include_str!("../../migrations/0014_consumer_groups.sql"),
     ),
 ];
 
@@ -407,6 +412,23 @@ impl Store {
             })
             .collect();
 
+        // Every consumer: who a jwt claim and an auth policy's anonymous may name, and the groups
+        // an acl judges.
+        let consumers: Vec<StoreConsumer> = tx
+            .query(
+                "select w.name as workspace, c.username, c.groups
+                   from consumers c join workspaces w on w.id = c.workspace_id
+                  order by w.name, c.username",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|r| StoreConsumer {
+                workspace: r.get("workspace"),
+                username: r.get("username"),
+                groups: r.get("groups"),
+            })
+            .collect();
         tx.commit().await?;
         Ok((
             version,
@@ -416,6 +438,7 @@ impl Store {
                 plugins,
                 credentials,
                 rate_limits,
+                consumers,
             },
         ))
     }

@@ -148,8 +148,13 @@ impl Refusal {
     }
 }
 
-/// Whether `token` is one `policy` accepts, verified with `keys`, the keys of its JWKS.
-pub fn verify(policy: &JwtPolicy, keys: &Keys, token: Option<&str>) -> Result<(), Refusal> {
+/// Whether `token` is one `policy` accepts, verified with `keys`, the keys of its JWKS, and its
+/// claims when it is.
+pub fn verify(
+    policy: &JwtPolicy,
+    keys: &Keys,
+    token: Option<&str>,
+) -> Result<serde_json::Value, Refusal> {
     let Some(token) = token else {
         return Err(Refusal::Missing);
     };
@@ -192,7 +197,7 @@ pub fn verify(policy: &JwtPolicy, keys: &Keys, token: Option<&str>) -> Result<()
         // Off by default in `jsonwebtoken`; a token that says it is not valid yet is not.
         validation.validate_nbf = true;
         match jsonwebtoken::decode::<serde_json::Value>(token, key, &validation) {
-            Ok(_) => return Ok(()),
+            Ok(data) => return Ok(data.claims),
             Err(e) => {
                 last = match e.kind() {
                     jsonwebtoken::errors::ErrorKind::InvalidSignature => Refusal::BadSignature,
@@ -286,7 +291,20 @@ mod tests {
     fn a_token_this_policy_accepts_is_accepted() {
         let p = policy(jwks(Some("k1")));
         let t = token(Some("k1"), good_claims());
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)).map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn a_verified_token_hands_back_its_claims() {
+        let p = policy(jwks(Some("k1")));
+        let t = token(
+            Some("k1"),
+            json!({"iss": "https://id.example", "aud": "orders", "exp": 4102444800u64, "sub": "mobile"}),
+        );
+        assert_eq!(
+            verify(&p, &keys_for(&p), Some(&t)).unwrap()["sub"],
+            "mobile"
+        );
     }
 
     #[test]
@@ -369,7 +387,7 @@ mod tests {
     fn a_key_set_without_key_ids_still_works() {
         let p = policy(jwks(None));
         assert_eq!(
-            verify(&p, &keys_for(&p), Some(&token(None, good_claims()))),
+            verify(&p, &keys_for(&p), Some(&token(None, good_claims()))).map(|_| ()),
             Ok(())
         );
     }
@@ -380,7 +398,7 @@ mod tests {
     fn a_kid_no_key_carries_falls_back_to_the_keys_without_one() {
         let p = policy(jwks(None));
         let t = token(Some("abc"), good_claims());
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)).map(|_| ()), Ok(()));
     }
 
     /// The fallback is for a `kid` nothing answers to. A `kid` that names a key gets that key
@@ -495,7 +513,7 @@ mod tests {
         p.issuer = None;
         p.audience = None;
         let t = token(Some("k1"), json!({"exp": 4102444800u64}));
-        assert_eq!(verify(&p, &keys_for(&p), Some(&t)), Ok(()));
+        assert_eq!(verify(&p, &keys_for(&p), Some(&t)).map(|_| ()), Ok(()));
     }
 
     #[test]

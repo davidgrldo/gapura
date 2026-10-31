@@ -151,6 +151,8 @@ fn redact(v: &mut serde_json::Value) {
             *creds = format!("{REDACTED}: {n} keys").into();
         }
     }
+    // `consumers` is shown as it is: a consumer's name and groups are what the upstream is told
+    // on every request and what the console lists to any reader, and no key is among them.
 }
 
 #[cfg(test)]
@@ -207,6 +209,7 @@ mod tests {
             credentials: [(KEY_HASH.to_string(), "team-x".to_string())].into(),
             credential_workspaces: [(KEY_HASH.to_string(), "orders".to_string())].into(),
             consumer_rate_limits: Default::default(),
+            consumers: [("orders/ops-bot".to_string(), vec!["ops-team".to_string()])].into(),
         };
         let mut v = serde_json::to_value(&config).unwrap();
         redact(&mut v);
@@ -220,6 +223,12 @@ mod tests {
             "{dump}"
         );
         assert!(dump.contains("1 keys"), "{dump}");
+        // The consumers, names and groups, are not secret and survive redaction.
+        assert_eq!(
+            v["consumers"],
+            serde_json::json!({"orders/ops-bot": ["ops-team"]}),
+            "{dump}"
+        );
     }
 
     #[test]
@@ -287,6 +296,7 @@ mod tests {
                 credentials: Default::default(),
                 credential_workspaces: Default::default(),
                 consumer_rate_limits: Default::default(),
+                consumers: Default::default(),
             },
             Vec::new(),
         );

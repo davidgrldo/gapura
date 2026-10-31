@@ -304,6 +304,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         }
     }
 
@@ -379,6 +380,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (re, _) = compile_regexes(&c);
         let first = c.match_port_with(
@@ -425,6 +427,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (re, _) = compile_regexes(&c);
         let at = |p: &str| {
@@ -471,6 +474,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (re, _) = compile_regexes(&c);
         let at = |headers: &[(String, String)]| {
@@ -515,6 +519,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (re, _) = compile_regexes(&c);
         let miss = |host: &str, path: &str| {
@@ -557,6 +562,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (re, _) = compile_regexes(&c);
         let post = RequestAttrs {
@@ -603,6 +609,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         assert_eq!(
             c.tls_for(443, Some("api.example.com")).unwrap().secret,
@@ -684,6 +691,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (regexes, _) = compile_regexes(&c);
         let at = |p: &str| {
@@ -748,6 +756,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (regexes, _) = compile_regexes(&c);
         let hit = c
@@ -810,6 +819,7 @@ mod tests {
             credentials: Default::default(),
             credential_workspaces: Default::default(),
             consumer_rate_limits: Default::default(),
+            consumers: Default::default(),
         };
         let (regexes, skipped) = compile_regexes(&c);
         assert_eq!(regexes.len(), 1, "identical patterns share one entry");

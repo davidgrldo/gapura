@@ -8,6 +8,40 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- One route can accept a JWT or an API key, name who a caller without one is, and refuse
+  consumers by group (#291).
+  - **`auth` policy:** on a route, service or workspace, switches its jwt and key_auth policies
+    from "all must pass" to "any one": jwt is tried first, then key_auth, and the first that finds
+    its credential decides; a credential it refuses is never tried as the other kind. A request
+    with neither is the policy's `anonymous` consumer, if it names one, so that consumer's request
+    limit and groups apply; otherwise it is refused 401 `AUTH_MISSING` with each policy's
+    challenge, or, when the route has only one of the two, with that policy's own key as before.
+    Without an `auth` policy nothing changes: a route with both still needs both, now always
+    asked JWT first.
+  - **`acl` policy:** `allow` and `deny` lists of groups, deny first; a request no policy
+    identified is refused. Refusals are 403 `ACL_FORBIDDEN`.
+  - **Groups:** `PUT` and `DELETE /api/workspaces/{ws}/consumers/{name}/groups/{group}`, one group
+    at a time (migration 0014). The upstream is told `x-consumer-groups`, and
+    `x-anonymous-consumer: true` for the anonymous consumer. Both are removed from every inbound
+    request, as `x-consumer-username` is, and a request transformer can no longer be given one
+    to write; one stored before this release keeps working.
+  - **JWT consumers:** a JWT requirement's `consumer_claim` (such as `sub`) names the caller's
+    consumer, so its groups, its own request limit and `x-consumer-username` apply; a token whose
+    claim names no consumer is refused `AUTH_JWT_INVALID`.
+  - **Changed:** a token presented to a JWT policy that holds no key to check it with -- its
+    `jwks_uri` has not loaded -- is now 503 `AUTH_UNAVAILABLE` with `Retry-After: 30`, not 401
+    `AUTH_JWT_INVALID`, so an IdP outage no longer reads as a bad token. An API key header whose
+    value is not text is now `AUTH_KEY_INVALID` rather than `AUTH_KEY_MISSING`.
+  - **Upgrade order:** data planes first. A data plane without `auth`, `acl` or
+    `jwt_consumer_claim` is refused a configuration that uses them (409, #283). An older data
+    plane strips only `x-consumer-username`, so an upstream must not trust `x-consumer-groups` or
+    `x-anonymous-consumer` until every data plane in front of it runs this release.
+  - **Routes left out:** a stored route that matches on `x-consumer-groups` or
+    `x-anonymous-consumer` is now left out of the configuration with a "not serving a route"
+    warning, as one matching on `x-consumer-username` has been (#228): routes are matched before
+    the gateway replaces those headers, so such a match reads whatever the client claims. Remove
+    that header match to serve it again; the console now refuses one.
+
 - Request debug timing (#290): with `--debug-token-file` (the chart's
   `telemetry.debugTiming`), a request whose `X-Gapura-Debug-Token` header carries the token is
   answered with a `Server-Timing` header: the route match, each Access policy, the UpstreamRequest

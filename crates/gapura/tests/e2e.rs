@@ -2791,6 +2791,7 @@ fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
                 limit: hour(2, LimitBy::Ip),
             },
         ],
+        consumers: Vec::new(),
     }
 }
 
@@ -2912,11 +2913,16 @@ fn jwks_of(keys: &[&EcKey]) -> String {
 
 /// A token from `JWT_ISSUER`, valid until 2100, signed by `key` and naming its `kid`.
 fn signed_by(key: &EcKey) -> String {
+    signed_by_as(key, "e2e")
+}
+
+/// `signed_by`, for the caller `sub` names: what a `consumer_claim` of `sub` looks up.
+fn signed_by_as(key: &EcKey, sub: &str) -> String {
     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
     header.kid = key.jwk["kid"].as_str().map(str::to_string);
     jsonwebtoken::encode(
         &header,
-        &json!({"iss": JWT_ISSUER, "sub": "e2e", "exp": 4102444800u64}),
+        &json!({"iss": JWT_ISSUER, "sub": sub, "exp": 4102444800u64}),
         &jsonwebtoken::EncodingKey::from_ec_der(&key.pkcs8),
     )
     .unwrap()
@@ -3101,8 +3107,9 @@ async fn a_jwks_uri_is_fetched_rotated_and_outlives_its_idp() {
     .await;
 }
 
-/// A URL that has never answered leaves its policy with no keys, which refuses every token as
-/// invalid -- never admits one unverified.
+/// A URL that has never answered leaves its policy with no keys, which answers every token
+/// `AUTH_UNAVAILABLE` -- never admits one unverified, and never tells a caller whose token may be
+/// good that it is a bad one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     let (ca_pem, _, _) = idp_tls();
@@ -3118,9 +3125,10 @@ async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     )
     .await;
     let r = guarded(&gw, &signed_by(&ec_key("any"))).await;
-    assert_eq!(r.status(), 401);
-    assert_eq!(r.headers()["x-gapura-error"], "AUTH_JWT_INVALID");
-    assert_eq!(r.headers()["www-authenticate"], "Bearer");
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_UNAVAILABLE");
+    assert_eq!(r.headers()["retry-after"], "30");
+    assert!(r.headers().get("www-authenticate").is_none());
     wait_for_metric(
         &gw,
         &format!("gapura_jwks_last_success_timestamp_seconds{{uri=\"{uri}\"}} 0"),
@@ -3449,4 +3457,276 @@ async fn a_websocket_upgrade_still_tunnels() {
     let mut echoed = [0u8; 4];
     sock.read_exact(&mut echoed).await.unwrap();
     assert_eq!(&echoed, b"ping");
+}
+
+/// One route, `either`, answering `echo.test` for the whole of workspace `shop` and carrying
+/// `policies`. `consumers` are `(username, groups)`; each name in `keyed` also holds the key
+/// `<username>-key`.
+fn shop_route(
+    upstream: SocketAddr,
+    policies: Vec<gapura_core::config::Plugin>,
+    consumers: &[(&str, &[&str])],
+    keyed: &[&str],
+) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{PathMatch, Protocol};
+    use gapura_core::store::{
+        StoreConsumer, StoreCredential, StorePlugin, StoreRoute, StoreService, StoreSnapshot,
+    };
+    use sha2::{Digest, Sha256};
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: "shop".into(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![StoreRoute {
+            workspace: "shop".into(),
+            name: "either".into(),
+            service: "echo".into(),
+            hosts: vec!["echo.test".into()],
+            paths: vec![PathMatch::Prefix("/".into())],
+            methods: vec![],
+            headers: vec![],
+            strip_path: false,
+            priority: 0,
+        }],
+        plugins: policies
+            .into_iter()
+            .map(|plugin| StorePlugin {
+                workspace: "shop".into(),
+                route: Some("either".into()),
+                service: None,
+                plugin,
+            })
+            .collect(),
+        credentials: keyed
+            .iter()
+            .map(|name| StoreCredential {
+                key_hash: Sha256::digest(format!("{name}-key").as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                consumer: (*name).into(),
+                workspace: "shop".into(),
+            })
+            .collect(),
+        consumers: consumers
+            .iter()
+            .map(|(username, groups)| StoreConsumer {
+                workspace: "shop".into(),
+                username: (*username).into(),
+                groups: groups.iter().map(|g| (*g).into()).collect(),
+            })
+            .collect(),
+        ..StoreSnapshot::default()
+    }
+}
+
+/// An `auth` policy turns a route's credential policies from "all of them" into "whichever the
+/// caller brought": `mobile` gets in with its key and, from the same route, with a token whose
+/// `sub` names it, and the upstream is told the same consumer either way. A caller with neither
+/// is refused with `AUTH_MISSING` and one `WWW-Authenticate` line per policy, so it can tell
+/// both ways in. The first credential found decides: a token that names no consumer is 401
+/// even beside a good key, because an invalid credential is never replaced by another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_takes_a_jwt_or_a_key_and_neither_is_401_with_both_challenges() {
+    use gapura_core::config::{AuthPolicy, JwtPolicy, KeyAuthPolicy, Plugin};
+    let key = ec_key("idp");
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_store_gateway(shop_route(
+        upstream,
+        vec![
+            Plugin::Auth(AuthPolicy::default()),
+            Plugin::KeyAuth(KeyAuthPolicy::default()),
+            Plugin::Jwt(JwtPolicy {
+                issuer: Some(JWT_ISSUER.into()),
+                jwks: jwks_of(&[&key]),
+                consumer_claim: Some("sub".into()),
+                ..JwtPolicy::default()
+            }),
+        ],
+        &[("mobile", &[])],
+        &["mobile"],
+    ))
+    .await;
+    let c = client(&gw);
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "mobile-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "the key alone");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["headers"]["x-consumer-username"], "mobile");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .bearer_auth(signed_by_as(&key, "mobile"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "the token alone");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["headers"]["x-consumer-username"], "mobile");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .bearer_auth(signed_by_as(&key, "stranger"))
+        .header("x-api-key", "mobile-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        401,
+        "a token naming no consumer is not rescued by a key"
+    );
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_JWT_INVALID");
+
+    let r = c.get(url(&gw, "echo.test", "/")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "neither");
+    assert_eq!(r.headers()["x-gapura-error"], "AUTH_MISSING");
+    let challenges: Vec<&str> = r
+        .headers()
+        .get_all("www-authenticate")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(challenges, ["Bearer", "Key realm=\"x-api-key\""]);
+}
+
+/// A caller with no credential is the route's `anonymous` consumer, so what is said about that
+/// consumer applies to it: the upstream is told it is `guest` and anonymous, and `guest`'s own
+/// limit of one an hour holds it while a keyed consumer, from the same address, is untouched.
+///
+/// Both requests count by address (see `consumer_limited`), so the two consumers' windows have
+/// the same client and differ only in their name; were `guest`'s limit counted in the window
+/// everyone shares, `mobile`'s request would be refused after `guest` used the hour's one.
+///
+/// The caller also sends `x-consumer-groups: admin`, which says nothing true about it and must
+/// not reach the upstream, and `mobile` sends `x-anonymous-consumer: true`, which must not
+/// make a consumer with a key look anonymous.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_without_a_credential_is_the_anonymous_consumer_and_its_own_limit_applies() {
+    use gapura_core::config::{AuthPolicy, KeyAuthPolicy, LimitBy, Plugin, RateLimit};
+    use gapura_core::store::StoreRateLimit;
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let mut snapshot = shop_route(
+        upstream,
+        vec![
+            Plugin::Auth(AuthPolicy {
+                anonymous: Some("guest".into()),
+                workspace: None,
+            }),
+            Plugin::KeyAuth(KeyAuthPolicy::default()),
+        ],
+        &[("guest", &[]), ("mobile", &[])],
+        &["mobile"],
+    );
+    // An hour window, so a run is very unlikely to cross a boundary (#57).
+    snapshot.rate_limits = vec![StoreRateLimit {
+        workspace: "shop".into(),
+        route: Some("either".into()),
+        service: None,
+        consumer: Some("guest".into()),
+        limit: RateLimit {
+            limit: 1,
+            window_ms: 3_600_000,
+            by: LimitBy::Ip,
+        },
+    }];
+    let gw = start_store_gateway(snapshot).await;
+    let c = client(&gw);
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-consumer-groups", "admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "guest's one request an hour");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["headers"]["x-consumer-username"], "guest");
+    assert_eq!(body["headers"]["x-anonymous-consumer"], "true");
+    assert!(
+        body["headers"].get("x-consumer-groups").is_none()
+            && body["values"].get("x-consumer-groups").is_none(),
+        "a group the caller claimed reached the upstream: {body}"
+    );
+
+    let r = c.get(url(&gw, "echo.test", "/")).send().await.unwrap();
+    assert_eq!(r.status(), 429, "past guest's own allowance");
+    assert_eq!(r.headers()["x-ratelimit-limit"], "1");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "mobile-key")
+        .header("x-anonymous-consumer", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "mobile has no limit of its own");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["headers"]["x-consumer-username"], "mobile");
+    assert!(
+        body["headers"].get("x-anonymous-consumer").is_none()
+            && body["values"].get("x-anonymous-consumer").is_none(),
+        "a consumer with a key was passed on as anonymous: {body}"
+    );
+}
+
+/// An `acl` admits a consumer by the groups it holds, after the key has named it: `mobile` is in
+/// `staff` and the upstream is told so; `other` has a good key and no group, and is 403
+/// `ACL_FORBIDDEN`, which the access log records under the same key.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_acl_admits_its_groups_and_refuses_the_rest_403() {
+    use gapura_core::config::{AclPolicy, KeyAuthPolicy, Plugin};
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_store_gateway(shop_route(
+        upstream,
+        vec![
+            Plugin::KeyAuth(KeyAuthPolicy::default()),
+            Plugin::Acl(AclPolicy {
+                allow: vec!["staff".into()],
+                deny: vec![],
+            }),
+        ],
+        &[("mobile", &["staff"]), ("other", &[])],
+        &["mobile", "other"],
+    ))
+    .await;
+    let c = client(&gw);
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "mobile-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "a member of staff");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["headers"]["x-consumer-username"], "mobile");
+    assert_eq!(body["headers"]["x-consumer-groups"], "staff");
+
+    let r = c
+        .get(url(&gw, "echo.test", "/"))
+        .header("x-api-key", "other-key")
+        .header("x-request-id", "acl-refused")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403, "a consumer in no group");
+    assert_eq!(r.headers()["x-gapura-error"], "ACL_FORBIDDEN");
+    let line = gw.access_log("acl-refused").await;
+    assert_eq!(line["status"], 403, "{line}");
+    assert_eq!(line["error_key"], "ACL_FORBIDDEN", "{line}");
 }

@@ -34,8 +34,16 @@ pub enum ErrorKey {
     AuthJwtMissing,
     /// A JWT policy found a token it does not accept. Which check failed is not said.
     AuthJwtInvalid,
-    /// Never answered: the parent of the four `AUTH_*` keys (see [`ErrorKey::parent`]), so what
-    /// is looked up by key can cover every refused credential at once.
+    /// An auth policy's chain found none of its credentials on the request, and names no
+    /// anonymous consumer. A chain of one policy answers that policy's own `*_MISSING` instead.
+    AuthMissing,
+    /// A credential was presented that the policy cannot check: a JWT policy holds no key it
+    /// can verify with -- its `jwks_uri` has not loaded, or its JWKS did not parse. Not a 401:
+    /// the credential may be good, and an outage must not read as a wrong key.
+    AuthUnavailable,
+    /// Never answered: the parent of the `AUTH_*` keys that answer 401 (see
+    /// [`ErrorKey::parent`]), so what is looked up by key can cover every refused credential at
+    /// once.
     Unauthorized,
     /// The rule's rate limit is spent for this client.
     RateLimited,
@@ -45,6 +53,8 @@ pub enum ErrorKey {
     RequestTooLarge,
     /// A cors policy refused a preflight from an origin it does not allow.
     CorsOriginForbidden,
+    /// An acl policy refused the consumer's groups, or a request no policy identified.
+    AclForbidden,
     /// Connecting to the upstream timed out.
     UpstreamConnectTimeout,
     /// The upstream went quiet past the rule's timeout, or the request's budget ran out.
@@ -70,11 +80,14 @@ impl ErrorKey {
             Self::AuthKeyInvalid => "AUTH_KEY_INVALID",
             Self::AuthJwtMissing => "AUTH_JWT_MISSING",
             Self::AuthJwtInvalid => "AUTH_JWT_INVALID",
+            Self::AuthMissing => "AUTH_MISSING",
+            Self::AuthUnavailable => "AUTH_UNAVAILABLE",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::RateLimited => "RATE_LIMITED",
             Self::IpForbidden => "IP_FORBIDDEN",
             Self::RequestTooLarge => "REQUEST_TOO_LARGE",
             Self::CorsOriginForbidden => "CORS_ORIGIN_FORBIDDEN",
+            Self::AclForbidden => "ACL_FORBIDDEN",
             Self::UpstreamConnectTimeout => "UPSTREAM_CONNECT_TIMEOUT",
             Self::UpstreamTimeout => "UPSTREAM_TIMEOUT",
             Self::UpstreamConnectError => "UPSTREAM_CONNECT_ERROR",
@@ -91,14 +104,15 @@ impl ErrorKey {
             | Self::AuthKeyInvalid
             | Self::AuthJwtMissing
             | Self::AuthJwtInvalid
+            | Self::AuthMissing
             | Self::Unauthorized => 401,
-            Self::IpForbidden | Self::CorsOriginForbidden => 403,
+            Self::IpForbidden | Self::CorsOriginForbidden | Self::AclForbidden => 403,
             Self::NoRoute => 404,
             Self::RequestTooLarge => 413,
             Self::RateLimited => 429,
             Self::NoBackend | Self::InternalError => 500,
             Self::UpstreamConnectError | Self::UpstreamTlsError | Self::UpstreamError => 502,
-            Self::NoEndpoints => 503,
+            Self::NoEndpoints | Self::AuthUnavailable => 503,
             Self::UpstreamConnectTimeout | Self::UpstreamTimeout => 504,
         }
     }
@@ -115,9 +129,11 @@ impl ErrorKey {
             | Self::AuthKeyInvalid
             | Self::AuthJwtMissing
             | Self::AuthJwtInvalid
+            | Self::AuthMissing
             | Self::Unauthorized => "unauthorized",
+            Self::AuthUnavailable => "authentication unavailable",
             Self::RateLimited => "too many requests",
-            Self::IpForbidden | Self::CorsOriginForbidden => "forbidden",
+            Self::IpForbidden | Self::CorsOriginForbidden | Self::AclForbidden => "forbidden",
             Self::RequestTooLarge => "request too large",
             Self::UpstreamConnectTimeout | Self::UpstreamTimeout => "gateway timeout",
             Self::UpstreamConnectError | Self::UpstreamTlsError | Self::UpstreamError => {
@@ -141,7 +157,8 @@ impl ErrorKey {
             Self::AuthKeyMissing
             | Self::AuthKeyInvalid
             | Self::AuthJwtMissing
-            | Self::AuthJwtInvalid => Some(Self::Unauthorized),
+            | Self::AuthJwtInvalid
+            | Self::AuthMissing => Some(Self::Unauthorized),
             Self::UpstreamConnectTimeout => Some(Self::UpstreamTimeout),
             Self::UpstreamTlsError => Some(Self::UpstreamConnectError),
             Self::UpstreamConnectError => Some(Self::UpstreamError),
@@ -149,11 +166,13 @@ impl ErrorKey {
             | Self::NoRoute
             | Self::NoBackend
             | Self::NoEndpoints
+            | Self::AuthUnavailable
             | Self::Unauthorized
             | Self::RateLimited
             | Self::IpForbidden
             | Self::RequestTooLarge
             | Self::CorsOriginForbidden
+            | Self::AclForbidden
             | Self::UpstreamTimeout
             | Self::UpstreamError
             | Self::InternalError => None,
@@ -278,7 +297,7 @@ pub fn render(key: ErrorKey, request_id: &str, json: bool) -> (&'static str, Str
 mod tests {
     use super::*;
 
-    const ALL: [ErrorKey; 19] = [
+    const ALL: [ErrorKey; 22] = [
         ErrorKey::InvalidRequestTarget,
         ErrorKey::NoRoute,
         ErrorKey::NoBackend,
@@ -287,11 +306,14 @@ mod tests {
         ErrorKey::AuthKeyInvalid,
         ErrorKey::AuthJwtMissing,
         ErrorKey::AuthJwtInvalid,
+        ErrorKey::AuthMissing,
+        ErrorKey::AuthUnavailable,
         ErrorKey::Unauthorized,
         ErrorKey::RateLimited,
         ErrorKey::IpForbidden,
         ErrorKey::RequestTooLarge,
         ErrorKey::CorsOriginForbidden,
+        ErrorKey::AclForbidden,
         ErrorKey::UpstreamConnectTimeout,
         ErrorKey::UpstreamTimeout,
         ErrorKey::UpstreamConnectError,
@@ -534,5 +556,33 @@ mod tests {
         assert_eq!(key.status(), 403);
         assert_eq!(key.message(), "forbidden");
         assert_eq!(key.parent(), None);
+    }
+
+    #[test]
+    fn the_chain_and_acl_keys_say_what_happened_and_keep_their_parents_status() {
+        assert_eq!(
+            (
+                ErrorKey::AuthMissing.as_str(),
+                ErrorKey::AuthMissing.status()
+            ),
+            ("AUTH_MISSING", 401)
+        );
+        assert_eq!(ErrorKey::AuthMissing.parent(), Some(ErrorKey::Unauthorized));
+        assert_eq!(
+            (
+                ErrorKey::AuthUnavailable.as_str(),
+                ErrorKey::AuthUnavailable.status()
+            ),
+            ("AUTH_UNAVAILABLE", 503)
+        );
+        assert_eq!(ErrorKey::AuthUnavailable.parent(), None);
+        assert_eq!(
+            (
+                ErrorKey::AclForbidden.as_str(),
+                ErrorKey::AclForbidden.status()
+            ),
+            ("ACL_FORBIDDEN", 403)
+        );
+        assert_eq!(ErrorKey::AclForbidden.message(), "forbidden");
     }
 }

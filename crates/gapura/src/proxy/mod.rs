@@ -344,9 +344,9 @@ fn apply_header_ops(target: &mut impl HeaderTarget, ops: &HeaderOps) -> Result<(
 /// The head and body of a locally generated error answer: the key in `X-Gapura-Error` and in
 /// the body, plain text unless the caller prefers JSON, the request id, and never any internal
 /// detail. `extra` carries what one kind of answer adds: the challenge on a 401, the limit
-/// headers on a 429. `Content-Length` is always explicit: without it the body is
-/// close-delimited, and the connection closes after every error while pingora announces
-/// keep-alive.
+/// headers on a 429, `Retry-After` on a 503 `AUTH_UNAVAILABLE`. `Content-Length` is always
+/// explicit: without it the body is close-delimited, and the connection closes after every error
+/// while pingora announces keep-alive.
 fn error_response(
     key: ErrorKey,
     request_id: &str,
@@ -361,7 +361,9 @@ fn error_response(
     resp.insert_header("X-Request-Id", request_id)?;
     resp.insert_header(failure::HEADER, key.as_str())?;
     for (name, value) in extra {
-        resp.insert_header(*name, value.as_str())?;
+        // Appended: a chain's 401 names each policy's challenge on a line of its own (RFC 9110
+        // section 11.6.1), and no list repeats a name otherwise.
+        resp.append_header(*name, value.as_str())?;
     }
     Ok((resp, Bytes::from(body)))
 }
@@ -440,8 +442,11 @@ fn path_params_change_the_route(rt: &Runtime, port: u16, ex: &Extracted) -> bool
     rule_for(&ex.path) != rule_for(&stripped)
 }
 
-/// Why a JWT policy refuses `req` -- its key, the metric's reason, and the challenge to answer
-/// with; `None` admits it.
+/// What a jwt `policy` makes of `req`: the token's claims, or the key, the metric's reason and the
+/// challenge it refuses with. A token presented to a policy that holds no key it can verify with
+/// is `AUTH_UNAVAILABLE`, a 503, not a refusal of the token: its `jwks_uri` has not loaded, or its
+/// document did not parse, and a caller with a good token must not be told it is a bad one. No
+/// token there is still `AUTH_JWT_MISSING`: the caller presented nothing to check.
 ///
 /// Every Authorization line is forwarded upstream, so the check must cover every line, not just
 /// the first (#190). Lines are counted raw (#212): counting only those that parse as UTF-8 and as
@@ -449,15 +454,15 @@ fn path_params_change_the_route(rt: &Runtime, port: u16, ex: &Extracted) -> bool
 /// a valid one, and a backend that splits on any whitespace or keeps the first duplicate then read
 /// the forged token. So one Authorization line per request, whatever its shape; a single line that
 /// is not UTF-8 or not a bearer presents no token and is refused as a missing one.
-fn jwt_refusal(
+fn jwt_verdict(
     req: &RequestHeader,
     policy: &gapura_core::config::JwtPolicy,
     keys: &jwt::Keys,
-) -> Option<(ErrorKey, &'static str, &'static str)> {
+) -> std::result::Result<serde_json::Value, (ErrorKey, &'static str, &'static str)> {
     let mut lines = req.headers.get_all(http::header::AUTHORIZATION).iter();
     let first = lines.next();
     if lines.next().is_some() {
-        return Some((
+        return Err((
             ErrorKey::AuthJwtInvalid,
             "multiple_bearer",
             // RFC 6750 section 3.1: more than one credential is a malformed request.
@@ -465,9 +470,39 @@ fn jwt_refusal(
         ));
     }
     let presented = jwt::bearer(first.and_then(|v| v.to_str().ok()));
-    jwt::verify(policy, keys, presented)
-        .err()
-        .map(|r| (ErrorKey::from(&r), r.as_str(), "Bearer"))
+    if presented.is_some() && keys.usable() == 0 {
+        return Err((ErrorKey::AuthUnavailable, "no_keys", "Bearer"));
+    }
+    jwt::verify(policy, keys, presented).map_err(|r| (ErrorKey::from(&r), r.as_str(), "Bearer"))
+}
+
+/// The gateway's word about who called, on the request sent upstream. Every header it sets is
+/// removed first, unconditionally: a client that sends one itself must not be believed, an
+/// upstream cannot tell the two apart, and stripping only when a policy ran would leave every
+/// route without one forwarding whatever a caller claimed. Then the consumer's name, its groups
+/// `, `-separated as Kong sends them, and, for the anonymous consumer, `x-anonymous-consumer`.
+fn consumer_headers(
+    upstream: &mut RequestHeader,
+    consumer: Option<&plugin::Consumer>,
+    config: &gapura_core::config::Config,
+) -> Result<()> {
+    use gapura_core::credentials::{
+        ANONYMOUS_HEADER, CONSUMER_HEADER, GATEWAY_HEADERS, GROUPS_HEADER,
+    };
+    for name in GATEWAY_HEADERS {
+        upstream.remove_header(name);
+    }
+    let Some(consumer) = consumer else {
+        return Ok(());
+    };
+    upstream.insert_header(CONSUMER_HEADER, consumer.name.as_str())?;
+    if let Some(groups) = config.consumers.get(&consumer.id).filter(|g| !g.is_empty()) {
+        upstream.insert_header(GROUPS_HEADER, groups.join(", "))?;
+    }
+    if consumer.anonymous {
+        upstream.insert_header(ANONYMOUS_HEADER, "true")?;
+    }
+    Ok(())
 }
 
 /// The client address after the trusted-proxy walk, the same answer the access log records:
@@ -963,17 +998,7 @@ impl ProxyHttp for GapuraProxy {
         };
         let rule = &rt.config.listeners[li].rules[ri];
 
-        // Removed unconditionally, before anything is set. This header is the gateway's word
-        // about who called; a client that sends it themselves must not be believed, and an
-        // upstream cannot tell the two apart. Stripping only when a policy ran would leave every
-        // route without one forwarding whatever a caller claimed.
-        upstream.remove_header(gapura_core::credentials::CONSUMER_HEADER);
-        if let Some(consumer) = &ctx.req.consumer {
-            upstream.insert_header(
-                gapura_core::credentials::CONSUMER_HEADER,
-                consumer.name.as_str(),
-            )?;
-        }
+        consumer_headers(upstream, ctx.req.consumer.as_ref(), &rt.config)?;
 
         // Forward the path that was matched. Without this a normalised request would match one
         // string and reach the backend as another, which is exactly the disagreement
@@ -1636,6 +1661,60 @@ mod tests {
     }
 
     #[test]
+    fn the_gateways_consumer_headers_replace_whatever_the_client_sent() {
+        use gapura_core::credentials::{ANONYMOUS_HEADER, CONSUMER_HEADER, GROUPS_HEADER};
+        let config = gapura_core::config::Config {
+            consumers: std::collections::BTreeMap::from([(
+                "shop/mobile".to_string(),
+                vec!["ops".to_string(), "staff".to_string()],
+            )]),
+            ..Default::default()
+        };
+        let spoofed = || {
+            let mut up = RequestHeader::build("GET", b"/", None).unwrap();
+            for name in [CONSUMER_HEADER, GROUPS_HEADER, ANONYMOUS_HEADER] {
+                up.insert_header(name, "admin").unwrap();
+            }
+            up
+        };
+        let mut up = spoofed();
+        consumer_headers(&mut up, None, &config).unwrap();
+        for name in [CONSUMER_HEADER, GROUPS_HEADER, ANONYMOUS_HEADER] {
+            assert!(up.headers.get(name).is_none(), "{name}");
+        }
+        let mobile = plugin::Consumer {
+            name: "mobile".into(),
+            id: "shop/mobile".into(),
+            anonymous: false,
+        };
+        let mut up = spoofed();
+        consumer_headers(&mut up, Some(&mobile), &config).unwrap();
+        assert_eq!(up.headers[CONSUMER_HEADER], "mobile");
+        assert_eq!(up.headers[GROUPS_HEADER], "ops, staff");
+        assert!(up.headers.get(ANONYMOUS_HEADER).is_none());
+        let guest = plugin::Consumer {
+            name: "guest".into(),
+            id: "shop/guest".into(),
+            anonymous: true,
+        };
+        let mut up = spoofed();
+        consumer_headers(&mut up, Some(&guest), &config).unwrap();
+        assert_eq!(up.headers[ANONYMOUS_HEADER], "true");
+        assert!(up.headers.get(GROUPS_HEADER).is_none());
+    }
+
+    #[test]
+    fn an_error_answer_keeps_every_challenge_it_is_given() {
+        let extra = [
+            ("WWW-Authenticate", "Bearer".to_string()),
+            ("WWW-Authenticate", "Key realm=\"x-api-key\"".to_string()),
+        ];
+        let (resp, _) = error_response(ErrorKey::AuthMissing, "r", false, &extra).unwrap();
+        let lines: Vec<_> = resp.headers.get_all("www-authenticate").iter().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
     fn every_forwarded_for_line_is_read_in_order() {
         // #160: behind a proxy that adds its own line instead of appending, the first line is
         // the client's. Reading it alone named whatever address the client wrote.
@@ -1729,7 +1808,7 @@ mod tests {
             let (policy, keys) = policy();
             let good = format!("Bearer {}", token(SECRET, "me"));
             assert_eq!(
-                jwt_refusal(&with_lines(&[good.as_bytes()]), &policy, &keys),
+                jwt_verdict(&with_lines(&[good.as_bytes()]), &policy, &keys).err(),
                 None
             );
         }
@@ -1748,7 +1827,7 @@ mod tests {
                 [forged.as_bytes(), good.as_bytes()],
                 [good.as_bytes(), forged.as_bytes()],
             ] {
-                let refusal = jwt_refusal(&with_lines(&lines), &policy, &keys);
+                let refusal = jwt_verdict(&with_lines(&lines), &policy, &keys).err();
                 assert_eq!(refusal.map(|r| r.1), Some("multiple_bearer"));
                 assert_eq!(refusal.map(|r| r.0), Some(ErrorKey::AuthJwtInvalid));
             }
@@ -1761,11 +1840,12 @@ mod tests {
             // prose this used to send read as an auth scheme named "one".
             let (policy, keys) = policy();
             let good = format!("Bearer {}", token(SECRET, "me"));
-            let refusal = jwt_refusal(
+            let refusal = jwt_verdict(
                 &with_lines(&[good.as_bytes(), good.as_bytes()]),
                 &policy,
                 &keys,
-            );
+            )
+            .err();
             assert_eq!(
                 refusal.map(|r| r.2),
                 Some("Bearer error=\"invalid_request\"")
@@ -1780,7 +1860,9 @@ mod tests {
             forged.push(0x80);
             let good = format!("Bearer {}", token(SECRET, "me"));
             assert_eq!(
-                jwt_refusal(&with_lines(&[&forged, good.as_bytes()]), &policy, &keys).map(|r| r.1),
+                jwt_verdict(&with_lines(&[&forged, good.as_bytes()]), &policy, &keys)
+                    .err()
+                    .map(|r| r.1),
                 Some("multiple_bearer")
             );
         }
@@ -1793,13 +1875,38 @@ mod tests {
             non_utf8.push(0x80);
             for line in [tab.as_bytes(), &non_utf8, b"Basic dXNlcjpwYXNz"] {
                 assert_eq!(
-                    jwt_refusal(&with_lines(&[line]), &policy, &keys),
+                    jwt_verdict(&with_lines(&[line]), &policy, &keys).err(),
                     Some((ErrorKey::AuthJwtMissing, "missing", "Bearer"))
                 );
             }
             assert_eq!(
-                jwt_refusal(&with_lines(&[]), &policy, &keys),
+                jwt_verdict(&with_lines(&[]), &policy, &keys).err(),
                 Some((ErrorKey::AuthJwtMissing, "missing", "Bearer"))
+            );
+        }
+
+        #[test]
+        fn a_token_for_a_policy_without_keys_is_unavailable_and_no_token_is_still_missing() {
+            let (policy, _) = policy();
+            let none = jwt::Keys::default();
+            let good = format!("Bearer {}", token(SECRET, "me"));
+            assert_eq!(
+                jwt_verdict(&with_lines(&[good.as_bytes()]), &policy, &none).err(),
+                Some((ErrorKey::AuthUnavailable, "no_keys", "Bearer"))
+            );
+            assert_eq!(
+                jwt_verdict(&with_lines(&[]), &policy, &none).err(),
+                Some((ErrorKey::AuthJwtMissing, "missing", "Bearer"))
+            );
+        }
+
+        #[test]
+        fn an_admitted_token_hands_back_its_claims() {
+            let (policy, keys) = policy();
+            let good = format!("Bearer {}", token(SECRET, "me"));
+            assert_eq!(
+                jwt_verdict(&with_lines(&[good.as_bytes()]), &policy, &keys).unwrap()["sub"],
+                "me"
             );
         }
     }

@@ -98,20 +98,26 @@ pub async fn put_policy(
         Ok(t) => t,
         Err(e) => return field_error(e),
     };
-    match policies::parse(kind, input.config) {
-        Ok(plugin) => written(
-            store
-                .put_policy(
-                    caller.me.id,
-                    workspace,
-                    &target,
-                    &plugin,
-                    input.seen_updated_at.as_deref(),
-                )
-                .await,
-        ),
-        Err(e) => field_error(e),
-    }
+    let plugin = match policies::parse(kind, input.config) {
+        // Held to what the gateway reserves only now: rows stored before it did are read by
+        // `parse` as they were written.
+        Ok(plugin) => match policies::newly_reserved(&plugin) {
+            Ok(()) => plugin,
+            Err(e) => return field_error(e),
+        },
+        Err(e) => return field_error(e),
+    };
+    written(
+        store
+            .put_policy(
+                caller.me.id,
+                workspace,
+                &target,
+                &plugin,
+                input.seen_updated_at.as_deref(),
+            )
+            .await,
+    )
 }
 
 /// `DELETE /api/workspaces/{ws}/policies/{kind}?target=…`: remove the policy of that kind there.

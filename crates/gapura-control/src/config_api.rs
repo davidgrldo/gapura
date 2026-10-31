@@ -28,7 +28,9 @@ use axum::{
     Extension, Json, Router,
 };
 use gapura_core::features;
-use gapura_core::store::{compile, refused_routes, StoreSettings, StoreSnapshot};
+use gapura_core::store::{
+    compile, missing_anonymous, refused_routes, StoreSettings, StoreSnapshot,
+};
 use sha2::{Digest, Sha256};
 
 use crate::store::Store;
@@ -265,10 +267,19 @@ async fn serve(
     }
     // Said when a data plane is sent a configuration, not on every poll, so it is logged once
     // per change and data plane rather than every few seconds: a route stored before the console
-    // refused it -- one matching on the consumer header (#228), one whose exact or prefix path
-    // contains `;` (#247), or one that strips a regex path -- is left out of it.
+    // refused it -- one matching on a header the gateway sets about the caller (#228), one whose
+    // exact or prefix path contains `;` (#247), or one that strips a regex path -- is left out of
+    // it. So is an auth policy whose anonymous consumer was deleted, which the compiled
+    // configuration drops, so that callers without a credential are refused.
     for (route, reason) in refused_routes(&snapshot) {
         tracing::warn!(%route, reason, "not serving a route");
+    }
+    for (workspace, consumer) in missing_anonymous(&snapshot) {
+        tracing::warn!(
+            %workspace,
+            %consumer,
+            "an auth policy names an anonymous consumer that does not exist; requests without a credential are refused"
+        );
     }
     (
         StatusCode::OK,

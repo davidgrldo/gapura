@@ -364,7 +364,7 @@ async fn the_compiled_policy_accepts_tokens_from_its_own_keys_only() {
     );
     let keys = gapura_core::jwt::keys(&policy.jwks).expect("the stored JWKS reads");
     assert_eq!(keys.usable(), 1);
-    let verify = |t: &str| gapura_core::jwt::verify(&policy, &keys, Some(t));
+    let verify = |t: &str| gapura_core::jwt::verify(&policy, &keys, Some(t)).map(|_| ());
     assert_eq!(verify(&token(&ours, "k1", "orders")), Ok(()));
     assert_eq!(
         verify(&token(&theirs, "k1", "orders")),
@@ -989,4 +989,66 @@ async fn a_requirement_can_name_the_url_its_keys_are_published_at() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
         assert_eq!(parse(&answer)["field"], at, "{body}");
     }
+}
+
+/// A requirement may name the claim that holds the caller's consumer. The read-back, the list
+/// and the audit show it; compiled, the policy also carries its workspace, the one consumers are
+/// looked up in. One that names no claim shows none, and is compiled with no workspace, as it was
+/// before a requirement could name one.
+#[tokio::test]
+async fn a_requirement_can_name_the_claim_that_names_its_consumer() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let document = jwks(&[&ec_key("k1")]);
+    let mut body = parse(&put("route:orders-api", ISSUER, None, &document));
+    body["consumer_claim"] = json!("sub");
+    ok(&app, "PUT", JWT, s.ed, &body.to_string()).await;
+
+    let policy = jwt_on(&compiled(&store).await, COMPILED_ROUTE).expect("the route requires a JWT");
+    assert_eq!(
+        (
+            policy.consumer_claim.as_deref(),
+            policy.workspace.as_deref()
+        ),
+        (Some("sub"), Some("default"))
+    );
+    let one = read(&app, &format!("{JWT}?target=route:orders-api"), s.vi).await;
+    assert_eq!(one["consumer_claim"], "sub", "{one}");
+    assert_eq!(read(&app, JWT, s.vi).await[0]["consumer_claim"], "sub");
+    let (_, _, after) = policy_audits(&store).await.pop().unwrap();
+    assert_eq!(after["consumer_claim"], "sub", "{after}");
+
+    // Without one, from a fresh read: none anywhere.
+    let replaced = seen(
+        &put("route:orders-api", ISSUER, None, &document),
+        &stamp(&app, "route:orders-api", s.vi).await,
+    );
+    ok(&app, "PUT", JWT, s.ed, &replaced).await;
+    let policy = jwt_on(&compiled(&store).await, COMPILED_ROUTE).expect("the route requires a JWT");
+    assert_eq!((policy.consumer_claim, policy.workspace), (None, None));
+    let one = read(&app, &format!("{JWT}?target=route:orders-api"), s.vi).await;
+    assert!(one.get("consumer_claim").is_none(), "{one}");
+    assert!(read(&app, JWT, s.vi).await[0]
+        .get("consumer_claim")
+        .is_none());
+    let (action, before, after) = policy_audits(&store).await.pop().unwrap();
+    assert_eq!(action, "update");
+    assert_eq!(before["consumer_claim"], "sub", "{before}");
+    assert!(after.get("consumer_claim").is_none(), "{after}");
+
+    // A claim name too long for one is named, and writes nothing.
+    let before = everything(&store).await;
+    let mut body = parse(&put("workspace", ISSUER, None, &document));
+    body["consumer_claim"] = json!("c".repeat(65));
+    let (status, answer) = send(&app, "PUT", JWT, Some(s.ed), &body.to_string()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(parse(&answer)["field"], "consumer_claim");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusal wrote nothing"
+    );
 }
