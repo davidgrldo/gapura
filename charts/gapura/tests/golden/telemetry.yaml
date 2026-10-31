@@ -290,6 +290,8 @@ spec:
         secret: { secretName: log-sink }
       - name: otlp-headers
         secret: { secretName: otlp-sink }
+      - name: debug-token
+        secret: { secretName: debug-timing }
       containers:
       - name: gapura
         image: ghcr.io/davidgrldo/gapura:0.2.0
@@ -309,11 +311,13 @@ spec:
         - --otlp-traces-url=http://otel-collector.observability:4318/v1/traces
         - --otlp-sample-ratio=0.25
         - --otlp-headers-file=/etc/gapura-otlp/headers
+        - --debug-token-file=/etc/gapura-debug-token/token
         volumeMounts:
         - { name: control-plane-token, mountPath: /etc/gapura-control-plane-token, readOnly: true }
         - { name: config-cache, mountPath: /var/cache/gapura }
         - { name: http-log-headers, mountPath: /etc/gapura-http-log, readOnly: true }
         - { name: otlp-headers, mountPath: /etc/gapura-otlp, readOnly: true }
+        - { name: debug-token, mountPath: /etc/gapura-debug-token, readOnly: true }
         ports:
         - { name: http, containerPort: 80, protocol: TCP }
         - { name: https, containerPort: 443, protocol: TCP }
@@ -398,6 +402,8 @@ spec:
         secret: { secretName: log-sink }
       - name: otlp-headers
         secret: { secretName: otlp-sink }
+      - name: debug-token
+        secret: { secretName: debug-timing }
       containers:
       - name: gapura
         image: ghcr.io/davidgrldo/gapura:0.2.0
@@ -417,6 +423,7 @@ spec:
         - --otlp-traces-url=http://otel-collector.observability:4318/v1/traces
         - --otlp-sample-ratio=0.25
         - --otlp-headers-file=/etc/gapura-otlp/headers
+        - --debug-token-file=/etc/gapura-debug-token/token
         env:
         - name: POD_NAME
           valueFrom: { fieldRef: { fieldPath: metadata.name } }
@@ -425,6 +432,7 @@ spec:
         volumeMounts:
         - { name: http-log-headers, mountPath: /etc/gapura-http-log, readOnly: true }
         - { name: otlp-headers, mountPath: /etc/gapura-otlp, readOnly: true }
+        - { name: debug-token, mountPath: /etc/gapura-debug-token, readOnly: true }
         ports:
         - { name: http, containerPort: 80, protocol: TCP }
         - { name: https, containerPort: 443, protocol: TCP }

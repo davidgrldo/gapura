@@ -22,6 +22,7 @@ use pingora::server::{
 };
 use pingora::services::background::background_service;
 use pingora::services::listening::Service;
+use sha2::{Digest, Sha256};
 
 /// The first address that cannot be bound, with the OS message.
 ///
@@ -97,6 +98,22 @@ fn main() {
     let (sinks, exporter) = telemetry::sinks::build(&args).unwrap_or_else(|e| {
         tracing::error!(error = %e, "cannot set up log and trace export, refusing to start");
         std::process::exit(1);
+    });
+
+    // Read now, so a bad file stops the process with one clear line rather than every timed
+    // request quietly going untimed.
+    let debug_token = args.debug_token_file.as_ref().map(|path| {
+        match std::fs::read_to_string(path) {
+            Ok(t) if !t.trim().is_empty() => Sha256::digest(t.trim()).into(),
+            Ok(_) => {
+                tracing::error!(path = %path.display(), "the debug token file is empty, refusing to start");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "cannot read the debug token file, refusing to start");
+                std::process::exit(1);
+            }
+        }
     });
 
     let store = Arc::new(store::Store::empty());
@@ -204,6 +221,7 @@ fn main() {
             limiter: Default::default(),
             access_log_query: args.access_log_query,
             sinks,
+            debug_token,
         },
     );
     for addr in &args.listen_http {

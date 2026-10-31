@@ -20,6 +20,7 @@ use gapura_core::credentials;
 use pingora::http::{RequestHeader, ResponseHeader};
 
 use crate::proxy::failure::ErrorKey;
+use crate::proxy::timing::{self, Timing};
 use crate::proxy::transform::{edit_headers, edit_query, writable};
 use crate::proxy::{client_ip_of, is_final, jwt, jwt_refusal, rate_limit, GapuraProxy};
 use crate::store::Runtime;
@@ -79,6 +80,8 @@ pub struct RequestCtx {
     /// What a cors policy's Access step decided, for its Response step.
     cors: Option<Cors>,
     terminated: bool,
+    /// The request's debug timing, when it carried the debug token (`timing`).
+    pub timing: Option<Box<Timing>>,
 }
 
 /// What a cors policy's Access step decided of a request.
@@ -327,7 +330,9 @@ impl Chain {
         cx: &mut RequestCtx,
     ) -> Flow {
         for step in &self.access {
+            let start = timing::start(&cx.timing);
             let flow = step.run(proxy, rt, rule, req, peer, cx);
+            timing::stop(&mut cx.timing, start, step.timing_name());
             if !matches!(flow, Flow::Continue) {
                 return flow;
             }
@@ -453,6 +458,18 @@ impl Access {
             Access::Jwt(_) | Access::KeyAuth(_) => 2,
             Access::SizeLimit(_) => 3,
             Access::RateLimit => 4,
+        }
+    }
+
+    /// The step's `Server-Timing` entry.
+    fn timing_name(&self) -> &'static str {
+        match self {
+            Access::Cors(_) => "access.cors",
+            Access::IpRestriction(_) => "access.ip_restriction",
+            Access::Jwt(_) => "access.jwt",
+            Access::KeyAuth(_) => "access.key_auth",
+            Access::SizeLimit(_) => "access.request_size_limit",
+            Access::RateLimit => "access.rate_limit",
         }
     }
 
@@ -895,6 +912,7 @@ mod tests {
             limiter: Default::default(),
             access_log_query: false,
             sinks: Default::default(),
+            debug_token: None,
         }
     }
 
@@ -1012,6 +1030,45 @@ mod tests {
         );
         chain.upstream_request(&mut req);
         assert!(req.headers.get("x-api-key").is_none());
+    }
+
+    /// A timed request gets an entry per Access step, in the order they ran; an untimed one
+    /// gets none.
+    #[test]
+    fn a_timed_request_records_each_access_step() {
+        let rt = with_key(Config::default());
+        let r = rule(vec![
+            key_auth(Some("shop")),
+            ip_restriction(&["0.0.0.0/0"], &[]),
+        ]);
+        let chain = Chain::compile(&r).unwrap();
+        let mut req = get();
+        req.insert_header("x-api-key", "k-1").unwrap();
+        let peer = Some("192.0.2.1".parse().unwrap());
+        let mut cx = RequestCtx {
+            timing: Some(Box::default()),
+            ..Default::default()
+        };
+        let flow = chain.access(&proxy(), &rt, &r, &req, peer, &mut cx);
+        assert!(matches!(flow, Flow::Continue));
+        let names: Vec<String> = cx
+            .timing
+            .unwrap()
+            .header()
+            .split(", ")
+            .map(|e| e.split(';').next().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "access.ip_restriction",
+                "access.key_auth",
+                "access.rate_limit"
+            ]
+        );
+        let mut untimed = RequestCtx::default();
+        chain.access(&proxy(), &rt, &r, &req, peer, &mut untimed);
+        assert!(untimed.timing.is_none());
     }
 
     #[test]

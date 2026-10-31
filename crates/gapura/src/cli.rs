@@ -72,6 +72,13 @@ pub struct Args {
     #[arg(long = "access-log-query")]
     pub access_log_query: bool,
 
+    /// File holding the token that turns on request debug timing: a request whose
+    /// `X-Gapura-Debug-Token` header carries it is answered with a `Server-Timing` header of the
+    /// time each phase and policy took. A file so the token never reaches a process list. Absent
+    /// is off, and no request is timed whatever it carries.
+    #[arg(long, value_name = "FILE")]
+    pub debug_token_file: Option<std::path::PathBuf>,
+
     /// POST every access-log line here as well, in batches as a JSON array, through a bounded
     /// queue per replica that drops its oldest entries when the endpoint cannot keep up (counted
     /// in `gapura_log_dropped_total`). An `https` endpoint's certificate is always verified

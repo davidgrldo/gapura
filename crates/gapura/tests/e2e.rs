@@ -1402,6 +1402,84 @@ async fn backend_timeout_is_504_and_zero_disables_it() {
     assert!(line["error_key"].is_null(), "{line}");
 }
 
+/// A request carrying the data plane's debug token is answered with a `Server-Timing` header of
+/// the phases it went through; one without it, or with another value, gets none. The token never
+/// reaches the upstream, whether it matched or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_timing_needs_the_token() {
+    let token_dir = tempfile::tempdir().unwrap();
+    let token_file = token_dir.path().join("token");
+    std::fs::write(&token_file, "s3cret-debug\n").unwrap();
+    let (dead, upstream) = spawn_dead_and_upstream().await;
+    let gw = start_gateway_with(
+        |http| config(http, upstream, dead, upstream),
+        &["--debug-token-file", token_file.to_str().unwrap()],
+    )
+    .await;
+    let c = client(&gw);
+    let send = |host: &'static str, token: Option<&'static str>| {
+        let mut req = c.get(url(&gw, host, "/api"));
+        if let Some(token) = token {
+            req = req.header("X-Gapura-Debug-Token", token);
+        }
+        req.send()
+    };
+    // The entry names, a pooled connect counted as a connect.
+    let names = |r: &reqwest::Response| -> Vec<String> {
+        r.headers()
+            .get("server-timing")
+            .map(|v| v.to_str().unwrap())
+            .unwrap_or_default()
+            .split(", ")
+            .filter(|e| !e.is_empty())
+            .map(|e| {
+                e.split(';')
+                    .next()
+                    .unwrap()
+                    .replace("connect.reused", "connect")
+            })
+            .collect()
+    };
+
+    let r = send("echo.test", Some("s3cret-debug")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        names(&r),
+        [
+            "route",
+            "access.rate_limit",
+            "connect",
+            "upstream_request",
+            "ttfb",
+            "response",
+            "total"
+        ],
+        "{:?}",
+        r.headers().get("server-timing")
+    );
+    let echoed: Value = r.json().await.unwrap();
+    assert!(
+        echoed["headers"]["x-gapura-debug-token"].is_null(),
+        "{echoed}"
+    );
+
+    for token in [None, Some("s3cret"), Some("s3cret-debug2")] {
+        let r = send("echo.test", token).await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(r.headers().get("server-timing").is_none(), "{token:?}");
+        let echoed: Value = r.json().await.unwrap();
+        assert!(
+            echoed["headers"]["x-gapura-debug-token"].is_null(),
+            "{echoed}"
+        );
+    }
+
+    // Answered by the gateway itself: what it did before answering.
+    let r = send("unknown.test", Some("s3cret-debug")).await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(names(&r), ["route", "total"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn admin_endpoints() {
     let (gw, c) = setup().await;

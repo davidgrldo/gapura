@@ -8,6 +8,12 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- Request debug timing (#290): with `--debug-token-file` (the chart's
+  `telemetry.debugTiming`), a request whose `X-Gapura-Debug-Token` header carries the token is
+  answered with a `Server-Timing` header: the route match, each Access policy, the UpstreamRequest
+  and Response phases, the upstream connect and time to first byte, and the total. The token is
+  compared in constant time and never forwarded; without it, or without the flag, nothing is
+  measured.
 - SIGTERM can drain before the listeners close (#289): `--drain-seconds N` keeps every listener
   accepting for N seconds after it, with `/readyz` answering `503 not ready: draining`, then
   stops as before. Pingora alone closes the listeners the moment SIGTERM arrives, so a load
