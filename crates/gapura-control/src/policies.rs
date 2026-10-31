@@ -5,13 +5,13 @@
 //! Pure, like `consumers`: the same check reads a request's body and a stored row, so a row only
 //! SQL written by hand could make fails the snapshot as a request carrying it would be refused.
 
-use crate::configuration::{FieldError, METHODS};
+use crate::configuration::{self, FieldError, METHODS};
 use gapura_core::client_ip::Cidr;
 use gapura_core::config::{
-    CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy,
-    RequestTransformerPolicy, ResponseTransformerPolicy,
+    AclPolicy, AuthPolicy, CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin,
+    RequestSizeLimitPolicy, RequestTransformerPolicy, ResponseTransformerPolicy,
 };
-use gapura_core::credentials::CONSUMER_HEADER;
+use gapura_core::credentials::{ANONYMOUS_HEADER, CONSUMER_HEADER, GATEWAY_HEADERS, GROUPS_HEADER};
 use serde::{Deserialize, Serialize};
 
 /// The kinds this endpoint keeps, as [`Plugin::kind`] names them.
@@ -21,6 +21,8 @@ pub const KINDS: &[&str] = &[
     "request_transformer",
     "response_transformer",
     "cors",
+    "auth",
+    "acl",
 ];
 
 /// The most addresses and networks an ip_restriction policy lists, allow and deny together:
@@ -55,6 +57,10 @@ pub const MAX_CORS_HEADERS: usize = 64;
 /// The longest a browser may keep a cors policy's preflight answer, a day: Firefox keeps one no
 /// longer, and Chromium no longer than two hours.
 pub const MAX_AGE_SECS: u64 = 86_400;
+
+/// The most groups an acl policy lists in `allow`, and again in `deny`: the data plane checks the
+/// caller's groups against both lists on every request the rule answers.
+pub const MAX_ACL_GROUPS: usize = 100;
 
 /// What a cors policy tells a preflight when it names no methods: Kong's default, less `OPTIONS`,
 /// which is the preflight's own.
@@ -108,6 +114,8 @@ pub fn parse(kind: &str, config: serde_json::Value) -> Result<Plugin, FieldError
         "request_transformer" => request_transformer(config).map(Plugin::RequestTransformer),
         "response_transformer" => response_transformer(config).map(Plugin::ResponseTransformer),
         "cors" => cors(config).map(Plugin::Cors),
+        "auth" => auth(config).map(Plugin::Auth),
+        "acl" => acl(config).map(Plugin::Acl),
         _ => Err(field("kind", "There is no such policy kind.")),
     }
 }
@@ -165,6 +173,67 @@ fn ip_restriction(config: serde_json::Value) -> Result<IpRestrictionPolicy, Fiel
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AclInput {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
+}
+
+/// An acl policy: the groups it admits and the groups it refuses, each named as a consumer's
+/// group is (`consumers::group`), so a list can only name groups a consumer could be in.
+fn acl(config: serde_json::Value) -> Result<AclPolicy, FieldError> {
+    let input: AclInput = serde_json::from_value(config)
+        .map_err(|_| field("config", "Send allow and deny, each a list of group names."))?;
+    // Nothing listed refuses nothing but callers without a consumer, which reads like a policy
+    // that guards a route by group and does not.
+    if input.allow.is_empty() && input.deny.is_empty() {
+        return Err(field(
+            "allow",
+            "List at least one group to allow or to deny.",
+        ));
+    }
+    let groups = |at: &str, list: Vec<String>| -> Result<Vec<String>, FieldError> {
+        if list.len() > MAX_ACL_GROUPS {
+            return Err(field(at, format!("List at most {MAX_ACL_GROUPS} groups.")));
+        }
+        list.iter()
+            .map(|g| crate::consumers::group(g).map_err(|e| field(at, e.sentence)))
+            .collect()
+    };
+    Ok(AclPolicy {
+        allow: groups("allow", input.allow)?,
+        deny: groups("deny", input.deny)?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthInput {
+    #[serde(default)]
+    anonymous: Option<String>,
+}
+
+/// An auth policy: who a caller without a credential is, by a consumer's name, or nobody. That
+/// the consumer exists is the store's to check, in the write. The workspace the data plane looks
+/// the consumer up in is stamped by the compiler, so a request that sends one is refused rather
+/// than believed.
+fn auth(config: serde_json::Value) -> Result<AuthPolicy, FieldError> {
+    let input: AuthInput = serde_json::from_value(config)
+        .map_err(|_| field("config", "Send anonymous, a consumer's name, or nothing."))?;
+    let anonymous = input
+        .anonymous
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| configuration::name(&n, "anonymous"))
+        .transpose()?;
+    Ok(AuthPolicy {
+        anonymous,
+        workspace: None,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RequestSizeLimitInput {
     /// Read as any JSON value and judged below, so that a string, a negative number or a
     /// fraction is named as `max_bytes` rather than as the whole configuration.
@@ -215,9 +284,10 @@ fn request_transformer(config: serde_json::Value) -> Result<RequestTransformerPo
         config,
         "Send headers and query, each with any of remove, rename, replace, add and append.",
     )?;
-    // The request transform runs after the gateway has set the consumer header from the key it
-    // checked, so a transform that wrote it would name whichever consumer the policy said.
-    let refused: Vec<&str> = FRAMING.iter().copied().chain([CONSUMER_HEADER]).collect();
+    // The request transform runs after the gateway has set the headers about the caller from the
+    // credential it checked, so a transform that wrote one would name whichever consumer, groups
+    // or anonymous caller the policy said.
+    let refused: Vec<&str> = FRAMING.iter().copied().chain(GATEWAY_HEADERS).collect();
     let policy = RequestTransformerPolicy {
         headers: edits("headers", &input.headers, true, &refused)?,
         query: edits("query", &input.query, false, &[])?,
@@ -656,16 +726,23 @@ fn is_token(b: u8) -> bool {
 
 /// Why a transform cannot touch the refused header `name`.
 fn refusal(name: &str) -> String {
-    if name == CONSUMER_HEADER {
-        format!(
+    match name {
+        CONSUMER_HEADER => format!(
             "{CONSUMER_HEADER} is set by the gateway from the consumer a key names, so a \
              transform cannot write it."
-        )
-    } else {
-        format!(
+        ),
+        GROUPS_HEADER => format!(
+            "{GROUPS_HEADER} is set by the gateway from the groups of the consumer a credential \
+             names, so a transform cannot write it."
+        ),
+        ANONYMOUS_HEADER => format!(
+            "{ANONYMOUS_HEADER} is set by the gateway when a caller without a credential is an \
+             auth policy's anonymous consumer, so a transform cannot write it."
+        ),
+        _ => format!(
             "{name} says how HTTP frames, routes or carries a message, which the gateway keeps \
              for itself, so a transform cannot write it."
-        )
+        ),
     }
 }
 
@@ -778,6 +855,8 @@ mod tests {
             "request_transformer" => json!({"query": {"remove": ["debug"]}}),
             "response_transformer" => json!({"headers": {"add": [["x-served-by", "gapura"]]}}),
             "cors" => json!({"origins": ["https://app.example"]}),
+            "auth" => json!({"anonymous": "guest"}),
+            "acl" => json!({"allow": ["staff"]}),
             other => panic!("no minimal configuration for {other}: add one here"),
         };
         for kind in KINDS {
@@ -978,10 +1057,11 @@ mod tests {
     }
 
     /// The names that frame and route a message are refused in every list of both kinds, in any
-    /// case; the consumer header only in a request transform's headers, since the response's is
-    /// the upstream's to send and a query parameter of that name is no header.
+    /// case; the headers the gateway sets about the caller only in a request transform's headers,
+    /// since the response's are the upstream's to send and a query parameter of one of those names
+    /// is no header.
     #[test]
-    fn the_framing_headers_and_the_consumer_header_are_refused() {
+    fn the_framing_headers_and_the_consumer_headers_are_refused() {
         for name in FRAMING.iter().copied().chain(["Content-Length", "HOST"]) {
             for (op, list) in [
                 ("remove", json!([name])),
@@ -1007,22 +1087,32 @@ mod tests {
             "x-consumer-username is set by the gateway from the consumer a key names, so a \
              transform cannot write it."
         );
-        // Every list refuses it, a removal and a rename away from it too: the gateway sets it
-        // just before the transform runs, so either would take the consumer from the upstream.
-        for (op, list) in [
-            ("remove", json!(["X-Consumer-Username"])),
-            ("rename", json!([["x-user", "X-Consumer-Username"]])),
-            ("rename", json!([["x-consumer-username", "x-user"]])),
-            ("replace", json!([[CONSUMER_HEADER, "alice"]])),
-            ("append", json!([[CONSUMER_HEADER, "alice"]])),
-        ] {
-            let e = refused("request_transformer", json!({"headers": {op: list}}));
-            assert_eq!(e.field, format!("headers.{op}"), "{list}");
-            assert!(e.sentence.starts_with(CONSUMER_HEADER), "{}", e.sentence);
+        // Every list refuses each header the gateway sets about the caller, in any case, a removal
+        // and a rename away from it too: the gateway sets them just before the transform runs, so
+        // either would take the consumer, its groups or its being anonymous from the upstream.
+        for name in GATEWAY_HEADERS {
+            let shouted = name.to_ascii_uppercase();
+            for (op, list) in [
+                ("remove", json!([shouted])),
+                ("rename", json!([["x-user", shouted]])),
+                ("rename", json!([[name, "x-user"]])),
+                ("replace", json!([[name, "alice"]])),
+                ("add", json!([[shouted, "alice"]])),
+                ("append", json!([[name, "alice"]])),
+            ] {
+                let e = refused("request_transformer", json!({"headers": {op: list}}));
+                assert_eq!(e.field, format!("headers.{op}"), "{list}");
+                assert!(e.sentence.starts_with(name), "{}", e.sentence);
+                assert!(e.sentence.ends_with("cannot write it."), "{}", e.sentence);
+            }
+            // A response's are the upstream's to send, and a query parameter of the name is no
+            // header.
+            let response = json!({"headers": {"add": [[name, "alice"]]}});
+            assert!(parse("response_transformer", response).is_ok(), "{name}");
+            let parameter = json!({"query": {"add": [[name, "alice"], ["host", "h"]]}});
+            assert!(parse("request_transformer", parameter).is_ok(), "{name}");
         }
         assert!(parse("response_transformer", consumer).is_ok());
-        let parameter = json!({"query": {"add": [[CONSUMER_HEADER, "alice"], ["host", "h"]]}});
-        assert!(parse("request_transformer", parameter).is_ok());
     }
 
     /// A transformer with nothing to do is refused, and so is one past [`MAX_EDITS`], headers and
@@ -1147,6 +1237,69 @@ mod tests {
         assert_eq!(audited(&plugin), config(&plugin));
         let plugin = parse("cors", json!({"origins": ["https://app.example"]})).unwrap();
         assert_eq!(audited(&plugin), config(&plugin));
+        let plugin = parse("auth", json!({"anonymous": "guest"})).unwrap();
+        assert_eq!(audited(&plugin), json!({"anonymous": "guest"}));
+        let plugin = parse("acl", json!({"allow": ["staff"], "deny": ["suspended"]})).unwrap();
+        assert_eq!(audited(&plugin), config(&plugin));
+    }
+
+    #[test]
+    fn an_acl_lists_groups_and_at_least_one() {
+        assert_eq!(
+            parse("acl", json!({"allow": ["staff"], "deny": ["suspended"]})),
+            Ok(Plugin::Acl(AclPolicy {
+                allow: vec!["staff".into()],
+                deny: vec!["suspended".into()]
+            }))
+        );
+        assert_eq!(
+            config(&parse("acl", json!({"deny": ["suspended"]})).unwrap()),
+            json!({"deny": ["suspended"]}),
+            "an empty list is left out, as the data plane reads it"
+        );
+        assert_eq!(refused("acl", json!({})).field, "allow");
+        assert_eq!(
+            refused("acl", json!({"allow": [], "deny": []})).field,
+            "allow"
+        );
+        assert_eq!(refused("acl", json!({"deny": ["two words"]})).field, "deny");
+        assert_eq!(refused("acl", json!({"allow": ["a,b"]})).field, "allow");
+        assert_eq!(
+            refused("acl", json!({"allow": ["staff"], "mode": "x"})).field,
+            "config"
+        );
+        assert_eq!(refused("acl", json!({"allow": "staff"})).field, "config");
+        let many: Vec<String> = (0..=MAX_ACL_GROUPS).map(|i| format!("g{i}")).collect();
+        assert_eq!(refused("acl", json!({ "deny": many })).field, "deny");
+        let most: Vec<String> = (0..MAX_ACL_GROUPS).map(|i| format!("g{i}")).collect();
+        assert!(parse("acl", json!({ "allow": most, "deny": most })).is_ok());
+    }
+
+    #[test]
+    fn an_auth_policy_names_an_anonymous_consumer_or_nobody() {
+        assert_eq!(
+            parse("auth", json!({})),
+            Ok(Plugin::Auth(AuthPolicy::default()))
+        );
+        assert_eq!(
+            parse("auth", json!({"anonymous": "guest"})),
+            Ok(Plugin::Auth(AuthPolicy {
+                anonymous: Some("guest".into()),
+                workspace: None
+            }))
+        );
+        assert_eq!(
+            parse("auth", json!({"anonymous": "  "})),
+            Ok(Plugin::Auth(AuthPolicy::default())),
+            "an empty name is nobody"
+        );
+        assert_eq!(
+            refused("auth", json!({"anonymous": "no such name!"})).field,
+            "anonymous"
+        );
+        // The store stamps the workspace; a request that sends one is refused.
+        assert_eq!(refused("auth", json!({"workspace": "x"})).field, "config");
+        assert_eq!(refused("auth", json!({"anonymous": 7})).field, "config");
     }
 
     /// Stored as the data plane matches it: origins lowercased with the scheme's own port left

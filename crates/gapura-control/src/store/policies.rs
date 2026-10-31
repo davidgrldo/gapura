@@ -1,18 +1,19 @@
 //! The policies `/api/workspaces/{ws}/policies/{kind}` keeps, as the console reads and writes
 //! them. Each write is one transaction in the order `consumers`' policy writes take: rights
-//! re-read and decided; the service or route it targets `FOR SHARE`; the policy row `FOR
-//! UPDATE`; one audit row. None of these kinds is ever a consumer's own.
+//! re-read and decided; the service or route it targets `FOR SHARE`; an auth policy's anonymous
+//! consumer `FOR SHARE`; the policy row `FOR UPDATE`; one audit row. None of these kinds is ever
+//! a consumer's own.
 
 use super::configuration::{decide, updated_at};
 use super::consumers::{fresh, plugin_row, target_of, target_row};
 use super::grants::{audit, retrying, Entry};
 use super::{Store, WriteError};
-use crate::configuration::Action;
+use crate::configuration::{Action, FieldError};
 use crate::consumers::Target;
 use crate::grants::Refusal;
 use crate::policies::{self, KindPolicyView};
 use anyhow::Result;
-use gapura_core::config::Plugin;
+use gapura_core::config::{AuthPolicy, Plugin};
 use uuid::Uuid;
 
 /// The `{target, kind, config}` an audit row records of `plugin`, its `config` in the form
@@ -110,6 +111,32 @@ impl Store {
         let tx = client.transaction().await?;
         let actor = decide(&tx, caller, workspace, Action::Write).await?;
         let resolved = target_row(&tx, workspace, target).await?;
+        // An anonymous consumer the workspace does not have would be dropped when compiled, and
+        // every caller without a credential refused, with nothing said where it was written. It is
+        // held `for share`, as a consumer's own limit holds its consumer, so it cannot be deleted
+        // between this read and the commit; deleted afterwards, the compiler drops it.
+        if let Plugin::Auth(AuthPolicy {
+            anonymous: Some(name),
+            ..
+        }) = plugin
+        {
+            let exists = tx
+                .query_opt(
+                    "select 1 from consumers where workspace_id = $1 and username = $2 for share",
+                    &[&workspace, name],
+                )
+                .await?
+                .is_some();
+            if !exists {
+                return Err(WriteError::Field(FieldError {
+                    field: "anonymous".into(),
+                    sentence: format!(
+                        "There is no consumer named {name} in this workspace. Create it first, \
+                         or name another."
+                    ),
+                }));
+            }
+        }
         let config = policies::config(plugin);
         let row = plugin_row(&tx, workspace, resolved, None, kind).await?;
         // What a read shows of the row: an enabled one this kind reads. A disabled row, or one

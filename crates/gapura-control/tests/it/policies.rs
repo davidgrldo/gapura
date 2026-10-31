@@ -19,8 +19,8 @@ use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::Store;
 use gapura_core::config::{
-    Config, CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin, RequestSizeLimitPolicy,
-    RequestTransformerPolicy,
+    AclPolicy, AuthPolicy, Config, CorsPolicy, HeaderEdits, IpRestrictionPolicy, Plugin,
+    RequestSizeLimitPolicy, RequestTransformerPolicy,
 };
 use gapura_core::store::StoreSettings;
 use serde_json::json;
@@ -107,6 +107,9 @@ const IP: &str = "/api/workspaces/default/policies/ip_restriction";
 const SIZE: &str = "/api/workspaces/default/policies/request_size_limit";
 const CORS: &str = "/api/workspaces/default/policies/cors";
 const TRANSFORM: &str = "/api/workspaces/default/policies/request_transformer";
+const AUTH: &str = "/api/workspaces/default/policies/auth";
+const ACL: &str = "/api/workspaces/default/policies/acl";
+const CONSUMERS: &str = "/api/workspaces/default/consumers";
 /// The compiled name of the seeded route.
 const COMPILED_ROUTE: &str = "default/orders-api";
 
@@ -946,6 +949,194 @@ async fn a_request_transformer_reaches_the_rule_and_its_audit_names_no_values() 
         everything(&store).await,
         before,
         "the refusal wrote nothing"
+    );
+}
+
+/// The auth policy the compiled seeded route carries, if any.
+fn auth_on(config: &Config) -> Option<AuthPolicy> {
+    plugins_on(config, COMPILED_ROUTE)
+        .into_iter()
+        .find_map(|p| match p {
+            Plugin::Auth(policy) => Some(policy),
+            _ => None,
+        })
+}
+
+/// An acl written through the endpoint reaches the compiled rule as the data plane reads it, and
+/// the list shows it.
+#[tokio::test]
+async fn an_acl_reaches_the_compiled_rule() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(
+        &app,
+        "PUT",
+        ACL,
+        s.ed,
+        &put("route:orders-api", json!({"allow": ["staff"]}), None),
+    )
+    .await;
+    assert_eq!(
+        plugins_on(&compiled(&store).await, COMPILED_ROUTE),
+        [Plugin::Acl(AclPolicy {
+            allow: vec!["staff".into()],
+            deny: vec![],
+        })]
+    );
+    let list = read(&app, ACL, s.vi).await;
+    assert_eq!(list[0]["target"], "route:orders-api");
+    assert_eq!(list[0]["config"], json!({"allow": ["staff"]}));
+    assert_eq!(
+        row(&app, ROUTES, "orders-api", s.vi).await["policies"]["acl"]["from"],
+        "route"
+    );
+
+    // A group no consumer could be in is named, and writes nothing.
+    let before = everything(&store).await;
+    let (status, answer) = send(
+        &app,
+        "PUT",
+        ACL,
+        Some(s.ed),
+        &put("workspace", json!({"deny": ["two words"]}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(parse(&answer)["field"], "deny");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusal wrote nothing"
+    );
+}
+
+/// An auth policy's anonymous consumer is one the workspace has when it is written: a name it does
+/// not have, or one only another workspace has, is refused beside the field and writes nothing.
+/// Compiled, the policy carries its workspace, and once the consumer is deleted it names nobody,
+/// so a caller without a credential is refused rather than admitted as a consumer that is gone.
+#[tokio::test]
+async fn an_auth_policy_names_a_consumer_the_workspace_has() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    store
+        .client()
+        .await
+        .unwrap()
+        .execute(
+            "insert into consumers (workspace_id, username)
+             select id, 'outsider' from workspaces where name = 'payments'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let before = everything(&store).await;
+    for name in ["guest", "outsider"] {
+        let (status, answer) = send(
+            &app,
+            "PUT",
+            AUTH,
+            Some(s.ed),
+            &put("route:orders-api", json!({ "anonymous": name }), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {answer}");
+        let answer = parse(&answer);
+        assert_eq!(answer["field"], "anonymous", "{answer}");
+        assert!(
+            answer["error"].as_str().unwrap().starts_with(&format!(
+                "There is no consumer named {name} in this workspace."
+            )),
+            "{answer}"
+        );
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"guest"}"#).await;
+    ok(
+        &app,
+        "PUT",
+        AUTH,
+        s.ed,
+        &put("route:orders-api", json!({"anonymous": "guest"}), None),
+    )
+    .await;
+    assert_eq!(
+        auth_on(&compiled(&store).await),
+        Some(AuthPolicy {
+            anonymous: Some("guest".into()),
+            workspace: Some("default".into()),
+        })
+    );
+    assert_eq!(
+        read(&app, AUTH, s.vi).await[0]["config"],
+        json!({"anonymous": "guest"})
+    );
+
+    ok(&app, "DELETE", &format!("{CONSUMERS}/guest"), s.ada, "").await;
+    assert_eq!(
+        auth_on(&compiled(&store).await),
+        Some(AuthPolicy {
+            anonymous: None,
+            workspace: Some("default".into()),
+        }),
+        "a deleted anonymous consumer is nobody"
+    );
+
+    // With nobody named, it needs no consumer.
+    let read_at = read(&app, AUTH, s.vi).await[0]["updated_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ok(
+        &app,
+        "PUT",
+        AUTH,
+        s.ed,
+        &put("route:orders-api", json!({}), Some(&read_at)),
+    )
+    .await;
+    assert_eq!(read(&app, AUTH, s.vi).await[0]["config"], json!({}));
+}
+
+/// A viewer reads auth and acl policies and writes neither.
+#[tokio::test]
+async fn a_viewer_writes_no_auth_or_acl_policy() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let before = everything(&store).await;
+    for (path, config) in [(AUTH, json!({})), (ACL, json!({"allow": ["staff"]}))] {
+        let (status, answer) = send(
+            &app,
+            "PUT",
+            path,
+            Some(s.vi),
+            &put("workspace", config, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {answer}");
+        assert_eq!(
+            sentence(&answer),
+            "Making changes in this workspace needs the editor role."
+        );
+        assert_eq!(read(&app, path, s.vi).await, json!([]));
+    }
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
     );
 }
 
