@@ -1,5 +1,5 @@
-//! Consumers, their keys, and key_auth, JWT and rate_limit policies as the console reads and
-//! writes them.
+//! Consumers, their groups and keys, and key_auth, JWT and rate_limit policies as the console
+//! reads and writes them.
 //!
 //! Each write is one transaction in the services slice's order: rights re-read locked and
 //! decided by `configuration::allowed`; the changed row locked; one audit row. A key is stored as
@@ -19,7 +19,7 @@ use super::{hash, hex, Store, WriteError, PREFIX_LEN, RATE_LIMIT};
 use crate::configuration::Action;
 use crate::consumers::{
     shown_by, usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, Limit,
-    PolicyView, RateLimitView, Target,
+    PolicyView, RateLimitView, Target, MAX_GROUPS,
 };
 use crate::grants::Refusal;
 use anyhow::{Context, Result};
@@ -233,8 +233,8 @@ impl Store {
         let rows = client
             .query(
                 &format!(
-                    "select c.username as name, k.key_prefix, {} as created_at, {} as expires_at,
-                            coalesce(k.expires_at <= now(), false) as expired
+                    "select c.username as name, c.groups, k.key_prefix, {} as created_at,
+                            {} as expires_at, coalesce(k.expires_at <= now(), false) as expired
                        from consumers c left join consumer_keys k on k.consumer_id = c.id
                       where c.workspace_id = $1
                       order by c.username, k.created_at desc",
@@ -249,9 +249,13 @@ impl Store {
         for row in rows {
             let name: String = row.get("name");
             if out.last().is_none_or(|c| c.name != name) {
+                // Sorted here as well as when written, so a row SQL by hand wrote lists the same.
+                let mut groups: Vec<String> = row.get("groups");
+                groups.sort();
                 out.push(ConsumerView {
                     name,
                     keys: Vec::new(),
+                    groups,
                 });
             }
             if let Some(prefix) = row.get::<_, Option<String>>("key_prefix") {
@@ -412,6 +416,99 @@ impl Store {
                 workspace: Some(workspace),
                 before: Some(before),
                 after: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Puts the consumer called `name` in `group`, which needs the editor role. Already in it
+    /// writes nothing. One group per call, so two editors adding different groups never
+    /// overwrite each other's lists.
+    pub async fn add_group(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+        group: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_set_group(caller, workspace, name, group, true)).await
+    }
+
+    /// Takes the consumer called `name` out of `group`, which needs the editor role.
+    pub async fn remove_group(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+        group: &str,
+    ) -> Result<(), WriteError> {
+        retrying(move || self.try_set_group(caller, workspace, name, group, false)).await
+    }
+
+    /// Adds `group` to the consumer's when `member`, or takes it away. The consumer row is held
+    /// `for update` from the read of its groups to the write of the new list, so two calls on one
+    /// consumer take turns, and neither writes a list read before the other's change.
+    async fn try_set_group(
+        &self,
+        caller: Uuid,
+        workspace: Uuid,
+        name: &str,
+        group: &str,
+        member: bool,
+    ) -> Result<(), WriteError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let actor = decide(&tx, caller, workspace, Action::Write).await?;
+        let Some(row) = tx
+            .query_opt(
+                "select id, groups from consumers
+                  where workspace_id = $1 and username = $2 for update",
+                &[&workspace, &name],
+            )
+            .await?
+        else {
+            return Err(Refusal::NotFound(format!(
+                "There is no consumer named {name} in this workspace."
+            ))
+            .into());
+        };
+        let id: Uuid = row.get("id");
+        let before: Vec<String> = row.get("groups");
+        let mut after = before.clone();
+        match (member, before.iter().any(|g| g == group)) {
+            // Nothing to write, so nothing to audit and nothing for the data planes to reload.
+            (true, true) => return Ok(()),
+            (false, false) => {
+                return Err(Refusal::NotFound(format!("{name} is not in {group}.")).into())
+            }
+            (true, false) if before.len() >= MAX_GROUPS => {
+                return Err(Refusal::Conflict(format!(
+                    "{name} is already in {MAX_GROUPS} groups, the most a consumer may be in. \
+                     Take it out of one first."
+                ))
+                .into())
+            }
+            (true, false) => after.push(group.to_string()),
+            (false, true) => after.retain(|g| g != group),
+        }
+        after.sort();
+        tx.execute(
+            "update consumers set groups = $2 where id = $1",
+            &[&id, &after],
+        )
+        .await?;
+        audit(
+            &tx,
+            &actor,
+            Entry {
+                action: "update",
+                object_kind: "consumer",
+                object_id: Some(id),
+                workspace: Some(workspace),
+                before: Some(serde_json::json!({ "name": name, "groups": before })),
+                after: Some(serde_json::json!({ "name": name, "groups": after })),
             },
         )
         .await?;

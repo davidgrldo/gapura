@@ -173,6 +173,63 @@ pub async fn revoke_key(
     }
 }
 
+/// `PUT /api/workspaces/{ws}/consumers/{name}/groups/{group}`: put a consumer in a group. Already
+/// in it is a success that writes nothing.
+pub async fn add_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<(String, String, String)>, PathRejection>,
+) -> Response {
+    set_group(state, headers, path, true).await
+}
+
+/// `DELETE /api/workspaces/{ws}/consumers/{name}/groups/{group}`: take a consumer out of one.
+pub async fn remove_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<(String, String, String)>, PathRejection>,
+) -> Response {
+    set_group(state, headers, path, false).await
+}
+
+/// Both group writes, which need the editor role: the group is named in the path, so there is no
+/// body to read.
+async fn set_group(
+    state: AppState,
+    headers: HeaderMap,
+    path: Result<Path<(String, String, String)>, PathRejection>,
+    member: bool,
+) -> Response {
+    let (store, caller) = match caller_of(&state, &headers).await {
+        Ok(found) => found,
+        Err(status) => return early(status),
+    };
+    let Ok(Path((ws, name, group))) = path else {
+        return unnamed();
+    };
+    let workspace = match workspace_in(&caller, &ws, Action::Write) {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    if let Some(r) = refuse_name("consumer", &name) {
+        return r;
+    }
+    let group = match consumers::group(&group) {
+        Ok(g) => g,
+        Err(e) => return field_error(e),
+    };
+    let done = if member {
+        store
+            .add_group(caller.me.id, workspace, &name, &group)
+            .await
+    } else {
+        store
+            .remove_group(caller.me.id, workspace, &name, &group)
+            .await
+    };
+    written(done)
+}
+
 /// `GET /api/workspaces/{ws}/key-auth`: where the workspace requires a key, and the header it is
 /// read from.
 pub async fn list_key_auth(

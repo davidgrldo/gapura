@@ -39,6 +39,32 @@ pub fn consumer(input: ConsumerInput) -> Result<String, FieldError> {
     configuration::name(&input.name, "name")
 }
 
+/// The longest group name.
+pub const MAX_GROUP_CHARS: usize = 64;
+/// The most groups one consumer is in: the data plane tells an upstream every one of them in
+/// `x-consumer-groups` on each request, so this bounds that header.
+pub const MAX_GROUPS: usize = 32;
+
+/// A group name: 1 to `MAX_GROUP_CHARS` of letters, digits and `. _ : -`. Those are what an HTTP
+/// header value and a URL path segment carry unescaped, so `x-consumer-groups` lists names with
+/// no comma inside one, and the path that adds a group names it as it is.
+pub fn group(name: &str) -> Result<String, FieldError> {
+    let ok = (1..=MAX_GROUP_CHARS).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_:".contains(&b));
+    if ok {
+        Ok(name.to_string())
+    } else {
+        Err(field(
+            "group",
+            format!(
+                "Name a group in 1 to {MAX_GROUP_CHARS} letters, digits, dots, dashes, underscores or colons."
+            ),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyInput {
@@ -558,6 +584,8 @@ pub struct KeyView {
 pub struct ConsumerView {
     pub name: String,
     pub keys: Vec<KeyView>,
+    /// The groups it is in, sorted, which an acl policy admits or refuses it by.
+    pub groups: Vec<String>,
 }
 
 /// What issuing answers with, the only time the key itself is shown.
@@ -610,6 +638,19 @@ mod tests {
                 .field,
             "name"
         );
+    }
+
+    #[test]
+    fn a_group_is_a_short_name_a_header_and_a_path_carry_as_they_are() {
+        let longest = "x".repeat(MAX_GROUP_CHARS);
+        for good in ["staff", "team.orders", "tier:gold", "a_b-c", &longest] {
+            assert_eq!(group(good), Ok(good.to_string()), "{good}");
+        }
+        let too_long = "x".repeat(MAX_GROUP_CHARS + 1);
+        for bad in ["", "two words", "a,b", "ü", "a/b", &too_long] {
+            let e = group(bad).unwrap_err();
+            assert_eq!(e.field, "group", "{bad}");
+        }
     }
 
     #[test]

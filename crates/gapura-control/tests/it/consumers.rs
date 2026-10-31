@@ -875,6 +875,8 @@ async fn no_role_is_403_everywhere() {
             ("DELETE", "/consumers/web", ""),
             ("POST", "/consumers/web/keys", ""),
             ("DELETE", "/consumers/web/keys/gpak_00000000", ""),
+            ("PUT", "/consumers/web/groups/staff", ""),
+            ("DELETE", "/consumers/web/groups/staff", ""),
             ("GET", "/key-auth", ""),
             ("PUT", "/key-auth", r#"{"target":"workspace"}"#),
             ("DELETE", "/key-auth?target=workspace", ""),
@@ -1260,6 +1262,186 @@ async fn every_consumer_reaches_the_configuration_with_its_groups() {
     assert_eq!(config.consumers["payments/mobile"], ["partners"]);
     assert!(config.consumers["default/guest"].is_empty());
     assert_eq!(config.consumers.len(), 3, "{:?}", config.consumers);
+}
+
+/// The consumer audit entries that changed a consumer's groups, oldest first: who, before, after.
+async fn group_audits(store: &Store) -> Vec<(String, serde_json::Value, serde_json::Value)> {
+    store
+        .client()
+        .await
+        .unwrap()
+        .query(
+            "select actor_name, before, after from audit_log
+              where object_kind = 'consumer' and action = 'update' order by id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect()
+}
+
+/// An editor puts a consumer in a group by naming it in the path, and the list and the compiled
+/// configuration show it. Putting it in again is a success that writes nothing, so a console that
+/// sends the same request twice records one change. Taking it out is audited as the change it is.
+#[tokio::test]
+async fn a_consumer_is_put_in_a_group_once_and_taken_out_again() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    assert_eq!(
+        row(&app, CONSUMERS, "mobile", s.vi).await["groups"],
+        serde_json::json!([]),
+        "a consumer starts in no group"
+    );
+    let staff = format!("{CONSUMERS}/mobile/groups/staff");
+    ok(&app, "PUT", &staff, s.ed, "").await;
+    let before = everything(&store).await;
+    ok(&app, "PUT", &staff, s.ed, "").await;
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "already in it writes nothing"
+    );
+    assert_eq!(
+        group_audits(&store).await,
+        vec![(
+            "ed".to_string(),
+            serde_json::json!({"name": "mobile", "groups": []}),
+            serde_json::json!({"name": "mobile", "groups": ["staff"]}),
+        )]
+    );
+    assert_eq!(
+        row(&app, CONSUMERS, "mobile", s.vi).await["groups"],
+        serde_json::json!(["staff"])
+    );
+    assert_eq!(
+        compiled(&store).await.consumers["default/mobile"],
+        ["staff"]
+    );
+
+    // Kept sorted whatever order they were added in.
+    ok(
+        &app,
+        "PUT",
+        &format!("{CONSUMERS}/mobile/groups/ops"),
+        s.ed,
+        "",
+    )
+    .await;
+    assert_eq!(
+        row(&app, CONSUMERS, "mobile", s.vi).await["groups"],
+        serde_json::json!(["ops", "staff"])
+    );
+
+    ok(&app, "DELETE", &staff, s.ed, "").await;
+    assert_eq!(
+        row(&app, CONSUMERS, "mobile", s.vi).await["groups"],
+        serde_json::json!(["ops"])
+    );
+    assert_eq!(compiled(&store).await.consumers["default/mobile"], ["ops"]);
+    assert_eq!(
+        group_audits(&store).await.last().unwrap(),
+        &(
+            "ed".to_string(),
+            serde_json::json!({"name": "mobile", "groups": ["ops", "staff"]}),
+            serde_json::json!({"name": "mobile", "groups": ["ops"]}),
+        )
+    );
+}
+
+/// A viewer may not change a consumer's groups; a name no group can have, a consumer that does
+/// not exist, a group it is not in and a group past the most it may be in are each refused and
+/// said why. None of them writes anything.
+#[tokio::test]
+async fn a_group_change_that_is_refused_writes_nothing() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    for i in 1..gapura_control::consumers::MAX_GROUPS {
+        ok(
+            &app,
+            "PUT",
+            &format!("{CONSUMERS}/mobile/groups/g{i:02}"),
+            s.ed,
+            "",
+        )
+        .await;
+    }
+    let before = everything(&store).await;
+    let refused = |method: &'static str, tail: &str, as_: Uuid| {
+        let path = format!("{CONSUMERS}/{tail}");
+        let app = app.clone();
+        async move {
+            let (status, answer) = send(&app, method, &path, Some(as_), FROM_THE_CONSOLE, "").await;
+            (status, json(&answer))
+        }
+    };
+
+    let editor = "Making changes in this workspace needs the editor role.";
+    for method in ["PUT", "DELETE"] {
+        let (status, answer) = refused(method, "mobile/groups/g01", s.vi).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {answer}");
+        assert_eq!(answer["error"], editor);
+
+        let (status, answer) = refused(method, "mobile/groups/two%20words", s.ed).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method}: {answer}");
+        assert_eq!(answer["field"], "group");
+
+        let (status, answer) = refused(method, "nobody/groups/staff", s.ed).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {answer}");
+        assert_eq!(
+            answer["error"],
+            "There is no consumer named nobody in this workspace."
+        );
+    }
+    let (status, answer) = refused("DELETE", "mobile/groups/staff", s.ed).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+    assert_eq!(answer["error"], "mobile is not in staff.");
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusals wrote nothing"
+    );
+
+    // The last group it may be in is taken; one more is refused.
+    ok(
+        &app,
+        "PUT",
+        &format!("{CONSUMERS}/mobile/groups/last"),
+        s.ed,
+        "",
+    )
+    .await;
+    let before = everything(&store).await;
+    let (status, answer) = refused("PUT", "mobile/groups/one-more", s.ed).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("mobile is already in 32 groups"),
+        "{answer}"
+    );
+    assert_eq!(
+        everything(&store).await,
+        before,
+        "the refusal wrote nothing"
+    );
+    assert_eq!(
+        row(&app, CONSUMERS, "mobile", s.vi).await["groups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        gapura_control::consumers::MAX_GROUPS
+    );
 }
 
 #[tokio::test]

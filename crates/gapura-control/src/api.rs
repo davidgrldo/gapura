@@ -149,6 +149,11 @@ pub fn router_with(state: AppState) -> Router {
             "/api/workspaces/{ws}/consumers/{name}/keys/{prefix}",
             delete(crate::consumers_api::revoke_key),
         )
+        // The group is named in the path, so neither reads a body.
+        .route(
+            "/api/workspaces/{ws}/consumers/{name}/groups/{group}",
+            put(crate::consumers_api::add_group).delete(crate::consumers_api::remove_group),
+        )
         .route(
             "/api/workspaces/{ws}/key-auth",
             get(crate::consumers_api::list_key_auth)
