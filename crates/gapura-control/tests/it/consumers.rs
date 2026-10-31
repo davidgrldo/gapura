@@ -1214,6 +1214,54 @@ async fn bad_input_is_named() {
     );
 }
 
+/// Every consumer of every workspace is in the compiled configuration under its
+/// `workspace/username`, with the groups it carries sorted, and one with none is there with an
+/// empty list: it is what a jwt claim and an auth policy's anonymous consumer are looked up in, so
+/// a consumer left out for having no groups would be one no token could name.
+#[tokio::test]
+async fn every_consumer_reaches_the_configuration_with_its_groups() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"mobile"}"#).await;
+    ok(&app, "POST", CONSUMERS, s.ed, r#"{"name":"guest"}"#).await;
+    ok(
+        &app,
+        "POST",
+        PAYMENTS_CONSUMERS,
+        s.root,
+        r#"{"name":"mobile"}"#,
+    )
+    .await;
+    assert!(
+        compiled(&store)
+            .await
+            .consumers
+            .values()
+            .all(|groups| groups.is_empty()),
+        "a consumer starts with no groups"
+    );
+
+    // Groups are set by SQL here: the endpoints that write them come after the column.
+    let db = store.client().await.unwrap();
+    db.batch_execute(
+        r#"update consumers set groups = '{staff,ops}'
+            where username = 'mobile' and workspace_id = (select id from workspaces where name = 'default');
+           update consumers set groups = '{partners}'
+            where username = 'mobile' and workspace_id = (select id from workspaces where name = 'payments');"#,
+    )
+    .await
+    .unwrap();
+
+    let config = compiled(&store).await;
+    assert_eq!(config.consumers["default/mobile"], ["ops", "staff"]);
+    assert_eq!(config.consumers["payments/mobile"], ["partners"]);
+    assert!(config.consumers["default/guest"].is_empty());
+    assert_eq!(config.consumers.len(), 3, "{:?}", config.consumers);
+}
+
 #[tokio::test]
 async fn kubernetes_mode_has_none_of_it() {
     let app = console(None);
