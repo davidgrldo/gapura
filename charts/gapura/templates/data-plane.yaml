@@ -158,6 +158,9 @@ spec:
         - --listen-https=0.0.0.0:{{ $https }}
         - --admin=0.0.0.0:{{ $admin }}
         - --log-level={{ .Values.logLevel }}
+        {{- with (include "gapura.drainArg" . | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- if gt (int .Values.threads) 0 }}
         - --threads={{ .Values.threads }}
         {{- end }}

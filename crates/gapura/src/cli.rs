@@ -108,6 +108,13 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
 
+    /// Seconds to keep accepting connections after SIGTERM, with /readyz answering 503, before
+    /// the listeners close and in-flight requests drain. Long enough for a load balancer health
+    /// checking /readyz to stop sending here; it adds to the time a stop takes, so the
+    /// orchestrator's kill timeout must cover it. 0 closes the listeners at once.
+    #[arg(long, default_value_t = 0, value_name = "SECONDS")]
+    pub drain_seconds: u64,
+
     /// Read Gateway API resources from the Kubernetes API server (in-cluster, or $KUBECONFIG).
     #[arg(long)]
     pub kubernetes: bool,
