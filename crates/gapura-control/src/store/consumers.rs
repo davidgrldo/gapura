@@ -164,7 +164,9 @@ async fn policy_row(
 }
 
 /// The `{target, kind, issuer, audience, keys}` an audit row records of a JWT requirement, and its
-/// `jwks_uri` when it has one: what it asks for, never the keys themselves.
+/// `jwks_uri` and `consumer_claim` when it has them: what it asks for, never the keys themselves.
+/// Each is left out when absent, so a row reads as it did before a requirement could have it, and
+/// a change of the claim alone is not recorded as a change of nothing.
 fn jwt_audit(target: &Target, policy: &JwtPolicy) -> serde_json::Value {
     let mut audit = serde_json::json!({
         "target": target.as_text(),
@@ -175,6 +177,9 @@ fn jwt_audit(target: &Target, policy: &JwtPolicy) -> serde_json::Value {
     });
     if let Some(uri) = &policy.jwks_uri {
         audit["jwks_uri"] = serde_json::json!(uri);
+    }
+    if let Some(claim) = &policy.consumer_claim {
+        audit["consumer_claim"] = serde_json::json!(claim);
     }
     audit
 }
@@ -871,6 +876,7 @@ impl Store {
                     issuer: policy.issuer,
                     audience: policy.audience,
                     jwks_uri: policy.jwks_uri,
+                    consumer_claim: policy.consumer_claim,
                 })
             })
             .collect()
@@ -920,6 +926,7 @@ impl Store {
                 jwks: policy.jwks,
                 jwks_uri: policy.jwks_uri,
                 jwks_ca_pem: policy.jwks_ca_pem,
+                consumer_claim: policy.consumer_claim,
                 updated_at: row.get("updated_at"),
             })
         })

@@ -20,6 +20,9 @@ pub const MAX_CLAIM_CHARS: usize = 512;
 pub use gapura_core::jwt::MAX_JWKS_BYTES;
 /// The longest `jwks_uri` a JWT requirement may name.
 pub const MAX_JWKS_URI_CHARS: usize = 2048;
+/// The longest claim name a JWT requirement reads its consumer from: far past `sub`, `azp` or
+/// `client_id`, so it refuses only a mistake.
+pub const MAX_CONSUMER_CLAIM_CHARS: usize = 64;
 
 fn field(field: &str, sentence: impl Into<String>) -> FieldError {
     FieldError {
@@ -206,6 +209,9 @@ pub struct JwtInput {
     /// PEM CA certificates that verify `jwks_uri` in place of the public roots.
     #[serde(default)]
     pub jwks_ca_pem: Option<String>,
+    /// The claim that names the caller's consumer; absent names none.
+    #[serde(default)]
+    pub consumer_claim: Option<String>,
     /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
     /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
     /// does one sent when there is no requirement to replace.
@@ -246,6 +252,21 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
             "Leave the audience empty, or use 1 to {MAX_CLAIM_CHARS} characters with no control characters."
         ),
     )?;
+    let claim_rule = format!(
+        "Name the claim that holds the consumer's name, such as sub, in 1 to \
+         {MAX_CONSUMER_CLAIM_CHARS} characters with no control characters, or leave it empty."
+    );
+    let consumer_claim = claim(
+        input.consumer_claim.as_deref(),
+        "consumer_claim",
+        &claim_rule,
+    )?;
+    if consumer_claim
+        .as_ref()
+        .is_some_and(|c| c.chars().count() > MAX_CONSUMER_CLAIM_CHARS)
+    {
+        return Err(field("consumer_claim", claim_rule));
+    }
     let jwks = input.jwks.as_deref().filter(|d| !d.trim().is_empty());
     let jwks_uri = input
         .jwks_uri
@@ -277,6 +298,7 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
                 issuer: Some(issuer),
                 audience,
                 jwks: document.to_string(),
+                consumer_claim,
                 ..JwtPolicy::default()
             })
         }
@@ -286,6 +308,7 @@ pub fn jwt(input: &JwtInput) -> Result<JwtPolicy, FieldError> {
             jwks: String::new(),
             jwks_uri: Some(key_url(uri)?),
             jwks_ca_pem: configuration::ca_pem(jwks_ca_pem, "jwks_ca_pem")?,
+            consumer_claim,
             ..JwtPolicy::default()
         }),
     }
@@ -358,6 +381,10 @@ pub struct JwtView {
     pub keys: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks_uri: Option<String>,
+    /// The claim that names the caller's consumer, absent when the requirement names none, so a
+    /// row reads as it did before a requirement could.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_claim: Option<String>,
 }
 
 /// One target's JWT requirement with its JWKS or the URL it is fetched from, which the console
@@ -372,6 +399,8 @@ pub struct JwtDocument {
     pub jwks_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks_ca_pem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_claim: Option<String>,
     /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
     pub updated_at: String,
 }
@@ -735,8 +764,49 @@ mod tests {
             jwks: Some(jwks.into()),
             jwks_uri: None,
             jwks_ca_pem: None,
+            consumer_claim: None,
             seen_updated_at: None,
         }
+    }
+
+    #[test]
+    fn a_consumer_claim_is_a_claim_name_or_nothing() {
+        let input = |claim: Option<&str>| JwtInput {
+            consumer_claim: claim.map(str::to_string),
+            ..jwt_input(Some("i"), None, JWKS)
+        };
+        assert_eq!(
+            jwt(&input(Some(" sub ")))
+                .unwrap()
+                .consumer_claim
+                .as_deref(),
+            Some("sub")
+        );
+        assert_eq!(jwt(&input(Some("  "))).unwrap().consumer_claim, None);
+        assert_eq!(jwt(&input(None)).unwrap().consumer_claim, None);
+        let longest = "c".repeat(MAX_CONSUMER_CLAIM_CHARS);
+        assert_eq!(
+            jwt(&input(Some(&longest))).unwrap().consumer_claim,
+            Some(longest)
+        );
+        for bad in ["c".repeat(MAX_CONSUMER_CLAIM_CHARS + 1), "a\nb".to_string()] {
+            assert_eq!(
+                jwt(&input(Some(&bad))).unwrap_err().field,
+                "consumer_claim",
+                "{bad:?}"
+            );
+        }
+        // Keys fetched from a URL name a consumer the same way.
+        let fetched = JwtInput {
+            consumer_claim: Some("client_id".into()),
+            ..uri_input("https://idp.example/jwks", None)
+        };
+        assert_eq!(
+            jwt(&fetched).unwrap().consumer_claim.as_deref(),
+            Some("client_id")
+        );
+        // The store stamps the workspace when it compiles the policy, never the request.
+        assert_eq!(jwt(&input(Some("sub"))).unwrap().workspace, None);
     }
 
     /// RFC 7517's example P-256 public key.
