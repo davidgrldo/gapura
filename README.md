@@ -44,6 +44,11 @@ a separate control plane is optional rather than required:
   In store mode a request limit can also be a consumer's own -- everywhere, or on one route or
   service -- and can count per consumer or per value of a header as well as per address; a
   consumer's own limit comes before any limit on everyone, in Kong's order.
+  An `auth` policy lets a route take a JWT or an API key, whichever the caller presents (JWT
+  first), and names the consumer a caller with neither is, so that consumer's limit applies; an
+  `acl` policy admits or refuses consumers by group, and the upstream is told the groups in
+  `x-consumer-groups`. A JWT requirement's `consumer_claim` names the caller's consumer from the
+  token.
 - **Operations**: Prometheus metrics, a JSON access log carrying trace context and the client
   address as seen behind trusted proxies, export of that log to an HTTP endpoint and of a span per
   request to an OTLP collector, a Grafana dashboard and example alerts, status written only by the
@@ -78,11 +83,14 @@ and a key never changes meaning, so a client can match on it:
 | `AUTH_KEY_MISSING` | 401 | an API key policy found no key |
 | `AUTH_KEY_INVALID` | 401 | an API key policy found a key it does not accept |
 | `AUTH_JWT_MISSING` | 401 | a JWT policy found no bearer token |
-| `AUTH_JWT_INVALID` | 401 | a JWT policy found a token it does not accept |
+| `AUTH_JWT_INVALID` | 401 | a JWT policy found a token it does not accept, or one whose `consumer_claim` names no consumer |
+| `AUTH_MISSING` | 401 | an `auth` policy's JWT and API key policies found neither credential, and it names no anonymous consumer |
+| `AUTH_UNAVAILABLE` | 503 | a JWT policy was given a token but holds no key to check it with: its `jwks_uri` has not loaded |
 | `RATE_LIMITED` | 429 | the rule's rate limit is spent for this client |
 | `IP_FORBIDDEN` | 403 | an ip_restriction policy refused the client address |
 | `REQUEST_TOO_LARGE` | 413 | a request_size_limit policy refused the body, by its length or as it streamed |
 | `CORS_ORIGIN_FORBIDDEN` | 403 | a cors policy refused a preflight from an origin it does not allow |
+| `ACL_FORBIDDEN` | 403 | an acl policy refused the consumer's groups, or a request no policy identified |
 | `UPSTREAM_CONNECT_TIMEOUT` | 504 | connecting to the upstream timed out |
 | `UPSTREAM_TIMEOUT` | 504 | the upstream went quiet past the rule's timeout, or the request's budget ran out |
 | `UPSTREAM_CONNECT_ERROR` | 502 | the upstream refused the connection or could not be reached |
