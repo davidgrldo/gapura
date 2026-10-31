@@ -2995,6 +2995,8 @@ async fn a_jwks_uri_that_never_loads_refuses_every_token() {
     let r = guarded(&gw, &signed_by(&ec_key("any"))).await;
     assert_eq!(r.status(), 503);
     assert_eq!(r.headers()["x-gapura-error"], "AUTH_UNAVAILABLE");
+    assert_eq!(r.headers()["retry-after"], "30");
+    assert!(r.headers().get("www-authenticate").is_none());
     wait_for_metric(
         &gw,
         &format!("gapura_jwks_last_success_timestamp_seconds{{uri=\"{uri}\"}} 0"),
