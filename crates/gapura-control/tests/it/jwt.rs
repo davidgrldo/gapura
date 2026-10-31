@@ -364,7 +364,7 @@ async fn the_compiled_policy_accepts_tokens_from_its_own_keys_only() {
     );
     let keys = gapura_core::jwt::keys(&policy.jwks).expect("the stored JWKS reads");
     assert_eq!(keys.usable(), 1);
-    let verify = |t: &str| gapura_core::jwt::verify(&policy, &keys, Some(t));
+    let verify = |t: &str| gapura_core::jwt::verify(&policy, &keys, Some(t)).map(|_| ());
     assert_eq!(verify(&token(&ours, "k1", "orders")), Ok(()));
     assert_eq!(
         verify(&token(&theirs, "k1", "orders")),
