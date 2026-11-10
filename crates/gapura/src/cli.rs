@@ -79,6 +79,28 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub debug_token_file: Option<std::path::PathBuf>,
 
+    /// Redis that request limits with `scope: redis` count in, shared by every replica given the
+    /// same one: `redis://host:6379/0`, or `rediss://` for TLS. A standalone Redis (or Valkey);
+    /// not a cluster. Without it a `redis` limit counts as `split`, and the replica warns once.
+    #[arg(long, value_name = "URL")]
+    pub redis_url: Option<String>,
+
+    /// File holding the Redis password (AUTH), so it never reaches a process list; a password
+    /// in `--redis-url` works too, and this replaces it.
+    #[arg(long, value_name = "FILE", requires = "redis_url")]
+    pub redis_password_file: Option<std::path::PathBuf>,
+
+    /// PEM file of the CA that signed a `rediss://` server's certificate, trusted instead of the
+    /// system's roots.
+    #[arg(long, value_name = "FILE", requires = "redis_url")]
+    pub redis_ca: Option<std::path::PathBuf>,
+
+    /// How long a `redis` limit waits for Redis before counting the request as `split`
+    /// instead. It is added to every such request's latency while Redis is slow, so keep it
+    /// short.
+    #[arg(long, value_name = "MS", default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=5_000))]
+    pub redis_timeout_ms: u64,
+
     /// POST every access-log line here as well, in batches as a JSON array, through a bounded
     /// queue per replica that drops its oldest entries when the endpoint cannot keep up (counted
     /// in `gapura_log_dropped_total`). An `https` endpoint's certificate is always verified

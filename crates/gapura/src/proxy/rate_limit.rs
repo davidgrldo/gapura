@@ -1,24 +1,28 @@
-//! Per-replica request limits. One fixed window per (window name, client), aligned to the epoch
-//! so every replica and every restart slices time identically. The window name is the rule's, or
-//! the rule's and the consumer's for a consumer's own limit, which counts apart from the rule
-//! everyone else shares; the client is what the limit counts by -- an address, a consumer or a
-//! header's value, see [`Client`]. The project has no database,
-//! so counts are per replica: with N replicas the effective allowance is N x limit, which is the
-//! documented semantics, not a bug to fix with state.
+//! Request limits counted on this replica. One fixed window per (window name, client), aligned to
+//! the epoch so every replica and every restart slices time identically. The window name is the
+//! rule's, or the rule's and the consumer's for a consumer's own limit, which counts apart from
+//! the rule everyone else shares; the client is what the limit counts by -- an address, a consumer
+//! or a header's value, see [`Client`].
+//!
+//! What a replica allows in a window is the caller's to say ([`RateLimiter::check`]): all of the
+//! limit for a `replica` scope, its [`share`] of it for `split`, and its share again while a
+//! `redis` limit cannot reach Redis, whose own count is [`super::shared_limit`]'s.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gapura_core::config::{LimitBy, RateLimit};
+use gapura_core::config::LimitBy;
+#[cfg(test)]
+use gapura_core::config::RateLimit;
 use sha2::{Digest, Sha256};
 
 /// What `check` decided for one request.
 #[derive(Debug)]
 pub enum Outcome {
     Allowed,
-    Limited { limit: u32, retry_after_secs: u64 },
+    Limited { retry_after_secs: u64 },
 }
 
 /// Who one window counts: what the rule's [`LimitBy`] names, for one request. An enum rather
@@ -159,6 +163,22 @@ fn add_header_window(counts: &mut HashMap<String, usize>, window: &str) {
     }
 }
 
+/// What a `split` limit allows on one of `replicas` replicas: the limit divided by them, rounded
+/// up, so that no replica allows nothing and the gateway as a whole allows at most
+/// `replicas - 1` more than the limit.
+pub fn share(limit: u32, replicas: u32) -> u32 {
+    limit.div_ceil(replicas.max(1))
+}
+
+/// A client as every count keys it: an address grouped as [`grouped`] does, anything else as it
+/// is. Public for the Redis count, whose keys must name the same client this table would.
+pub fn canonical(client: Client) -> Client {
+    match client {
+        Client::Ip(addr) => Client::Ip(grouped(addr)),
+        named => named,
+    }
+}
+
 /// The address a limit counts a client by. An IPv6 /64 is the granularity an address limit
 /// works at: without this, a client rotating source addresses inside one /64 gets a fresh
 /// window per address (#189), which makes the limit effectively off for IPv6 and fills the map
@@ -172,6 +192,14 @@ fn grouped(ip: IpAddr) -> IpAddr {
         }
         v4 => v4,
     }
+}
+
+/// Now, in epoch milliseconds; `0` on a clock set before 1970.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub struct RateLimiter {
@@ -192,23 +220,22 @@ impl Default for RateLimiter {
 }
 
 impl RateLimiter {
-    /// Counts one request of `client` against `rl` under the window name `window`. `ip` is the
-    /// request's own address, which only the header cap needs: past `HEADER_WINDOWS` a new
-    /// header value counts by it instead of opening one more window.
+    /// Counts one request of `client` under the window name `window`, in windows of `window_ms`,
+    /// allowing `allowance` of them in each: the whole limit, or this replica's share of it. `ip`
+    /// is the request's own address, which only the header cap needs: past `HEADER_WINDOWS` a
+    /// new header value counts by it instead of opening one more window.
     pub fn check(
         &self,
         window: &str,
         client: impl Into<Client>,
         ip: Option<IpAddr>,
-        rl: &RateLimit,
+        window_ms: u64,
+        allowance: u32,
     ) -> Outcome {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        self.check_at(window, client, ip, rl, now_ms)
+        self.count_at(window, client, ip, window_ms, allowance, now_ms())
     }
 
+    #[cfg(test)]
     fn check_at(
         &self,
         window: &str,
@@ -217,14 +244,22 @@ impl RateLimiter {
         rl: &RateLimit,
         now_ms: u64,
     ) -> Outcome {
-        let window_ms = rl.window_ms.max(1);
+        self.count_at(window, client, ip, rl.window_ms, rl.limit, now_ms)
+    }
+
+    fn count_at(
+        &self,
+        window: &str,
+        client: impl Into<Client>,
+        ip: Option<IpAddr>,
+        window_ms: u64,
+        allowance: u32,
+        now_ms: u64,
+    ) -> Outcome {
+        let window_ms = window_ms.max(1);
         let ends_ms = (now_ms / window_ms + 1) * window_ms;
         // The key is built once, before the lock every worker shares is taken.
-        let client = match client.into() {
-            Client::Ip(addr) => Client::Ip(grouped(addr)),
-            named => named,
-        };
-        let mut key = (window.to_string(), client);
+        let mut key = (window.to_string(), canonical(client.into()));
         // Set when this call swept because `window`'s header windows were full and found them
         // still full. Logged after the lock is released: a subscriber that blocks on its
         // output must not hold up every worker's limit check.
@@ -270,9 +305,8 @@ impl RateLimiter {
             if w.ends_ms != ends_ms {
                 *w = Window { ends_ms, count: 0 };
             }
-            if w.count >= rl.limit {
+            if w.count >= allowance {
                 Outcome::Limited {
-                    limit: rl.limit,
                     retry_after_secs: ((ends_ms.saturating_sub(now_ms)) / 1000).max(1),
                 }
             } else {
@@ -299,7 +333,39 @@ mod tests {
             limit,
             window_ms,
             by: gapura_core::config::LimitBy::Ip,
+            scope: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_share_rounds_up_and_is_never_nothing() {
+        assert_eq!(share(100, 1), 100);
+        assert_eq!(share(100, 3), 34, "three replicas allow 102 between them");
+        assert_eq!(
+            share(5, 10),
+            1,
+            "a small limit across many replicas still admits one each"
+        );
+        assert_eq!(share(7, 0), 7, "no count is one replica");
+    }
+
+    /// The allowance is the caller's: a replica given its share trips at the share, and says so.
+    #[test]
+    fn a_replica_allows_what_it_is_given() {
+        let l = RateLimiter::default();
+        let ip: IpAddr = "198.51.100.1".parse().unwrap();
+        let allowance = share(10, 4);
+        for _ in 0..allowance {
+            assert!(matches!(
+                l.count_at("r", ip, None, 60_000, allowance, 1_000),
+                Outcome::Allowed
+            ));
+        }
+        assert_eq!(allowance, 3);
+        assert!(matches!(
+            l.count_at("r", ip, None, 60_000, allowance, 1_000),
+            Outcome::Limited { .. }
+        ));
     }
 
     #[test]
@@ -313,11 +379,7 @@ mod tests {
             ));
         }
         match l.check_at("r", ip, None, &rl(3, 60_000), 2_000) {
-            Outcome::Limited {
-                limit,
-                retry_after_secs,
-            } => {
-                assert_eq!(limit, 3);
+            Outcome::Limited { retry_after_secs } => {
                 assert_eq!(retry_after_secs, 58, "the rest of this minute's window");
             }
             o => panic!("expected Limited, got {o:?}"),
@@ -399,11 +461,7 @@ mod tests {
             "the flood must have triggered a sweep"
         );
         match l.check_at("login", victim, None, &login, now) {
-            Outcome::Limited {
-                limit,
-                retry_after_secs,
-            } => {
-                assert_eq!(limit, 5);
+            Outcome::Limited { retry_after_secs } => {
                 assert_eq!(retry_after_secs, 3_599);
             }
             o => panic!("the login window must survive the sweep, got {o:?}"),

@@ -61,6 +61,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # would cost every image another toolchain for a few signature checks. No `use_pem`: keys arrive
 # as JWKS documents, never as PEM.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+# The data plane's `redis` request limits. No default features: only the async client, its
+# reconnecting ConnectionManager, scripts, and rustls for `rediss://` on the ring provider the
+# workspace already builds. No cluster or sentinel support.
+redis = { version = "1.8", default-features = false, features = ["tokio-comp", "connection-manager", "script", "tokio-rustls-comp"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

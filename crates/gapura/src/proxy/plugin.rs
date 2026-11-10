@@ -13,8 +13,8 @@
 use std::net::IpAddr;
 
 use gapura_core::config::{
-    AclPolicy, Body, CorsPolicy, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy, Phase,
-    Plugin, RequestTransformerPolicy, RouteRule,
+    AclPolicy, Body, CorsPolicy, HeaderEdits, IpRestrictionPolicy, JwtPolicy, KeyAuthPolicy,
+    LimitScope, Phase, Plugin, RequestTransformerPolicy, RouteRule,
 };
 use gapura_core::credentials;
 use pingora::http::{RequestHeader, ResponseHeader};
@@ -370,8 +370,9 @@ impl Chain {
 
     /// Run the Access steps in order, up to the first that does not continue. `peer` is the
     /// connection's address, from which the client's is worked out only if a limit or an
-    /// ip_restriction step needs it.
-    pub fn access(
+    /// ip_restriction step needs it. Async for the limit alone, which may ask Redis; every
+    /// other step is decided here and now.
+    pub async fn access(
         &self,
         proxy: &GapuraProxy,
         rt: &Runtime,
@@ -382,7 +383,10 @@ impl Chain {
     ) -> Flow {
         for step in &self.access {
             let start = timing::start(&cx.timing);
-            let flow = step.run(proxy, rt, rule, req, peer, cx);
+            let flow = match step {
+                Access::RateLimit => limit(proxy, rt, rule, req, peer, cx).await,
+                step => step.run(proxy, rt, rule, req, peer, cx),
+            };
             timing::stop(&mut cx.timing, start, step.timing_name());
             if !matches!(flow, Flow::Continue) {
                 return flow;
@@ -761,7 +765,8 @@ impl Access {
                     _ => Flow::Continue,
                 }
             }
-            Access::RateLimit => limit(proxy, rt, rule, req, peer, cx),
+            // Run by `Chain::access`, which awaits it.
+            Access::RateLimit => unreachable!("the limit is awaited, not run"),
         }
     }
 }
@@ -939,7 +944,11 @@ fn client_of(proxy: &GapuraProxy, req: &RequestHeader, peer: Option<IpAddr>) -> 
 /// the access log records, so a limited request names the same client a served one would; a
 /// limit that counts by consumer or by a header's value counts that instead, which the log does
 /// not name.
-fn limit(
+///
+/// What this replica allows is the limit's [`LimitScope`]'s: all of it, its share, or whatever
+/// Redis says is left of it across every replica -- and its share again when Redis cannot say.
+/// `X-RateLimit-Limit` is the limit as configured either way, the allowance a client is told of.
+async fn limit(
     proxy: &GapuraProxy,
     rt: &Runtime,
     rule: &RouteRule,
@@ -966,12 +975,34 @@ fn limit(
     let Some(client) = rate_limit::client(&rl.by, ip, consumer, &req.headers) else {
         return Flow::Continue;
     };
-    match proxy.limiter.check(&window, client, ip, rl) {
+    let share = || rate_limit::share(rl.limit, proxy.store.replicas());
+    let outcome = match rl.scope {
+        LimitScope::Replica => proxy
+            .limiter
+            .check(&window, client, ip, rl.window_ms, rl.limit),
+        LimitScope::Split => proxy
+            .limiter
+            .check(&window, client, ip, rl.window_ms, share()),
+        LimitScope::Redis => match proxy
+            .shared
+            .check(&window, &client, rl.window_ms, rl.limit)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(why) => {
+                METRICS
+                    .rate_limit_redis_fallbacks_total
+                    .with_label_values(&[why.label()])
+                    .inc();
+                proxy
+                    .limiter
+                    .check(&window, client, ip, rl.window_ms, share())
+            }
+        },
+    };
+    match outcome {
         rate_limit::Outcome::Allowed => Flow::Continue,
-        rate_limit::Outcome::Limited {
-            limit,
-            retry_after_secs,
-        } => {
+        rate_limit::Outcome::Limited { retry_after_secs } => {
             METRICS
                 .rate_limited_total
                 .with_label_values(&[&route])
@@ -980,7 +1011,7 @@ fn limit(
                 key: ErrorKey::RateLimited,
                 headers: vec![
                     ("Retry-After", retry_after_secs.to_string()),
-                    ("X-RateLimit-Limit", limit.to_string()),
+                    ("X-RateLimit-Limit", rl.limit.to_string()),
                     ("X-RateLimit-Remaining", "0".to_string()),
                 ],
             })
@@ -1001,6 +1032,15 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use crate::store::Store;
+
+    /// The Access steps are async for the limit's sake, and nothing in these tests awaits
+    /// anything that needs a runtime: run a future to its end here.
+    trait Now: std::future::Future + Sized {
+        fn now(self) -> Self::Output {
+            futures::executor::block_on(self)
+        }
+    }
+    impl<F: std::future::Future> Now for F {}
 
     const ALL: [Phase; 5] = [
         Phase::Access,
@@ -1090,6 +1130,7 @@ mod tests {
             limit: 1,
             window_ms: 60_000,
             by: LimitBy::Ip,
+            scope: Default::default(),
         });
         assert!(Chain::compile(&with_limit).is_ok());
     }
@@ -1100,6 +1141,7 @@ mod tests {
             trusted_proxies: vec![],
             trusted_client_headers: vec![],
             limiter: Default::default(),
+            shared: Default::default(),
             access_log_query: false,
             sinks: Default::default(),
             debug_token: None,
@@ -1166,7 +1208,9 @@ mod tests {
         ] {
             let r = rule(plugins);
             let chain = Chain::compile(&r).unwrap();
-            let flow = chain.access(&proxy(), &rt, &r, &get(), None, &mut RequestCtx::default());
+            let flow = chain
+                .access(&proxy(), &rt, &r, &get(), None, &mut RequestCtx::default())
+                .now();
             assert_eq!(refused(flow).key, ErrorKey::AuthJwtMissing);
         }
     }
@@ -1244,21 +1288,25 @@ mod tests {
         let rt = people(&r);
         let chain = Chain::compile(&r).unwrap();
         let mut cx = RequestCtx::default();
-        let flow = chain.access(&proxy(), &rt, &r, &bearer("mobile".into()), None, &mut cx);
+        let flow = chain
+            .access(&proxy(), &rt, &r, &bearer("mobile".into()), None, &mut cx)
+            .now();
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(
             cx.consumer.as_ref().map(|c| c.id.as_str()),
             Some("shop/mobile")
         );
         for sub in [serde_json::json!("nobody"), serde_json::json!(7)] {
-            let flow = chain.access(
-                &proxy(),
-                &rt,
-                &r,
-                &bearer(sub),
-                None,
-                &mut RequestCtx::default(),
-            );
+            let flow = chain
+                .access(
+                    &proxy(),
+                    &rt,
+                    &r,
+                    &bearer(sub),
+                    None,
+                    &mut RequestCtx::default(),
+                )
+                .now();
             assert_eq!(refused(flow).key, ErrorKey::AuthJwtInvalid);
         }
     }
@@ -1268,14 +1316,10 @@ mod tests {
         let r = rule(vec![Plugin::Jwt(jwt_policy(false))]);
         let rt = people(&r);
         let mut cx = RequestCtx::default();
-        let flow = Chain::compile(&r).unwrap().access(
-            &proxy(),
-            &rt,
-            &r,
-            &bearer("mobile".into()),
-            None,
-            &mut cx,
-        );
+        let flow = Chain::compile(&r)
+            .unwrap()
+            .access(&proxy(), &rt, &r, &bearer("mobile".into()), None, &mut cx)
+            .now();
         assert!(matches!(flow, Flow::Continue));
         assert!(cx.consumer.is_none());
     }
@@ -1298,7 +1342,8 @@ mod tests {
         let mut cx = RequestCtx::default();
         let flow = Chain::compile(r)
             .unwrap()
-            .access(&proxy(), &rt, r, req, None, &mut cx);
+            .access(&proxy(), &rt, r, req, None, &mut cx)
+            .now();
         (flow, cx)
     }
 
@@ -1544,14 +1589,16 @@ mod tests {
         let r = rule(vec![key_auth(None), ip_restriction(&[], &["192.0.2.0/24"])]);
         let chain = Chain::compile(&r).unwrap();
         let from = |ip: &str| {
-            chain.access(
-                &proxy(),
-                &rt,
-                &r,
-                &get(),
-                Some(ip.parse().unwrap()),
-                &mut RequestCtx::default(),
-            )
+            chain
+                .access(
+                    &proxy(),
+                    &rt,
+                    &r,
+                    &get(),
+                    Some(ip.parse().unwrap()),
+                    &mut RequestCtx::default(),
+                )
+                .now()
         };
         let failure = refused(from("192.0.2.9"));
         assert_eq!(failure.key, ErrorKey::IpForbidden);
@@ -1565,7 +1612,9 @@ mod tests {
         let rt = Runtime::new(Config::default(), 1, Vec::new());
         let r = rule(vec![ip_restriction(&["10.0.0.0/8"], &[])]);
         let chain = Chain::compile(&r).unwrap();
-        let flow = chain.access(&proxy(), &rt, &r, &get(), None, &mut RequestCtx::default());
+        let flow = chain
+            .access(&proxy(), &rt, &r, &get(), None, &mut RequestCtx::default())
+            .now();
         assert_eq!(refused(flow).key, ErrorKey::IpForbidden);
     }
 
@@ -1577,7 +1626,7 @@ mod tests {
         let mut req = get();
         req.insert_header("x-api-key", "k-1").unwrap();
         let mut cx = RequestCtx::default();
-        let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+        let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now();
         assert!(matches!(flow, Flow::Continue));
         let consumer = cx.consumer.expect("identified");
         assert_eq!(
@@ -1605,7 +1654,7 @@ mod tests {
             timing: Some(Box::default()),
             ..Default::default()
         };
-        let flow = chain.access(&proxy(), &rt, &r, &req, peer, &mut cx);
+        let flow = chain.access(&proxy(), &rt, &r, &req, peer, &mut cx).now();
         assert!(matches!(flow, Flow::Continue));
         let names: Vec<String> = cx
             .timing
@@ -1623,7 +1672,9 @@ mod tests {
             ]
         );
         let mut untimed = RequestCtx::default();
-        chain.access(&proxy(), &rt, &r, &req, peer, &mut untimed);
+        chain
+            .access(&proxy(), &rt, &r, &req, peer, &mut untimed)
+            .now();
         assert!(untimed.timing.is_none());
     }
 
@@ -1638,6 +1689,7 @@ mod tests {
                         limit: 1,
                         window_ms: 60_000,
                         by: LimitBy::Consumer,
+                        scope: Default::default(),
                     }),
                 },
             )]),
@@ -1650,7 +1702,7 @@ mod tests {
         req.insert_header("x-api-key", "k-1").unwrap();
         let run = || {
             let mut cx = RequestCtx::default();
-            chain.access(&proxy, &rt, &r, &req, None, &mut cx)
+            chain.access(&proxy, &rt, &r, &req, None, &mut cx).now()
         };
         assert!(matches!(run(), Flow::Continue));
         let failure = refused(run());
@@ -1696,7 +1748,9 @@ mod tests {
         let r = rule(vec![size_limit(10)]);
         let chain = Chain::compile(&r).unwrap();
         let run = |req: &RequestHeader| {
-            chain.access(&proxy(), &rt, &r, req, None, &mut RequestCtx::default())
+            chain
+                .access(&proxy(), &rt, &r, req, None, &mut RequestCtx::default())
+                .now()
         };
         let failure = refused(run(&with_length(11)));
         assert_eq!(failure.key, ErrorKey::RequestTooLarge);
@@ -1844,14 +1898,16 @@ mod tests {
         let rt = Runtime::new(Config::default(), 1, Vec::new());
         let r = rule(vec![size_limit(10), key_auth(None)]);
         let chain = Chain::compile(&r).unwrap();
-        let flow = chain.access(
-            &proxy(),
-            &rt,
-            &r,
-            &with_length(11),
-            None,
-            &mut RequestCtx::default(),
-        );
+        let flow = chain
+            .access(
+                &proxy(),
+                &rt,
+                &r,
+                &with_length(11),
+                None,
+                &mut RequestCtx::default(),
+            )
+            .now();
         assert_eq!(refused(flow).key, ErrorKey::AuthKeyMissing);
 
         let mut limited = rule(vec![size_limit(10)]);
@@ -1859,12 +1915,15 @@ mod tests {
             limit: 1,
             window_ms: 60_000,
             by: LimitBy::Ip,
+            scope: Default::default(),
         });
         let chain = Chain::compile(&limited).unwrap();
         let proxy = proxy();
         let run = |req: &RequestHeader| {
             let peer = Some("192.0.2.1".parse().unwrap());
-            chain.access(&proxy, &rt, &limited, req, peer, &mut RequestCtx::default())
+            chain
+                .access(&proxy, &rt, &limited, req, peer, &mut RequestCtx::default())
+                .now()
         };
         for _ in 0..2 {
             assert_eq!(
@@ -2029,7 +2088,8 @@ mod tests {
         req.insert_header("access-control-request-headers", "x-a, content-type")
             .unwrap();
         let mut cx = RequestCtx::default();
-        let Flow::Respond(mut resp) = chain.access(&proxy(), &rt, &r, &req, None, &mut cx) else {
+        let Flow::Respond(mut resp) = chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now()
+        else {
             panic!("not answered");
         };
         chain.response(&cx, &mut resp);
@@ -2050,7 +2110,7 @@ mod tests {
         let r = rule(vec![cors(|p| p.headers = vec!["x-b".into()])]);
         let chain = Chain::compile(&r).unwrap();
         let mut cx = RequestCtx::default();
-        let Flow::Respond(resp) = chain.access(&proxy(), &rt, &r, &req, None, &mut cx) else {
+        let Flow::Respond(resp) = chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now() else {
             panic!("not answered");
         };
         assert_eq!(header(&resp, "access-control-allow-headers"), Some("x-b"));
@@ -2063,14 +2123,16 @@ mod tests {
         let r = rule(vec![cors(|_| {})]);
         let chain = Chain::compile(&r).unwrap();
         let mut cx = RequestCtx::default();
-        let flow = chain.access(
-            &proxy(),
-            &rt,
-            &r,
-            &preflight("https://app.example"),
-            None,
-            &mut cx,
-        );
+        let flow = chain
+            .access(
+                &proxy(),
+                &rt,
+                &r,
+                &preflight("https://app.example"),
+                None,
+                &mut cx,
+            )
+            .now();
         let Flow::Respond(resp) = flow else {
             panic!("not answered");
         };
@@ -2097,7 +2159,7 @@ mod tests {
             two,
         ] {
             let mut cx = RequestCtx::default();
-            let failure = refused(chain.access(&proxy(), &rt, &r, &req, None, &mut cx));
+            let failure = refused(chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now());
             assert_eq!(failure.key, ErrorKey::CorsOriginForbidden);
             assert!(failure.headers.is_empty());
             // The 403 says it varies by origin, and allows none.
@@ -2117,7 +2179,7 @@ mod tests {
         let chain = Chain::compile(&r).unwrap();
         let mut cx = RequestCtx::default();
         let req = preflight("https://app.example");
-        let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+        let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now();
         assert_eq!(refused(flow).key, ErrorKey::AuthKeyMissing);
 
         let mut resp = ResponseHeader::build(200, None).unwrap();
@@ -2150,7 +2212,7 @@ mod tests {
                 req.insert_header("origin", origin).unwrap();
             }
             let mut cx = RequestCtx::default();
-            let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+            let flow = chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now();
             assert!(matches!(flow, Flow::Continue), "{origin:?}");
             let mut resp = ResponseHeader::build(200, None).unwrap();
             for (name, value) in [
@@ -2216,7 +2278,7 @@ mod tests {
         let mut req = get();
         req.insert_header("origin", "https://app.example").unwrap();
         let mut cx = RequestCtx::default();
-        chain.access(&proxy(), &rt, &r, &req, None, &mut cx);
+        chain.access(&proxy(), &rt, &r, &req, None, &mut cx).now();
         let mut resp = ResponseHeader::build(200, None).unwrap();
         chain.response(&cx, &mut resp);
         assert_eq!(header(&resp, "access-control-allow-origin"), None);

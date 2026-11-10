@@ -1,7 +1,7 @@
 //! Hot-swappable runtime state derived from a `Config`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
@@ -242,16 +242,24 @@ pub struct Store {
     /// cleared by the control source on its next tick. A flag rather than a channel: a burst of
     /// such tokens asks for one refetch, never one each, and the request path never waits.
     jwks_kid_miss: AtomicBool,
+    /// How many replicas this one counts itself among, which a `split` request limit divides
+    /// by; `0` until a source has said. Set by the source that knows: the ready endpoints of the
+    /// gateway's own Service under Kubernetes, the control plane's count in `--control-plane`
+    /// mode. Kept apart from the configuration, so a scale-out changes no configuration and
+    /// costs no reload.
+    replicas: AtomicU32,
 }
 
 impl Store {
     pub fn empty() -> Self {
+        METRICS.rate_limit_replicas.set(1);
         Self {
             current: ArcSwap::from_pointee(Runtime::new(Config::default(), 0, Vec::new())),
             ready: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             outliers: outlier::Registry::default(),
             jwks_kid_miss: AtomicBool::new(false),
+            replicas: AtomicU32::new(0),
         }
     }
 
@@ -311,6 +319,29 @@ impl Store {
     pub fn take_jwks_refresh(&self) -> bool {
         self.jwks_kid_miss.swap(false, Ordering::Relaxed)
     }
+
+    /// A source's count of the replicas this one is among. `0` is "cannot tell", which keeps
+    /// what was last said rather than undoing it: a source that briefly cannot count (a control
+    /// plane that predates the count, a Service whose endpoints are all unready while it rolls)
+    /// should not make every replica allow the whole limit meanwhile.
+    pub fn set_replicas(&self, replicas: u32) {
+        if replicas == 0 {
+            return;
+        }
+        if self.replicas.swap(replicas, Ordering::Relaxed) != replicas {
+            METRICS.rate_limit_replicas.set(i64::from(replicas));
+            tracing::info!(
+                replicas,
+                "split request limits now divide by this many replicas"
+            );
+        }
+    }
+
+    /// The replicas a `split` limit divides by: at least one, which is what a replica that has
+    /// not been told counts as.
+    pub fn replicas(&self) -> u32 {
+        self.replicas.load(Ordering::Relaxed).max(1)
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +362,18 @@ mod tests {
             tls,
             rules: vec![],
         }
+    }
+
+    #[test]
+    fn replicas_count_as_one_until_told_and_silence_keeps_the_last_count() {
+        let store = Store::empty();
+        assert_eq!(store.replicas(), 1);
+        store.set_replicas(3);
+        assert_eq!(store.replicas(), 3);
+        store.set_replicas(0);
+        assert_eq!(store.replicas(), 3, "cannot tell is not one");
+        store.set_replicas(2);
+        assert_eq!(store.replicas(), 2);
     }
 
     #[test]

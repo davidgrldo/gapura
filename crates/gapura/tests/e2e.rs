@@ -654,6 +654,16 @@ async fn start_store_gateway_with(
     snapshot: gapura_core::store::StoreSnapshot,
     extra: &[&str],
 ) -> Gateway {
+    start_store_gateway_counted(snapshot, extra, None).await
+}
+
+/// `start_store_gateway_with`, the stand-in also answering every poll with `replicas` as the
+/// count of this data plane's replicas, as a control plane does that counts them.
+async fn start_store_gateway_counted(
+    snapshot: gapura_core::store::StoreSnapshot,
+    extra: &[&str],
+    replicas: Option<&'static str>,
+) -> Gateway {
     let served = Arc::new(Mutex::new(String::new()));
     let body = Arc::clone(&served);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -667,6 +677,7 @@ async fn start_store_gateway_with(
             async move {
                 (
                     [("content-type", "application/json"), ("etag", "\"v1\"")],
+                    axum::response::AppendHeaders(replicas.map(|n| ("x-gapura-replicas", n))),
                     config,
                 )
             }
@@ -2737,6 +2748,7 @@ fn consumer_limited(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
         limit,
         window_ms: 3_600_000,
         by,
+        scope: Default::default(),
     };
     StoreSnapshot {
         services: vec![StoreService {
@@ -3642,6 +3654,7 @@ async fn a_caller_without_a_credential_is_the_anonymous_consumer_and_its_own_lim
             limit: 1,
             window_ms: 3_600_000,
             by: LimitBy::Ip,
+            scope: Default::default(),
         },
     }];
     let gw = start_store_gateway(snapshot).await;
@@ -3729,4 +3742,85 @@ async fn an_acl_admits_its_groups_and_refuses_the_rest_403() {
     let line = gw.access_log("acl-refused").await;
     assert_eq!(line["status"], 403, "{line}");
     assert_eq!(line["error_key"], "ACL_FORBIDDEN", "{line}");
+}
+
+/// Two routes to the echo upstream, `split` for /split and `replica` for /replica, each
+/// limited to 4 an hour per address on its own route. Hour windows, as in `consumer_limited`.
+fn scoped_limits(upstream: SocketAddr) -> gapura_core::store::StoreSnapshot {
+    use gapura_core::config::{LimitBy, LimitScope, PathMatch, Protocol, RateLimit};
+    use gapura_core::store::{StoreRateLimit, StoreRoute, StoreService, StoreSnapshot};
+    let route = |name: &str| StoreRoute {
+        workspace: "shop".into(),
+        name: name.into(),
+        service: "echo".into(),
+        hosts: vec!["echo.test".into()],
+        paths: vec![PathMatch::Prefix(format!("/{name}"))],
+        methods: vec![],
+        headers: vec![],
+        strip_path: false,
+        priority: 0,
+    };
+    let limit = |name: &str, scope| StoreRateLimit {
+        workspace: "shop".into(),
+        route: Some(name.into()),
+        service: None,
+        consumer: None,
+        limit: RateLimit {
+            limit: 4,
+            window_ms: 3_600_000,
+            by: LimitBy::Ip,
+            scope,
+        },
+    };
+    StoreSnapshot {
+        services: vec![StoreService {
+            workspace: "shop".into(),
+            name: "echo".into(),
+            protocol: Protocol::Http,
+            host: upstream.ip().to_string(),
+            port: upstream.port(),
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            tls_verify: true,
+            tls_ca_pem: None,
+            tls_sni: None,
+        }],
+        routes: vec![route("split"), route("replica")],
+        plugins: Vec::new(),
+        credentials: Vec::new(),
+        rate_limits: vec![
+            limit("split", LimitScope::Split),
+            limit("replica", LimitScope::Replica),
+        ],
+        consumers: Vec::new(),
+    }
+}
+
+/// The control plane says this data plane runs two replicas: a `split` limit of 4 then allows
+/// this replica 2, telling the client of the limit as configured, while a `replica` limit of 4
+/// allows all 4 here. And the count is on /metrics.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_split_limit_allows_this_replica_its_share() {
+    let upstream = spawn_upstream(TcpListener::bind("127.0.0.1:0").unwrap()).await;
+    let gw = start_store_gateway_counted(scoped_limits(upstream), &[], Some("2")).await;
+    let c = client(&gw);
+    let status = |path: &'static str| {
+        let req = c.get(url(&gw, "echo.test", path));
+        async move { req.send().await.unwrap() }
+    };
+    for i in 0..2 {
+        assert_eq!(status("/split").await.status(), 200, "split {i}");
+    }
+    let r = status("/split").await;
+    assert_eq!(r.status(), 429, "past this replica's share of 4 across 2");
+    assert_eq!(
+        r.headers()["x-ratelimit-limit"],
+        "4",
+        "the limit as configured"
+    );
+    for i in 0..4 {
+        assert_eq!(status("/replica").await.status(), 200, "replica {i}");
+    }
+    assert_eq!(status("/replica").await.status(), 429);
+    wait_for_metric(&gw, "gapura_rate_limit_replicas 2").await;
 }

@@ -36,6 +36,7 @@ sha2.workspace = true
 # A caret range (>= 1.2.2, < 2) starting at the version `url` already brings in, so the lock
 # resolves both to one copy and it adds nothing to the build.
 form_urlencoded = "1.2.2"
+redis.workspace = true
 
 [dev-dependencies]
 # Only the tests, to sign tokens; verifying is `gapura_core::jwt`'s.

@@ -89,6 +89,31 @@ impl BackgroundService for KubeSource {
     }
 }
 
+/// How many replicas serve behind `service`, the gateway's own (`--publish-service`): its ready
+/// endpoints, which is what a `split` request limit divides by. An endpoint with an address of
+/// each family is one replica, and a dual-stack Service's two families of slices are counted
+/// apart and the larger taken, so neither doubles the count. `0` with none ready -- this one
+/// included while it starts or drains -- which [`Store::set_replicas`] reads as "cannot tell".
+fn replicas(snapshot: &gapura_core::Snapshot, service: &ObjectRef) -> u32 {
+    let mut by_family: HashMap<&str, u32> = HashMap::new();
+    for slice in snapshot.endpoint_slices.values() {
+        let ours = slice.metadata.namespace.as_deref() == Some(service.namespace.as_str())
+            && slice.metadata.labels.get("kubernetes.io/service-name") == Some(&service.name);
+        if !ours {
+            continue;
+        }
+        let ready = slice
+            .endpoints
+            .iter()
+            .filter(|e| e.conditions.as_ref().and_then(|c| c.ready).unwrap_or(true))
+            .count();
+        *by_family
+            .entry(slice.address_type.as_deref().unwrap_or(""))
+            .or_default() += u32::try_from(ready).unwrap_or(u32::MAX);
+    }
+    by_family.into_values().max().unwrap_or(0)
+}
+
 impl KubeSource {
     async fn run(&self, mut shutdown: ShutdownWatch) -> anyhow::Result<Stopped> {
         let client = Client::try_default()
@@ -317,6 +342,9 @@ impl KubeSource {
             while let Ok(c) = rx.try_recv() {
                 dirty |= state.apply(c);
             }
+            if let Some(service) = &self.publish_service {
+                self.store.set_replicas(replicas(&state.snapshot, service));
+            }
             if !dirty || !state.synced_all(&watched) {
                 continue;
             }
@@ -360,5 +388,61 @@ impl KubeSource {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gateway's own Service across two slices and two families, beside another Service's.
+    const SLICES: &str = "apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: { name: gw-a, namespace: gapura-system, labels: { kubernetes.io/service-name: gapura } }
+addressType: IPv4
+endpoints:
+- { addresses: [10.0.0.1], conditions: { ready: true } }
+- { addresses: [10.0.0.2] }
+- { addresses: [10.0.0.3], conditions: { ready: false, terminating: true } }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: { name: gw-b, namespace: gapura-system, labels: { kubernetes.io/service-name: gapura } }
+addressType: IPv4
+endpoints:
+- { addresses: [10.0.0.4], conditions: { ready: true } }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: { name: gw-v6, namespace: gapura-system, labels: { kubernetes.io/service-name: gapura } }
+addressType: IPv6
+endpoints:
+- { addresses: ['fd00::1'], conditions: { ready: true } }
+- { addresses: ['fd00::2'], conditions: { ready: true } }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: { name: other, namespace: gapura-system, labels: { kubernetes.io/service-name: other } }
+addressType: IPv4
+endpoints:
+- { addresses: [10.0.1.1] }
+- { addresses: [10.0.1.2] }
+- { addresses: [10.0.1.3] }
+- { addresses: [10.0.1.4] }
+";
+
+    #[test]
+    fn replicas_are_the_ready_endpoints_of_the_gateways_own_service() {
+        let snap = gapura_core::Snapshot::from_yaml_docs(SLICES).unwrap();
+        assert_eq!(
+            replicas(&snap, &ObjectRef::new("gapura-system", "gapura")),
+            3,
+            "three ready IPv4 endpoints across two slices; the IPv6 family counts fewer of the same pods, and the larger is taken"
+        );
+        assert_eq!(
+            replicas(&snap, &ObjectRef::new("elsewhere", "gapura")),
+            0,
+            "no slices is cannot tell"
+        );
     }
 }
