@@ -26,11 +26,7 @@ use tower::ServiceExt;
 use crate::common::fresh_store;
 
 /// A fresh store, as `common::fresh_store` makes one, and the endpoint over it.
-async fn fixture() -> Option<(
-    Arc<Store>,
-    axum::Router,
-    tokio::sync::MutexGuard<'static, ()>,
-)> {
+async fn fixture() -> Option<(Arc<Store>, axum::Router, crate::common::Fresh)> {
     let (store, guard) = fresh_store().await?;
     let api = Arc::new(ConfigApi {
         store: store.clone(),
@@ -381,7 +377,7 @@ async fn replicas_migrating_at_once_all_start() {
         )
         .await
         .unwrap();
-    let url = std::env::var("GAPURA_TEST_DATABASE_URL").unwrap();
+    let url = crate::common::url();
     let (a, b, c) = tokio::join!(
         Store::connect(&url),
         Store::connect(&url),
@@ -601,10 +597,7 @@ async fn a_bad_configuration_certificate_stops_the_start_before_any_migration() 
                 "--config-tls-key",
                 "/nonexistent/key.pem",
             ])
-            .env(
-                "DATABASE_URL",
-                std::env::var("GAPURA_TEST_DATABASE_URL").unwrap(),
-            )
+            .env("DATABASE_URL", crate::common::url())
             .env("KUBECONFIG", &kubeconfig)
             .output(),
     )

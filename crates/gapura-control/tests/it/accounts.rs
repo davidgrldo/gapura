@@ -785,7 +785,7 @@ async fn a_sign_in_after_a_cut_off_stands_when_the_database_clock_runs_ahead() {
         )
         .await
         .unwrap();
-    let url = std::env::var("GAPURA_TEST_DATABASE_URL").unwrap();
+    let url = crate::common::url();
     let joiner = if url.contains('?') { '&' } else { '?' };
     let ahead = Arc::new(
         Store::connect(&format!(
