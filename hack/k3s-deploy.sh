@@ -15,6 +15,8 @@ cd "$(dirname "$0")/.."
 
 CLUSTER=${CLUSTER:-gapura-k3s}
 IMAGE=${IMAGE:-gapura:dev}
+# Set to 1 when $IMAGE is already built and loaded, as CI does with the image job's layer cache.
+SKIP_BUILD=${SKIP_BUILD:-0}
 NS=${NS:-gapura-system}
 HTTP_PORT=${HTTP_PORT:-30080}
 GWAPI=${GWAPI:-v1.6.2}
@@ -38,7 +40,9 @@ kubectl wait --for=condition=Established --timeout=60s \
   crd/httproutes.gateway.networking.k8s.io \
   crd/backendtlspolicies.gateway.networking.k8s.io
 
-docker build -t "$IMAGE" .
+if [ "$SKIP_BUILD" != 1 ]; then
+  docker build -t "$IMAGE" .
+fi
 
 # Import straight into the node's containerd: docker save, docker cp, k3s ctr import, with no
 # `k3d image import` in between. Its default mode loses a race between the tools node writing
