@@ -110,6 +110,9 @@
             <Table.Head>Status</Table.Head>
             <Table.Head>In sync</Table.Head>
             <Table.Head>Version</Table.Head>
+            <Table.Head class="text-right">
+              Replicas <span class="font-normal text-muted-foreground">(last 2 min)</span>
+            </Table.Head>
             <Table.Head>Configuration</Table.Head>
             <Table.Head>
               Address <span class="font-normal text-muted-foreground">(as the control plane sees it)</span>
@@ -141,6 +144,11 @@
               </Table.Cell>
               <Table.Cell class="font-mono">
                 {#if plane.build}{plane.build}{:else}<span class="font-sans text-muted-foreground">—</span>{/if}
+              </Table.Cell>
+              <!-- 0 is a data plane whose replicas do not name themselves (older releases): unknown,
+                   not none. -->
+              <Table.Cell class="text-right tabular-nums">
+                {#if plane.replicas > 0}{plane.replicas}{:else}<span class="text-muted-foreground">—</span>{/if}
               </Table.Cell>
               <Table.Cell class="font-mono">
                 {#if plane.config_tag}{plane.config_tag}{:else}<span class="font-sans text-muted-foreground">—</span>{/if}

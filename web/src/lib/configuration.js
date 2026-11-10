@@ -33,6 +33,21 @@ export function countedBy(by) {
   if (mode === 'header') return `per value of the ${header} header`
   return 'per client address'
 }
+// How a request limit is shared across the gateway's replicas, as config.rs's LimitScope names
+// them, the default first; web/check.mjs fails the build when the server names others.
+// `SCOPE_LABEL` is how the Shared select words each.
+export const SCOPE = ['split', 'replica', 'redis']
+export const SCOPE_LABEL = {
+  split: 'split between replicas',
+  replica: 'by each replica alone',
+  redis: 'in Redis, by every replica',
+}
+// How a list or a read-only line says how a limit is shared; `scope` is absent for `split`.
+export function sharedAs(scope) {
+  if (scope === 'replica') return 'by each replica alone'
+  if (scope === 'redis') return 'counted in Redis'
+  return 'split between replicas'
+}
 // An IP restriction's bound, as policies.rs's MAX_NETWORKS: addresses and networks, allow and
 // deny together. web/check.mjs fails the build when it drifts.
 export const MAX_NETWORKS = 1000
