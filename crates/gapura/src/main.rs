@@ -312,3 +312,5 @@ fn main() {
     });
     std::process::exit(0)
 }
+
+// CI timing probe; this PR is closed without merging.
