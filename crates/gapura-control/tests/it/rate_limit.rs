@@ -20,7 +20,7 @@ use axum::http::{Request, StatusCode};
 use gapura_control::session::{encode, Session};
 use gapura_control::state::AppState;
 use gapura_control::store::Store;
-use gapura_core::config::{Config, LimitBy, Plugin, RateLimit};
+use gapura_core::config::{Config, LimitBy, LimitScope, Plugin, RateLimit};
 use gapura_core::store::StoreSettings;
 use serde_json::json;
 use tower::ServiceExt;
@@ -328,6 +328,7 @@ fn per_minute(limit: u32) -> Option<RateLimit> {
         limit,
         window_ms: 60_000,
         by: LimitBy::Ip,
+        scope: Default::default(),
     })
 }
 
@@ -351,6 +352,7 @@ async fn the_compiled_rule_carries_the_limit() {
                 limit: 20,
                 window_ms,
                 by: LimitBy::Ip,
+                scope: Default::default(),
             }),
             "{per}"
         );
@@ -365,6 +367,7 @@ async fn the_compiled_rule_carries_the_limit() {
             limit: 1_000_000,
             window_ms: 3_600_000,
             by: LimitBy::Ip,
+            scope: Default::default(),
         })
     );
 }
@@ -903,6 +906,7 @@ async fn a_stored_limit_in_another_shape_fails_the_snapshot() {
             limit: 10,
             window_ms: 1_000,
             by: LimitBy::Ip,
+            scope: Default::default(),
         })
     );
     assert_eq!(policy_audits(&store).await.len(), 1);
@@ -1004,7 +1008,8 @@ async fn a_consumer_s_own_limit_reaches_the_compiled_table() {
         Some(RateLimit {
             limit: 3,
             window_ms: 1_000,
-            by: LimitBy::Ip
+            by: LimitBy::Ip,
+            scope: Default::default(),
         })
     );
     let mobile = &config.consumer_rate_limits["default/mobile"];
@@ -1013,7 +1018,8 @@ async fn a_consumer_s_own_limit_reaches_the_compiled_table() {
         RateLimit {
             limit: 7,
             window_ms: 60_000,
-            by: LimitBy::Consumer
+            by: LimitBy::Consumer,
+            scope: Default::default(),
         }
     );
     assert_eq!(
@@ -1021,7 +1027,8 @@ async fn a_consumer_s_own_limit_reaches_the_compiled_table() {
         Some(RateLimit {
             limit: 50,
             window_ms: 3_600_000,
-            by: LimitBy::Header("x-tenant".into())
+            by: LimitBy::Header("x-tenant".into()),
+            scope: Default::default(),
         })
     );
     assert_eq!(
@@ -1522,7 +1529,8 @@ async fn a_consumer_s_limit_on_a_service_reaches_its_routes_and_holds_the_servic
         RateLimit {
             limit: 9,
             window_ms: 60_000,
-            by: LimitBy::Consumer
+            by: LimitBy::Consumer,
+            scope: Default::default(),
         }
     );
     assert_eq!(mobile.any, None);
@@ -1575,4 +1583,67 @@ async fn a_consumer_s_limit_on_a_service_reaches_its_routes_and_holds_the_servic
          limits of their own here, which are removed from those consumers, not from the service.",
     )
     .await;
+}
+
+/// `scope` says how the data plane's replicas share a limit: absent is `split`, which is stored,
+/// listed and audited as a limit written before `scope` existed; `replica` and `redis` are
+/// stored, listed, audited and compiled as given; anything else is refused and writes nothing.
+#[tokio::test]
+async fn a_limit_s_scope_is_stored_listed_audited_and_compiled() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let s = seed(&store, &app).await;
+    let with_scope = |scope: &str| {
+        json!({"target": "route:orders-api", "limit": 20, "per": "minute", "scope": scope})
+            .to_string()
+    };
+    let listed = || async {
+        read(&app, LIMITS, s.vi)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["target"] == "route:orders-api")
+            .expect("listed")
+            .clone()
+    };
+
+    apply(&app, s.ed, &put("route:orders-api", 20, "minute")).await;
+    let shown = listed().await;
+    assert!(shown.get("scope").is_none(), "split is not shown: {shown}");
+    assert_eq!(
+        limit_on(&compiled(&store).await, COMPILED_ROUTE).map(|l| l.scope),
+        Some(LimitScope::Split)
+    );
+
+    for (scope, want) in [
+        ("redis", LimitScope::Redis),
+        ("replica", LimitScope::Replica),
+    ] {
+        apply(&app, s.ed, &with_scope(scope)).await;
+        let shown = listed().await;
+        assert_eq!(shown["scope"], scope, "{shown}");
+        assert_eq!(
+            limit_on(&compiled(&store).await, COMPILED_ROUTE).map(|l| l.scope),
+            Some(want)
+        );
+        let (_, _, after) = policy_audits(&store).await.pop().expect("an audit row");
+        assert_eq!(after["scope"], scope, "{after}");
+    }
+
+    let before = everything(&store).await;
+    let read_at = stamp(&app, "route:orders-api", s.ed).await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        LIMITS,
+        Some(s.ed),
+        &seen(&with_scope("cluster"), read_at.as_deref()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(parse(&body)["field"], "scope", "{body}");
+    assert_eq!(everything(&store).await, before, "a refusal writes nothing");
 }

@@ -81,6 +81,10 @@ impl Store {
                                  else 'not_seen' end as status,
                             d.last_seen_etag,
                             d.last_seen_build, d.last_seen_features,
+                            (select count(*) from data_plane_instances i
+                              where i.data_plane_id = d.id
+                                and i.last_seen_at > now() - make_interval(secs => $1))
+                                as replicas,
                             t.token_prefix, {} as token_created_at, {} as token_last_used_at
                        from data_planes d left join data_plane_tokens t on t.data_plane_id = d.id
                       order by d.name, t.created_at desc, t.token_prefix",
@@ -108,6 +112,7 @@ impl Store {
                     status: state,
                     in_sync: data_planes::in_sync(etag.as_deref(), current_etag),
                     build: row.get("last_seen_build"),
+                    replicas: row.get("replicas"),
                     config_tag: etag.as_deref().map(data_planes::short_tag),
                     // One that never called has said nothing to judge.
                     missing: if state == "never" {

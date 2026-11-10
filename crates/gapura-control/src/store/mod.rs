@@ -92,7 +92,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0014_consumer_groups",
         include_str!("../../migrations/0014_consumer_groups.sql"),
     ),
+    (
+        "0015_data_plane_instances",
+        include_str!("../../migrations/0015_data_plane_instances.sql"),
+    ),
 ];
+
+/// The replica a configuration call came from, as `X-Gapura-Instance` names it, and how recently
+/// a replica must have called to be counted beside it.
+pub struct Instance<'a> {
+    pub name: &'a str,
+    pub within: std::time::Duration,
+}
 
 /// The advisory lock key `migrate` holds: "gapura" in ASCII, then 1. Any constant works as long as
 /// nothing else sharing the database takes the same one.
@@ -487,7 +498,8 @@ impl Store {
         address: Option<std::net::IpAddr>,
         build: Option<&str>,
         features: Option<&[String]>,
-    ) -> Result<()> {
+        instance: Option<&Instance<'_>>,
+    ) -> Result<Option<u32>> {
         // tokio-postgres binds no IpAddr to inet without a feature it is not built with, so the
         // address goes over as text and the database parses it.
         let address = address.map(|a| a.to_string());
@@ -516,8 +528,35 @@ impl Store {
             ],
         )
         .await?;
+        let replicas = match instance {
+            None => None,
+            Some(instance) => {
+                tx.execute(
+                    "insert into data_plane_instances (data_plane_id, instance) values ($1, $2)
+                     on conflict (data_plane_id, instance) do update set last_seen_at = now()",
+                    &[&data_plane, &instance.name],
+                )
+                .await?;
+                tx.execute(
+                    "delete from data_plane_instances
+                      where data_plane_id = $1 and last_seen_at < now() - interval '10 minutes'",
+                    &[&data_plane],
+                )
+                .await?;
+                let n: i64 = tx
+                    .query_one(
+                        "select count(*) from data_plane_instances
+                          where data_plane_id = $1
+                            and last_seen_at >= now() - make_interval(secs => $2)",
+                        &[&data_plane, &(instance.within.as_secs_f64())],
+                    )
+                    .await?
+                    .get(0);
+                Some(u32::try_from(n).unwrap_or(u32::MAX).max(1))
+            }
+        };
         tx.commit().await?;
-        Ok(())
+        Ok(replicas)
     }
 
     /// Registers a data plane and returns its token, which is shown once and never stored.
@@ -722,8 +761,8 @@ fn parse_rate_limit(config: serde_json::Value) -> Result<gapura_core::config::Ra
         .map(|limit| limit.rate_limit())
         .context(
             "the configuration does not fit a rate_limit policy: a limit from 1 to 1000000, \
-             a window_ms of 1000, 60000 or 3600000, and a by of ip, consumer or a lowercase \
-             header name",
+             a window_ms of 1000, 60000 or 3600000, a by of ip, consumer or a lowercase \
+             header name, and a scope of split, replica or redis",
         )
 }
 
@@ -927,7 +966,14 @@ mod tests {
                 limit: 120,
                 window_ms: 60_000,
                 by: gapura_core::config::LimitBy::Ip,
+                scope: gapura_core::config::LimitScope::Split,
             }
+        );
+        assert_eq!(
+            parse_rate_limit(json!({"limit": 120, "window_ms": 60_000, "scope": "redis"}))
+                .unwrap()
+                .scope,
+            gapura_core::config::LimitScope::Redis
         );
         assert_eq!(
             parse_rate_limit(json!({"limit": 10, "window_ms": 1_000, "by": "consumer"})).unwrap(),
@@ -935,6 +981,7 @@ mod tests {
                 limit: 10,
                 window_ms: 1_000,
                 by: gapura_core::config::LimitBy::Consumer,
+                scope: gapura_core::config::LimitScope::Split,
             }
         );
         for bad in [
@@ -943,6 +990,7 @@ mod tests {
             json!({"limit": 10, "window_ms": 30_000}),
             json!({"limit": 10}),
             json!({"limit": 10, "window_ms": 1_000, "by": "everyone"}),
+            json!({"limit": 10, "window_ms": 1_000, "scope": "cluster"}),
             json!({"limit": 10, "window_ms": 1_000, "by": {"header": "Host"}}),
             json!({}),
         ] {

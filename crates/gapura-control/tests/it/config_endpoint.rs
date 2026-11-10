@@ -726,3 +726,47 @@ async fn a_held_poll_with_nothing_new_is_told_so_after_its_wait() {
     assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
     assert!(started.elapsed() >= std::time::Duration::from_millis(900));
 }
+
+/// A limit counted in Redis needs `rate_limit_redis`: a data plane that predates it would count
+/// that limit per replica and drop the shared count. A `split` limit needs nothing, since a data
+/// plane that predates `scope` still counts it, if per replica.
+#[tokio::test]
+async fn a_limit_counted_in_redis_is_refused_to_a_data_plane_that_cannot() {
+    let Some((store, app, _guard)) = fixture().await else {
+        return;
+    };
+    let token = store.seed_token("edge-1").await.expect("issuing a token");
+    let db = store.client().await.unwrap();
+    db.batch_execute(
+        "insert into services (workspace_id, name, protocol, host, port)
+           select id, 'orders', 'http', 'orders.internal', 8080 from workspaces limit 1;
+         insert into routes (workspace_id, service_id, name, paths)
+           select w.id, s.id, 'orders-api', '[{\"type\":\"prefix\",\"value\":\"/\"}]'
+             from workspaces w, services s limit 1;
+         insert into plugins (workspace_id, name, config)
+           select id, 'rate_limit', '{\"limit\":10,\"window_ms\":60000}' from workspaces limit 1;",
+    )
+    .await
+    .expect("seeding");
+    let without: Vec<&str> = FEATURES
+        .iter()
+        .copied()
+        .filter(|f| *f != "rate_limit_redis")
+        .collect();
+    let (status, _, _) = get_as(&app, &token, None, Some(&without.join(","))).await;
+    assert_eq!(status, StatusCode::OK, "a split limit needs no feature");
+
+    db.execute(
+        "update plugins set config = '{\"limit\":10,\"window_ms\":60000,\"scope\":\"redis\"}'
+          where name = 'rate_limit'",
+        &[],
+    )
+    .await
+    .unwrap();
+    let (status, _, body) = get_as(&app, &token, None, Some(&without.join(","))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["missing"], serde_json::json!(["rate_limit_redis"]));
+    let (status, _, _) = get(&app, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "this build reads it");
+}
