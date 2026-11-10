@@ -335,6 +335,9 @@ pub struct RateLimitRequirementView {
     /// `consumer` or `header:<name>`; absent for the address.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// `replica` or `redis`; absent for `split`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<&'static str>,
     /// `"route"`, `"service"` or `"workspace"`.
     pub from: &'static str,
     /// The policy row's own stamp, as `KeyAuthView`'s.

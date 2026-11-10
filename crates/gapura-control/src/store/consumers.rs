@@ -18,8 +18,8 @@ use super::grants::{audit, retrying, Entry};
 use super::{hash, hex, Store, WriteError, PREFIX_LEN, RATE_LIMIT};
 use crate::configuration::Action;
 use crate::consumers::{
-    shown_by, usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView, Limit,
-    PolicyView, RateLimitView, Target, MAX_GROUPS,
+    shown_by, shown_scope, usable_keys, ConsumerView, IssuedKey, JwtDocument, JwtView, KeyView,
+    Limit, PolicyView, RateLimitView, Target, MAX_GROUPS,
 };
 use crate::grants::Refusal;
 use anyhow::{Context, Result};
@@ -206,10 +206,13 @@ fn rate_limit_audit(target: &Target, consumer: Option<&str>, limit: &Limit) -> s
     if let Some(by) = shown_by(&limit.by) {
         entry["by"] = by.into();
     }
+    if let Some(scope) = shown_scope(limit.scope) {
+        entry["scope"] = scope.into();
+    }
     entry
 }
 
-/// The `{target, limit, per, by}` the audit entry of a deleted consumer records of a limit of its
+/// The `{target, limit, per, by, scope}` the audit entry of a deleted consumer records of a limit of its
 /// own that went with it: what `rate_limit_audit` records, without the kind and the consumer,
 /// which the entry already says, and `by` only when it counts by something other than the
 /// address. A row the compiler could not read is recorded by its target alone.
@@ -220,6 +223,9 @@ fn own_limit_audit(target: &Target, config: serde_json::Value) -> serde_json::Va
         entry["per"] = serde_json::json!(limit.per);
         if let Some(by) = shown_by(&limit.by) {
             entry["by"] = by.into();
+        }
+        if let Some(scope) = shown_scope(limit.scope) {
+            entry["scope"] = scope.into();
         }
     }
     entry
@@ -1137,6 +1143,7 @@ impl Store {
                     limit: limit.limit,
                     per: limit.per,
                     by: shown_by(&limit.by),
+                    scope: shown_scope(limit.scope),
                     updated_at: row.get("updated_at"),
                 })
             })

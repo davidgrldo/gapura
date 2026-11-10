@@ -33,6 +33,19 @@ const VERSION: &str = match option_env!("GAPURA_VERSION") {
     _ => env!("CARGO_PKG_VERSION"),
 };
 
+/// The control plane's count of this data plane's replicas, `X-Gapura-Replicas`: a whole number
+/// from 1 to 10 000. Anything else is no count.
+fn replicas(headers: &reqwest::header::HeaderMap) -> Option<u32> {
+    headers
+        .get("x-gapura-replicas")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (1..=10_000).contains(n))
+}
+
 /// What one poll learned.
 enum Polled {
     /// The version held is the one served.
@@ -65,6 +78,10 @@ pub struct ControlSource {
     pub cache_path: Option<PathBuf>,
     pub interval: Duration,
     pub store: Arc<Store>,
+    /// This replica's name among its data plane's (`--identity`, else the hostname -- the pod's
+    /// name), sent as `X-Gapura-Instance` so the control plane can count the replicas polling
+    /// it and answer with how many, which a `split` request limit divides by.
+    pub instance: String,
 }
 
 impl ControlSource {
@@ -158,10 +175,18 @@ impl ControlSource {
                 gapura_core::features::FEATURES.join(","),
             )
             .header("prefer", format!("wait={}", self.interval.as_secs().max(1)));
+        if let Ok(instance) = reqwest::header::HeaderValue::from_str(&self.instance) {
+            req = req.header("x-gapura-instance", instance);
+        }
         if let Some(v) = held {
             req = req.header(reqwest::header::IF_NONE_MATCH, v);
         }
         let res = req.send().await?;
+        // On every answer, a 304 too: a scale-out changes no configuration. A control plane that
+        // predates the count sends none, and the last count stands.
+        if let Some(n) = replicas(res.headers()) {
+            self.store.set_replicas(n);
+        }
         if res.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(Polled::Unchanged);
         }
@@ -472,6 +497,22 @@ mod tests {
             cache_path: Some(dir.join("cache.json")),
             interval: Duration::from_secs(1),
             store: Arc::new(Store::empty()),
+            instance: "gapura-0".into(),
+        }
+    }
+
+    #[test]
+    fn a_replica_count_is_a_whole_number_within_bounds() {
+        let with = |v: &str| {
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("x-gapura-replicas", v.parse().unwrap());
+            replicas(&h)
+        };
+        assert_eq!(replicas(&reqwest::header::HeaderMap::new()), None);
+        assert_eq!(with("3"), Some(3));
+        assert_eq!(with(" 2 "), Some(2));
+        for bad in ["0", "-1", "10001", "two", ""] {
+            assert_eq!(with(bad), None, "{bad:?}");
         }
     }
 

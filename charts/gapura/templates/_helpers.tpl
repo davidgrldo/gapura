@@ -173,13 +173,19 @@ startupProbe:
 {{- end -}}
 
 {{/*
-Log and trace export and debug timing (values: telemetry), shared by the gateway and the data
-plane. `part` is "args" for the container's flags, "volumes" for the header and token Secrets and
+Log and trace export and debug timing (values: telemetry), and the Redis that request limits with
+scope redis count in (values: rateLimit.redis), shared by the gateway and the data plane. `part`
+is "args" for the container's flags, "volumes" for the header, token, password and CA Secrets and
 "mounts" for where they are mounted; each renders nothing while none is on. Call it as
 include "gapura.telemetry" (dict "root" . "part" "args").
 */}}
 {{- define "gapura.telemetry" -}}
 {{- $t := .root.Values.telemetry | default dict }}
+{{- $redis := (.root.Values.rateLimit | default dict).redis | default dict }}
+{{- $redisPassword := $redis.password | default dict }}
+{{- $redisCa := $redis.ca | default dict }}
+{{- $redisPasswordSecret := and $redis.url $redisPassword.existingSecret }}
+{{- $redisCaSecret := and $redis.url $redisCa.existingSecret }}
 {{- $log := $t.httpLog | default dict }}
 {{- $logHeaders := $log.headers | default dict }}
 {{- $otlp := $t.otlp | default dict }}
@@ -206,6 +212,18 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 {{- if $debug.existingSecret }}
 - --debug-token-file=/etc/gapura-debug-token/{{ $debug.key | default "token" }}
 {{- end }}
+{{- if $redis.url }}
+- --redis-url={{ $redis.url }}
+{{- if $redisPasswordSecret }}
+- --redis-password-file=/etc/gapura-redis-password/{{ $redisPassword.key | default "password" }}
+{{- end }}
+{{- if $redisCaSecret }}
+- --redis-ca=/etc/gapura-redis-ca/{{ $redisCa.key | default "ca.crt" }}
+{{- end }}
+{{- if not (kindIs "invalid" $redis.timeoutMs) }}
+- --redis-timeout-ms={{ $redis.timeoutMs }}
+{{- end }}
+{{- end }}
 {{- else if eq .part "volumes" }}
 {{- if $logSecret }}
 - name: http-log-headers
@@ -219,6 +237,14 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 - name: debug-token
   secret: { secretName: {{ $debug.existingSecret }} }
 {{- end }}
+{{- if $redisPasswordSecret }}
+- name: redis-password
+  secret: { secretName: {{ $redisPassword.existingSecret }} }
+{{- end }}
+{{- if $redisCaSecret }}
+- name: redis-ca
+  secret: { secretName: {{ $redisCa.existingSecret }} }
+{{- end }}
 {{- else }}
 {{- if $logSecret }}
 - { name: http-log-headers, mountPath: /etc/gapura-http-log, readOnly: true }
@@ -228,6 +254,12 @@ include "gapura.telemetry" (dict "root" . "part" "args").
 {{- end }}
 {{- if $debug.existingSecret }}
 - { name: debug-token, mountPath: /etc/gapura-debug-token, readOnly: true }
+{{- end }}
+{{- if $redisPasswordSecret }}
+- { name: redis-password, mountPath: /etc/gapura-redis-password, readOnly: true }
+{{- end }}
+{{- if $redisCaSecret }}
+- { name: redis-ca, mountPath: /etc/gapura-redis-ca, readOnly: true }
 {{- end }}
 {{- end }}
 {{- end -}}

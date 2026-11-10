@@ -8,7 +8,7 @@ use crate::config::{
     Cluster, Filters, HeaderOps, KvMatch, Mirror, PathMatch, PathRewrite, Redirect, Rewrite,
     RouteMatch, RouteRule, Timeouts, WeightedBackend,
 };
-use crate::config::{LimitBy, RateLimit};
+use crate::config::{LimitBy, LimitScope, RateLimit};
 use crate::duration;
 use crate::input::{
     HeaderModifier, HttpBackendRef, HttpRoute, HttpRouteFilter, HttpRouteMatch, PathModifier,
@@ -20,6 +20,7 @@ use crate::status::{reasons, types, Condition, ConditionStatus};
 /// Service annotations the translator reads for per-rule request limits.
 pub(crate) const RATE_LIMIT_ANNOTATION: &str = "gapura.dev/rate-limit";
 pub(crate) const RATE_LIMIT_BY_ANNOTATION: &str = "gapura.dev/rate-limit-by";
+pub(crate) const RATE_LIMIT_SCOPE_ANNOTATION: &str = "gapura.dev/rate-limit-scope";
 
 use crate::translate::backends;
 
@@ -1116,7 +1117,9 @@ spec:
 /// backendRef order -- a rule with several annotated backends is a config mistake, and one
 /// answer beats several. `gapura.dev/rate-limit-by` accepts only `ip`, the client address after
 /// the trusted-proxy walk; any other value disables the pair with a warning rather than
-/// silently keying by something unreviewed.
+/// silently keying by something unreviewed. `gapura.dev/rate-limit-scope` says how the replicas
+/// share the limit -- `split` (the default), `replica` or `redis`, see [`LimitScope`] -- and any
+/// other value disables the limit too, for the same reason.
 fn rate_limit_of(snap: &Snapshot, route_ns: &str, refs: &[HttpBackendRef]) -> Option<RateLimit> {
     for b in refs {
         let ns = b.namespace.as_deref().unwrap_or(route_ns);
@@ -1135,7 +1138,11 @@ fn rate_limit_of(snap: &Snapshot, route_ns: &str, refs: &[HttpBackendRef]) -> Op
                 return None;
             }
         }
-        return parse_rate_limit(value);
+        let scope = match svc.metadata.annotations.get(RATE_LIMIT_SCOPE_ANNOTATION) {
+            None => LimitScope::Split,
+            Some(name) => LimitScope::parse(name.trim())?,
+        };
+        return parse_rate_limit(value).map(|rl| RateLimit { scope, ..rl });
     }
     None
 }
@@ -1153,6 +1160,7 @@ fn parse_rate_limit(value: &str) -> Option<RateLimit> {
         limit,
         window_ms,
         by: LimitBy::Ip,
+        scope: LimitScope::Split,
     })
 }
 
@@ -1168,6 +1176,7 @@ mod rate_limit_tests {
                 limit: 20,
                 window_ms: 60_000,
                 by: LimitBy::Ip,
+                scope: Default::default(),
             })
         );
         assert_eq!(
@@ -1176,6 +1185,7 @@ mod rate_limit_tests {
                 limit: 1,
                 window_ms: 1_000,
                 by: LimitBy::Ip,
+                scope: Default::default(),
             })
         );
         assert_eq!(
@@ -1184,6 +1194,7 @@ mod rate_limit_tests {
                 limit: 5,
                 window_ms: 3_600_000,
                 by: LimitBy::Ip,
+                scope: Default::default(),
             })
         );
         assert_eq!(parse_rate_limit("0/min"), None);

@@ -2227,6 +2227,7 @@ mod tests {
             limit,
             window_ms,
             by: crate::config::LimitBy::Ip,
+            scope: Default::default(),
         }
     }
 

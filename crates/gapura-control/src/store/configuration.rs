@@ -352,6 +352,7 @@ impl Requirements {
             limit: limit.limit,
             per: limit.per,
             by: crate::consumers::shown_by(&limit.by),
+            scope: crate::consumers::shown_scope(limit.scope),
             from,
             updated_at,
         }

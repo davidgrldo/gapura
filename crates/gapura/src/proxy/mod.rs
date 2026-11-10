@@ -21,6 +21,7 @@ pub mod outlier;
 pub mod plugin;
 pub mod rate_limit;
 pub mod select;
+pub mod shared_limit;
 mod timing;
 pub mod tls;
 mod transform;
@@ -75,8 +76,10 @@ pub struct GapuraProxy {
     /// Header names (e.g. CF-Connecting-IP) believed for the client address when no
     /// X-Forwarded-For chain exists and the peer is a trusted proxy (`--trusted-client-header`).
     pub trusted_client_headers: Vec<String>,
-    /// Per-replica request limits, shared by every worker thread.
+    /// Request limits counted on this replica, shared by every worker thread.
     pub limiter: rate_limit::RateLimiter,
+    /// Request limits counted in Redis (`--redis-url`); never connected without one.
+    pub shared: Arc<shared_limit::SharedLimiter>,
     /// Whether the access log carries the request's query string (`--access-log-query`).
     pub access_log_query: bool,
     /// Where `logging` sends each request's record and span, beside stdout: empty unless
@@ -849,7 +852,9 @@ impl ProxyHttp for GapuraProxy {
                     .map(|a| a.ip());
                 let flow = match rt.chain(listener, rule) {
                     Some(Ok(chain)) => {
-                        chain.access(self, &rt, r, session.req_header(), peer, &mut ctx.req)
+                        chain
+                            .access(self, &rt, r, session.req_header(), peer, &mut ctx.req)
+                            .await
                     }
                     // Answered as `Decision::Misplaced` before it got here.
                     _ => Flow::Fail(Failure {
@@ -2057,6 +2062,7 @@ spec:
             trusted_proxies: vec![],
             trusted_client_headers: vec![],
             limiter: Default::default(),
+            shared: Default::default(),
             access_log_query: false,
             sinks: Default::default(),
             debug_token: None,

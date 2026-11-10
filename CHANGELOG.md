@@ -8,6 +8,31 @@ means what it usually does, moving from one version below to a later one. Releas
 
 ## Unreleased
 
+- A request limit is shared across the gateway's replicas: split between them by default, or
+  counted once in Redis (#292).
+  - **Changed: `split` is the default.** Each replica allows the limit divided by the replicas it
+    knows of, rounded up, so a limit of 100 a minute is about 100 a minute across the gateway
+    rather than 100 on each replica. Under Kubernetes a replica counts the ready endpoints of its
+    own Service (`--publish-service`, which the chart sets); in `--control-plane` mode the control
+    plane counts each data plane's replicas from their polls (`X-Gapura-Instance`, migration 0015)
+    and answers every poll with the count (`X-Gapura-Replicas`). With `--config-dir`, or until a
+    replica is told, it counts as one, as before. `gapura_rate_limit_replicas` says what it divides
+    by, and the console's data plane list shows each one's replicas.
+  - **`scope`** on a limit -- the `rate_limit` policy's field, the console's Shared select, or a
+    Service's `gapura.dev/rate-limit-scope` -- is `split`, `replica` (each replica allows all of
+    it, which every limit did until now), or `redis`. Any other annotation value disables the
+    limit, as a bad `gapura.dev/rate-limit-by` does.
+  - **`redis`** counts in a standalone Redis or Valkey that every replica given the same
+    `--redis-url` shares (`--redis-password-file`, `--redis-ca`, `--redis-timeout-ms`; the chart's
+    `rateLimit.redis`). Redis never decides whether a request is served: past the timeout, on an
+    error or without a connection the request counts as `split`, which
+    `gapura_rate_limit_redis_fallbacks_total{reason}` counts, and Redis is left alone for a second,
+    doubling up to 30 s, after each failure.
+  - **Upgrade order:** data planes first. An older data plane counts every limit per replica,
+    whatever its scope, and is refused a configuration with a `redis` limit (409, feature
+    `rate_limit_redis`). To keep a limit's old allowance on a gateway with several replicas, set
+    its scope to `replica`, or multiply it by the replica count.
+
 - One route can accept a JWT or an API key, name who a caller without one is, and refuse
   consumers by group (#291).
   - **`auth` policy:** on a route, service or workspace, switches its jwt and key_auth policies

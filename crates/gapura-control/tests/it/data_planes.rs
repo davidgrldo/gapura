@@ -1001,3 +1001,106 @@ async fn kubernetes_mode_has_none_of_it() {
         assert!(sentence(&body).contains("keeps no configuration"), "{body}");
     }
 }
+
+/// `/v1/config` as replica `instance` of a data plane, asking to be held `wait` seconds: the
+/// status and the count of replicas it is answered with.
+async fn call_from(
+    app: &axum::Router,
+    token: &str,
+    instance: Option<&str>,
+    wait: u64,
+) -> (StatusCode, Option<u32>) {
+    let mut req = Request::builder()
+        .uri("/v1/config")
+        .header("authorization", format!("Bearer {token}"))
+        .header("prefer", format!("wait={wait}"));
+    if let Some(instance) = instance {
+        req = req.header("x-gapura-instance", instance);
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let replicas = res
+        .headers()
+        .get("x-gapura-replicas")
+        .map(|v| v.to_str().unwrap().parse().unwrap());
+    (res.status(), replicas)
+}
+
+/// Each poll names its replica and is answered with how many replicas of its data plane polled
+/// recently, which a `split` limit divides by: counted per data plane, not across them; a
+/// replica gone quiet for three of its waits drops out; a replica that names none is not counted
+/// and is told nothing; and the list says how many each data plane runs.
+#[tokio::test]
+async fn a_poll_is_told_how_many_replicas_its_data_plane_runs() {
+    let Some((store, _guard)) = fresh_store().await else {
+        return;
+    };
+    let app = console(Some(store.clone()));
+    let config = served(&store);
+    let s = seed(&store).await;
+    let (edge, _) = register(&app, "edge-1", s.root).await;
+    let (other, _) = register(&app, "edge-2", s.root).await;
+
+    assert_eq!(
+        call_from(&config, &edge, Some("gw-a"), 5).await,
+        (StatusCode::OK, Some(1))
+    );
+    assert_eq!(call_from(&config, &edge, Some("gw-b"), 5).await.1, Some(2));
+    assert_eq!(
+        call_from(&config, &edge, Some("gw-a"), 5).await.1,
+        Some(2),
+        "a replica calling again is still one"
+    );
+    assert_eq!(
+        call_from(&config, &other, Some("gw-a"), 5).await.1,
+        Some(1),
+        "another data plane's replicas are its own, whatever they are called"
+    );
+    assert_eq!(
+        call_from(&config, &edge, None, 5).await,
+        (StatusCode::OK, None),
+        "a replica that names none is told nothing"
+    );
+    assert_eq!(
+        call_from(&config, &edge, Some("not a name"), 5).await.1,
+        None
+    );
+    assert_eq!(row(&app, "edge-1", s.vi).await["replicas"], 2);
+    assert_eq!(row(&app, "edge-2", s.vi).await["replicas"], 1);
+
+    // gw-b has been quiet for 40 s: past the 30 s floor for a 5 s wait, so it drops out ...
+    let client = store.client().await.unwrap();
+    client
+        .execute(
+            "update data_plane_instances set last_seen_at = now() - interval '40 seconds'
+              where instance = 'gw-b'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(call_from(&config, &edge, Some("gw-a"), 5).await.1, Some(1));
+    // ... but within three of a 20 s wait, so a data plane held that long still counts it.
+    assert_eq!(call_from(&config, &edge, Some("gw-a"), 20).await.1, Some(2));
+
+    // Unseen for ten minutes, a replica's row is deleted by the next poll.
+    client
+        .execute(
+            "update data_plane_instances set last_seen_at = now() - interval '11 minutes'
+              where instance = 'gw-b'",
+            &[],
+        )
+        .await
+        .unwrap();
+    call_from(&config, &edge, Some("gw-a"), 5).await;
+    assert_eq!(
+        count(
+            &store,
+            "select count(*) from data_plane_instances where instance = 'gw-b'"
+        )
+        .await,
+        0
+    );
+}

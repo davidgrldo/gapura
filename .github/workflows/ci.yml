@@ -23,6 +23,16 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # The shared request limit's test counts in a real Redis, and refuses to skip in CI too.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -36,6 +46,7 @@ jobs:
       - run: cargo test --workspace --locked
         env:
           GAPURA_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          GAPURA_TEST_REDIS_URL: redis://localhost:6379
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings

@@ -116,6 +116,41 @@ fn main() {
         }
     });
 
+    // Read and checked now, like the files above: a wrong URL or an unreadable password should
+    // stop the process with one line, not leave every redis limit quietly counting as split.
+    let shared = Arc::new(proxy::shared_limit::SharedLimiter::new(
+        std::time::Duration::from_millis(args.redis_timeout_ms),
+        args.redis_url.is_some(),
+    ));
+    let redis = args.redis_url.as_ref().map(|url| {
+        let password = args.redis_password_file.as_ref().map(|path| {
+            match std::fs::read_to_string(path) {
+                Ok(p) if !p.trim().is_empty() => p.trim().to_string(),
+                Ok(_) => {
+                    tracing::error!(path = %path.display(), "the redis password file is empty, refusing to start");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    tracing::error!(path = %path.display(), error = %e, "cannot read the redis password file, refusing to start");
+                    std::process::exit(1);
+                }
+            }
+        });
+        let ca = args.redis_ca.as_ref().map(|path| {
+            std::fs::read(path).unwrap_or_else(|e| {
+                tracing::error!(path = %path.display(), error = %e, "cannot read the redis CA file, refusing to start");
+                std::process::exit(1);
+            })
+        });
+        match proxy::shared_limit::client(url, password.as_deref(), ca) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(error = %e, "invalid --redis-url, refusing to start");
+                std::process::exit(2);
+            }
+        }
+    });
+
     let store = Arc::new(store::Store::empty());
     let settings = args.settings().expect("valid settings");
     if let Some(dir) = &args.config_dir {
@@ -138,6 +173,15 @@ fn main() {
     server.bootstrap();
     if let Some(exporter) = exporter {
         server.add_service(background_service("telemetry", exporter));
+    }
+    if let Some(client) = redis {
+        server.add_service(background_service(
+            "redis",
+            proxy::shared_limit::Connect {
+                limiter: shared.clone(),
+                client,
+            },
+        ));
     }
 
     if let Some(url) = &args.control_plane {
@@ -178,6 +222,7 @@ fn main() {
             cache_path: args.config_cache.clone(),
             interval: std::time::Duration::from_secs(args.control_plane_interval),
             store: store.clone(),
+            instance: args.identity(),
         };
         tracing::info!(url = %url, "control plane source enabled");
         server.add_service(background_service("control-plane", source));
@@ -219,6 +264,7 @@ fn main() {
             trusted_proxies: args.trusted_proxies.clone(),
             trusted_client_headers: args.trusted_client_headers.clone(),
             limiter: Default::default(),
+            shared,
             access_log_query: args.access_log_query,
             sinks,
             debug_token,

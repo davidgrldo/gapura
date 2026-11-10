@@ -71,6 +71,10 @@ pub struct DataPlaneView {
     pub in_sync: Option<bool>,
     /// What it runs, as its last call said (`0.2.0-rc.17`); `None` when it said nothing.
     pub build: Option<String>,
+    /// How many of its replicas called within `CONNECTED_WITHIN_SECS`, by the name each sends
+    /// as `X-Gapura-Instance`. 0 for one whose replicas send none (rc.17 and older, and every
+    /// release before the count), which the console shows as unknown rather than as none.
+    pub replicas: i64,
     /// The first 12 hex digits of the configuration it held on its last call, to read beside
     /// another's; `None` when it held none.
     pub config_tag: Option<String>,

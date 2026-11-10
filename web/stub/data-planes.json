@@ -7,6 +7,7 @@
     "status": "connected",
     "in_sync": true,
     "build": "0.2.0-rc.18",
+    "replicas": 2,
     "config_tag": "9f2c4e1ab03d",
     "missing": [],
     "tokens": [
@@ -30,6 +31,7 @@
     "status": "never",
     "in_sync": null,
     "build": null,
+    "replicas": 0,
     "config_tag": null,
     "missing": [],
     "tokens": []
@@ -42,6 +44,7 @@
     "status": "connected",
     "in_sync": false,
     "build": "0.2.0-rc.16",
+    "replicas": 0,
     "config_tag": "41d8e0c7b2fa",
     "missing": [
       "ip_restriction",

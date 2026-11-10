@@ -4,16 +4,29 @@
   import { Input } from '$lib/components/ui/input/index.js'
   import NativeSelect from './NativeSelect.svelte'
   import { get, write } from './api.js'
-  import { base, BY, BY_LABEL, byParts, byText, countedBy, listed, MAX_RATE_LIMIT, PER } from './configuration.js'
+  import {
+    base,
+    BY,
+    BY_LABEL,
+    byParts,
+    byText,
+    countedBy,
+    listed,
+    MAX_RATE_LIMIT,
+    PER,
+    SCOPE,
+    SCOPE_LABEL,
+    sharedAs,
+  } from './configuration.js'
   import { can } from './workspace.js'
 
   // One request limit, applied on its own as KeyAuthControl's key requirement is, and for the
   // same reasons: it changes how much may be asked rather than where traffic goes, its refusal is
   // not the sheet's, and Enter in its input applies it rather than saving the sheet.
   // - `target` is `workspace`, `service:{name}` or `route:{name}`;
-  // - `applies` is the limit the list says applies to it, `{ limit, per, by, from, updated_at }`
-  //   or null, where `by` is left out for the address and `from` may be a broader target, which
-  //   is changed where it is set, not here.
+  // - `applies` is the limit the list says applies to it, `{ limit, per, by, scope, from,
+  //   updated_at }` or null, where `by` is left out for the address, `scope` for `split`, and
+  //   `from` may be a broader target, which is changed where it is set, not here.
   //   `updated_at` is the policy row's stamp, which an apply sends back; when it is left out, it
   //   is read here;
   // - `consumer` names the consumer whose own limit this is, and is sent with every write; absent
@@ -40,12 +53,14 @@
   // `header`.
   let mode = $state('ip')
   let header = $state('')
+  // How the gateway's replicas share the limit: one of SCOPE.
+  let scope = $state('split')
   // The consumers whose own limit on this target replaces this one for them, read from the limits
   // list. Only the limit on everyone has any; empty until read, and when the read fails, which
   // costs nothing but the note.
   let others = $state([])
   let saving = $state(false)
-  // `{ sentence, field }` from a refused apply; a `limit`, `per` or `by` field puts the sentence
+  // `{ sentence, field }` from a refused apply; a `limit`, `per`, `by` or `scope` field puts the sentence
   // beside that input.
   let error = $state(undefined)
   let box = $state(null)
@@ -71,6 +86,7 @@
     const parts = byParts(own?.by)
     mode = parts.mode
     header = parts.header
+    scope = own?.scope ?? 'split'
     error = undefined
   })
 
@@ -96,9 +112,13 @@
         if (!needsStamp) return
         // The row of this very limit: the one on everyone names no consumer, a consumer's names it.
         const row = list.find((r) => r.target === target && r.consumer === consumer)
-        // `by` is compared too: a limit changed to count by something else since the list was
-        // read is not the one this form shows, and its stamp would let an apply replace it unseen.
-        seen = row && row.limit === own.limit && row.per === own.per && row.by === own.by ? row.updated_at : ''
+        // `by` and `scope` are compared too: a limit changed to count by something else, or to
+        // share otherwise, since the list was read is not the one this form shows, and its stamp
+        // would let an apply replace it unseen.
+        seen =
+          row && row.limit === own.limit && row.per === own.per && row.by === own.by && row.scope === own.scope
+            ? row.updated_at
+            : ''
         reading = false
       },
       () => {
@@ -115,9 +135,10 @@
   const chosen = $derived(byText(mode, header))
   const changed = $derived(
     on !== (own !== null) ||
-      (on && (limit !== own.limit || per !== own.per || chosen !== (own.by ?? 'ip'))),
+      (on &&
+        (limit !== own.limit || per !== own.per || chosen !== (own.by ?? 'ip') || scope !== (own.scope ?? 'split'))),
   )
-  const placed = $derived(['limit', 'per', 'by'].includes(error?.field) ? error.field : undefined)
+  const placed = $derived(['limit', 'per', 'by', 'scope'].includes(error?.field) ? error.field : undefined)
 
   async function apply(event) {
     event.preventDefault()
@@ -140,6 +161,7 @@
           limit,
           per,
           by: chosen,
+          scope,
           // None when nothing is set here: the server then refuses to replace one set since.
           seen_updated_at: own === null ? undefined : seen,
         })
@@ -166,7 +188,9 @@
             ? document.getElementById(`${id}-per`)
             : placed === 'by'
               ? document.getElementById(mode === 'header' ? `${id}-header` : `${id}-by`)
-              : null
+              : placed === 'scope'
+                ? document.getElementById(`${id}-scope`)
+                : null
       ;(named ?? button)?.focus()
       return
     }
@@ -189,8 +213,7 @@
     [placed === field ? `${id}-${field}-error` : null, help].filter(Boolean).join(' ') || undefined
 
   // What the help line under the inputs says first, by what the limit counts. It has no full stop
-  // of its own: the template ends it with one, before the clause about replicas that every mode
-  // shares.
+  // of its own: the template ends it with one, before what `shared` says.
   const counted = $derived(
     mode === 'consumer'
       ? consumer === undefined
@@ -201,6 +224,15 @@
         : consumer === undefined
           ? 'Per client address'
           : `Per client address ${consumer} calls from`,
+  )
+
+  // What the help line says next, of how the replicas share the limit.
+  const shared = $derived(
+    scope === 'replica'
+      ? 'Counted by each gateway replica alone: with 3 replicas a client can make up to 3 × this.'
+      : scope === 'redis'
+        ? "Counted once in Redis for every replica. A replica without Redis, or while Redis does not answer, counts its split share instead."
+        : "Split between the gateway's replicas: each allows its share, so the gateway allows about this many in all.",
   )
 
   // What is said under the control about the consumers whose own limit is on this target. When a
@@ -227,7 +259,9 @@
   <fieldset bind:this={group} tabindex="-1" class="grid gap-2 rounded-lg border p-3 outline-none" disabled={saving}>
     <legend class="px-1 font-medium">{legend}</legend>
     {#if inherited}
-      <p>Limited by the {applies.from}: {applies.limit} per {applies.per}, {countedBy(applies.by)}.</p>
+      <p>
+        Limited by the {applies.from}: {applies.limit} per {applies.per}, {countedBy(applies.by)}, {sharedAs(applies.scope)}.
+      </p>
     {:else if can.write(role)}
       <label class="flex items-center gap-2">
         <input bind:this={box} type="checkbox" bind:checked={on} onchange={() => (error = undefined)} />
@@ -292,8 +326,20 @@
           {/if}
         </div>
         {@render problem('by')}
+        <div class="grid gap-1.5">
+          <label for="{id}-scope" class="font-medium">Shared</label>
+          <NativeSelect
+            id="{id}-scope"
+            bind:value={scope}
+            aria-invalid={placed === 'scope'}
+            aria-describedby={described('scope', `${id}-help`)}
+          >
+            {#each SCOPE as s (s)}<option value={s}>{SCOPE_LABEL[s]}</option>{/each}
+          </NativeSelect>
+        </div>
+        {@render problem('scope')}
         <p id="{id}-help" class="text-xs text-muted-foreground">
-          {counted}. Counted by each gateway replica separately: with 3 replicas a client can make up to 3 × this.
+          {counted}. {shared}
         </p>
       {/if}
       {#if error && !placed}
@@ -308,7 +354,7 @@
         {saving ? 'Applying…' : 'Apply'}
       </Button>
     {:else if own !== null}
-      <p>Limited: {own.limit} per {own.per}, {countedBy(own.by)}.</p>
+      <p>Limited: {own.limit} per {own.per}, {countedBy(own.by)}, {sharedAs(own.scope)}.</p>
     {:else}
       <p>Not limited.</p>
     {/if}

@@ -142,6 +142,29 @@ telemetry:
     existingSecret: ""
     key: token
 
+# Request limits across replicas (README "Request limits across replicas"), for the gateway above
+# and for dataPlane alike. How a limit is shared is the limit's own `scope`: split (the default:
+# each replica allows its share, counting how many replicas there are from this chart's Service,
+# or from the control plane for dataPlane), replica, or redis, which counts in the Redis below.
+rateLimit:
+  redis:
+    # redis:// or rediss:// URL of a standalone Redis or Valkey, not a cluster (--redis-url). Empty
+    # is none: a limit with scope redis then counts as split, and each replica says so once.
+    url: ""
+    # The password (AUTH) in a Secret under `key`, mounted as a file (--redis-password-file) and
+    # never an argument.
+    password:
+      existingSecret: ""
+      key: password
+    # PEM bundle of the CA that signed a rediss:// server's certificate, in a Secret under `key`
+    # (--redis-ca), trusted instead of the system's roots.
+    ca:
+      existingSecret: ""
+      key: ca.crt
+    # How long a request waits for Redis before it is counted as split instead
+    # (--redis-timeout-ms). Every redis-limited request pays it while Redis is slow.
+    timeoutMs: 50
+
 # EnvFilter directives, e.g. "info" or "gapura=debug". Pingora logs every failed downstream
 # handshake at error level, including the ones a port scanner causes, so it is quieted by default.
 logLevel: info,pingora_core::services::listening=warn

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::config::{Config, Plugin};
+use crate::config::{Config, LimitScope, Plugin};
 
 /// What this build reads, sorted: every [`Plugin::kind`], and one name for each field that a
 /// data plane predating it would misread rather than refuse. A test fails while a kind is
@@ -22,6 +22,7 @@ pub const FEATURES: &[&str] = &[
     "jwt",
     "jwt_consumer_claim",
     "key_auth",
+    "rate_limit_redis",
     "request_size_limit",
     "request_transformer",
     "response_transformer",
@@ -36,15 +37,25 @@ pub const FEATURES: &[&str] = &[
 pub const LEGACY_FEATURES: &[&str] = &["jwt", "key_auth"];
 
 impl Config {
-    /// The features this configuration uses: the kind of every policy on every rule, and
-    /// `jwks_uri` or `jwt_consumer_claim` wherever a JWT policy names one.
+    /// The features this configuration uses: the kind of every policy on every rule,
+    /// `jwks_uri` or `jwt_consumer_claim` wherever a JWT policy names one, and
+    /// `rate_limit_redis` wherever a limit -- a rule's or a consumer's own -- counts in Redis.
     pub fn needs(&self) -> BTreeSet<&'static str> {
         let mut needs = BTreeSet::new();
-        let plugins = self
-            .listeners
-            .iter()
-            .flat_map(|l| &l.rules)
-            .flat_map(|r| &r.plugins);
+        let rules = self.listeners.iter().flat_map(|l| &l.rules);
+        let own = self
+            .consumer_rate_limits
+            .values()
+            .flat_map(|c| c.routes.values().chain(&c.any));
+        if rules
+            .clone()
+            .filter_map(|r| r.rate_limit.as_ref())
+            .chain(own)
+            .any(|l| l.scope == LimitScope::Redis)
+        {
+            needs.insert("rate_limit_redis");
+        }
+        let plugins = rules.flat_map(|r| &r.plugins);
         for plugin in plugins {
             needs.insert(plugin.kind());
             if matches!(plugin, Plugin::Jwt(jwt) if jwt.jwks_uri.is_some()) {
@@ -187,6 +198,48 @@ mod tests {
         assert!(!with(vec![Plugin::Jwt(JwtPolicy::default())])
             .needs()
             .contains("jwt_consumer_claim"));
+    }
+
+    /// Only a limit counted in Redis needs a name: an older data plane counts a `split` or a
+    /// `replica` limit per replica, which is looser than `split` but is a count, where one that
+    /// ignored `redis` would drop the shared count the operator asked for.
+    #[test]
+    fn a_limit_counted_in_redis_needs_it_on_a_rule_or_a_consumer() {
+        use crate::config::{ConsumerRateLimits, LimitBy, RateLimit};
+        use std::collections::BTreeMap;
+        let limit = |scope| RateLimit {
+            limit: 10,
+            window_ms: 1_000,
+            by: LimitBy::Ip,
+            scope,
+        };
+        for scope in [LimitScope::Split, LimitScope::Replica] {
+            let mut cfg = with(vec![]);
+            cfg.listeners[0].rules[0].rate_limit = Some(limit(scope));
+            assert!(cfg.needs().is_empty(), "{scope:?}");
+        }
+        let mut on_rule = with(vec![]);
+        on_rule.listeners[0].rules[0].rate_limit = Some(limit(LimitScope::Redis));
+        assert_eq!(on_rule.needs(), BTreeSet::from(["rate_limit_redis"]));
+
+        let mut own = with(vec![]);
+        own.consumer_rate_limits.insert(
+            "default/mobile".into(),
+            ConsumerRateLimits {
+                routes: BTreeMap::new(),
+                any: Some(limit(LimitScope::Redis)),
+            },
+        );
+        assert_eq!(own.needs(), BTreeSet::from(["rate_limit_redis"]));
+        let mut on_route = with(vec![]);
+        on_route.consumer_rate_limits.insert(
+            "default/mobile".into(),
+            ConsumerRateLimits {
+                routes: BTreeMap::from([("default/orders".into(), limit(LimitScope::Redis))]),
+                any: None,
+            },
+        );
+        assert_eq!(on_route.needs(), BTreeSet::from(["rate_limit_redis"]));
     }
 
     #[test]

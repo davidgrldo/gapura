@@ -21,6 +21,12 @@ pub struct Metrics {
     /// labels: route (`ns/name` or `-`), code
     pub requests_total: IntCounterVec,
     pub rate_limited_total: IntCounterVec,
+    /// The replicas a `split` request limit divides by, as the source last said; 1 until it has.
+    pub rate_limit_replicas: IntGauge,
+    /// labels: reason (`timeout`, `error`, `unavailable`). Requests a `redis` limit counted as
+    /// `split` instead, because Redis did not answer in time, answered with an error, or was not
+    /// connected (or not configured, or backing off after a failure).
+    pub rate_limit_redis_fallbacks_total: IntCounterVec,
     /// labels: route
     pub request_duration_seconds: HistogramVec,
     /// labels: cluster, kind (`connect`, `timeout`, `read`, `other`)
@@ -169,6 +175,17 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| Metrics {
         "gapura_rate_limited_total",
         "Requests rejected by a per-rule rate limit, by route.",
         &["route"]
+    )
+    .expect("metric registered once"),
+    rate_limit_replicas: register_int_gauge!(
+        "gapura_rate_limit_replicas",
+        "Replicas a split request limit divides by, as the config source last counted them"
+    )
+    .expect("metric registered once"),
+    rate_limit_redis_fallbacks_total: register_int_counter_vec!(
+        "gapura_rate_limit_redis_fallbacks_total",
+        "Requests a redis request limit counted as split instead, by why Redis was not used",
+        &["reason"]
     )
     .expect("metric registered once"),
     status_writes_total: register_int_counter_vec!(

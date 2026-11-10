@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use axum::{
     extract::{ConnectInfo, State},
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{AppendHeaders, IntoResponse, Response},
     routing::get,
     Extension, Json, Router,
 };
@@ -33,7 +33,7 @@ use gapura_core::store::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::store::Store;
+use crate::store::{Instance, Store};
 
 pub struct ConfigApi {
     pub store: Arc<Store>,
@@ -199,9 +199,19 @@ async fn serve(
     // one a data plane holds. It is recorded as unknown rather than storing what a caller sent.
     let recorded = sent.filter(|v| v.len() <= 128);
     let has = named_features(&headers);
+    // A replica is counted beside the others that called within three of its waits, and never
+    // less than half a minute: a held poll returns at least once per wait, so three cover a
+    // missed one, and the floor covers a data plane that asks to be held for no time at all.
+    let instance = instance(&headers).map(|name| Instance {
+        name,
+        within: wait(&headers)
+            .unwrap_or_default()
+            .saturating_mul(3)
+            .max(REPLICAS_WITHIN),
+    });
     // Recorded before the body is built and whatever the answer turns out to be: the caller is
     // alive either way, and a 304 is the overwhelming majority of these calls.
-    if let Err(e) = api
+    let replicas = match api
         .store
         .record_call(
             id,
@@ -211,13 +221,21 @@ async fn serve(
             peer.map(|p| p.0 .0.ip().to_canonical()),
             build(&headers),
             has.as_deref(),
+            instance.as_ref(),
         )
         .await
     {
-        // Liveness is for a human looking at a console. Losing it must not cost a data plane
-        // its configuration.
-        tracing::warn!(error = %e, "recording a data plane's call");
-    }
+        Ok(replicas) => replicas,
+        Err(e) => {
+            // Liveness is for a human looking at a console, and the count only tunes a limit,
+            // which keeps the last one it had. Losing either must not cost a data plane its
+            // configuration.
+            tracing::warn!(error = %e, "recording a data plane's call");
+            None
+        }
+    };
+    // On every answer below: a scale-out changes no configuration, so a 304 must carry it too.
+    let replicas = replicas.map(|n| ("x-gapura-replicas", n.to_string()));
 
     let (body, etag, needs) = match served(&snapshot, &api.settings) {
         Ok(served) => served,
@@ -248,7 +266,12 @@ async fn serve(
         _ => (snapshot, body, etag, needs),
     };
     if sent.is_some_and(|v| v == etag) {
-        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+        return (
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, etag)],
+            AppendHeaders(replicas),
+        )
+            .into_response();
     }
     // Refused rather than sent: a data plane would fail to parse a policy kind it does not know,
     // and would run without a field it does not know. It keeps serving what it holds, which is
@@ -261,6 +284,7 @@ async fn serve(
         return (
             StatusCode::CONFLICT,
             [(header::CACHE_CONTROL, "no-store")],
+            AppendHeaders(replicas),
             Json(serde_json::json!({ "error": "incompatible", "missing": missing })),
         )
             .into_response();
@@ -290,9 +314,25 @@ async fn serve(
             // and the conditional request is what makes caching unnecessary anyway.
             (header::CACHE_CONTROL, "no-store".to_string()),
         ],
+        AppendHeaders(replicas),
         body,
     )
         .into_response()
+}
+
+/// The least a replica's last call may be past to be counted, whatever it asked to wait.
+const REPLICAS_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The replica a call came from, `X-Gapura-Instance`: 1 to 253 of what a hostname or a pod's name
+/// is made of (`a-z`, `A-Z`, `0-9`, `.`, `-`, `_`). Anything else is no name, and that call is
+/// not counted: no data plane sends one, and a caller must not make this store what it likes.
+fn instance(headers: &HeaderMap) -> Option<&str> {
+    let name = headers.get("x-gapura-instance")?.to_str().ok()?;
+    let ok = (1..=253).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    ok.then_some(name)
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -480,6 +520,26 @@ mod tests {
         assert_eq!(build(&h).map(str::len), Some(128));
         h.insert(header::USER_AGENT, "x".repeat(129).parse().unwrap());
         assert_eq!(build(&h), None);
+    }
+
+    #[test]
+    fn a_replica_names_itself_as_a_hostname_would() {
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-gapura-instance", v.parse().unwrap());
+            instance(&h).map(str::to_string)
+        };
+        assert_eq!(instance(&HeaderMap::new()), None);
+        assert_eq!(
+            with("gapura-data-plane-7d9f-x2k").as_deref(),
+            Some("gapura-data-plane-7d9f-x2k")
+        );
+        assert_eq!(with("gw_1.example").as_deref(), Some("gw_1.example"));
+        for bad in ["", "a b", "a/b", "a:b"] {
+            assert_eq!(with(bad), None, "{bad:?}");
+        }
+        assert_eq!(with(&"a".repeat(253)).map(|s| s.len()), Some(253));
+        assert_eq!(with(&"a".repeat(254)), None);
     }
 
     #[test]

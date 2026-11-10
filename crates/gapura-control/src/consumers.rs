@@ -6,7 +6,7 @@
 //! rate_limit policies on and off, an admin deletes consumers and revokes keys.
 
 use crate::configuration::{self, FieldError};
-use gapura_core::config::{JwtPolicy, LimitBy, RateLimit};
+use gapura_core::config::{JwtPolicy, LimitBy, LimitScope, RateLimit};
 use gapura_core::jwt::JwksError;
 use k8s_openapi::jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -449,6 +449,10 @@ pub struct RateLimitInput {
     /// `header:<name>`.
     #[serde(default)]
     pub by: Option<serde_json::Value>,
+    /// How the data plane's replicas share the limit: `split` (the default when absent or
+    /// null), `replica` or `redis`.
+    #[serde(default)]
+    pub scope: Option<serde_json::Value>,
     /// The policy row's `updated_at` as this caller last read it, which a `PUT` replacing an
     /// existing requirement must send; a missing or different one answers 409 (#197, #223), and so
     /// does one sent when there is no requirement to replace.
@@ -457,18 +461,19 @@ pub struct RateLimitInput {
 }
 
 /// A request limit: at most `limit` requests per `per` from each client, as `by` tells them
-/// apart -- by address, by consumer or by a header's value -- counted by each data plane replica
-/// separately.
+/// apart -- by address, by consumer or by a header's value -- shared across the data plane's
+/// replicas as `scope` says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limit {
     pub limit: u32,
     pub per: Per,
     pub by: LimitBy,
+    pub scope: LimitScope,
 }
 
 /// The configuration a `rate_limit` row stores, and nothing else: an unknown field is a shape this
-/// binary does not know, not one to ignore. `by` is absent for the address, so a row written
-/// before it existed reads as it always did.
+/// binary does not know, not one to ignore. `by` is absent for the address and `scope` for
+/// `split`, so a row written before either existed reads as it always did.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredLimit {
@@ -476,15 +481,19 @@ struct StoredLimit {
     window_ms: u64,
     #[serde(default, skip_serializing_if = "LimitBy::is_ip")]
     by: LimitBy,
+    #[serde(default, skip_serializing_if = "LimitScope::is_split")]
+    scope: LimitScope,
 }
 
 impl Limit {
-    /// What the row stores: `{"limit": n, "window_ms": ms}`, with `by` when it is not `ip`.
+    /// What the row stores: `{"limit": n, "window_ms": ms}`, with `by` when it is not `ip` and
+    /// `scope` when it is not `split`.
     pub fn config(&self) -> serde_json::Value {
         serde_json::to_value(StoredLimit {
             limit: self.limit,
             window_ms: self.per.window_ms(),
             by: self.by.clone(),
+            scope: self.scope,
         })
         .expect("two numbers and a name always serialise")
     }
@@ -507,6 +516,7 @@ impl Limit {
             limit: stored.limit,
             per: Per::of_window(stored.window_ms)?,
             by: stored.by,
+            scope: stored.scope,
         })
     }
 
@@ -516,6 +526,7 @@ impl Limit {
             limit: self.limit,
             window_ms: self.per.window_ms(),
             by: self.by.clone(),
+            scope: self.scope,
         }
     }
 }
@@ -554,6 +565,24 @@ pub fn shown_by(by: &LimitBy) -> Option<String> {
     (!by.is_ip()).then(|| by_text(by))
 }
 
+/// How a request says the replicas share a limit: `split`, also when absent or null;
+/// `replica`; or `redis`.
+fn limit_scope(value: Option<&serde_json::Value>) -> Result<LimitScope, FieldError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(LimitScope::Split);
+    };
+    value
+        .as_str()
+        .and_then(LimitScope::parse)
+        .ok_or_else(|| field("scope", "Use split, replica or redis."))
+}
+
+/// `scope` as a list or an audit row shows it: absent for `split`, which every limit is unless it
+/// says otherwise, so those rows read as they did before `scope` existed.
+pub fn shown_scope(scope: LimitScope) -> Option<&'static str> {
+    (!scope.is_split()).then(|| scope.as_str())
+}
+
 /// The consumer a request names a limit for, by the rule a consumer is created with; `None`
 /// for a limit on everyone.
 pub fn consumer_named(name: Option<&str>) -> Result<Option<String>, FieldError> {
@@ -582,7 +611,13 @@ pub fn rate_limit(input: &RateLimitInput) -> Result<Limit, FieldError> {
         _ => return Err(field("per", "Use second, minute or hour.")),
     };
     let by = limit_by(input.by.as_ref())?;
-    Ok(Limit { limit, per, by })
+    let scope = limit_scope(input.scope.as_ref())?;
+    Ok(Limit {
+        limit,
+        per,
+        by,
+        scope,
+    })
 }
 
 /// A request limit as the list shows it. `consumer` and `by` are absent for a limit on everyone
@@ -596,6 +631,9 @@ pub struct RateLimitView {
     pub per: Per,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// `replica` or `redis`; absent for `split`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<&'static str>,
     /// The policy row's stamp, which a `PUT` replacing it sends back as `seen_updated_at`.
     pub updated_at: String,
 }
@@ -948,8 +986,53 @@ mod tests {
             per: Some(per),
             consumer: None,
             by: None,
+            scope: None,
             seen_updated_at: None,
         }
+    }
+
+    #[test]
+    fn a_limit_is_split_unless_it_names_replica_or_redis() {
+        use serde_json::json;
+        let with_scope = |scope: serde_json::Value| RateLimitInput {
+            scope: Some(scope),
+            ..limit_input(json!(10), json!("minute"))
+        };
+        for (scope, want) in [
+            (json!(null), LimitScope::Split),
+            (json!("split"), LimitScope::Split),
+            (json!("replica"), LimitScope::Replica),
+            (json!("redis"), LimitScope::Redis),
+        ] {
+            let got = rate_limit(&with_scope(scope.clone())).unwrap();
+            assert_eq!(got.scope, want, "{scope}");
+            assert_eq!(
+                Limit::from_config(got.config()),
+                Some(got.clone()),
+                "read back"
+            );
+            assert_eq!(
+                got.rate_limit().scope,
+                want,
+                "what the data plane counts with"
+            );
+        }
+        assert_eq!(
+            rate_limit(&limit_input(json!(10), json!("minute")))
+                .unwrap()
+                .config(),
+            json!({"limit": 10, "window_ms": 60_000}),
+            "a split limit is stored as one written before scope existed"
+        );
+        for bad in [json!("cluster"), json!("Redis"), json!(1)] {
+            assert_eq!(
+                rate_limit(&with_scope(bad.clone())).unwrap_err().field,
+                "scope",
+                "{bad}"
+            );
+        }
+        assert_eq!(shown_scope(LimitScope::Split), None);
+        assert_eq!(shown_scope(LimitScope::Redis), Some("redis"));
     }
 
     #[test]
@@ -968,6 +1051,7 @@ mod tests {
                     limit,
                     window_ms,
                     by: gapura_core::config::LimitBy::Ip,
+                    scope: Default::default(),
                 },
                 "{limit}/{per}"
             );
@@ -1015,6 +1099,7 @@ mod tests {
             per: None,
             consumer: None,
             by: None,
+            scope: None,
             seen_updated_at: None,
         };
         assert_eq!(rate_limit(&missing).unwrap_err().field, "limit");

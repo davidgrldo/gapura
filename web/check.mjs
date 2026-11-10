@@ -308,7 +308,19 @@ if (JSON.stringify(serverBy) !== JSON.stringify(BY)) {
 for (const mode of BY) {
   if (!BY_LABEL[mode]) throw new Error(`BY_LABEL in src/lib/configuration.js has no label for ${mode}`)
 }
-console.log('ok: the request-limit control offers the bounds, windows and counts the server accepts')
+// How a limit is shared is config.rs's LimitScope, read from its `as_str` for the same reason.
+const CORE_CONFIG = '../crates/gapura-core/src/config.rs'
+const scopeSource = readFileSync(CORE_CONFIG, 'utf8').match(/impl LimitScope \{[\s\S]*?fn as_str[\s\S]*?\n {4}\}/)
+if (!scopeSource) throw new Error(`${CORE_CONFIG} has no LimitScope::as_str`)
+const serverScope = [...scopeSource[0].matchAll(/LimitScope::\w+ => "([a-z_]+)"/g)].map((m) => m[1])
+const { SCOPE, SCOPE_LABEL } = await import('./src/lib/configuration.js')
+if (JSON.stringify(serverScope) !== JSON.stringify(SCOPE)) {
+  throw new Error(`SCOPE in src/lib/configuration.js is ${SCOPE}, the server's LimitScope names ${serverScope}`)
+}
+for (const scope of SCOPE) {
+  if (!SCOPE_LABEL[scope]) throw new Error(`SCOPE_LABEL in src/lib/configuration.js has no label for ${scope}`)
+}
+console.log('ok: the request-limit control offers the bounds, windows, counts and scopes the server accepts')
 
 // The sheets offer a Reload button when a 409's sentence contains "Reload" (that is how they
 // tell a stale save from any other conflict), so the server's stale-edit sentence has to keep
