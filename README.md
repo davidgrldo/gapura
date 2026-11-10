@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-The Rust API gateway. Kubernetes Gateway API-native, one binary, nothing in the request path touches a database, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
+The Rust API gateway. Kubernetes Gateway API-native, one binary, nothing in the request path touches a database unless a request limit asks to count in Redis, no enterprise edition. Built on [Pingora](https://github.com/cloudflare/pingora).
 
 Status: v0.1.0 is the latest published release: the data plane, the Kubernetes controller (`--kubernetes`) with status writes and leader election, TLS to backends via BackendTLSPolicy, the Helm chart in [charts/gapura](charts/gapura), the multi-arch image, and CI, everything the quickstart below installs. The tree is ahead of that release, the console, consumer API keys, and JWT policies among it, none of it in a stable release yet; [CHANGELOG.md](CHANGELOG.md) lists what changed. The Gateway API GATEWAY-HTTP conformance suite passes all 37 core tests plus the four extended tests it claims; the report is in [conformance/](conformance/).
 
@@ -16,8 +16,9 @@ Status: v0.1.0 is the latest published release: the data plane, the Kubernetes c
 
 ## What it does
 
-Gateway API core, served out of one binary. Nothing in the request path touches a database, and
-a separate control plane is optional rather than required:
+Gateway API core, served out of one binary. Nothing in the request path touches a database -- the
+one exception is a request limit an operator asks to count in a Redis of their own -- and a
+separate control plane is optional rather than required:
 
 - **Routing** on hostname, path (`Exact`, `PathPrefix` and `RegularExpression`), header, query
   parameter and method. A `RegularExpression` path must match the whole path, as in Envoy and
@@ -27,7 +28,9 @@ a separate control plane is optional rather than required:
 - **TLS**: termination with the certificate chosen per SNI, and TLS to backends via
   `BackendTLSPolicy`, including a per-Service annotation to encrypt without verifying.
 - **Traffic**: per-rule request and backend timeouts, one retry against a second endpoint when a
-  connection fails, and per-route rate limits from a Service annotation, counted per replica.
+  connection fails, and per-route rate limits from a Service annotation, split between the
+  replicas so the gateway as a whole allows about the limit, or counted in Redis
+  ([Request limits across replicas](#request-limits-across-replicas)).
   Passive outlier detection takes an endpoint out of rotation after five consecutive connect
   errors, timeouts or 502/503/504 answers, for 30 s and longer each time it happens again (up to
   5 min); it is ignored while more than half of a backend's endpoints are out, so it never leaves
@@ -192,6 +195,44 @@ request while a token is configured, so no upstream sees it. A request without t
 another value, is not timed and gets no header; loopback is no exception. Without the flag nothing
 is timed at all. The header goes on after the Response steps, so a response transformer cannot
 remove it. The request body's streamed steps and anything after the head are not in it.
+
+### Request limits across replicas
+
+A request limit -- a store `rate_limit` policy, or a Service's `gapura.dev/rate-limit` -- has a
+`scope` that says how the gateway's replicas share it (the annotation's is
+`gapura.dev/rate-limit-scope`; any other value there disables the limit, as a bad
+`gapura.dev/rate-limit-by` does):
+
+- `split`, the default: each replica allows the limit divided by the replicas it knows of,
+  rounded up, counting alone. With 3 replicas a limit of 100 a minute is 34 a minute on each, so
+  the gateway allows about 100 while the load balancer spreads a client's requests, up to
+  `replicas - 1` more from the rounding, and fewer to a client whose requests all land on one
+  replica. Under Kubernetes a replica counts the ready endpoints of its own Service
+  (`--publish-service`, which the chart sets); in `--control-plane` mode the control plane counts
+  the replicas of each data plane that polled it within three poll intervals (at least 30 s), by the
+  name each sends (`--identity`, else the hostname -- the pod's name), and answers every poll with
+  the count. A replica that has not been told counts as one; with `--config-dir` it always does. The
+  count is `gapura_rate_limit_replicas`, and the console's data plane list shows it.
+- `replica`: each replica allows all of the limit, counting alone: with N replicas the gateway
+  allows up to N × the limit. What every limit meant before `scope` existed.
+- `redis`: one count in Redis that every replica given the same `--redis-url` shares, every
+  data plane and every Gateway: a fixed window per client, aligned to the epoch as the replicas'
+  own are, kept under a key of `gapura:rl:` and a hash of the rule and the client (no route
+  name, address or consumer appears in a key), which expires 5 s after its window. A standalone
+  Redis or Valkey, `redis://` or `rediss://` (`--redis-ca` for a private CA,
+  `--redis-password-file` for AUTH); not a cluster. A limit that counts by a header holds one key
+  per value per window there, which Redis's `maxmemory` bounds, not the gateway.
+
+Redis decides how much is left, never whether a request is served. A replica waits for it at most
+`--redis-timeout-ms` (50 ms by default); when it does not answer, answers with an error, or is not
+connected, the request is counted as `split` on that replica, and
+`gapura_rate_limit_redis_fallbacks_total{reason}` (`timeout`, `error`, `unavailable`) counts it.
+After a failure Redis is not asked again for a second, then twice as long each time it fails again,
+up to 30 s, so an outage costs one timeout per backoff rather than one per request, and the
+replica logs the first failure and the recovery rather than every request. A replica given a
+`redis` limit without `--redis-url` counts it as `split` and says so once.
+
+`X-RateLimit-Limit` on a 429 is the limit as configured, whatever share of it this replica allows.
 
 ## The name
 
@@ -515,9 +556,10 @@ Per-route request limits come from the backend Service too: `gapura.dev/rate-lim
 (supported units `s`, `min`, `h`) caps each client's requests per rule at `limit` per window,
 answered past the cap with `429`, `Retry-After`, `X-RateLimit-Limit` and
 `X-RateLimit-Remaining: 0`. `gapura.dev/rate-limit-by: ip` is the only keying (the default;
-any other value disables the pair), the counter is per replica — with N replicas the effective
-allowance is N × the limit, the honest shape when replicas share no store — and rejections are
-counted in `gapura_rate_limited_total{route}`.
+any other value disables the pair), `gapura.dev/rate-limit-scope` says how the replicas share it
+(`split` by default, `replica` or `redis`; see
+[Request limits across replicas](#request-limits-across-replicas)), and rejections are counted in
+`gapura_rate_limited_total{route}`.
 
 `gapura-core` is the pure translation library (Gateway API resources in, routing Config and status out). The Kubernetes controller lives in the `gapura` binary, packaged by the Dockerfile and the chart in [charts/gapura](charts/gapura).
 
