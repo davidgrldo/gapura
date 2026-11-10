@@ -9,7 +9,7 @@ means what it usually does, moving from one version below to a later one. Releas
 ## Unreleased
 
 - A request limit is shared across the gateway's replicas: split between them by default, or
-  counted once in Redis.
+  counted once in Redis (#292).
   - **Changed: `split` is the default.** Each replica allows the limit divided by the replicas it
     knows of, rounded up, so a limit of 100 a minute is about 100 a minute across the gateway
     rather than 100 on each replica. Under Kubernetes a replica counts the ready endpoints of its
