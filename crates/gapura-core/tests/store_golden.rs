@@ -52,6 +52,7 @@ fn limit(
             limit: per_minute,
             window_ms: 60_000,
             by,
+            scope: Default::default(),
         },
     }
 }

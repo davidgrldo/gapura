@@ -198,11 +198,11 @@ pub struct MatchEntry {
 }
 
 /// A per-rule request limit: from the backend Service's `gapura.dev/rate-limit` annotation
-/// ("20/min"; seconds, minutes or hours), or from a store `rate_limit` policy. Enforced by the
-/// data plane per replica: with N replicas the effective allowance is N x limit, which is the
-/// honest shape for a gateway whose replicas share no counter. The annotation path counts by
-/// client IP only (`gapura.dev/rate-limit-by: ip`); a store policy may also count by consumer
-/// or by a header, see [`LimitBy`].
+/// ("20/min"; seconds, minutes or hours), or from a store `rate_limit` policy. How the gateway's
+/// replicas share it is [`RateLimit::scope`]: by default each allows its share of it, so the
+/// gateway as a whole allows about `limit`. The annotation path counts by client IP only
+/// (`gapura.dev/rate-limit-by: ip`); a store policy may also count by consumer or by a header,
+/// see [`LimitBy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimit {
     pub limit: u32,
@@ -211,6 +211,59 @@ pub struct RateLimit {
     /// serialises exactly as one written before this field existed.
     #[serde(default, skip_serializing_if = "LimitBy::is_ip")]
     pub by: LimitBy,
+    /// Absent on the wire when it is [`LimitScope::Split`], so a limit written before this field
+    /// existed serialises exactly as it did and its ETag does not move. A data plane predating
+    /// the field counts every limit per replica, which is what [`LimitScope::Replica`] says and
+    /// looser than `split`: the upgrade note asks for data planes first. Only `redis` has a
+    /// feature name (`rate_limit_redis`), because a data plane that ignored it would not merely
+    /// count looser than asked but drop the one count the operator set up Redis to keep.
+    #[serde(default, skip_serializing_if = "LimitScope::is_split")]
+    pub scope: LimitScope,
+}
+
+/// How a [`RateLimit`] is counted across the gateway's replicas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitScope {
+    /// Each replica allows `limit` divided by the replicas it knows of, rounded up, counting
+    /// alone: about `limit` across the gateway while the load balancer spreads clients evenly,
+    /// up to `replicas - 1` over it from the rounding, and stricter than `limit` for a client
+    /// whose requests all land on one replica. A replica knows how many there are from the ready
+    /// endpoints of its own Service under Kubernetes (`--publish-service`), and from the control
+    /// plane in `--control-plane` mode, which counts the instances of its data plane polling it;
+    /// until it knows, and with neither, it counts as one, which is `replica`.
+    #[default]
+    Split,
+    /// Each replica allows all of `limit`, counting alone: with N replicas the gateway allows up
+    /// to N x limit. What every limit meant before `scope` existed.
+    Replica,
+    /// One count in Redis that every replica connected to it shares (`--redis-url`). A replica
+    /// that has no Redis, or whose Redis does not answer in time, counts as `split` meanwhile,
+    /// so an outage neither lifts the limit nor refuses requests.
+    Redis,
+}
+
+impl LimitScope {
+    /// Whether this is the default, which [`RateLimit::scope`] leaves off the wire.
+    pub fn is_split(&self) -> bool {
+        matches!(self, LimitScope::Split)
+    }
+
+    /// The name the store, the API and the annotation give it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LimitScope::Split => "split",
+            LimitScope::Replica => "replica",
+            LimitScope::Redis => "redis",
+        }
+    }
+
+    /// The scope a name gives, as [`LimitScope::as_str`] spells it.
+    pub fn parse(name: &str) -> Option<LimitScope> {
+        [LimitScope::Split, LimitScope::Replica, LimitScope::Redis]
+            .into_iter()
+            .find(|s| s.as_str() == name)
+    }
 }
 
 /// What a [`RateLimit`] counts by: one window per client address, per consumer, or per value of
@@ -1313,6 +1366,7 @@ mod tests {
             limit,
             window_ms: 60_000,
             by: LimitBy::Ip,
+            scope: Default::default(),
         }
     }
 
