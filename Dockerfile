@@ -9,17 +9,31 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake perl pkg-config \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# The dependencies first, OpenSSL among them, as a layer of their own: built from the manifests
+# and the lockfile with every crate of the workspace stubbed out, so the layer changes only when
+# they do, and a change to the code reuses it. A layer rather than a cache mount: CI keeps layers
+# between runs (`cache-to: type=gha`) and drops cache mounts, so with a mount every pull request
+# rebuilt every dependency.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/gapura-core/Cargo.toml crates/gapura-core/
+COPY crates/gapura/Cargo.toml crates/gapura/
+COPY crates/gapura-control/Cargo.toml crates/gapura-control/
+RUN for c in gapura-core gapura gapura-control; do mkdir -p "crates/$c/src"; done \
+ && touch crates/gapura-core/src/lib.rs crates/gapura-control/src/lib.rs \
+ && for c in gapura gapura-control; do \
+      echo 'fn main() { panic!("a dependency stub, not the real binary") }' > "crates/$c/src/main.rs"; \
+    done \
+ && cargo build --release --locked -p gapura
 COPY crates ./crates
 # The tag this image is published under, which the data plane reports to the control plane as
 # its version: every prerelease of one version shares the crate's. Empty outside a release, and
 # the crate's version is used.
 ARG GAPURA_VERSION
-# Cache mounts keep the OpenSSL build across image rebuilds; the binary is copied out of
-# the cache because a cache mount is not part of the layer.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p gapura \
+# The sources are touched because COPY keeps their times, which can predate the stubs above, and
+# cargo would then take the stubs for an up-to-date build of them. A stub panics, so an image
+# that shipped one anyway fails `--version` here.
+RUN find crates -name '*.rs' -exec touch {} + \
+ && cargo build --release --locked -p gapura \
  && cp /src/target/release/gapura /usr/local/bin/gapura \
  && /usr/local/bin/gapura --version
 

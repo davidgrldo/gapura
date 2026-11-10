@@ -46,20 +46,33 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake perl pkg-config \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# The dependencies as a layer of their own, as the data plane's Dockerfile builds them and for
+# the same reason: every crate of the workspace stubbed out, so the layer changes only with the
+# manifests and the lockfile, and CI, which keeps layers but not cache mounts, reuses it. The
+# stubs embed no console, so `web/dist` need not exist yet.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/gapura-core/Cargo.toml crates/gapura-core/
+COPY crates/gapura/Cargo.toml crates/gapura/
+COPY crates/gapura-control/Cargo.toml crates/gapura-control/
+RUN for c in gapura-core gapura gapura-control; do mkdir -p "crates/$c/src"; done \
+ && touch crates/gapura-core/src/lib.rs crates/gapura-control/src/lib.rs \
+ && for c in gapura gapura-control; do \
+      echo 'fn main() { panic!("a dependency stub, not the real binary") }' > "crates/$c/src/main.rs"; \
+    done \
+ && cargo build --release --locked -p gapura-control
 COPY crates ./crates
 # Before the build, and this ordering is the entire reason the Node stage exists. `rust-embed`
 # bakes `web/dist` into the binary at compile time in release builds, so assets copied in
 # after `cargo build` would never reach it: the image would ship the "the console has not been
 # built" page while containing a perfectly good build of the console.
 COPY --from=web /web/dist ./web/dist
-# Cache mounts keep the dependency build across image rebuilds; the binary is copied out of
-# the cache because a cache mount is not part of the layer. `--help` rather than the data
-# plane's `--version`, because this package's clap command declares no version — the point of
-# running it here is only to catch a binary that compiled but cannot start.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p gapura-control \
+# The sources are touched because COPY keeps their times, which can predate the stubs above, and
+# cargo would then take the stubs for an up-to-date build of them; a stub panics, so one shipped
+# anyway fails here. `--help` rather than the data plane's `--version`, because this package's
+# clap command declares no version — the point of running it here is only to catch a binary that
+# compiled but cannot start.
+RUN find crates -name '*.rs' -exec touch {} + \
+ && cargo build --release --locked -p gapura-control \
  && cp /src/target/release/gapura-control /usr/local/bin/gapura-control \
  && /usr/local/bin/gapura-control --help > /dev/null
 
