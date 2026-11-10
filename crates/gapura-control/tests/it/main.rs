@@ -3,9 +3,9 @@
 //! thirteen link steps.
 //!
 //! The modules share one process, so whatever state is global to it is shared between them too.
-//! The database is the one that matters: every module's tests reset the same schema, so they all
-//! take turns through `common::fresh_store`'s single lock, never one of their own. Run one module
-//! with its path as the filter:
+//! The database is not: `common::fresh_store` gives each test a database of its own, cloned from
+//! a migrated template, so the tests run side by side. Run one module with its path as the
+//! filter:
 //!
 //! ```text
 //! GAPURA_TEST_DATABASE_URL=postgres://postgres:x@localhost:5433/postgres cargo test -p gapura-control --test it accounts::

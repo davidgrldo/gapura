@@ -33,4 +33,18 @@ jobs:
         run: |
           curl -sSL "https://raw.githubusercontent.com/k3d-io/k3d/v5.8.3/install.sh" | TAG=v5.8.3 bash
           k3d version
+      # The image is built here rather than by the script's plain `docker build`, so that it reads
+      # the layers ci.yml's image job keeps (the same Dockerfile, the default scope): the
+      # dependency layer, OpenSSL in it, is then reused rather than compiled again. Read only:
+      # that job is the one that writes the cache.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: gapura:dev
+          cache-from: type=gha
       - run: ./hack/k3s-deploy.sh
+        env:
+          SKIP_BUILD: "1"

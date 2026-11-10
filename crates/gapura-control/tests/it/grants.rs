@@ -417,8 +417,7 @@ async fn backend_pid(client: &tokio_postgres::Client) -> i32 {
 /// Bounded at five seconds by the clock, so a write that never waits fails the test instead of
 /// hanging it.
 async fn wait_for_lock_waiters(blocker: i32, n: i64) {
-    let url = std::env::var("GAPURA_TEST_DATABASE_URL")
-        .expect("a test that holds a lock only runs once the store it uses is set");
+    let url = crate::common::url();
     let (probe, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
         .expect("connecting the probe");
